@@ -30,7 +30,7 @@ impl Session {
     pub(crate) async fn emit_workflow_status_snapshots(&self, turn_context: &TurnContext) {
         for snapshot in self.collect_workflow_snapshots().await {
             let msg = EventMsg::ItemCompleted(ItemCompletedEvent {
-                thread_id: self.conversation_id,
+                thread_id: self.thread_id,
                 turn_id: turn_context.sub_id.clone(),
                 item: TurnItem::WorkflowStatus(WorkflowStatusItem::new(snapshot)),
                 completed_at_ms: now_unix_timestamp_ms(),

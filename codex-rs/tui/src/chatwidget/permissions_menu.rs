@@ -1,4 +1,5 @@
 use super::*;
+use codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_DANGER_FULL_ACCESS;
 
 impl ChatWidget {
     pub(super) fn open_permission_profiles_popup(&mut self) {
@@ -48,7 +49,7 @@ impl ChatWidget {
         }
         items.push(self.builtin_permission_mode_selection_item(
             full_access,
-            ":danger-no-sandbox",
+            BUILT_IN_PERMISSION_PROFILE_DANGER_FULL_ACCESS,
             full_access.description.to_string(),
             AskForApproval::from(full_access.approval),
             ApprovalsReviewer::User,
@@ -73,6 +74,7 @@ impl ChatWidget {
                             .as_deref()
                             .unwrap_or("Configured permission profile."),
                         active_profile_id.as_deref(),
+                        profile.allowed,
                     )
                 }),
         );
@@ -94,10 +96,10 @@ impl ChatWidget {
         approval_policy: AskForApproval,
         approvals_reviewer: ApprovalsReviewer,
     ) -> SelectionItem {
-        let label = if approvals_reviewer == ApprovalsReviewer::AutoReview {
-            "Auto-review"
-        } else {
-            preset.label
+        let label = match (preset.id, approvals_reviewer) {
+            ("auto", ApprovalsReviewer::AutoReview) => APPROVE_FOR_ME_LABEL,
+            ("auto", ApprovalsReviewer::User) => ASK_FOR_APPROVAL_LABEL,
+            _ => preset.label,
         };
         let active_profile_id = self
             .config
@@ -141,6 +143,12 @@ impl ChatWidget {
                         .can_set_permission_profile(&preset.permission_profile)
                         .err()
                         .map(|err| err.to_string())
+                })
+                .or_else(|| {
+                    (!self
+                        .config
+                        .is_permission_profile_allowed(id, &preset.permission_profile))
+                    .then(|| "Disabled by requirements.".to_string())
                 }),
             ..Default::default()
         }
@@ -151,6 +159,7 @@ impl ChatWidget {
         id: &str,
         description: &str,
         active_profile_id: Option<&str>,
+        allowed: bool,
     ) -> SelectionItem {
         let id_for_action = id.to_string();
         let selection = PermissionProfileSelection {
@@ -165,6 +174,7 @@ impl ChatWidget {
             is_current: active_profile_id == Some(id),
             actions: Self::permission_profile_selection_actions(selection),
             dismiss_on_select: true,
+            disabled_reason: (!allowed).then(|| "Disabled by requirements.".to_string()),
             ..Default::default()
         }
     }

@@ -48,16 +48,18 @@ Requirements:
 
 ```bash
 git clone https://github.com/Dylan-Flekks/flekks-medical-workspace.git
-cd flekks-medical-workspace/codex-rs
-cargo build -p codex-cli
-./target/debug/codex
+cd flekks-medical-workspace
+just medical-workspace
 ```
 
-Inside the TUI, run:
+When the TUI opens, run:
 
 ```text
 /workspacemedical
 ```
+
+The equivalent manual launch sequence is `cd codex-rs`, `cargo build -p codex-cli`,
+`stty cols 160 rows 45`, and `./target/debug/codex`.
 
 Use synthetic fixtures only. See [Development](docs/development.md) for focused tests and snapshot review.
 

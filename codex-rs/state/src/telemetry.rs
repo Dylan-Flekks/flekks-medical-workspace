@@ -42,6 +42,7 @@ pub(crate) enum DbKind {
     Goals,
     Memories,
     Workspace,
+    ThreadHistory,
 }
 
 impl DbKind {
@@ -52,6 +53,7 @@ impl DbKind {
             Self::Goals => "goals",
             Self::Memories => "memories",
             Self::Workspace => "workspace",
+            Self::ThreadHistory => "thread_history",
         }
     }
 }

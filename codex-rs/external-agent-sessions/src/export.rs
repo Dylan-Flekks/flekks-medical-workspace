@@ -1,11 +1,11 @@
 use crate::ConversationMessage;
 use crate::ImportedExternalAgentSession;
 use crate::MessageRole;
-use crate::records::conversation_messages;
-use crate::records::project_root_from_records;
-use crate::records::read_records;
-use crate::records::source_title_from_records;
+use crate::records::read_session_import;
 use crate::summarize_for_label;
+use crate::title::IMPORTED_SESSION_FALLBACK_TITLE;
+use crate::title::SessionTitleCandidates;
+use crate::title::fallback_title_from_user_message;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::AgentMessageEvent;
@@ -23,42 +23,69 @@ use std::path::Path;
 
 const EXTERNAL_SESSION_IMPORTED_MARKER: &str = "<EXTERNAL SESSION IMPORTED>";
 
-pub fn load_session_for_import(path: &Path) -> io::Result<Option<ImportedExternalAgentSession>> {
-    let records = read_records(path)?;
-    let Some(cwd) = project_root_from_records(&records) else {
+#[cfg(test)]
+fn load_session_for_import(path: &Path) -> io::Result<Option<ImportedExternalAgentSession>> {
+    Ok(
+        load_session_for_import_with_content_sha256(path)?
+            .map(|(session, _content_sha256)| session),
+    )
+}
+
+pub(crate) fn load_session_for_import_with_content_sha256(
+    path: &Path,
+) -> io::Result<Option<(ImportedExternalAgentSession, String)>> {
+    let parsed = read_session_import(path)?;
+    let Some(cwd) = parsed.cwd else {
         return Ok(None);
     };
-    let messages = conversation_messages(&records);
-    let rollout_items = rollout_items_from_messages(&messages);
+    let messages = parsed.messages;
+    let first_user_message_text = messages
+        .iter()
+        .find(|message| message.role == MessageRole::User)
+        .map(|message| message.text.as_str());
+    let first_user_message = first_user_message_text.map(summarize_for_label);
+    let fallback_title = messages
+        .iter()
+        .filter(|message| message.role == MessageRole::User)
+        .find_map(|message| fallback_title_from_user_message(&message.text))
+        .or_else(|| first_user_message_text.map(|_| IMPORTED_SESSION_FALLBACK_TITLE.to_string()));
+    let title = SessionTitleCandidates {
+        custom_title: parsed.custom_title,
+        ai_title: parsed.ai_title,
+        fallback_title,
+    }
+    .select();
+    let rollout_items = rollout_items_from_messages(messages);
     if rollout_items.is_empty() {
         return Ok(None);
     }
-    let title = source_title_from_records(&records).or_else(|| {
-        messages
-            .iter()
-            .find(|message| message.role == MessageRole::User)
-            .map(|message| summarize_for_label(&message.text))
-    });
-    Ok(Some(ImportedExternalAgentSession {
-        cwd,
-        title,
-        rollout_items,
-    }))
+    Ok(Some((
+        ImportedExternalAgentSession {
+            cwd,
+            title,
+            first_user_message,
+            rollout_items,
+        },
+        parsed.content_sha256,
+    )))
 }
 
-fn rollout_items_from_messages(messages: &[ConversationMessage]) -> Vec<RolloutItem> {
+fn rollout_items_from_messages(messages: Vec<ConversationMessage>) -> Vec<RolloutItem> {
     let mut items = Vec::new();
-    let mut response_items = Vec::new();
-    let mut current_turn: Option<(String, Option<String>)> = None;
+    let mut current_turn = None;
+    let mut response_item_bytes = 0i64;
+    let mut last_model_visible_tokens = 0i64;
     let mut user_turn_count = 0usize;
+    let completed_at = messages.last().and_then(|message| message.timestamp);
 
     for message in messages {
         match message.role {
             MessageRole::User => {
-                if let Some((turn_id, last_agent_message)) = current_turn.take() {
+                let started_at = message.timestamp;
+                if let Some((turn_id, previous_started_at)) = current_turn.take() {
                     items.push(turn_complete_item(
                         turn_id,
-                        last_agent_message,
+                        previous_started_at,
                         /*completed_at*/ None,
                     ));
                 }
@@ -68,33 +95,29 @@ fn rollout_items_from_messages(messages: &[ConversationMessage]) -> Vec<RolloutI
                     TurnStartedEvent {
                         turn_id: turn_id.clone(),
                         trace_id: None,
-                        started_at: message.timestamp,
+                        started_at,
                         model_context_window: None,
                         collaboration_mode_kind: Default::default(),
                     },
                 )));
-                let response_item = response_item(message);
-                response_items.push(response_item.clone());
-                items.push(RolloutItem::ResponseItem(response_item));
                 items.push(RolloutItem::EventMsg(EventMsg::UserMessage(
                     UserMessageEvent {
-                        client_id: None,
                         message: message.text.clone(),
-                        images: None,
-                        local_images: Vec::new(),
-                        text_elements: Vec::new(),
                         ..Default::default()
                     },
                 )));
-                current_turn = Some((turn_id, None));
+                response_item_bytes =
+                    response_item_bytes.saturating_add(message_byte_count(&message));
+                items.push(RolloutItem::ResponseItem(response_item(message)));
+                current_turn = Some((turn_id, started_at));
             }
             MessageRole::Assistant => {
-                let Some((_, last_agent_message)) = current_turn.as_mut() else {
+                if current_turn.is_none() {
                     continue;
-                };
-                let response_item = response_item(message);
-                response_items.push(response_item.clone());
-                items.push(RolloutItem::ResponseItem(response_item));
+                }
+                response_item_bytes =
+                    response_item_bytes.saturating_add(message_byte_count(&message));
+                last_model_visible_tokens = approx_tokens_from_byte_count_i64(response_item_bytes);
                 items.push(RolloutItem::EventMsg(EventMsg::AgentMessage(
                     AgentMessageEvent {
                         message: message.text.clone(),
@@ -102,20 +125,15 @@ fn rollout_items_from_messages(messages: &[ConversationMessage]) -> Vec<RolloutI
                         memory_citation: None,
                     },
                 )));
-                *last_agent_message = Some(message.text.clone());
+                items.push(RolloutItem::ResponseItem(response_item(message)));
             }
         }
     }
 
-    if let Some((turn_id, last_agent_message)) = current_turn {
+    if let Some((turn_id, started_at)) = current_turn {
         items.push(external_session_imported_marker_item());
-        items.push(token_count_item(&response_items));
-        let completed_at = messages.last().and_then(|message| message.timestamp);
-        items.push(turn_complete_item(
-            turn_id,
-            last_agent_message,
-            completed_at,
-        ));
+        items.push(token_count_item(last_model_visible_tokens));
+        items.push(turn_complete_item(turn_id, started_at, completed_at));
     }
 
     items
@@ -129,14 +147,10 @@ fn external_session_imported_marker_item() -> RolloutItem {
     }))
 }
 
-fn response_item(message: &ConversationMessage) -> ResponseItem {
+fn response_item(message: ConversationMessage) -> ResponseItem {
     let content = match message.role {
-        MessageRole::Assistant => ContentItem::OutputText {
-            text: message.text.clone(),
-        },
-        MessageRole::User => ContentItem::InputText {
-            text: message.text.clone(),
-        },
+        MessageRole::Assistant => ContentItem::OutputText { text: message.text },
+        MessageRole::User => ContentItem::InputText { text: message.text },
     };
     ResponseItem::Message {
         id: None,
@@ -146,16 +160,15 @@ fn response_item(message: &ConversationMessage) -> ResponseItem {
         },
         content: vec![content],
         phase: None,
+        internal_chat_message_metadata_passthrough: None,
     }
 }
 
-fn token_count_item(response_items: &[ResponseItem]) -> RolloutItem {
-    let last_model_generated = response_items.iter().rposition(
-        |item| matches!(item, ResponseItem::Message { role, .. } if role == "assistant"),
-    );
-    let last_model_visible_tokens = last_model_generated
-        .map(|index| estimate_response_items_token_count(&response_items[..=index]))
-        .unwrap_or_default();
+fn message_byte_count(message: &ConversationMessage) -> i64 {
+    i64::try_from(message.text.len()).unwrap_or(i64::MAX)
+}
+
+fn token_count_item(last_model_visible_tokens: i64) -> RolloutItem {
     let usage = TokenUsage {
         total_tokens: last_model_visible_tokens,
         ..TokenUsage::default()
@@ -170,26 +183,16 @@ fn token_count_item(response_items: &[ResponseItem]) -> RolloutItem {
     }))
 }
 
-fn estimate_response_items_token_count(response_items: &[ResponseItem]) -> i64 {
-    response_items
-        .iter()
-        .map(|item| {
-            serde_json::to_string(item)
-                .map(|serialized| i64::try_from(serialized.len()).unwrap_or(i64::MAX))
-                .map(approx_tokens_from_byte_count_i64)
-                .unwrap_or_default()
-        })
-        .fold(0i64, i64::saturating_add)
-}
-
 fn turn_complete_item(
     turn_id: String,
-    last_agent_message: Option<String>,
+    started_at: Option<i64>,
     completed_at: Option<i64>,
 ) -> RolloutItem {
     RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
         turn_id,
-        last_agent_message,
+        last_agent_message: None,
+        error: None,
+        started_at,
         completed_at,
         duration_ms: None,
         time_to_first_token_ms: None,
@@ -241,7 +244,7 @@ mod tests {
     }
 
     #[test]
-    fn adds_import_marker_without_replacing_last_agent_message() {
+    fn adds_import_marker_without_copying_last_agent_message() {
         let root = TempDir::new().expect("tempdir");
         let project_root = root.path().join("repo");
         std::fs::create_dir_all(&project_root).expect("project root");
@@ -280,8 +283,52 @@ mod tests {
             });
         assert_eq!(
             last_turn_complete.and_then(|event| event.last_agent_message.as_deref()),
-            Some("first answer")
+            None
         );
+    }
+
+    #[test]
+    fn stores_imported_messages_as_response_items_and_visible_events() {
+        let root = TempDir::new().expect("tempdir");
+        let project_root = root.path().join("repo");
+        std::fs::create_dir_all(&project_root).expect("project root");
+        let path = root.path().join("session.jsonl");
+        let request = "r".repeat(1_000);
+        let answer = "a".repeat(1_000);
+        std::fs::write(
+            &path,
+            jsonl(&[
+                record("user", &request, &project_root),
+                record("assistant", &answer, &project_root),
+            ]),
+        )
+        .expect("session");
+
+        let imported = load_session_for_import(&path)
+            .expect("load")
+            .expect("session");
+        let response_message_count = imported
+            .rollout_items
+            .iter()
+            .filter(|item| {
+                matches!(
+                    item,
+                    RolloutItem::ResponseItem(ResponseItem::Message { .. })
+                )
+            })
+            .count();
+        let visible_message_event_count = imported
+            .rollout_items
+            .iter()
+            .filter(|item| match item {
+                RolloutItem::EventMsg(EventMsg::UserMessage(event)) => event.message == request,
+                RolloutItem::EventMsg(EventMsg::AgentMessage(event)) => event.message == answer,
+                _ => false,
+            })
+            .count();
+
+        assert_eq!(response_message_count, 2);
+        assert_eq!(visible_message_event_count, 2);
     }
 
     #[test]
@@ -349,6 +396,91 @@ mod tests {
             .expect("session");
 
         assert_eq!(imported.title.as_deref(), Some("named by source app"));
+    }
+
+    #[test]
+    fn sanitizes_only_the_imported_session_fallback_title() {
+        let root = TempDir::new().expect("tempdir");
+        let project_root = root.path().join("repo");
+        std::fs::create_dir_all(&project_root).expect("project root");
+        let path = root.path().join("session.jsonl");
+        let message = "<system-reminder>\ncontrol context\n</system-reminder>\nFix auth flow";
+        std::fs::write(&path, jsonl(&[record("user", message, &project_root)])).expect("session");
+
+        let imported = load_session_for_import(&path)
+            .expect("load")
+            .expect("session");
+        let imported_user_message = imported.rollout_items.iter().find_map(|item| match item {
+            RolloutItem::EventMsg(EventMsg::UserMessage(event)) => Some(event.message.as_str()),
+            _ => None,
+        });
+
+        assert_eq!(imported.title.as_deref(), Some("Fix auth flow"));
+        assert_eq!(
+            imported.first_user_message.as_deref(),
+            Some("<system-reminder>")
+        );
+        assert_eq!(imported_user_message, Some(message));
+    }
+
+    #[test]
+    fn skips_control_only_user_messages_when_choosing_fallback_title() {
+        let root = TempDir::new().expect("tempdir");
+        let project_root = root.path().join("repo");
+        std::fs::create_dir_all(&project_root).expect("project root");
+        let path = root.path().join("session.jsonl");
+        let control_message = "<ide_selection>src/auth.rs:1-5</ide_selection>";
+        std::fs::write(
+            &path,
+            jsonl(&[
+                record("user", control_message, &project_root),
+                record("user", "Fix auth flow", &project_root),
+            ]),
+        )
+        .expect("session");
+
+        let imported = load_session_for_import(&path)
+            .expect("load")
+            .expect("session");
+
+        assert_eq!(imported.title.as_deref(), Some("Fix auth flow"));
+        assert_eq!(
+            imported.first_user_message.as_deref(),
+            Some(control_message)
+        );
+    }
+
+    #[test]
+    fn uses_safe_fallback_after_all_user_messages_are_control_only() {
+        let root = TempDir::new().expect("tempdir");
+        let project_root = root.path().join("repo");
+        std::fs::create_dir_all(&project_root).expect("project root");
+        let path = root.path().join("session.jsonl");
+        std::fs::write(
+            &path,
+            jsonl(&[
+                record(
+                    "user",
+                    "<ide_selection>src/auth.rs:1-5</ide_selection>",
+                    &project_root,
+                ),
+                record(
+                    "user",
+                    "<local-command-stderr>tests failed</local-command-stderr>",
+                    &project_root,
+                ),
+            ]),
+        )
+        .expect("session");
+
+        let imported = load_session_for_import(&path)
+            .expect("load")
+            .expect("session");
+
+        assert_eq!(
+            imported.title.as_deref(),
+            Some(IMPORTED_SESSION_FALLBACK_TITLE)
+        );
     }
 
     #[test]

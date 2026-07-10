@@ -65,7 +65,6 @@ struct WorkspaceContextSource {
     accessed_at: i64,
 }
 
-#[async_trait::async_trait]
 impl ToolExecutor<ToolInvocation> for WorkspaceContextReadHandler {
     fn tool_name(&self) -> ToolName {
         ToolName::plain(WORKSPACE_CONTEXT_READ_TOOL_NAME)
@@ -79,32 +78,31 @@ impl ToolExecutor<ToolInvocation> for WorkspaceContextReadHandler {
         true
     }
 
-    async fn handle(
-        &self,
-        invocation: ToolInvocation,
-    ) -> Result<Box<dyn crate::tools::context::ToolOutput>, FunctionCallError> {
-        let ToolInvocation {
-            session, payload, ..
-        } = invocation;
-        let arguments = match payload {
-            ToolPayload::Function { arguments } => arguments,
-            _ => {
-                return Err(FunctionCallError::RespondToModel(
-                    "workspace_context_read handler received unsupported payload".to_string(),
-                ));
-            }
-        };
-        let args: WorkspaceContextReadArgs = parse_arguments(arguments.as_str())?;
-        let state_db = session.state_db().ok_or_else(|| {
-            FunctionCallError::RespondToModel(
-                "workspace store is unavailable for this session".to_string(),
-            )
-        })?;
-        let result = read_workspace_context(state_db, args).await?;
-        let value = serde_json::to_value(result).map_err(|err| {
-            FunctionCallError::Fatal(format!("failed to serialize workspace context: {err}"))
-        })?;
-        Ok(boxed_tool_output(JsonToolOutput::new(value)))
+    fn handle(&self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'_> {
+        Box::pin(async move {
+            let ToolInvocation {
+                session, payload, ..
+            } = invocation;
+            let arguments = match payload {
+                ToolPayload::Function { arguments } => arguments,
+                _ => {
+                    return Err(FunctionCallError::RespondToModel(
+                        "workspace_context_read handler received unsupported payload".to_string(),
+                    ));
+                }
+            };
+            let args: WorkspaceContextReadArgs = parse_arguments(arguments.as_str())?;
+            let state_db = session.state_db().ok_or_else(|| {
+                FunctionCallError::RespondToModel(
+                    "workspace store is unavailable for this session".to_string(),
+                )
+            })?;
+            let result = read_workspace_context(state_db, args).await?;
+            let value = serde_json::to_value(result).map_err(|err| {
+                FunctionCallError::Fatal(format!("failed to serialize workspace context: {err}"))
+            })?;
+            Ok(boxed_tool_output(JsonToolOutput::new(value)))
+        })
     }
 }
 

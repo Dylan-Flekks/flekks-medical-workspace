@@ -17,7 +17,9 @@ LAYOUT_VERSION = 1
 def prepare_package_dir(package_dir: Path, *, force: bool) -> None:
     if package_dir.exists():
         if not package_dir.is_dir():
-            raise RuntimeError(f"Package output exists and is not a directory: {package_dir}")
+            raise RuntimeError(
+                f"Package output exists and is not a directory: {package_dir}"
+            )
         if any(package_dir.iterdir()):
             if not force:
                 raise RuntimeError(
@@ -47,6 +49,11 @@ def build_package_dir(
     copy_executable(
         inputs.entrypoint_bin,
         bin_dir / entrypoint_name,
+        is_windows=spec.is_windows,
+    )
+    copy_executable(
+        inputs.code_mode_host_bin,
+        bin_dir / f"codex-code-mode-host{spec.exe_suffix}",
         is_windows=spec.is_windows,
     )
     copy_executable(inputs.rg_bin, path_dir / spec.rg_name, is_windows=spec.is_windows)
@@ -128,6 +135,7 @@ def validate_package_dir(
 
     required_files = [
         Path("bin") / variant.entrypoint_name(spec),
+        Path("bin") / f"codex-code-mode-host{spec.exe_suffix}",
         Path("codex-path") / spec.rg_name,
     ]
     executable_files = list(required_files)

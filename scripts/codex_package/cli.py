@@ -44,8 +44,7 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=argparse.SUPPRESS,
         help=(
-            "Output directory to create as the package root. Defaults to a new "
-            "temporary directory."
+            "Output directory to create as the package root. Defaults to a new temporary directory."
         ),
     )
     parser.add_argument(
@@ -72,8 +71,7 @@ def parse_args() -> argparse.Namespace:
         "--cargo-profile",
         default="dev-small",
         help=(
-            "Cargo profile for source-built package artifacts. Use release for "
-            "release packages."
+            "Cargo profile for source-built package artifacts. Use release for release packages."
         ),
     )
     parser.add_argument(
@@ -85,11 +83,27 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--code-mode-host-bin",
+        type=Path,
+        help=(
+            "Optional prebuilt codex-code-mode-host executable. If omitted, "
+            "the host is built with Cargo."
+        ),
+    )
+    parser.add_argument(
         "--bwrap-bin",
         type=Path,
         help=(
             "Optional prebuilt Linux bwrap executable. If omitted for Linux "
             "targets, bwrap is built with Cargo."
+        ),
+    )
+    parser.add_argument(
+        "--zsh-manifest",
+        type=Path,
+        help=(
+            "Optional DotSlash manifest for the patched zsh fork instead of "
+            "scripts/codex_package/codex-zsh."
         ),
     )
     parser.add_argument(
@@ -142,6 +156,11 @@ def main() -> int:
             "prebuilt entrypoint executable",
             "--entrypoint-bin",
         ),
+        code_mode_host_bin=resolve_optional_input_path(
+            args.code_mode_host_bin,
+            "prebuilt code-mode host executable",
+            "--code-mode-host-bin",
+        ),
         bwrap_bin=resolve_optional_input_path(
             args.bwrap_bin,
             "prebuilt Linux bwrap executable",
@@ -161,15 +180,18 @@ def main() -> int:
     version = read_workspace_version()
     inputs = PackageInputs(
         entrypoint_bin=source_outputs.entrypoint_bin,
+        code_mode_host_bin=source_outputs.code_mode_host_bin,
         rg_bin=resolve_rg_bin(spec, args.rg_bin),
-        zsh_bin=resolve_zsh_bin(spec),
+        zsh_bin=resolve_zsh_bin(spec, args.zsh_manifest),
         bwrap_bin=source_outputs.bwrap_bin,
         codex_command_runner_bin=source_outputs.codex_command_runner_bin,
         codex_windows_sandbox_setup_bin=source_outputs.codex_windows_sandbox_setup_bin,
     )
     prepare_package_dir(package_dir, force=args.force)
     build_package_dir(package_dir, version, variant, spec, inputs)
-    validate_package_dir(package_dir, variant, spec, include_zsh=inputs.zsh_bin is not None)
+    validate_package_dir(
+        package_dir, variant, spec, include_zsh=inputs.zsh_bin is not None
+    )
 
     for archive_output in args.archive_output:
         archive_path = archive_output.resolve()
