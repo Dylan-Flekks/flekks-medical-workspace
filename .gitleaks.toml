@@ -10,6 +10,7 @@ id = "private-key"
   regexTarget = "line"
   paths = [
     '''(^|/)codex-rs/agent-identity/src/lib\.rs$''',
+    '''(^|/)codex-rs/login/src/auth/agent_identity\.rs$''',
     '''(^|/)codex-rs/login/src/auth/auth_tests\.rs$''',
   ]
   regexes = ['''br#"-----BEGIN PRIVATE KEY-----''']
@@ -44,3 +45,46 @@ id = "generic-api-key"
   regexTarget = "line"
   paths = ['''(^|/)codex-rs/cloud-requirements/src/lib\.rs$''']
   regexes = ['''^\s*agent_private_key: "[^"]+"\s*$''']
+
+  [[rules.allowlists]]
+  description = "Audited app-server protocol idempotency-key documentation examples"
+  condition = "AND"
+  regexTarget = "line"
+  paths = ['''(^|/)codex-rs/app-server/README\.md$''']
+  regexes = ['''idempotencyKey": "[^"]+"''']
+
+  [[rules.allowlists]]
+  description = "Audited CLI login mock ID-token responses"
+  condition = "AND"
+  regexTarget = "line"
+  paths = ['''(^|/)codex-rs/cli/tests/login\.rs$''']
+  regexes = ['''id_token": "[^"]+"''']
+
+  [[rules.allowlists]]
+  description = "Fixed-size catalog cache-key hash used by an upstream unit test"
+  condition = "AND"
+  regexTarget = "line"
+  paths = ['''(^|/)codex-rs/core-plugins/src/remote/catalog_cache\.rs$''']
+  regexes = ['''^\s*let mut cache_key_hash = .+;\s*$''']
+
+  [[rules.allowlists]]
+  description = "Audited device-key token-digest fixtures"
+  condition = "AND"
+  regexTarget = "line"
+  paths = [
+    '''(^|/)codex-rs/app-server-protocol/src/protocol/v2(?:/tests)?\.rs$''',
+    '''(^|/)codex-rs/app-server/src/in_process\.rs$''',
+    '''(^|/)codex-rs/app-server/src/message_processor/tracing_tests\.rs$''',
+    '''(^|/)codex-rs/app-server/tests/suite/v2/device_key\.rs$''',
+  ]
+  regexes = ['''token(_sha256_base64url:|Sha256Base64url":) "[^"]+"''']
+
+  [[rules.allowlists]]
+  description = "Synthetic password lines embedded in upstream memory-stage test fixtures"
+  condition = "AND"
+  regexTarget = "line"
+  paths = [
+    '''(^|/)codex-rs/core/src/memories/phase_one\.rs$''',
+    '''(^|/)codex-rs/core/src/memories/stage_one\.rs$''',
+  ]
+  regexes = ['''password = [^\\"]+\\n''']
