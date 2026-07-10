@@ -4,19 +4,19 @@ expression: "render_dashboard_lines_at(&dashboard, width, height)"
 ---
 Medical Workspace
 Patient: Jordan Patient  DOB: blank  MRN: blank  Contact: Missing contact  Coverage: Missing coverage  Encounter: No encounter
-┌Patient Directory───────────────┐┌Patient Demographics──────────────────────────────────────────────────────────┐┌Agent Workpane──────────────────────────────┐
-│Local search: /                 ││Display: Jordan Patient                                                       ││Mode: > Input |   Packet |   Returned       │
-│0 active patients; local only   ││Preferred:                                                                    ││  ● draft: No instructions drafted          │
-│No saved patients yet.          ││DOB:                                                                          ││  ● context: 0 files | 0 text | 0 clips     │
-│New patient: :patient new       ││Sex/Gender:                                                                   ││  ● plan: not sent                          │
-│                                ││Patient ID / MRN:                                                             ││  ● returned: none                          │
-│               ┌Commands──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐               │
-│               │Search commands  :proposal                                                                                                    │hen Ctrl-G     │
-│               │Enter run   Esc close   ↑/↓ move                                                                                              │auto-apply.    │
+ EXPLORER                          PATIENT CHART                                                                   AGENT WORK
+┌Patient Directory───────────────┐┌Patient Demographics──────────────────────────────────────────────────────────┐┌Agent Work──────────────────────────────────┐
+│Local search: /                 ││Display: Jordan Patient                                                       ││Patient Chart: Jordan...; Save first eval   │
+│0 active patients; local only   ││Preferred:                                                                    ││[Pending]  History  Audit  ←/→              │
+│No saved patients yet.          ││DOB:                                                                          ││                                            │
+│New patient: :patient new       ││Sex/Gender:                                                                   ││Mode: > Input |   Packet |   Returned       │
+│               ┌Commands──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐afted          │
+│               │Search commands  :proposal                                                                                                    │ | 0 clips     │
+│               │Enter run   Esc close   ↑/↓ move                                                                                              │               │
 │               │                                                                                                                              │               │
 │               │> Select next proposal                                                                                    :proposal next off  │               │
-│               │Accept proposal                                                                                       :proposal accept off    │               │
-└───────────────│Decline proposal                                                                                     :proposal decline off    │               │
+│               │Accept proposal                                                                                       :proposal accept off    │hen Ctrl-G     │
+└───────────────│Decline proposal                                                                                     :proposal decline off    │auto-apply.    │
 ┌Patient Notes──│Make note proposal from returned work                                                        :agent result to proposal off    │               │
 │Patient Notes  │Jump to proposals                                                                                      :workflow proposals    │               │
 │  New note     │                                                                                                                              │               │
@@ -25,12 +25,12 @@ Patient: Jordan Patient  DOB: blank  MRN: blank  Contact: Missing contact  Cover
 │  Medical, comm│                                                                                                                              │               │
 │admin notes app│                                                                                                                              │               │
 │               │                                                                                                                              │               │
+│               │                                                                                                                              │               │
 └───────────────│                                                                                                                              │               │
 ┌Uploaded Docume│                                                                                                                              │               │
 │Uploaded Docume│                                                                                                                              │               │
 │No files yet   │                                                                                                                              │               │
 │Paste/drop JPG/│                                                                                                                              │               │
-│               │                                                                                                                              │               │
 │               │                                                                                                                              │               │
 │               │                                                                                                                              │               │
 │               └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘               │

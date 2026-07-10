@@ -40,6 +40,7 @@ use codex_app_server_protocol::WorkspaceAgentResult;
 use codex_app_server_protocol::WorkspaceAgentResultCreateParams;
 use codex_app_server_protocol::WorkspaceAgentResultListParams;
 use codex_app_server_protocol::WorkspaceAgentResultStatusUpdateParams;
+use codex_app_server_protocol::WorkspaceAgentRunStartParams;
 use codex_app_server_protocol::WorkspaceArtifactDerivative;
 use codex_app_server_protocol::WorkspaceArtifactDerivativeListParams;
 use codex_app_server_protocol::WorkspaceArtifactDerivativeStatusUpdateParams;
@@ -286,6 +287,57 @@ enum MedicalPaneSlot {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MedicalZone {
+    Explorer,
+    Chart,
+    AgentWork,
+}
+
+impl MedicalZone {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Explorer => "Explorer",
+            Self::Chart => "Patient Chart",
+            Self::AgentWork => "Agent Work",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum AgentRailTab {
+    #[default]
+    Pending,
+    History,
+    Audit,
+}
+
+impl AgentRailTab {
+    fn next(self) -> Self {
+        match self {
+            Self::Pending => Self::History,
+            Self::History => Self::Audit,
+            Self::Audit => Self::Pending,
+        }
+    }
+
+    fn previous(self) -> Self {
+        match self {
+            Self::Pending => Self::Audit,
+            Self::History => Self::Pending,
+            Self::Audit => Self::History,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Pending => "Pending",
+            Self::History => "History",
+            Self::Audit => "Audit",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WorkspaceInputMode {
     Navigation,
     PatientSearch,
@@ -298,6 +350,7 @@ enum WorkspaceInputMode {
     FileTree,
     CenterReadOnly,
     WorkflowEditor,
+    AgentRail,
     AgentInput,
     PacketReview,
     ReturnedWorkReview,
@@ -318,6 +371,7 @@ impl WorkspaceInputMode {
             Self::FileTree => "File list",
             Self::CenterReadOnly => "Read-only chart",
             Self::WorkflowEditor => "Chart editor",
+            Self::AgentRail => "Agent review",
             Self::AgentInput => "Agent input",
             Self::PacketReview => "Packet review",
             Self::ReturnedWorkReview => "Returned work",
@@ -339,6 +393,7 @@ impl WorkspaceInputMode {
             Self::FileTree => "Arrows move  Enter detail  Space include  Esc close",
             Self::CenterReadOnly => "Page scroll  : command  Tab move  Esc close",
             Self::WorkflowEditor => "Type value  Up/Down field  Ctrl-S save  Esc guards draft",
+            Self::AgentRail => "Left/Right tabs  Page scroll  r starts request",
             Self::AgentInput => "Type request  :context packet  Ctrl-G send  Esc chart",
             Self::PacketReview => "Review packet  Ctrl-G send  r edit request",
             Self::ReturnedWorkReview => "i inspect  r input  p packet  Esc close",
@@ -459,7 +514,7 @@ impl MedicalWorkflowSection {
             | Self::Jobs
             | Self::Timeline => "Patient Chart",
             Self::Documents => "Uploaded Documents",
-            Self::AgentRequest | Self::ContextPacket => "Agent Workpane",
+            Self::AgentRequest | Self::ContextPacket => "Agent Work",
             Self::AgentInbox => "Agent Review",
             Self::PracticeLibrary => "Practice Library",
             Self::PracticeIntelligence => "Practice Intelligence",
@@ -1399,8 +1454,8 @@ fn digits_only(value: &str) -> String {
     value.chars().filter(char::is_ascii_digit).collect()
 }
 
-fn epoch_millis_date_label(ms: i64) -> String {
-    DateTime::<Utc>::from_timestamp_millis(ms)
+fn epoch_seconds_date_label(seconds: i64) -> String {
+    DateTime::<Utc>::from_timestamp(seconds, 0)
         .map(|time| time.format("%Y-%m-%d").to_string())
         .unwrap_or_else(|| "unknown".to_string())
 }
@@ -2428,6 +2483,7 @@ pub(crate) struct WorkspaceDashboard {
     last_workflow_section: Option<MedicalWorkflowSection>,
     workflow_scroll: u16,
     agent_scroll: u16,
+    agent_rail_tab: AgentRailTab,
     draft_client: ClientDraft,
     draft_note: NoteDraft,
     draft_document: DocumentDraft,
@@ -2500,6 +2556,7 @@ impl Default for WorkspaceDashboard {
             last_workflow_section: None,
             workflow_scroll: 0,
             agent_scroll: 0,
+            agent_rail_tab: AgentRailTab::default(),
             draft_client: ClientDraft::default(),
             draft_note: NoteDraft::default(),
             draft_document: DocumentDraft::default(),
@@ -2867,6 +2924,7 @@ impl WorkspaceDashboard {
             .workspace_note_proposal_resolve(WorkspaceNoteProposalResolveParams {
                 proposal_id,
                 accept,
+                edited_body: None,
             })
             .await?;
         let note_id = self.draft_note.id.clone();
@@ -3113,66 +3171,72 @@ impl WorkspaceDashboard {
         let Some(area) = viewport else {
             return self.focus;
         };
-        if WorkspaceLayoutMode::for_area(area) == WorkspaceLayoutMode::Large {
-            let areas = MedicalLargeAreas::new(area);
-            let point = (scroll_event.column, scroll_event.row);
-            if rect_contains(areas.clients, point) {
-                return WorkspaceFocus::Clients;
-            }
-            if rect_contains(areas.notes, point) {
-                return WorkspaceFocus::Notes;
-            }
-            if rect_contains(areas.patient_files, point) {
-                return WorkspaceFocus::PatientFiles;
-            }
-            if rect_contains(areas.agent, point) {
-                return WorkspaceFocus::Agent;
-            }
-            if rect_contains(areas.demographics, point) {
-                return WorkspaceFocus::Demographics;
-            }
-            if rect_contains(areas.note_title, point) {
-                return WorkspaceFocus::NoteTitle;
-            }
-            if rect_contains(areas.note_body, point) {
-                return WorkspaceFocus::NoteBody;
-            }
-            if rect_contains(areas.active_work, point) {
-                return WorkspaceFocus::Workflow;
-            }
-            return self.focus;
-        }
-        let areas = WorkspaceAreas::new(area);
         let point = (scroll_event.column, scroll_event.row);
-        if rect_contains(areas.clients, point) {
-            return WorkspaceFocus::Clients;
-        }
-        if rect_contains(areas.notes, point) {
-            return WorkspaceFocus::Notes;
-        }
-        if areas.patient_files.width > 0
-            && areas.patient_files.height > 0
-            && rect_contains(areas.patient_files, point)
-        {
-            return WorkspaceFocus::PatientFiles;
-        }
-        if rect_contains(areas.demographics, point) {
-            return WorkspaceFocus::Demographics;
-        }
-        if rect_contains(areas.note_title, point) {
-            return WorkspaceFocus::NoteTitle;
-        }
-        if rect_contains(areas.note_body, point) {
-            return WorkspaceFocus::NoteBody;
-        }
-        if rect_contains(areas.workflow, point) {
-            if self.focus == WorkspaceFocus::Agent && self.workflow_section_uses_agent_workpane() {
-                return WorkspaceFocus::Agent;
+        match WorkspaceLayoutMode::for_area(area) {
+            WorkspaceLayoutMode::Large => {
+                let areas = MedicalLargeAreas::new(area);
+                if rect_contains(areas.clients, point) {
+                    return WorkspaceFocus::Clients;
+                }
+                if rect_contains(areas.notes, point) {
+                    return WorkspaceFocus::Notes;
+                }
+                if rect_contains(areas.patient_files, point) {
+                    return WorkspaceFocus::PatientFiles;
+                }
+                if rect_contains(areas.agent, point) {
+                    return WorkspaceFocus::Agent;
+                }
+                if self.medical_chart_shows_workflow() && rect_contains(areas.active_work, point) {
+                    return WorkspaceFocus::Workflow;
+                }
+                if rect_contains(areas.demographics, point) {
+                    return WorkspaceFocus::Demographics;
+                }
+                if rect_contains(areas.note_title, point) {
+                    return WorkspaceFocus::NoteTitle;
+                }
+                if rect_contains(areas.note_body, point) {
+                    return WorkspaceFocus::NoteBody;
+                }
             }
-            if self.focus == WorkspaceFocus::PatientFiles && areas.patient_files.width == 0 {
-                return WorkspaceFocus::PatientFiles;
+            WorkspaceLayoutMode::Medium => {
+                let areas = MedicalMediumAreas::new(area);
+                if rect_contains(areas.clients, point) {
+                    return WorkspaceFocus::Clients;
+                }
+                if rect_contains(areas.notes, point) {
+                    return WorkspaceFocus::Notes;
+                }
+                if rect_contains(areas.patient_files, point) {
+                    return WorkspaceFocus::PatientFiles;
+                }
+                if rect_contains(areas.main, point) && self.focus == WorkspaceFocus::Agent {
+                    return WorkspaceFocus::Agent;
+                }
+                if self.medical_chart_shows_workflow() && rect_contains(areas.main, point) {
+                    return WorkspaceFocus::Workflow;
+                }
+                if rect_contains(areas.demographics, point) {
+                    return WorkspaceFocus::Demographics;
+                }
+                if rect_contains(areas.note_title, point) {
+                    return WorkspaceFocus::NoteTitle;
+                }
+                if rect_contains(areas.note_body, point) {
+                    return WorkspaceFocus::NoteBody;
+                }
+                if rect_contains(areas.active_work, point) {
+                    return WorkspaceFocus::Workflow;
+                }
             }
-            return WorkspaceFocus::Workflow;
+            WorkspaceLayoutMode::Compact => {
+                let areas = MedicalCompactAreas::new(area);
+                if rect_contains(areas.body, point) {
+                    return self.focus;
+                }
+            }
+            WorkspaceLayoutMode::Tiny => {}
         }
         self.focus
     }
@@ -3190,10 +3254,10 @@ impl WorkspaceDashboard {
     fn scroll_agent_workpane(&mut self, delta: isize, amount: u16) {
         if delta.is_negative() {
             self.agent_scroll = self.agent_scroll.saturating_sub(amount);
-            self.status = "Scrolled Agent Workpane up.".to_string();
+            self.status = "Scrolled Agent Work up.".to_string();
         } else {
             self.agent_scroll = self.agent_scroll.saturating_add(amount);
-            self.status = "Scrolled Agent Workpane down.".to_string();
+            self.status = "Scrolled Agent Work down.".to_string();
         }
     }
 
@@ -3279,7 +3343,7 @@ impl WorkspaceDashboard {
             return;
         }
         let mut next = self.focus;
-        for _ in 0..7 {
+        for _ in 0..8 {
             next = if delta.is_negative() {
                 next.previous()
             } else {
@@ -3346,6 +3410,7 @@ impl WorkspaceDashboard {
             WorkspaceLayoutMode::Compact => vec![
                 MedicalPaneSlot::PatientDirectory,
                 MedicalPaneSlot::ChartTree,
+                MedicalPaneSlot::PatientFileTree,
                 MedicalPaneSlot::CenterWorkArea,
                 MedicalPaneSlot::AgentWorkpane,
                 MedicalPaneSlot::PatientDemographics,
@@ -3355,6 +3420,7 @@ impl WorkspaceDashboard {
             WorkspaceLayoutMode::Tiny => vec![
                 MedicalPaneSlot::PatientDirectory,
                 MedicalPaneSlot::ChartTree,
+                MedicalPaneSlot::PatientFileTree,
                 MedicalPaneSlot::CenterWorkArea,
             ],
         }
@@ -3437,18 +3503,18 @@ impl WorkspaceDashboard {
 
     fn focus_medical_agent_workpane(&mut self) {
         self.focus = WorkspaceFocus::Agent;
+        self.agent_rail_tab = AgentRailTab::Pending;
+        self.agent_scroll = 0;
         if self.agent_result.is_active() {
-            self.set_workflow_section(MedicalWorkflowSection::AgentInbox);
-            self.agent_scroll = 0;
             self.status = "Focused returned agent work draft.".to_string();
             return;
         }
-        self.set_workflow_section(MedicalWorkflowSection::AgentRequest);
-        self.agent_scroll = 0;
-        self.agent_request.start();
+        if self.agent_request.is_active() {
+            self.status = "Focused local agent request draft.".to_string();
+            return;
+        }
         self.status =
-            "Agent input ready. Type local instructions/context; review packet before Ctrl-G."
-                .to_string();
+            "Focused Agent Work. Use r or :agent request to start a local draft.".to_string();
     }
 
     fn can_focus_patient_files_sidepane(&self) -> bool {
@@ -4287,6 +4353,7 @@ impl WorkspaceDashboard {
         self.focus_workspace_area(focus, &status);
         self.set_workflow_section(section);
         if focus == WorkspaceFocus::Agent {
+            self.agent_rail_tab = AgentRailTab::Pending;
             self.agent_scroll = 0;
         }
     }
@@ -4325,7 +4392,7 @@ impl WorkspaceDashboard {
             return;
         }
         if self.profile == WorkspaceProfile::Medical
-            && self.medical_large_center_can_render_active_work_detail()
+            && self.medical_chart_can_render_active_work_detail()
         {
             self.workflow_scroll = 0;
             return;
@@ -4464,7 +4531,7 @@ impl WorkspaceDashboard {
                     self.status = "Local agent instructions draft.".to_string();
                 } else {
                     self.status =
-                        "Agent Workpane ready. Use :agent request before typing instructions."
+                        "Agent Work ready. Use :agent request before typing instructions."
                             .to_string();
                 }
                 WorkspaceDashboardAction::Consumed
@@ -4786,6 +4853,19 @@ impl WorkspaceDashboard {
             return Err("Save the patient before submitting a Medical Agent Plan.".to_string());
         };
         let assembly = self.medical_context_assembly();
+        let authorized_scope_json = json!({
+            "schema": "medical-agent-authorized-scope-v1",
+            "read": {
+                "patientId": client_id,
+                "encounterId": self.active_encounter_id(),
+                "noteId": self.draft_note.id.clone(),
+                "artifactIds": self.selected_artifacts().iter().map(|document| &document.id).collect::<Vec<_>>(),
+                "reviewedTextIds": self.selected_derivatives().iter().map(|derivative| &derivative.id).collect::<Vec<_>>(),
+                "contextClipIds": self.selected_clips().iter().map(|clip| &clip.id).collect::<Vec<_>>(),
+            },
+            "write": [],
+        })
+        .to_string();
         Ok(WorkspaceContextPacketCreateParams {
             client_id,
             encounter_id: self.active_encounter_id(),
@@ -4799,6 +4879,10 @@ impl WorkspaceDashboard {
             clip_summary: assembly.clip_summary,
             chart_context_summary: assembly.chart_context_summary,
             context_envelope_json: assembly.context_envelope_json,
+            clinician_actor: Some("local clinician".to_string()),
+            base_note_revision: Some(self.draft_note.current_revision),
+            authorized_scope_json: Some(authorized_scope_json),
+            expected_output_kind: Some("note_proposal".to_string()),
         })
     }
 
@@ -4809,6 +4893,7 @@ impl WorkspaceDashboard {
         self.agent_result.clear();
         self.stale_context_notice = None;
         self.focus = WorkspaceFocus::Agent;
+        self.agent_rail_tab = AgentRailTab::Pending;
         self.set_workflow_section(MedicalWorkflowSection::AgentInbox);
         self.agent_scroll = 0;
         self.status =
@@ -4827,14 +4912,37 @@ impl WorkspaceDashboard {
             .iter()
             .find(|packet| packet.id == packet_id)
             .map(|packet| packet.context_envelope_sha256.clone());
+        let packet_client_id = self
+            .context_packets
+            .iter()
+            .find(|packet| packet.id == packet_id)
+            .map(|packet| packet.client_id.clone())
+            .or_else(|| self.draft_client.id.clone());
+        let run = app_server
+            .workspace_agent_run_start(WorkspaceAgentRunStartParams {
+                packet_id: packet_id.clone(),
+                idempotency_key: "tui-context-handoff-v1".to_string(),
+                client_id: packet_client_id,
+                context_envelope_sha256: packet_hash.clone(),
+                provider: None,
+                model: None,
+                source_thread_id: None,
+                source_turn_id: None,
+            })
+            .await?
+            .run;
         let result = app_server
             .workspace_agent_result_create(WorkspaceAgentResultCreateParams {
                 packet_id: packet_id.clone(),
+                run_id: Some(run.id),
                 body,
                 summary: None,
                 client_id: self.draft_client.id.clone(),
                 note_id: self.draft_note.id.clone(),
                 context_envelope_sha256: packet_hash,
+                result_kind: Some("note_proposal".to_string()),
+                structured_changes_json: None,
+                rationale_summary: None,
             })
             .await?
             .result;
@@ -5443,6 +5551,7 @@ impl WorkspaceDashboard {
                 ),
                 source_thread_id: None,
                 source_turn_id: Some(result.id.clone()),
+                agent_result_id: Some(result.id.clone()),
             })
             .await?;
         app_server
@@ -6921,6 +7030,15 @@ impl WorkspaceDashboard {
             }
             return;
         }
+        if self.render_medical_medium_workspace(area, buf) {
+            if self.action_overlay_visible {
+                self.render_action_overlay(area, buf);
+            }
+            if self.command_input.is_some() {
+                self.render_command_palette(area, buf);
+            }
+            return;
+        }
         if self.render_medical_focus_first_workspace(area, buf) {
             if self.action_overlay_visible {
                 self.render_action_overlay(area, buf);
@@ -6978,12 +7096,31 @@ impl WorkspaceDashboard {
             .wrap(Wrap { trim: true })
             .render(areas.header, buf);
 
+        self.render_medical_zone_label(
+            areas.explorer_label,
+            MedicalZone::Explorer,
+            self.medical_active_zone() == MedicalZone::Explorer,
+            buf,
+        );
+        self.render_medical_zone_label(
+            areas.chart_label,
+            MedicalZone::Chart,
+            self.medical_active_zone() == MedicalZone::Chart,
+            buf,
+        );
+        self.render_medical_zone_label(
+            areas.agent_label,
+            MedicalZone::AgentWork,
+            self.medical_active_zone() == MedicalZone::AgentWork,
+            buf,
+        );
+
         self.render_clients(areas.clients, buf);
         self.render_notes(areas.notes, buf);
         self.render_patient_files_sidepane(areas.patient_files, buf);
 
-        if self.medical_large_center_shows_workflow() {
-            if self.medical_large_center_can_render_active_work_detail() {
+        if self.medical_chart_shows_workflow() {
+            if self.medical_chart_can_render_active_work_detail() {
                 self.render_medical_active_work_area(areas.active_work, buf);
             } else {
                 self.render_workflow_without_patient_files_section(areas.active_work, buf);
@@ -6999,6 +7136,58 @@ impl WorkspaceDashboard {
         true
     }
 
+    fn render_medical_medium_workspace(&self, area: Rect, buf: &mut Buffer) -> bool {
+        if self.profile != WorkspaceProfile::Medical
+            || WorkspaceLayoutMode::for_area(area) != WorkspaceLayoutMode::Medium
+        {
+            return false;
+        }
+
+        let areas = MedicalMediumAreas::new(area);
+        Paragraph::new(self.header_lines())
+            .wrap(Wrap { trim: true })
+            .render(areas.header, buf);
+        self.render_medical_zone_label(
+            areas.explorer_label,
+            MedicalZone::Explorer,
+            self.medical_active_zone() == MedicalZone::Explorer,
+            buf,
+        );
+        let main_zone = if self.focus == WorkspaceFocus::Agent {
+            MedicalZone::AgentWork
+        } else {
+            MedicalZone::Chart
+        };
+        self.render_medical_zone_label(
+            areas.main_label,
+            main_zone,
+            self.medical_active_zone() == main_zone,
+            buf,
+        );
+
+        self.render_clients(areas.clients, buf);
+        self.render_notes(areas.notes, buf);
+        self.render_patient_files_sidepane(areas.patient_files, buf);
+
+        if self.focus == WorkspaceFocus::Agent {
+            self.render_agent_workpane(areas.main, buf);
+        } else if self.medical_chart_shows_workflow() {
+            if self.medical_chart_can_render_active_work_detail() {
+                self.render_medical_active_work_area(areas.main, buf);
+            } else {
+                self.render_workflow_without_patient_files_section(areas.main, buf);
+            }
+        } else {
+            self.render_demographics(areas.demographics, buf);
+            self.render_note_title(areas.note_title, buf);
+            self.render_note_body(areas.note_body, buf);
+            self.render_workflow_without_patient_files_section(areas.active_work, buf);
+        }
+
+        Paragraph::new(self.status_line(areas.status.width)).render(areas.status, buf);
+        true
+    }
+
     fn render_medical_focus_first_workspace(&self, area: Rect, buf: &mut Buffer) -> bool {
         if self.profile != WorkspaceProfile::Medical
             || WorkspaceLayoutMode::for_area(area) != WorkspaceLayoutMode::Compact
@@ -7006,26 +7195,87 @@ impl WorkspaceDashboard {
             return false;
         }
 
-        let header_height = if area.width >= 100 && area.height >= 24 {
-            2
-        } else {
-            1
-        };
-        let vertical = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(header_height),
-                Constraint::Min(3),
-                Constraint::Length(1),
-            ])
-            .split(area);
+        let areas = MedicalCompactAreas::new(area);
         Paragraph::new(self.header_lines())
             .wrap(Wrap { trim: true })
-            .render(vertical[0], buf);
+            .render(areas.header, buf);
+        Paragraph::new(self.medical_zone_breadcrumb_line()).render(areas.breadcrumb, buf);
 
-        self.render_medical_focused_pane(vertical[1], buf);
-        Paragraph::new(self.status_line(vertical[2].width)).render(vertical[2], buf);
+        self.render_medical_focused_pane(areas.body, buf);
+        Paragraph::new(self.status_line(areas.status.width)).render(areas.status, buf);
         true
+    }
+
+    fn medical_active_zone(&self) -> MedicalZone {
+        match self.focus {
+            WorkspaceFocus::Clients | WorkspaceFocus::Notes | WorkspaceFocus::PatientFiles => {
+                MedicalZone::Explorer
+            }
+            WorkspaceFocus::Demographics
+            | WorkspaceFocus::NoteTitle
+            | WorkspaceFocus::NoteBody
+            | WorkspaceFocus::Workflow => MedicalZone::Chart,
+            WorkspaceFocus::Agent => MedicalZone::AgentWork,
+        }
+    }
+
+    fn render_medical_zone_label(
+        &self,
+        area: Rect,
+        zone: MedicalZone,
+        active: bool,
+        buf: &mut Buffer,
+    ) {
+        let label = format!(" {} ", zone.label().to_uppercase());
+        let span = if active {
+            Span::styled(
+                label,
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            )
+        } else {
+            Span::styled(label, Style::default().fg(Color::DarkGray))
+        };
+        Paragraph::new(Line::from(span)).render(area, buf);
+    }
+
+    fn medical_zone_breadcrumb_line(&self) -> Line<'static> {
+        let active_zone = self.medical_active_zone();
+        let mut spans = vec![Span::styled(
+            "Zones: ",
+            Style::default().fg(Color::DarkGray),
+        )];
+        for (index, zone) in [
+            MedicalZone::Explorer,
+            MedicalZone::Chart,
+            MedicalZone::AgentWork,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            if index > 0 {
+                spans.push(Span::styled(" > ", Style::default().fg(Color::DarkGray)));
+            }
+            if zone == active_zone {
+                spans.push(Span::styled(
+                    format!("[{}]", zone.label()),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ));
+            } else {
+                spans.push(Span::styled(
+                    zone.label(),
+                    Style::default().fg(Color::DarkGray),
+                ));
+            }
+        }
+        spans.push(Span::styled(
+            format!("  Focus: {}", self.medical_focus_footer_label()),
+            Style::default().fg(Color::DarkGray),
+        ));
+        Line::from(spans)
     }
 
     fn render_medical_focused_pane(&self, area: Rect, buf: &mut Buffer) {
@@ -7036,12 +7286,17 @@ impl WorkspaceDashboard {
             MedicalPaneSlot::PatientDemographics => self.render_demographics(area, buf),
             MedicalPaneSlot::NoteTitle => self.render_note_title(area, buf),
             MedicalPaneSlot::NoteBody => self.render_note_body(area, buf),
+            MedicalPaneSlot::CenterWorkArea
+                if self.workflow_section == MedicalWorkflowSection::Proposals =>
+            {
+                self.render_medical_active_work_area(area, buf);
+            }
             MedicalPaneSlot::CenterWorkArea => self.render_workflow(area, buf),
             MedicalPaneSlot::AgentWorkpane => self.render_agent_workpane(area, buf),
         }
     }
 
-    fn medical_large_center_shows_workflow(&self) -> bool {
+    fn medical_chart_shows_workflow(&self) -> bool {
         if self.workflow_section_uses_agent_workpane() {
             return false;
         }
@@ -7055,7 +7310,7 @@ impl WorkspaceDashboard {
             || self.addendum_draft.active
     }
 
-    fn medical_large_center_can_render_active_work_detail(&self) -> bool {
+    fn medical_chart_can_render_active_work_detail(&self) -> bool {
         self.profile == WorkspaceProfile::Medical
             && !self.draft_document.is_active()
             && !self.derivative_draft.is_active()
@@ -7073,6 +7328,12 @@ impl WorkspaceDashboard {
         if inner.width == 0 || inner.height == 0 {
             return;
         }
+        if self.workflow_section == MedicalWorkflowSection::Proposals
+            && self.selected_pending_proposal().is_some()
+        {
+            self.render_medical_proposal_comparison(inner, buf);
+            return;
+        }
         let lines = self.medical_active_work_lines();
         let max_scroll = lines.len().saturating_sub(inner.height as usize) as u16;
         let scroll = if active {
@@ -7084,6 +7345,125 @@ impl WorkspaceDashboard {
             .wrap(Wrap { trim: false })
             .scroll((scroll, 0))
             .render(inner, buf);
+    }
+
+    fn render_medical_proposal_comparison(&self, area: Rect, buf: &mut Buffer) {
+        let Some(proposal) = self.selected_pending_proposal() else {
+            return;
+        };
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(if area.height >= 10 { 3 } else { 2 }),
+                Constraint::Min(3),
+                Constraint::Length(1),
+            ])
+            .split(area);
+        Paragraph::new(vec![
+            Line::from(format!(
+                "Current vs Proposed · Note Proposals · {} pending proposals",
+                self.pending_proposal_count()
+            )),
+            self.proposal_review_state_line(proposal),
+            Line::from(format!(
+                "Summary: {}",
+                compact_preview(&proposal.summary, area.width.saturating_sub(9) as usize)
+            )),
+        ])
+        .wrap(Wrap { trim: true })
+        .render(rows[0], buf);
+
+        let current_title = format!("Current chart · r{}", self.draft_note.current_revision);
+        let proposed_title = format!("Proposed edit · from r{}", proposal.base_revision);
+        let render_comparison_pane =
+            |pane: Rect, title: String, lines: Vec<Line<'static>>, pane_buf: &mut Buffer| {
+                let block = Block::default()
+                    .title(title)
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::DarkGray));
+                let inner = block.inner(pane);
+                block.render(pane, pane_buf);
+                Paragraph::new(lines)
+                    .wrap(Wrap { trim: false })
+                    .scroll((self.workflow_scroll, 0))
+                    .render(inner, pane_buf);
+            };
+        let current_lines = proposal_comparison_body_lines(&self.draft_note.body, '-');
+        let proposed_lines = proposal_comparison_body_lines(&proposal.proposed_body, '+');
+        if rows[1].width >= 72 {
+            let columns = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+                .split(rows[1]);
+            render_comparison_pane(columns[0], current_title, current_lines, buf);
+            render_comparison_pane(columns[1], proposed_title, proposed_lines, buf);
+        } else {
+            let panes = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+                .split(rows[1]);
+            render_comparison_pane(panes[0], current_title, current_lines, buf);
+            render_comparison_pane(panes[1], proposed_title, proposed_lines, buf);
+        }
+        Paragraph::new(Line::from(
+            ":proposal accept | :proposal decline | :proposal next  · read-only comparison",
+        ))
+        .render(rows[2], buf);
+    }
+
+    fn proposal_review_state_line(&self, proposal: &WorkspaceNoteProposal) -> Line<'static> {
+        let stale = proposal.base_revision != self.draft_note.current_revision;
+        let mut spans = vec![Span::styled(
+            "Review state: ",
+            Style::default().fg(Color::DarkGray),
+        )];
+        if self.draft_note.is_locked() {
+            let label = if stale {
+                "SIGNED · STALE · READ ONLY"
+            } else {
+                "SIGNED · READ ONLY"
+            };
+            spans.push(Span::styled(
+                label,
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        } else if stale {
+            spans.push(Span::styled(
+                "STALE",
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ));
+        } else if self.dirty {
+            spans.push(Span::styled(
+                "UNSAVED · ACCEPT BLOCKED",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        } else {
+            spans.push(Span::styled(
+                "READY",
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
+        let detail = if stale {
+            format!(
+                " · current pane is live r{}; proposal was prepared from r{}",
+                self.draft_note.current_revision, proposal.base_revision
+            )
+        } else if self.draft_note.is_locked() {
+            " · use an addendum; replacement accept is blocked".to_string()
+        } else {
+            format!(
+                " · proposal base matches current r{}",
+                proposal.base_revision
+            )
+        };
+        spans.push(Span::styled(detail, Style::default().fg(Color::DarkGray)));
+        Line::from(spans)
     }
 
     fn workflow_section_uses_agent_workpane(&self) -> bool {
@@ -7216,10 +7596,13 @@ impl WorkspaceDashboard {
                 command_input,
             ));
         }
-        if self.profile == WorkspaceProfile::Medical
-            && WorkspaceLayoutMode::for_area(area) == WorkspaceLayoutMode::Large
-        {
-            return self.cursor_pos_medical_large(area);
+        if self.profile == WorkspaceProfile::Medical {
+            match WorkspaceLayoutMode::for_area(area) {
+                WorkspaceLayoutMode::Large => return self.cursor_pos_medical_large(area),
+                WorkspaceLayoutMode::Medium => return self.cursor_pos_medical_medium(area),
+                WorkspaceLayoutMode::Compact => return self.cursor_pos_medical_compact(area),
+                WorkspaceLayoutMode::Tiny => return None,
+            }
         }
         match self.focus {
             WorkspaceFocus::Demographics => {
@@ -7333,6 +7716,116 @@ impl WorkspaceDashboard {
                 }
                 self.cursor_pos_in_agent_workpane_inner(inner)
             }
+            WorkspaceFocus::Clients | WorkspaceFocus::Notes | WorkspaceFocus::PatientFiles => None,
+        }
+    }
+
+    fn cursor_pos_medical_medium(&self, area: Rect) -> Option<(u16, u16)> {
+        let areas = MedicalMediumAreas::new(area);
+        match self.focus {
+            WorkspaceFocus::Demographics => {
+                let inner = inner_rect(areas.demographics);
+                if inner.width == 0 || inner.height == 0 {
+                    return None;
+                }
+                let row = self.demographics_field.index() as u16;
+                if row >= inner.height {
+                    return None;
+                }
+                let label_len = self.demographics_field.label(self.profile).len() + 2;
+                Some(cursor_at_text_end(
+                    inner,
+                    row,
+                    label_len,
+                    self.draft_client.value(self.demographics_field),
+                ))
+            }
+            WorkspaceFocus::NoteTitle => {
+                let inner = inner_rect(areas.note_title);
+                if inner.width == 0 || inner.height == 0 {
+                    return None;
+                }
+                Some(cursor_at_text_end(inner, 0, 0, &self.draft_note.title))
+            }
+            WorkspaceFocus::NoteBody => {
+                let inner = inner_rect(areas.note_body);
+                if inner.width == 0 || inner.height == 0 {
+                    return None;
+                }
+                let lines = self.draft_note.body.lines().collect::<Vec<_>>();
+                let row = lines
+                    .len()
+                    .max(1)
+                    .saturating_sub(1)
+                    .min(inner.height.saturating_sub(1) as usize) as u16;
+                Some(cursor_at_text_end(
+                    inner,
+                    row,
+                    0,
+                    lines.last().copied().unwrap_or(""),
+                ))
+            }
+            WorkspaceFocus::Workflow => {
+                let workflow = if self.medical_chart_shows_workflow() {
+                    areas.main
+                } else {
+                    areas.active_work
+                };
+                let inner = inner_rect(workflow);
+                if inner.width == 0 || inner.height == 0 {
+                    return None;
+                }
+                self.cursor_pos_in_workflow_inner(inner)
+            }
+            WorkspaceFocus::Agent => {
+                let inner = inner_rect(areas.main);
+                if inner.width == 0 || inner.height == 0 {
+                    return None;
+                }
+                self.cursor_pos_in_agent_workpane_inner(inner)
+            }
+            WorkspaceFocus::Clients | WorkspaceFocus::Notes | WorkspaceFocus::PatientFiles => None,
+        }
+    }
+
+    fn cursor_pos_medical_compact(&self, area: Rect) -> Option<(u16, u16)> {
+        let inner = inner_rect(MedicalCompactAreas::new(area).body);
+        if inner.width == 0 || inner.height == 0 {
+            return None;
+        }
+        match self.focus {
+            WorkspaceFocus::Demographics => {
+                let row = self.demographics_field.index() as u16;
+                if row >= inner.height {
+                    return None;
+                }
+                let label_len = self.demographics_field.label(self.profile).len() + 2;
+                Some(cursor_at_text_end(
+                    inner,
+                    row,
+                    label_len,
+                    self.draft_client.value(self.demographics_field),
+                ))
+            }
+            WorkspaceFocus::NoteTitle => {
+                Some(cursor_at_text_end(inner, 0, 0, &self.draft_note.title))
+            }
+            WorkspaceFocus::NoteBody => {
+                let lines = self.draft_note.body.lines().collect::<Vec<_>>();
+                let row = lines
+                    .len()
+                    .max(1)
+                    .saturating_sub(1)
+                    .min(inner.height.saturating_sub(1) as usize) as u16;
+                Some(cursor_at_text_end(
+                    inner,
+                    row,
+                    0,
+                    lines.last().copied().unwrap_or(""),
+                ))
+            }
+            WorkspaceFocus::Workflow => self.cursor_pos_in_workflow_inner(inner),
+            WorkspaceFocus::Agent => self.cursor_pos_in_agent_workpane_inner(inner),
             WorkspaceFocus::Clients | WorkspaceFocus::Notes | WorkspaceFocus::PatientFiles => None,
         }
     }
@@ -7889,6 +8382,7 @@ impl WorkspaceDashboard {
         self.agent_result.clear();
         self.agent_request.start();
         self.focus = WorkspaceFocus::Agent;
+        self.agent_rail_tab = AgentRailTab::Pending;
         self.set_workflow_section(MedicalWorkflowSection::AgentRequest);
         self.workflow_scroll = 0;
         self.status =
@@ -8744,6 +9238,16 @@ impl WorkspaceDashboard {
             return WorkspaceDashboardAction::Consumed;
         }
         match key_event.code {
+            KeyCode::Left => {
+                self.agent_rail_tab = self.agent_rail_tab.previous();
+                self.agent_scroll = 0;
+                self.status = format!("Agent Work: {}.", self.agent_rail_tab.label());
+            }
+            KeyCode::Right => {
+                self.agent_rail_tab = self.agent_rail_tab.next();
+                self.agent_scroll = 0;
+                self.status = format!("Agent Work: {}.", self.agent_rail_tab.label());
+            }
             KeyCode::Up | KeyCode::PageUp => {
                 self.scroll_agent_workpane(-1, 4);
             }
@@ -8752,19 +9256,19 @@ impl WorkspaceDashboard {
             }
             KeyCode::Home => {
                 self.agent_scroll = 0;
-                self.status = "Agent Workpane top.".to_string();
+                self.status = "Agent Work top.".to_string();
             }
             KeyCode::Char('r') => {
-                self.set_workflow_section(MedicalWorkflowSection::AgentRequest);
-                self.agent_scroll = 0;
-                self.status = "Focused agent instructions.".to_string();
+                self.start_agent_request();
             }
             KeyCode::Char('p') => {
+                self.agent_rail_tab = AgentRailTab::Pending;
                 self.set_workflow_section(MedicalWorkflowSection::ContextPacket);
                 self.agent_scroll = 0;
                 self.status = "Focused Medical Agent Plan review.".to_string();
             }
             KeyCode::Char('i') => {
+                self.agent_rail_tab = AgentRailTab::Pending;
                 self.set_workflow_section(MedicalWorkflowSection::AgentInbox);
                 self.agent_scroll = 0;
                 self.status = "Focused returned agent work.".to_string();
@@ -8922,6 +9426,31 @@ impl WorkspaceDashboard {
                             .to_string();
                 }
                 _ => {}
+            }
+            return WorkspaceDashboardAction::Consumed;
+        }
+        if self.workflow_section == MedicalWorkflowSection::Proposals
+            && !self.draft_document.is_active()
+        {
+            match key_event.code {
+                KeyCode::Up => self.scroll_center_work_area(/*delta*/ -1, /*amount*/ 1),
+                KeyCode::Down => self.scroll_center_work_area(/*delta*/ 1, /*amount*/ 1),
+                KeyCode::PageUp => {
+                    self.scroll_center_work_area(/*delta*/ -1, /*amount*/ 8)
+                }
+                KeyCode::PageDown => {
+                    self.scroll_center_work_area(/*delta*/ 1, /*amount*/ 8)
+                }
+                KeyCode::Home => {
+                    self.workflow_scroll = 0;
+                    self.status = "Proposal comparison top.".to_string();
+                }
+                KeyCode::Char('n') => self.select_next_proposal(),
+                _ => {
+                    self.status =
+                        "Current vs Proposed is read-only. Use :proposal accept, decline, or next."
+                            .to_string();
+                }
             }
             return WorkspaceDashboardAction::Consumed;
         }
@@ -9163,6 +9692,9 @@ impl WorkspaceDashboard {
                 WorkspaceInputMode::WorkflowEditor
             }
             WorkspaceFocus::Workflow => WorkspaceInputMode::CenterReadOnly,
+            WorkspaceFocus::Agent if self.agent_rail_tab != AgentRailTab::Pending => {
+                WorkspaceInputMode::AgentRail
+            }
             WorkspaceFocus::Agent if self.agent_result.is_active() => {
                 WorkspaceInputMode::ReturnedWorkDraft
             }
@@ -9209,6 +9741,12 @@ impl WorkspaceDashboard {
             }
             WorkspaceFocus::NoteTitle => "Type note title".to_string(),
             WorkspaceFocus::NoteBody => "Type note body".to_string(),
+            WorkspaceFocus::Agent if self.agent_rail_tab == AgentRailTab::History => {
+                "Review immutable handoff/result history".to_string()
+            }
+            WorkspaceFocus::Agent if self.agent_rail_tab == AgentRailTab::Audit => {
+                "Review agent provenance events".to_string()
+            }
             WorkspaceFocus::Agent => match self.workflow_section {
                 MedicalWorkflowSection::AgentRequest => "type local instructions".to_string(),
                 MedicalWorkflowSection::ContextPacket => "Ctrl-G sends packet".to_string(),
@@ -9863,7 +10401,7 @@ impl WorkspaceDashboard {
                     lines.push(Line::from(format!(
                         "{marker}{}  {}  {} [{}]",
                         compact_preview(&note.kind, 16),
-                        epoch_millis_date_label(note.created_at),
+                        epoch_seconds_date_label(note.created_at),
                         compact_preview(&note.title, 28),
                         note_status_readable_label(&note.status),
                     )));
@@ -10304,7 +10842,7 @@ impl WorkspaceDashboard {
 
     fn render_agent_workpane(&self, area: Rect, buf: &mut Buffer) {
         let active = self.focus == WorkspaceFocus::Agent;
-        let block = pane_block("Agent Workpane", active);
+        let block = pane_block("Agent Work", active);
         let inner = block.inner(area);
         block.render(area, buf);
         if inner.width == 0 || inner.height == 0 {
@@ -10313,10 +10851,8 @@ impl WorkspaceDashboard {
         let compact_summary = self.profile == WorkspaceProfile::Medical && inner.height <= 1;
         let lines = if compact_summary {
             vec![Line::from(self.workflow_single_line_chart_context())]
-        } else if active {
-            self.agent_workpane_active_lines()
         } else {
-            self.agent_workpane_summary_lines()
+            self.agent_workpane_active_lines()
         };
         let max_scroll = lines.len().saturating_sub(inner.height as usize) as u16;
         let scroll = if active && !compact_summary {
@@ -10331,13 +10867,92 @@ impl WorkspaceDashboard {
     }
 
     fn agent_workpane_active_lines(&self) -> Vec<Line<'static>> {
-        let mut lines = vec![Line::from(self.workflow_single_line_chart_context())];
-        lines.extend(match self.workflow_section {
-            MedicalWorkflowSection::AgentRequest => self.agent_workpane_request_lines(),
-            MedicalWorkflowSection::ContextPacket => self.agent_workpane_handoff_lines(),
-            MedicalWorkflowSection::AgentInbox => self.agent_workpane_review_lines(),
-            _ => self.agent_workpane_summary_lines(),
+        let mut lines = vec![
+            Line::from(self.workflow_single_line_chart_context()),
+            self.agent_workpane_tabs_line(),
+            Line::from(""),
+        ];
+        lines.extend(match self.agent_rail_tab {
+            AgentRailTab::Pending => match self.workflow_section {
+                MedicalWorkflowSection::AgentRequest => self.agent_workpane_request_lines(),
+                MedicalWorkflowSection::ContextPacket => self.agent_workpane_handoff_lines(),
+                MedicalWorkflowSection::AgentInbox => self.agent_workpane_review_lines(),
+                _ => self.agent_workpane_summary_lines(),
+            },
+            AgentRailTab::History => self.agent_workpane_history_lines(),
+            AgentRailTab::Audit => self.agent_workpane_audit_lines(),
         });
+        lines
+    }
+
+    fn agent_workpane_tabs_line(&self) -> Line<'static> {
+        let tab = |tab: AgentRailTab| {
+            if tab == self.agent_rail_tab {
+                Span::styled(
+                    format!("[{}]", tab.label()),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                )
+            } else {
+                Span::styled(tab.label(), Style::default().fg(Color::DarkGray))
+            }
+        };
+        Line::from(vec![
+            tab(AgentRailTab::Pending),
+            Span::styled("  ", Style::default().fg(Color::DarkGray)),
+            tab(AgentRailTab::History),
+            Span::styled("  ", Style::default().fg(Color::DarkGray)),
+            tab(AgentRailTab::Audit),
+            Span::styled("  ←/→", Style::default().fg(Color::DarkGray)),
+        ])
+    }
+
+    fn agent_workpane_history_lines(&self) -> Vec<Line<'static>> {
+        let mut lines = vec![workflow_header_line("Agent History", WorkflowTone::Review)];
+        lines.extend(self.agent_workpane_note_history_lines(/*limit*/ 8));
+        if !self.agent_results.is_empty() {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "Returned Work",
+                Style::default().add_modifier(Modifier::BOLD),
+            )));
+            for result in self.agent_results.iter().take(8) {
+                lines.push(Line::from(format!(
+                    "  {} [{}] {}",
+                    compact_preview(&result.id, 12),
+                    agent_result_status_label(&result.status),
+                    compact_preview(&result.summary, 46)
+                )));
+            }
+        }
+        lines
+    }
+
+    fn agent_workpane_audit_lines(&self) -> Vec<Line<'static>> {
+        let mut lines = vec![
+            workflow_header_line("Agent Audit", WorkflowTone::Review),
+            Line::from("  Read-only provenance for the active chart."),
+        ];
+        if self.audit_events.is_empty() {
+            lines.push(Line::from("  No audit events for the active note yet."));
+        } else {
+            for event in self.audit_events.iter().take(12) {
+                let actor = nonempty_or(&event.actor, &event.actor_kind);
+                lines.push(Line::from(format!(
+                    "  {} {} · {}",
+                    epoch_seconds_date_label(event.created_at),
+                    compact_preview(&actor, 14),
+                    compact_preview(&event.action, 22)
+                )));
+                lines.push(Line::from(format!(
+                    "    {}:{} · via {}",
+                    compact_preview(&event.entity_type, 14),
+                    compact_preview(&event.entity_id, 14),
+                    compact_preview(&event.source, 18)
+                )));
+            }
+        }
         lines
     }
 
@@ -10446,14 +11061,26 @@ impl WorkspaceDashboard {
             let status = result
                 .map(|result| agent_result_status_label(&result.status).to_string())
                 .unwrap_or_else(|| "awaiting returned work".to_string());
+            let lifecycle_at = match packet.status.as_str() {
+                "submitted" => packet.submitted_at.unwrap_or(packet.sent_at),
+                "canceled" => packet.canceled_at.unwrap_or(packet.sent_at),
+                _ => packet.sent_at,
+            };
+            lines.push(Line::from(format!(
+                "  context packet {} by {} on {}; plan {}",
+                nonempty_or(&packet.status, "unknown"),
+                compact_preview(
+                    &nonempty_or(&packet.clinician_actor, "unknown clinician"),
+                    18
+                ),
+                epoch_seconds_date_label(lifecycle_at),
+                compact_preview(&packet.id, 10)
+            )));
             lines.push(Line::from(format!(
                 "  request: {}",
                 compact_preview(&packet.human_request, 42)
             )));
-            lines.push(Line::from(format!(
-                "  result: {status}; plan {}",
-                compact_preview(&packet.id, 10)
-            )));
+            lines.push(Line::from(format!("  result: {status}")));
         }
         lines
     }
@@ -10610,7 +11237,7 @@ impl WorkspaceDashboard {
             MedicalWorkflowSection::Documents => "Patient File Detail",
             MedicalWorkflowSection::AgentRequest
             | MedicalWorkflowSection::ContextPacket
-            | MedicalWorkflowSection::AgentInbox => "Agent Workpane",
+            | MedicalWorkflowSection::AgentInbox => "Agent Work",
             MedicalWorkflowSection::PracticeLibrary => "Practice Library",
             MedicalWorkflowSection::PracticeIntelligence => "Practice Intelligence",
             MedicalWorkflowSection::Audit => "Audit Trail",
@@ -13594,6 +14221,9 @@ struct WorkspaceAreas {
 #[derive(Debug, Clone, Copy)]
 struct MedicalLargeAreas {
     header: Rect,
+    explorer_label: Rect,
+    chart_label: Rect,
+    agent_label: Rect,
     clients: Rect,
     notes: Rect,
     patient_files: Rect,
@@ -13602,6 +14232,30 @@ struct MedicalLargeAreas {
     note_body: Rect,
     active_work: Rect,
     agent: Rect,
+    status: Rect,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct MedicalMediumAreas {
+    header: Rect,
+    explorer_label: Rect,
+    main_label: Rect,
+    clients: Rect,
+    notes: Rect,
+    patient_files: Rect,
+    demographics: Rect,
+    note_title: Rect,
+    note_body: Rect,
+    active_work: Rect,
+    main: Rect,
+    status: Rect,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct MedicalCompactAreas {
+    header: Rect,
+    breadcrumb: Rect,
+    body: Rect,
     status: Rect,
 }
 
@@ -13624,6 +14278,18 @@ impl MedicalLargeAreas {
                 Constraint::Length(agent_width),
             ])
             .split(vertical[1]);
+        let explorer = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Min(3)])
+            .split(columns[0]);
+        let chart = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Min(3)])
+            .split(columns[1]);
+        let agent = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Min(3)])
+            .split(columns[2]);
         let left = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -13631,7 +14297,7 @@ impl MedicalLargeAreas {
                 Constraint::Percentage(26),
                 Constraint::Percentage(40),
             ])
-            .split(columns[0]);
+            .split(explorer[1]);
         let center = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -13639,18 +14305,97 @@ impl MedicalLargeAreas {
                 Constraint::Length(3),
                 Constraint::Min(3),
             ])
-            .split(columns[1]);
+            .split(chart[1]);
         Self {
             header: vertical[0],
+            explorer_label: explorer[0],
+            chart_label: chart[0],
+            agent_label: agent[0],
             clients: left[0],
             notes: left[1],
             patient_files: left[2],
             demographics: center[0],
             note_title: center[1],
             note_body: center[2],
-            active_work: columns[1],
-            agent: columns[2],
+            active_work: chart[1],
+            agent: agent[1],
             status: vertical[2],
+        }
+    }
+}
+
+impl MedicalMediumAreas {
+    fn new(area: Rect) -> Self {
+        let vertical = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(2),
+                Constraint::Min(3),
+                Constraint::Length(1),
+            ])
+            .split(area);
+        let columns = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Length(30), Constraint::Min(40)])
+            .split(vertical[1]);
+        let explorer = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Min(3)])
+            .split(columns[0]);
+        let main = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Min(3)])
+            .split(columns[1]);
+        let left = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Percentage(36),
+                Constraint::Percentage(28),
+                Constraint::Percentage(36),
+            ])
+            .split(explorer[1]);
+        let chart = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(9),
+                Constraint::Length(3),
+                Constraint::Percentage(52),
+                Constraint::Min(7),
+            ])
+            .split(main[1]);
+        Self {
+            header: vertical[0],
+            explorer_label: explorer[0],
+            main_label: main[0],
+            clients: left[0],
+            notes: left[1],
+            patient_files: left[2],
+            demographics: chart[0],
+            note_title: chart[1],
+            note_body: chart[2],
+            active_work: chart[3],
+            main: main[1],
+            status: vertical[2],
+        }
+    }
+}
+
+impl MedicalCompactAreas {
+    fn new(area: Rect) -> Self {
+        let vertical = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Min(3),
+                Constraint::Length(1),
+            ])
+            .split(area);
+        Self {
+            header: vertical[0],
+            breadcrumb: vertical[1],
+            body: vertical[2],
+            status: vertical[3],
         }
     }
 }
@@ -13881,6 +14626,32 @@ fn selected_line(text: &str, selected: bool) -> Line<'static> {
         Span::raw(marker.to_string()),
         Span::styled(text.to_string(), style),
     ])
+}
+
+fn proposal_comparison_body_lines(body: &str, marker: char) -> Vec<Line<'static>> {
+    let marker_style = if marker == '+' {
+        Style::default().fg(Color::Green)
+    } else {
+        Style::default().fg(Color::Red)
+    };
+    let body_lines = if body.is_empty() {
+        vec![""]
+    } else {
+        body.lines().collect::<Vec<_>>()
+    };
+    body_lines
+        .into_iter()
+        .enumerate()
+        .map(|(index, text)| {
+            Line::from(vec![
+                Span::styled(
+                    format!("{marker}{:>3} ", index + 1),
+                    marker_style.add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(text.to_string()),
+            ])
+        })
+        .collect()
 }
 
 fn text_field_display_lines(text: &str) -> Vec<&str> {
@@ -16318,7 +17089,7 @@ mod tests {
         assert!(rendered.contains("Patient ID / MRN"));
         assert!(rendered.contains("Chart start"));
         assert!(rendered.contains("Chart end"));
-        assert!(rendered.contains("Agent Workpane"));
+        assert!(rendered.contains("Agent Work"));
         assert!(rendered.contains("Mode:"));
         assert!(rendered.contains("No upload/OCR/payer action/auto-apply"));
         assert!(rendered.contains("Uploaded Documents"));
@@ -17007,7 +17778,7 @@ mod tests {
         let chart_rendered = render_dashboard_lines_at(&dashboard, 120, 32);
 
         assert!(
-            !chart_rendered.contains("Agent Workpane"),
+            !chart_rendered.contains("Agent Work"),
             "120-column chart render should use the two-zone layout and hide the right agent pane:\n{chart_rendered}"
         );
         assert!(chart_rendered.contains("Uploaded Documents"));
@@ -17187,7 +17958,7 @@ mod tests {
         assert_eq!(dashboard.focus, WorkspaceFocus::Workflow);
         assert!(
             dashboard.status.contains("Focused Today's Visit"),
-            "Note Body should tab to the center chart work area before Agent Workpane: {}",
+            "Note Body should tab to the center chart work area before Agent Work: {}",
             dashboard.status
         );
         assert_eq!(
@@ -17195,9 +17966,11 @@ mod tests {
             WorkspaceDashboardAction::Consumed
         );
         assert_eq!(dashboard.focus, WorkspaceFocus::Agent);
+        assert_eq!(dashboard.workflow_section, MedicalWorkflowSection::Visit);
+        assert!(!dashboard.agent_request.is_active());
         assert_eq!(
-            dashboard.workflow_section,
-            MedicalWorkflowSection::AgentRequest
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Char('r'))),
+            WorkspaceDashboardAction::Consumed
         );
         assert!(dashboard.agent_request.is_active());
         for c in "Use eval template".chars() {
@@ -17317,10 +18090,8 @@ mod tests {
         assert_eq!(dashboard.focus, WorkspaceFocus::Workflow);
         press_consumed(&mut dashboard, KeyCode::Tab);
         assert_eq!(dashboard.focus, WorkspaceFocus::Agent);
-        assert_eq!(
-            dashboard.workflow_section,
-            MedicalWorkflowSection::AgentRequest
-        );
+        assert_eq!(dashboard.workflow_section, MedicalWorkflowSection::Visit);
+        press_consumed(&mut dashboard, KeyCode::Char('r'));
         type_text(&mut dashboard, "Use eval template");
         assert_eq!(dashboard.agent_request.body, "Use eval template");
 
@@ -17432,6 +18203,7 @@ mod tests {
             dashboard.draft_note.body = "Existing note body.".to_string();
             if focus == WorkspaceFocus::Agent {
                 dashboard.focus_medical_agent_workpane();
+                press_consumed(&mut dashboard, KeyCode::Char('r'));
                 type_text(&mut dashboard, "Use eval template");
             }
             let before_agent = dashboard.agent_request.body.clone();
@@ -17475,10 +18247,9 @@ mod tests {
         assert_eq!(dashboard.focus, WorkspaceFocus::Workflow);
         press_consumed(&mut dashboard, KeyCode::Tab);
         assert_eq!(dashboard.focus, WorkspaceFocus::Agent);
-        assert_eq!(
-            dashboard.workflow_section,
-            MedicalWorkflowSection::AgentRequest
-        );
+        assert_eq!(dashboard.workflow_section, MedicalWorkflowSection::Visit);
+        assert!(!dashboard.agent_request.is_active());
+        press_consumed(&mut dashboard, KeyCode::Char('r'));
         assert!(dashboard.agent_request.is_active());
 
         type_text(
@@ -17556,6 +18327,7 @@ mod tests {
         assert_eq!(dashboard.focus, WorkspaceFocus::Workflow);
         press_consumed(&mut dashboard, KeyCode::Tab);
         assert_eq!(dashboard.focus, WorkspaceFocus::Agent);
+        press_consumed(&mut dashboard, KeyCode::Char('r'));
         type_text(&mut dashboard, "Use concise plan");
         let agent_body = dashboard.agent_request.body.clone();
 
@@ -17626,7 +18398,7 @@ mod tests {
         assert_eq!(
             center.agent_scroll_for_tests(),
             0,
-            "center scroll must not mutate Agent Workpane scroll"
+            "center scroll must not mutate Agent Work scroll"
         );
 
         let mut agent = center.clone();
@@ -17636,7 +18408,7 @@ mod tests {
         assert_eq!(
             agent.workflow_scroll_for_tests(),
             center_scroll_before,
-            "Agent Workpane scroll must not mutate center scroll"
+            "Agent Work scroll must not mutate center scroll"
         );
         assert!(agent.agent_scroll_for_tests() > 0);
 
@@ -17653,7 +18425,7 @@ mod tests {
         assert_eq!(
             mouse_agent.workflow_scroll_for_tests(),
             center_scroll_before,
-            "mouse scroll in Agent Workpane must not mutate center scroll"
+            "mouse scroll in Agent Work must not mutate center scroll"
         );
 
         let mut note_body = medical_recursive_base_dashboard();
@@ -17698,7 +18470,7 @@ mod tests {
         assert_eq!(
             dashboard.agent_scroll_for_tests(),
             agent_scroll_before,
-            "trackpad scroll over Uploaded Documents must not scroll the focused Agent Workpane"
+            "trackpad scroll over Uploaded Documents must not scroll the focused Agent Work"
         );
         assert_ne!(
             dashboard.patient_files_tree_index, file_index_before,
@@ -17735,7 +18507,7 @@ mod tests {
         }
 
         let medium_viewport = Rect::new(0, 0, 110, 42);
-        let medium_areas = WorkspaceAreas::new(medium_viewport);
+        let medium_areas = MedicalMediumAreas::new(medium_viewport);
         let mut medium = medical_recursive_files_dashboard();
         medium.documents.push(patient_file(
             "document-second-patient-file",
@@ -17757,7 +18529,7 @@ mod tests {
         assert_eq!(
             medium.agent_scroll_for_tests(),
             medium_agent_scroll_before,
-            "medium pointer scroll over Uploaded Documents must not scroll Agent Workpane"
+            "medium pointer scroll over Uploaded Documents must not scroll Agent Work"
         );
         assert_ne!(
             medium.patient_files_tree_index, medium_file_index_before,
@@ -17873,6 +18645,7 @@ mod tests {
         }
 
         dashboard.focus_medical_agent_workpane();
+        press_consumed(&mut dashboard, KeyCode::Char('r'));
         type_text(&mut dashboard, "Use eval template");
         let agent_status = status_line_text(&dashboard);
         assert!(agent_status.contains("Focus: Agent"));
@@ -17906,6 +18679,7 @@ mod tests {
     fn medical_agent_workpane_escape_is_predictable_and_preserves_local_draft() {
         let mut dashboard = medical_recursive_base_dashboard();
         dashboard.focus_medical_agent_workpane();
+        press_consumed(&mut dashboard, KeyCode::Char('r'));
         type_text(&mut dashboard, "Use eval template");
 
         assert_eq!(
@@ -18083,7 +18857,8 @@ mod tests {
             .command_palette_actions()
             .first()
             .map(|action| action.command);
-        assert_eq!(agent_first, Some("agent request"));
+        assert_eq!(agent_first, Some("agent result inspect"));
+        assert!(!dashboard.agent_request.is_active());
     }
 
     #[test]
@@ -18169,7 +18944,7 @@ mod tests {
         assert_eq!(
             dashboard.agent_scroll_for_tests(),
             agent_scroll_before,
-            "palette scroll must not move Agent Workpane"
+            "palette scroll must not move Agent Work"
         );
         assert_eq!(
             dashboard.patient_files_tree_index, file_index_before,
@@ -18289,7 +19064,7 @@ mod tests {
             (
                 ":agent preview",
                 WorkspaceFocus::Agent,
-                "Focused Agent Workpane.",
+                "Focused Agent Work.",
             ),
             (
                 ":agent inbox",
@@ -19212,16 +19987,14 @@ mod tests {
             WorkspaceDashboardAction::Consumed
         );
         assert_eq!(dashboard.focus, WorkspaceFocus::Agent);
+        assert_eq!(dashboard.workflow_section, MedicalWorkflowSection::Visit);
+        assert!(!dashboard.agent_request.is_active());
+        assert!(dashboard.status.contains("Focused Agent Work"));
         assert_eq!(
-            dashboard.workflow_section,
-            MedicalWorkflowSection::AgentRequest
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Char('r'))),
+            WorkspaceDashboardAction::Consumed
         );
         assert!(dashboard.agent_request.is_active());
-        assert!(
-            dashboard
-                .status
-                .contains("Agent input ready. Type local instructions/context")
-        );
         for c in "Use eval template".chars() {
             dashboard.handle_key_event(KeyEvent::from(KeyCode::Char(c)));
         }
@@ -19364,7 +20137,7 @@ mod tests {
         let mut dashboard = medical_recursive_files_dashboard();
         dashboard.focus = WorkspaceFocus::Clients;
         let mut seen = Vec::new();
-        for _ in 0..7 {
+        for _ in 0..8 {
             seen.push(dashboard.current_medical_pane_slot());
             assert_eq!(
                 dashboard
@@ -19377,13 +20150,14 @@ mod tests {
             vec![
                 MedicalPaneSlot::PatientDirectory,
                 MedicalPaneSlot::ChartTree,
+                MedicalPaneSlot::PatientFileTree,
                 MedicalPaneSlot::CenterWorkArea,
                 MedicalPaneSlot::AgentWorkpane,
                 MedicalPaneSlot::PatientDemographics,
                 MedicalPaneSlot::NoteTitle,
                 MedicalPaneSlot::NoteBody,
             ],
-            "compact focus should move from the top rows downward"
+            "compact focus should preserve every one-zone destination"
         );
 
         let medium = Rect::new(0, 0, 110, 42);
@@ -19512,6 +20286,7 @@ mod tests {
 
         let selected_before = dashboard.highlighted_patient_file_document_id();
         dashboard.focus_medical_agent_workpane();
+        press_consumed(&mut dashboard, KeyCode::Char('r'));
         for c in "template".chars() {
             dashboard.handle_key_event(KeyEvent::from(KeyCode::Char(c)));
         }
@@ -19859,6 +20634,7 @@ mod tests {
 
         let mut agent = medical_recursive_base_dashboard();
         agent.focus_medical_agent_workpane();
+        press_consumed(&mut agent, KeyCode::Char('r'));
         type_text(&mut agent, "Use eval template.");
         assert_eq!(agent.agent_request.body, "Use eval template.");
         press_consumed(&mut agent, KeyCode::Tab);
@@ -20260,6 +21036,7 @@ mod tests {
         document.thumbnail_status = "ready".to_string();
         document.thumbnail_path =
             "/tmp/codex-workspace-files/thumbnails/doc-id-card.png".to_string();
+        let original_local_path = document.local_path.clone();
         let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
         dashboard.draft_client.id = Some("client-1".to_string());
         dashboard.documents = vec![document];
@@ -20267,14 +21044,22 @@ mod tests {
             .selected_artifact_ids
             .insert("doc-id-card".to_string());
 
-        let prompt = dashboard.agent_context_prompt();
+        let assembly = dashboard.medical_context_assembly();
+        let prompt = assembly.prompt;
         assert!(prompt.contains("Scanned patient ID"));
-        assert!(prompt.contains("/tmp/scanned-patient-id.jpg"));
+        assert!(prompt.contains("scanned-patient-id.jpg"));
+        assert!(!prompt.contains(&original_local_path));
         assert!(!prompt.contains("doc-id-card.png"));
         assert!(!prompt.contains("codex-workspace-files/thumbnails"));
 
         let params = dashboard.context_packet_create_params().unwrap();
         assert!(params.context_envelope_json.contains("Scanned patient ID"));
+        assert!(
+            params
+                .context_envelope_json
+                .contains("scanned-patient-id.jpg")
+        );
+        assert!(!params.context_envelope_json.contains(&original_local_path));
         assert!(!params.context_envelope_json.contains("doc-id-card.png"));
         assert!(
             !params
@@ -20490,7 +21275,7 @@ mod tests {
         dashboard.set_record_dates_for_tests("2026-01-01", "2026-06-09");
 
         for (width, height, expected) in [
-            (160, 40, "Agent Workpane"),
+            (160, 40, "Agent Work"),
             (120, 32, "Uploaded Documents"),
             (110, 42, "Uploaded Documents"),
             (105, 55, "Today's Visit"),
@@ -20513,7 +21298,7 @@ mod tests {
             );
             if width == 105 || width == 120 {
                 assert!(
-                    !rendered.contains("Agent Workpane"),
+                    !rendered.contains("Agent Work"),
                     "{width}-column fallback should hide the right agent pane:\n{rendered}"
                 );
             }
@@ -20555,7 +21340,7 @@ mod tests {
         assert!(narrow_rendered.contains("Next:"));
 
         let rendered = render_dashboard_lines_at(&dashboard, 160, 40);
-        assert!(rendered.contains("Agent Workpane"));
+        assert!(rendered.contains("Agent Work"));
         assert!(rendered.contains("Mode:"));
         assert!(rendered.contains("No upload/OCR/payer action/auto-apply"));
         assert!(rendered.contains("Uploaded Documents"));
@@ -20673,12 +21458,7 @@ mod tests {
         for (command, scope, visible_scope, expected_action) in [
             (":scope patient", "Today's Visit", "Today's Visit", "Next:"),
             (":scope files", "Uploaded Documents", "Documents", "Next:"),
-            (
-                ":scope packet",
-                "Agent Workpane",
-                "Agent Workpane",
-                "Blocked:",
-            ),
+            (":scope packet", "Agent Work", "Agent Work", "Blocked:"),
             (":scope review", "Agent Review", "Returned", "Blocked:"),
             (
                 ":scope practice",
@@ -20718,7 +21498,7 @@ mod tests {
                     || matches!(
                         scope,
                         "Uploaded Documents"
-                            | "Agent Workpane"
+                            | "Agent Work"
                             | "Agent Review"
                             | "Practice Intelligence"
                             | "Audit Trail"
@@ -20771,7 +21551,7 @@ mod tests {
         );
         let unsaved_render = render_dashboard_lines_at(&unsaved, 160, 45);
         assert!(unsaved_render.contains("Patient Demographics"));
-        assert!(unsaved_render.contains("Agent Workpane"));
+        assert!(unsaved_render.contains("Agent Work"));
         assert!(unsaved_render.contains("HPI:"));
         assert!(unsaved_render.contains("Assessment:"));
 
@@ -20782,7 +21562,7 @@ mod tests {
                 .contains("Open encounter")
         );
         let no_encounter_render = render_dashboard_lines_at(&no_encounter, 120, 32);
-        assert!(!no_encounter_render.contains("Agent Workpane"));
+        assert!(!no_encounter_render.contains("Agent Work"));
         assert!(no_encounter_render.contains("Uploaded Documents"));
         assert_eq!(
             no_encounter.execute_workspace_command(":first eval"),
@@ -20803,7 +21583,7 @@ mod tests {
                 .contains("Write eval note")
         );
         let empty_note_render = render_dashboard_lines_at(&empty_note, 160, 45);
-        assert!(empty_note_render.contains("Agent Workpane"));
+        assert!(empty_note_render.contains("Agent Work"));
         assert!(empty_note_render.contains("HPI:"));
         assert!(empty_note_render.contains("Plan:"));
 
@@ -20818,7 +21598,7 @@ mod tests {
             .selected_artifact_ids
             .insert("document-1".to_string());
         let selected_file_render = render_dashboard_lines_at(&selected_file, 160, 45);
-        assert!(selected_file_render.contains("Agent Workpane"));
+        assert!(selected_file_render.contains("Agent Work"));
         assert!(selected_file_render.contains("context: 1 files"));
         assert!(selected_file_render.contains("Uploaded Documents"));
 
@@ -20826,7 +21606,7 @@ mod tests {
         packet_ready.agent_request.body =
             "Review this first eval and selected referral metadata.".to_string();
         let packet_ready_render = render_dashboard_lines_at(&packet_ready, 160, 45);
-        assert!(packet_ready_render.contains("Agent Workpane"));
+        assert!(packet_ready_render.contains("Agent Work"));
         assert!(packet_ready_render.contains("draft: Review this first eval"));
 
         let mut packet_sent = selected_file;
@@ -20838,7 +21618,7 @@ mod tests {
             "1 selected artifact",
         ));
         let packet_sent_render = render_dashboard_lines_at(&packet_sent, 160, 45);
-        assert!(packet_sent_render.contains("Agent Workpane"));
+        assert!(packet_sent_render.contains("Agent Work"));
         assert!(packet_sent_render.contains("Mode:"));
         assert!(!packet_sent_render.contains("Communication History"));
     }
@@ -20884,7 +21664,7 @@ mod tests {
             WorkspaceDashboardAction::Consumed
         );
         let packet_ready = render_dashboard_lines_at(&dashboard, 160, 45);
-        assert!(packet_ready.contains("Agent Workpane"));
+        assert!(packet_ready.contains("Agent Work"));
         assert!(packet_ready.contains("Review Packet"));
         assert!(packet_ready.contains("Next: Ctrl-G opens agent"));
         assert!(packet_ready.contains("Agent sees"));
@@ -21073,7 +21853,7 @@ mod tests {
         empty.set_context_for_tests("Jordan Patient", "Visit note", "Draft plan.");
         empty.execute_workspace_command(":agent inbox");
         let empty_render = render_dashboard_lines_at(&empty, 160, 45);
-        assert!(empty_render.contains("Agent Workpane"));
+        assert!(empty_render.contains("Agent Work"));
         assert!(empty_render.contains("Agent Review"));
         assert!(empty_render.contains("no Medical Agent Plan history"));
         assert!(empty_render.contains("Submit Medical Agent Plan first"));
@@ -21635,6 +22415,37 @@ mod tests {
     }
 
     #[test]
+    fn medical_proposal_comparison_render_snapshots() {
+        let dashboard = WorkspaceDashboard {
+            focus: WorkspaceFocus::Workflow,
+            workflow_section: MedicalWorkflowSection::Proposals,
+            draft_note: NoteDraft {
+                id: Some("note-1".to_string()),
+                title: "Visit note".to_string(),
+                body: "Assessment: improving gait tolerance.\nPlan: continue current program."
+                    .to_string(),
+                current_revision: 3,
+                ..NoteDraft::default()
+            },
+            proposals: vec![test_proposal(
+                "proposal-1",
+                "note-1",
+                3,
+                "Assessment: gait tolerance improved with cueing.\nPlan: progress walking intervals next visit.",
+            )],
+            status: "Reviewing returned-work proposal.".to_string(),
+            ..medical_recursive_base_dashboard()
+        };
+
+        for (width, height) in [(160, 40), (120, 32), (80, 20)] {
+            insta::assert_snapshot!(
+                format!("medical_workspace_proposal_comparison_{width}x{height}"),
+                render_dashboard_lines_at(&dashboard, width, height)
+            );
+        }
+    }
+
+    #[test]
     fn medical_command_palette_render_snapshots() {
         let mut dashboard = WorkspaceDashboard {
             focus: WorkspaceFocus::Clients,
@@ -21758,7 +22569,10 @@ mod tests {
 
         assert!(prompt.contains("Chart start: 2026-01-01"));
         assert!(prompt.contains("Chart end: 2026-06-09"));
-        assert!(prompt.contains("unsaved draft: referral / Outside referral / /tmp/referral.pdf"));
+        assert!(
+            prompt.contains("unsaved draft: referral / Outside referral / file_name: referral.pdf")
+        );
+        assert!(!prompt.contains("/tmp/referral.pdf"));
         assert!(prompt.contains("needs review"));
     }
 
@@ -21859,6 +22673,9 @@ mod tests {
         let rendered = render_dashboard_lines_at(&dashboard, 160, 45);
         assert!(rendered.contains("Note Proposals"));
         assert!(rendered.contains("1 pending proposals"));
+        assert!(rendered.contains("Current chart · r3"));
+        assert!(rendered.contains("Proposed edit · from r3"));
+        assert!(rendered.contains("READY"));
         assert!(rendered.contains("tighten wording"));
         assert!(rendered.contains("Proposed body"));
 
@@ -21876,6 +22693,179 @@ mod tests {
                 accept: false,
             }
         );
+    }
+
+    #[test]
+    fn medical_agent_focus_is_navigation_only_with_pending_history_and_audit_tabs() {
+        let mut dashboard = medical_recursive_base_dashboard();
+        dashboard.workflow_section = MedicalWorkflowSection::Visit;
+        dashboard.draft_note.body = "Clinician-authored chart text.".to_string();
+        let mut packet = test_context_packet(
+            "packet-1",
+            "client-1",
+            Some("note-1"),
+            "Draft a concise assessment.",
+            "0 selected artifacts",
+        );
+        packet.clinician_actor = "Taylor PT".to_string();
+        packet.status = "submitted".to_string();
+        packet.submitted_at = Some(1_767_225_600);
+        dashboard.push_context_packet_for_tests(packet);
+        dashboard.audit_events = vec![WorkspaceAuditEvent {
+            id: "audit-1".to_string(),
+            entity_type: "note_proposal".to_string(),
+            entity_id: "proposal-1".to_string(),
+            action: "proposal accepted".to_string(),
+            actor: "Taylor PT".to_string(),
+            actor_kind: "clinician".to_string(),
+            source: "workspace/note/proposal/resolve".to_string(),
+            client_id: Some("client-1".to_string()),
+            encounter_id: Some("encounter-1".to_string()),
+            note_id: Some("note-1".to_string()),
+            document_id: None,
+            source_thread_id: None,
+            source_turn_id: None,
+            success: true,
+            summary: "Clinician accepted returned work.".to_string(),
+            metadata_json: None,
+            created_at: 1_767_225_600,
+        }];
+
+        dashboard.focus_medical_agent_workpane();
+
+        assert_eq!(dashboard.focus, WorkspaceFocus::Agent);
+        assert_eq!(dashboard.workflow_section, MedicalWorkflowSection::Visit);
+        assert!(!dashboard.agent_request.is_active());
+        assert_eq!(dashboard.draft_note.body, "Clinician-authored chart text.");
+        let pending = render_dashboard_lines_at(&dashboard, 160, 40);
+        assert!(pending.contains("[Pending]"));
+        assert!(pending.contains("History"));
+        assert!(pending.contains("Audit"));
+
+        press_consumed(&mut dashboard, KeyCode::Right);
+        assert_eq!(dashboard.agent_rail_tab, AgentRailTab::History);
+        assert!(!dashboard.agent_request.is_active());
+        let history = dashboard
+            .agent_workpane_history_lines()
+            .iter()
+            .map(line_plain_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(history.contains("Agent History"));
+        assert!(history.contains("context packet submitted by Taylor PT on 2026-01-01"));
+
+        press_consumed(&mut dashboard, KeyCode::Right);
+        assert_eq!(dashboard.agent_rail_tab, AgentRailTab::Audit);
+        assert!(!dashboard.agent_request.is_active());
+        let audit = dashboard
+            .agent_workpane_audit_lines()
+            .iter()
+            .map(line_plain_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(audit.contains("Agent Audit"));
+        assert!(audit.contains("2026-01-01 Taylor PT · proposal accepted"));
+        assert!(audit.contains("note_proposal:proposal-1"));
+
+        press_consumed(&mut dashboard, KeyCode::Char('r'));
+        assert_eq!(dashboard.agent_rail_tab, AgentRailTab::Pending);
+        assert!(dashboard.agent_request.is_active());
+    }
+
+    #[test]
+    fn medical_responsive_zones_keep_explorer_chart_and_agent_work_explicit() {
+        let mut dashboard = medical_recursive_base_dashboard();
+        dashboard.focus = WorkspaceFocus::Demographics;
+
+        let large = render_dashboard_lines_at(&dashboard, 160, 40);
+        assert!(large.contains("EXPLORER"));
+        assert!(large.contains("PATIENT CHART"));
+        assert!(large.contains("AGENT WORK"));
+
+        let medium_chart = render_dashboard_lines_at(&dashboard, 120, 32);
+        assert!(medium_chart.contains("EXPLORER"));
+        assert!(medium_chart.contains("PATIENT CHART"));
+        assert!(medium_chart.contains("Patient Demographics"));
+
+        dashboard.focus_medical_agent_workpane();
+        let medium_agent = render_dashboard_lines_at(&dashboard, 120, 32);
+        assert!(medium_agent.contains("EXPLORER"));
+        assert!(medium_agent.contains("AGENT WORK"));
+        assert!(!medium_agent.contains("Patient Demographics"));
+
+        dashboard.focus = WorkspaceFocus::PatientFiles;
+        let compact = render_dashboard_lines_at(&dashboard, 80, 20);
+        assert!(compact.contains("Zones: [Explorer] > Patient Chart > Agent Work"));
+        assert!(compact.contains("Focus: Documents"));
+        assert!(compact.contains("Uploaded Documents"));
+    }
+
+    #[test]
+    fn medical_cursor_geometry_tracks_the_visible_compact_and_medium_zone() {
+        let compact_viewport = Rect::new(0, 0, 80, 20);
+        let compact_areas = MedicalCompactAreas::new(compact_viewport);
+        let mut compact = medical_recursive_base_dashboard();
+        compact.focus = WorkspaceFocus::NoteTitle;
+        compact.draft_note.title = "Visit".to_string();
+        let compact_cursor = compact.cursor_pos(compact_viewport).unwrap();
+        assert!(rect_contains(
+            inner_rect(compact_areas.body),
+            compact_cursor
+        ));
+
+        let medium_viewport = Rect::new(0, 0, 120, 32);
+        let medium_areas = MedicalMediumAreas::new(medium_viewport);
+        let mut medium = medical_recursive_base_dashboard();
+        medium.start_agent_request();
+        type_text(&mut medium, "Draft assessment");
+        let medium_cursor = medium.cursor_pos(medium_viewport).unwrap();
+        assert!(rect_contains(inner_rect(medium_areas.main), medium_cursor));
+        assert!(!rect_contains(medium_areas.patient_files, medium_cursor));
+    }
+
+    #[test]
+    fn medical_proposal_comparison_labels_ready_stale_and_signed_without_mutating_chart() {
+        let ready = WorkspaceDashboard {
+            focus: WorkspaceFocus::Workflow,
+            workflow_section: MedicalWorkflowSection::Proposals,
+            draft_note: NoteDraft {
+                id: Some("note-1".to_string()),
+                title: "Draft note".to_string(),
+                body: "Current clinician text".to_string(),
+                current_revision: 3,
+                ..NoteDraft::default()
+            },
+            proposals: vec![test_proposal(
+                "proposal-1",
+                "note-1",
+                3,
+                "Proposed agent text",
+            )],
+            ..WorkspaceDashboard::new(WorkspaceProfile::Medical)
+        };
+        let ready_render = render_dashboard_lines_at(&ready, 160, 40);
+        assert!(ready_render.contains("READY"));
+        assert!(ready_render.contains("Current chart · r3"));
+        assert!(ready_render.contains("Proposed edit · from r3"));
+
+        let mut stale = ready.clone();
+        stale.proposals[0].base_revision = 2;
+        let stale_render = render_dashboard_lines_at(&stale, 160, 40);
+        assert!(stale_render.contains("STALE"));
+        assert!(stale_render.contains("current pane is live r3"));
+        assert!(stale_render.contains("prepared from r2"));
+        assert!(!stale_render.contains("Current historical base"));
+
+        let mut signed = ready.clone();
+        signed.draft_note.status = "signed".to_string();
+        let signed_render = render_dashboard_lines_at(&signed, 160, 40);
+        assert!(signed_render.contains("SIGNED · READ ONLY"));
+
+        let mut read_only = ready;
+        press_consumed(&mut read_only, KeyCode::Char('d'));
+        assert_eq!(read_only.draft_note.body, "Current clinician text");
+        assert!(!read_only.draft_document.is_active());
+        assert!(read_only.status.contains("read-only"));
     }
 
     #[test]
@@ -22055,6 +23045,16 @@ mod tests {
         let params = dashboard.context_packet_create_params().unwrap();
         assert_eq!(params.client_id, "client-1");
         assert_eq!(params.note_id.as_deref(), Some("note-1"));
+        assert_eq!(params.clinician_actor.as_deref(), Some("local clinician"));
+        assert_eq!(params.base_note_revision, Some(0));
+        assert_eq!(
+            params.expected_output_kind.as_deref(),
+            Some("note_proposal")
+        );
+        let authorized_scope = params.authorized_scope_json.as_deref().unwrap();
+        assert!(authorized_scope.contains("medical-agent-authorized-scope-v1"));
+        assert!(authorized_scope.contains("client-1"));
+        assert!(authorized_scope.contains(r#""write":[]"#));
         assert!(params.human_request.contains("Review the gait clip"));
         assert_eq!(params.selected_artifact_ids_json, "[]");
         assert_eq!(params.artifact_summary, "0 selected artifacts");
@@ -22633,9 +23633,15 @@ mod tests {
             chart_context_summary: params.chart_context_summary,
             context_envelope_sha256: context_envelope_hash(&params.context_envelope_json),
             context_envelope_json: params.context_envelope_json,
+            clinician_actor: "local clinician".to_string(),
+            base_note_revision: Some(0),
+            authorized_scope_json: "{}".to_string(),
+            expected_output_kind: "note_proposal".to_string(),
             status: "sent".to_string(),
             created_at: 1,
             sent_at: 1,
+            submitted_at: Some(1),
+            canceled_at: None,
             updated_at: 1,
         });
         assert_eq!(
@@ -22794,9 +23800,15 @@ mod tests {
             chart_context_summary: params.chart_context_summary.clone(),
             context_envelope_sha256: context_envelope_hash(&params.context_envelope_json),
             context_envelope_json: params.context_envelope_json,
+            clinician_actor: "local clinician".to_string(),
+            base_note_revision: Some(0),
+            authorized_scope_json: "{}".to_string(),
+            expected_output_kind: "note_proposal".to_string(),
             status: "sent".to_string(),
             created_at: 1,
             sent_at: 1,
+            submitted_at: Some(1),
+            canceled_at: None,
             updated_at: 1,
         });
         dashboard.clips[0].body = "Source row changed after packet send.".to_string();
@@ -23383,9 +24395,15 @@ mod tests {
                     .to_string(),
             context_envelope_json,
             context_envelope_sha256,
+            clinician_actor: "local clinician".to_string(),
+            base_note_revision: Some(0),
+            authorized_scope_json: "{}".to_string(),
+            expected_output_kind: "note_proposal".to_string(),
             status: "sent".to_string(),
             created_at: 1,
             sent_at: 1,
+            submitted_at: Some(1),
+            canceled_at: None,
             updated_at: 1,
         }
     }
@@ -23409,9 +24427,24 @@ mod tests {
             chart_context_summary: params.chart_context_summary.clone(),
             context_envelope_json: params.context_envelope_json.clone(),
             context_envelope_sha256: context_envelope_hash(&params.context_envelope_json),
+            clinician_actor: params
+                .clinician_actor
+                .clone()
+                .unwrap_or_else(|| "local clinician".to_string()),
+            base_note_revision: params.base_note_revision,
+            authorized_scope_json: params
+                .authorized_scope_json
+                .clone()
+                .unwrap_or_else(|| "{}".to_string()),
+            expected_output_kind: params
+                .expected_output_kind
+                .clone()
+                .unwrap_or_else(|| "note_proposal".to_string()),
             status: "sent".to_string(),
             created_at: 1,
             sent_at: 1,
+            submitted_at: Some(1),
+            canceled_at: None,
             updated_at: 1,
         }
     }
@@ -23493,10 +24526,16 @@ mod tests {
     ) -> WorkspaceAgentResult {
         WorkspaceAgentResult {
             id: id.to_string(),
+            run_id: None,
             packet_id: packet_id.to_string(),
             client_id: client_id.to_string(),
             note_id: note_id.map(str::to_string),
             context_envelope_sha256: context_envelope_hash("{}"),
+            base_note_revision: Some(0),
+            packet_context_sha256: context_envelope_hash("{}"),
+            result_kind: "note_proposal".to_string(),
+            structured_changes_json: "[]".to_string(),
+            rationale_summary: summary.to_string(),
             body: body.to_string(),
             summary: summary.to_string(),
             status: "review_pending".to_string(),
@@ -23520,6 +24559,7 @@ mod tests {
             status: WorkspaceNoteProposalStatus::Pending,
             source_thread_id: Some("thread-1".to_string()),
             source_turn_id: Some("turn-1".to_string()),
+            agent_result_id: Some("result-1".to_string()),
             created_at: 1,
             resolved_at: None,
         }

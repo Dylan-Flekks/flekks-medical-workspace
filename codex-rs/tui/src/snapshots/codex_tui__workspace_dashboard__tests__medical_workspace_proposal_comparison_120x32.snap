@@ -1,0 +1,36 @@
+---
+source: tui/src/workspace_dashboard.rs
+expression: "render_dashboard_lines_at(&dashboard, width, height)"
+---
+Medical Workspace
+Patient: Jordan Patient  DOB: blank  MRN: blank  Contact: Missing contact  Coverage: Missing coverage  Encounter: No
+ EXPLORER                      PATIENT CHART
+┌Patient Directory───────────┐┌Patient Chart───────────────────────────────────────────────────────────────────────────┐
+│Local search: /             ││Current vs Proposed · Note Proposals · 1 pending proposals                              │
+│0 active patients; local    ││Review state: READY · proposal base matches current r3                                  │
+│only                        ││Summary: tighten wording                                                                │
+│No saved patients yet.      ││┌Current chart · r3────────────────────────┐┌Proposed edit · from r3───────────────────┐│
+│New patient: :patient new   │││-  1 Assessment: improving gait tolerance.││+  1 Assessment: gait tolerance improved  ││
+│                            │││-  2 Plan: continue current program.      ││with cueing.                              ││
+│                            │││                                          ││+  2 Plan: progress walking intervals next││
+│                            │││                                          ││visit.                                    ││
+└────────────────────────────┘││                                          ││                                          ││
+┌Patient Notes───────────────┐││                                          ││                                          ││
+│Patient Notes               │││                                          ││                                          ││
+│  New note                  │││                                          ││                                          ││
+│  No patient notes yet. Use │││                                          ││                                          ││
+│:note new.                  │││                                          ││                                          ││
+│  Medical, communication,   │││                                          ││                                          ││
+│and admin notes appear here.│││                                          ││                                          ││
+└────────────────────────────┘││                                          ││                                          ││
+┌Uploaded Documents──────────┐││                                          ││                                          ││
+│Uploaded Documents          │││                                          ││                                          ││
+│No files yet                │││                                          ││                                          ││
+│Paste/drop JPG/PDF. S...    │││                                          ││                                          ││
+│                            │││                                          ││                                          ││
+│                            │││                                          ││                                          ││
+│                            │││                                          ││                                          ││
+│                            ││└──────────────────────────────────────────┘└──────────────────────────────────────────┘│
+│                            ││:proposal accept | :proposal decline | :proposal next  · read-only comparison           │
+└────────────────────────────┘└────────────────────────────────────────────────────────────────────────────────────────┘
+Focus: Center | Mode: Read-only chart | Next: Accept proposal | Status: Reviewing returned-work proposal.
