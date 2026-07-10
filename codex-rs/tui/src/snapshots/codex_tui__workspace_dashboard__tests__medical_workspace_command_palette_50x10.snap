@@ -1,0 +1,14 @@
+---
+source: tui/src/workspace_dashboard.rs
+expression: "render_dashboard_lines_at(&dashboard, width, height)"
+---
+┌Commands────────────────────────────────────────┐
+│Search commands  :proposal                      │
+│Enter run   Esc close   ↑/↓ move                │
+│                                                │
+│> Select next proposal      :proposal next off  │
+│Accept proposal         :proposal accept off    │
+│Decline proposal       :proposal decline off    │
+│… 2 more                                        │
+│                                                │
+└────────────────────────────────────────────────┘

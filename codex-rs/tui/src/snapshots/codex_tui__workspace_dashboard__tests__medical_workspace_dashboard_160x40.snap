@@ -1,0 +1,44 @@
+---
+source: tui/src/workspace_dashboard.rs
+expression: "render_dashboard_lines_at(&dashboard, width, height)"
+---
+Medical Workspace  Unsaved
+Patient: Jordan Patient  DOB: blank  MRN: blank  Contact: Missing contact  Coverage: Missing coverage  Encounter: No encounter
+┌Patient Directory───────────────┐┌Today's Visit─────────────────────────────────────────────────────────────────┐┌Agent Workpane──────────────────────────────┐
+│Local search: /                 ││Patient: Jordan Patient; note: Visit note                                     ││Mode: > Input |   Packet |   Returned       │
+│0 active patients; local only   ││Next                                                                          ││  ● draft: No instructions drafted          │
+│No saved patients yet.          ││  ● Next: Save first eval                                                     ││  ● context: 0 files | 0 text | 0 clips     │
+│New patient: :patient new       ││                                                                              ││  ● plan: not sent                          │
+│                                ││Intake Checklist                                                              ││  ● returned: none                          │
+│                                ││  [ ] Demographics - missing DOB or Patient ID / MRN                          ││                                            │
+│                                ││  [ ] Emergency contact - missing                                             ││  ● review: :agent preview, then Ctrl-G     │
+│                                ││  [ ] Coverage - missing                                                      ││  No upload/OCR/payer action/auto-apply.    │
+│                                ││  [ ] ID card - missing                                                       ││                                            │
+│                                ││  [ ] Insurance card - missing                                                ││                                            │
+│                                ││  [ ] Referral - missing                                                      ││                                            │
+└────────────────────────────────┘│  [ ] Allergies - not recorded                                                ││                                            │
+┌Patient Notes───────────────────┐│  [ ] Note - needs save                                                       ││                                            │
+│Patient Notes                   ││                                                                              ││                                            │
+│  New note                      ││                                                                              ││                                            │
+│  No patient notes yet. Use     ││                                                                              ││                                            │
+│:note new.                      ││                                                                              ││                                            │
+│  Medical, communication, and   ││                                                                              ││                                            │
+│admin notes appear here.        ││                                                                              ││                                            │
+│                                ││                                                                              ││                                            │
+└────────────────────────────────┘│                                                                              ││                                            │
+┌Uploaded Documents──────────────┐│                                                                              ││                                            │
+│Uploaded Documents              ││                                                                              ││                                            │
+│No files yet                    ││                                                                              ││                                            │
+│Paste/drop JPG/PDF. Space...    ││                                                                              ││                                            │
+│                                ││                                                                              ││                                            │
+│                                ││                                                                              ││                                            │
+│                                ││                                                                              ││                                            │
+│                                ││                                                                              ││                                            │
+│                                ││                                                                              ││                                            │
+│                                ││                                                                              ││                                            │
+│                                ││                                                                              ││                                            │
+│                                ││                                                                              ││                                            │
+│                                ││                                                                              ││                                            │
+│                                ││                                                                              ││                                            │
+└────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────┘└────────────────────────────────────────────┘
+Focus: Center | Mode: Read-only chart | Next: Save first eval | Status: Unsaved changes. | Page scroll  : command  Tab move  Esc close

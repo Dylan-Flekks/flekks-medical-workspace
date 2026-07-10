@@ -1,0 +1,13 @@
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Audited upstream test fixtures and generated dependency checksums"
+paths = [
+  '''^codex-rs/agent-identity/src/lib\.rs$''',
+  '''^codex-rs/app-server/tests/suite/v2/connection_handling_websocket\.rs$''',
+  '''^codex-rs/Cargo\.lock$''',
+  '''^codex-rs/cli/src/login\.rs$''',
+  '''^codex-rs/cloud-requirements/src/lib\.rs$''',
+  '''^codex-rs/login/src/auth/auth_tests\.rs$''',
+]

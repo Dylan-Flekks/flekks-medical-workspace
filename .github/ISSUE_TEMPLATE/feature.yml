@@ -1,0 +1,31 @@
+name: Feature proposal
+description: Propose a bounded capability or workflow improvement.
+title: "[Feature]: "
+labels: ["enhancement", "needs-design"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem and user
+      description: Who is affected and what is difficult today?
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired outcome
+    validations:
+      required: true
+  - type: textarea
+    id: boundaries
+    attributes:
+      label: Data, authority, and audit boundaries
+      description: Explain what agents and humans may read or change.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+    validations:
+      required: true

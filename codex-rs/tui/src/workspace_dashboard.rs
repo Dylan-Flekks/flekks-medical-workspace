@@ -1,0 +1,24245 @@
+use crate::app_server_session::AppServerSession;
+use crate::clipboard_paste::normalize_pasted_path;
+use crate::macos_native_drop::NativeMedicalDropResult;
+use crate::macos_native_drop::NativeMedicalFileDropEvent;
+use crate::macos_native_drop::run_native_medical_file_drop_panel;
+use crate::tui::MouseScrollDirection;
+use crate::tui::MouseScrollEvent;
+use crate::workspace_actions::WORKSPACE_ACTIONS;
+use crate::workspace_actions::WorkspaceActionDef;
+use crate::workspace_actions::WorkspaceActionGroup;
+use crate::workspace_actions::WorkspaceActionId;
+use crate::workspace_actions::action_for_command;
+use crate::workspace_actions::normalize_workspace_command;
+use crate::workspace_context_assembly::MedicalContextAssembly;
+use crate::workspace_context_assembly::MedicalContextAssemblyInput;
+use crate::workspace_context_assembly::MedicalContextDraftDocument;
+use crate::workspace_context_assembly::MedicalContextDraftTask;
+use crate::workspace_context_assembly::artifact_presence_label;
+use crate::workspace_context_assembly::artifact_scope_label;
+use crate::workspace_context_assembly::artifact_size_label;
+use crate::workspace_context_assembly::assemble_medical_context;
+use crate::workspace_context_assembly::clip_context_label;
+use crate::workspace_context_assembly::clip_kind_title;
+use crate::workspace_context_assembly::clip_range_label;
+use crate::workspace_context_assembly::compact_preview;
+use crate::workspace_context_assembly::default_clip_kind_for_derivative;
+use crate::workspace_context_assembly::default_derivative_kind_for_document;
+use crate::workspace_context_assembly::derivative_context_label;
+use crate::workspace_context_assembly::derivative_kind_title;
+use crate::workspace_context_assembly::derivative_range_label;
+use crate::workspace_context_assembly::derivative_status_label;
+use crate::workspace_context_assembly::document_context_label;
+use crate::workspace_context_assembly::edi_transaction_label;
+use crate::workspace_context_assembly::edi_transaction_label_from_text;
+use crate::workspace_context_assembly::provider_file_reference_summary;
+use crate::workspace_context_assembly::provider_reviewed_text_summary;
+use chrono::DateTime;
+use chrono::Utc;
+use codex_app_server_protocol::WorkspaceAgentResult;
+use codex_app_server_protocol::WorkspaceAgentResultCreateParams;
+use codex_app_server_protocol::WorkspaceAgentResultListParams;
+use codex_app_server_protocol::WorkspaceAgentResultStatusUpdateParams;
+use codex_app_server_protocol::WorkspaceArtifactDerivative;
+use codex_app_server_protocol::WorkspaceArtifactDerivativeListParams;
+use codex_app_server_protocol::WorkspaceArtifactDerivativeStatusUpdateParams;
+use codex_app_server_protocol::WorkspaceArtifactDerivativeUpsertParams;
+use codex_app_server_protocol::WorkspaceAuditEvent;
+use codex_app_server_protocol::WorkspaceAuditListParams;
+use codex_app_server_protocol::WorkspaceClient;
+use codex_app_server_protocol::WorkspaceClientUpsertParams;
+use codex_app_server_protocol::WorkspaceContextClip;
+use codex_app_server_protocol::WorkspaceContextClipListParams;
+use codex_app_server_protocol::WorkspaceContextClipStatusUpdateParams;
+use codex_app_server_protocol::WorkspaceContextClipUpsertParams;
+use codex_app_server_protocol::WorkspaceContextPacket;
+use codex_app_server_protocol::WorkspaceContextPacketCreateParams;
+use codex_app_server_protocol::WorkspaceContextPacketListParams;
+use codex_app_server_protocol::WorkspaceDocument;
+use codex_app_server_protocol::WorkspaceDocumentUpsertParams;
+use codex_app_server_protocol::WorkspaceEncounter;
+use codex_app_server_protocol::WorkspaceEncounterUpsertParams;
+use codex_app_server_protocol::WorkspaceNote;
+use codex_app_server_protocol::WorkspaceNoteAddendum;
+use codex_app_server_protocol::WorkspaceNoteAddendumCreateParams;
+use codex_app_server_protocol::WorkspaceNoteProposal;
+use codex_app_server_protocol::WorkspaceNoteProposalCreateParams;
+use codex_app_server_protocol::WorkspaceNoteProposalResolveParams;
+use codex_app_server_protocol::WorkspaceNoteProposalStatus;
+use codex_app_server_protocol::WorkspaceNoteSignParams;
+use codex_app_server_protocol::WorkspaceNoteSignature;
+use codex_app_server_protocol::WorkspaceNoteUpsertParams;
+use codex_app_server_protocol::WorkspacePatientSafetyItem;
+use codex_app_server_protocol::WorkspacePatientSafetyItemUpsertParams;
+use codex_app_server_protocol::WorkspacePracticeLibraryItem;
+use codex_app_server_protocol::WorkspacePracticeLibraryListParams;
+use codex_app_server_protocol::WorkspaceTask;
+use codex_app_server_protocol::WorkspaceTaskPriority;
+use codex_app_server_protocol::WorkspaceTaskStatus;
+use codex_app_server_protocol::WorkspaceTaskStatusUpdateParams;
+use codex_app_server_protocol::WorkspaceTaskUpsertParams;
+use color_eyre::eyre::Result;
+use crossterm::cursor::SetCursorStyle;
+use crossterm::event::KeyCode;
+use crossterm::event::KeyEvent;
+use crossterm::event::KeyEventKind;
+use crossterm::event::KeyModifiers;
+use image::GenericImageView;
+use image::imageops::FilterType;
+use ratatui::buffer::Buffer;
+use ratatui::layout::Constraint;
+use ratatui::layout::Direction;
+use ratatui::layout::Layout;
+use ratatui::layout::Margin;
+use ratatui::layout::Rect;
+use ratatui::style::Color;
+use ratatui::style::Modifier;
+use ratatui::style::Style;
+use ratatui::text::Line;
+use ratatui::text::Span;
+use ratatui::widgets::Block;
+use ratatui::widgets::Borders;
+use ratatui::widgets::Clear;
+use ratatui::widgets::Paragraph;
+use ratatui::widgets::Widget;
+use ratatui::widgets::Wrap;
+use serde_json::json;
+use sha2::Digest;
+use sha2::Sha256;
+use std::collections::BTreeSet;
+use std::fs;
+use std::fs::File;
+use std::io::Read;
+use std::path::Path;
+use std::path::PathBuf;
+use std::time::Duration;
+use std::time::Instant;
+use std::time::UNIX_EPOCH;
+
+// Failure/recovery invariant for the medical workspace:
+// - failed or blocked actions must not leave optimistic saved state behind
+// - stale selected context is pruned before packet assembly and surfaced to the provider
+// - retryable recovery text should be visible without expanding the packet boundary
+// - packet replay/result provenance remains historical and immutable
+
+const UNTITLED_NOTE_TITLE: &str = "Untitled note";
+const MEDICAL_WORKFLOW_CHART_CONTEXT_LINE_COUNT: usize = 8;
+const AGENT_REQUEST_INPUT_LABEL: &str = "Request: ";
+const AGENT_REQUEST_CONTINUATION_LABEL: &str = "         ";
+const MEDICAL_NOTE_GROUPS: &[&str] = &[
+    "Medical Notes",
+    "Communication Notes",
+    "Administrative Notes",
+    "Addenda",
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum WorkspaceProfile {
+    #[default]
+    Generic,
+    Medical,
+}
+
+impl WorkspaceProfile {
+    fn header_title(self) -> &'static str {
+        match self {
+            Self::Generic => "Workspace",
+            Self::Medical => "Medical Workspace",
+        }
+    }
+
+    fn clients_title(self) -> &'static str {
+        match self {
+            Self::Generic => "Clients",
+            Self::Medical => "Patient Directory",
+        }
+    }
+
+    fn client_draft_label(self) -> &'static str {
+        match self {
+            Self::Generic => "New client",
+            Self::Medical => "New patient",
+        }
+    }
+
+    fn notes_title(self) -> &'static str {
+        match self {
+            Self::Generic => "Notes",
+            Self::Medical => "Patient Notes",
+        }
+    }
+
+    fn demographics_title(self) -> &'static str {
+        match self {
+            Self::Generic => "Demographics",
+            Self::Medical => "Patient Demographics",
+        }
+    }
+
+    fn note_title_label(self) -> &'static str {
+        match self {
+            Self::Generic => "Title",
+            Self::Medical => "Note Title",
+        }
+    }
+
+    fn note_body_label(self) -> &'static str {
+        match self {
+            Self::Generic => "Note",
+            Self::Medical => "Note Body",
+        }
+    }
+
+    fn workflow_title(self) -> &'static str {
+        match self {
+            Self::Generic => "Workflow",
+            Self::Medical => "Patient Chart",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum WorkspaceDashboardAction {
+    CreateAddendum {
+        note_id: String,
+        base_revision: i64,
+        body: String,
+    },
+    Consumed,
+    Close,
+    EnsureEncounter,
+    ResolveProposal {
+        proposal_id: String,
+        accept: bool,
+    },
+    Save,
+    SaveAgentResult {
+        packet_id: String,
+        body: String,
+    },
+    AssociatePracticeLibraryDocument(Box<WorkspaceDocumentUpsertParams>),
+    ChoosePatientFiles,
+    ImportDocumentToVault {
+        document_id: String,
+    },
+    GenerateDocumentThumbnail {
+        document_id: String,
+    },
+    OpenDocumentFile {
+        document_id: String,
+    },
+    SaveDroppedFileReferences(Vec<WorkspaceDocumentUpsertParams>),
+    SaveArtifactDerivative(Box<WorkspaceArtifactDerivativeUpsertParams>),
+    SaveContextClip(Box<WorkspaceContextClipUpsertParams>),
+    SendContextToAgent,
+    SelectClient(usize),
+    SelectNote(usize),
+    SignNote,
+    UpdateAgentResultStatus {
+        result_id: String,
+        status: String,
+    },
+    UpdateArtifactDerivativeStatus {
+        derivative_id: String,
+        review_status: String,
+    },
+    UpdateContextClipStatus {
+        clip_id: String,
+        review_status: String,
+    },
+    ConvertAgentResultToProposal {
+        result_id: String,
+    },
+    UpdateTaskStatus {
+        task_id: String,
+        status: WorkspaceTaskStatus,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WorkspaceFocus {
+    Clients,
+    Notes,
+    Demographics,
+    NoteTitle,
+    NoteBody,
+    Workflow,
+    Agent,
+    PatientFiles,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PatientFileTreeRow {
+    File { document_index: usize },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MedicalPaneSlot {
+    PatientDirectory,
+    ChartTree,
+    PatientFileTree,
+    PatientDemographics,
+    NoteTitle,
+    NoteBody,
+    CenterWorkArea,
+    AgentWorkpane,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkspaceInputMode {
+    Navigation,
+    PatientSearch,
+    CommandPalette,
+    PatientField,
+    PatientAdminField,
+    NoteTitle,
+    NoteBody,
+    LockedNote,
+    FileTree,
+    CenterReadOnly,
+    WorkflowEditor,
+    AgentInput,
+    PacketReview,
+    ReturnedWorkReview,
+    ReturnedWorkDraft,
+}
+
+impl WorkspaceInputMode {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Navigation => "Navigate",
+            Self::PatientSearch => "Search",
+            Self::CommandPalette => "Command",
+            Self::PatientField => "Patient field",
+            Self::PatientAdminField => "Admin field",
+            Self::NoteTitle => "Note title",
+            Self::NoteBody => "Note body",
+            Self::LockedNote => "Read-only note",
+            Self::FileTree => "File list",
+            Self::CenterReadOnly => "Read-only chart",
+            Self::WorkflowEditor => "Chart editor",
+            Self::AgentInput => "Agent input",
+            Self::PacketReview => "Packet review",
+            Self::ReturnedWorkReview => "Returned work",
+            Self::ReturnedWorkDraft => "Returned draft",
+        }
+    }
+
+    fn hint(self) -> &'static str {
+        match self {
+            Self::Navigation => "Tab move  / search  : command  Esc close",
+            Self::PatientSearch => "Type query  Enter open  Esc chart",
+            Self::CommandPalette => "Type command  Enter run  Esc close",
+            Self::PatientField | Self::PatientAdminField => {
+                "Type value  Up/Down field  Ctrl-S save  Esc chart"
+            }
+            Self::NoteTitle => "Type title  Enter body  Ctrl-S save  Esc chart",
+            Self::NoteBody => "Type note  Enter newline  Ctrl-S save  Esc chart",
+            Self::LockedNote => "Read-only  :addendum start  Esc close",
+            Self::FileTree => "Arrows move  Enter detail  Space include  Esc close",
+            Self::CenterReadOnly => "Page scroll  : command  Tab move  Esc close",
+            Self::WorkflowEditor => "Type value  Up/Down field  Ctrl-S save  Esc guards draft",
+            Self::AgentInput => "Type request  :context packet  Ctrl-G send  Esc chart",
+            Self::PacketReview => "Review packet  Ctrl-G send  r edit request",
+            Self::ReturnedWorkReview => "i inspect  r input  p packet  Esc close",
+            Self::ReturnedWorkDraft => "Paste/type result  Ctrl-S save  Esc guards draft",
+        }
+    }
+}
+
+impl WorkspaceFocus {
+    fn next(self) -> Self {
+        match self {
+            Self::Clients => Self::Demographics,
+            Self::Demographics => Self::Notes,
+            Self::Notes => Self::NoteTitle,
+            Self::NoteTitle => Self::NoteBody,
+            Self::NoteBody => Self::Workflow,
+            Self::Workflow => Self::Agent,
+            Self::Agent => Self::PatientFiles,
+            Self::PatientFiles => Self::Clients,
+        }
+    }
+
+    fn previous(self) -> Self {
+        match self {
+            Self::Clients => Self::PatientFiles,
+            Self::Demographics => Self::Clients,
+            Self::Notes => Self::Demographics,
+            Self::NoteTitle => Self::Notes,
+            Self::NoteBody => Self::NoteTitle,
+            Self::Workflow => Self::NoteBody,
+            Self::Agent => Self::Workflow,
+            Self::PatientFiles => Self::Agent,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MedicalWorkflowSection {
+    Visit,
+    Safety,
+    NoteStatus,
+    Documents,
+    AgentRequest,
+    ContextPacket,
+    AgentInbox,
+    Proposals,
+    Addenda,
+    Jobs,
+    Timeline,
+    PracticeLibrary,
+    PracticeIntelligence,
+    Audit,
+}
+
+impl MedicalWorkflowSection {
+    const ALL: [Self; 14] = [
+        Self::Visit,
+        Self::Safety,
+        Self::NoteStatus,
+        Self::Documents,
+        Self::AgentRequest,
+        Self::ContextPacket,
+        Self::AgentInbox,
+        Self::Proposals,
+        Self::Addenda,
+        Self::Jobs,
+        Self::Timeline,
+        Self::PracticeLibrary,
+        Self::PracticeIntelligence,
+        Self::Audit,
+    ];
+
+    fn heading(self) -> &'static str {
+        match self {
+            Self::Visit => "Visit",
+            Self::Safety => "Clinical Safety",
+            Self::NoteStatus => "Note Status",
+            Self::Documents => "Uploaded Documents",
+            Self::AgentRequest => "Ask Agent",
+            Self::ContextPacket => "Medical Agent Plan",
+            Self::AgentInbox => "Agent Review",
+            Self::Proposals => "Note Proposals",
+            Self::Addenda => "Addenda",
+            Self::Jobs => "Jobs",
+            Self::Timeline => "Timeline",
+            Self::PracticeLibrary => "Practice Library",
+            Self::PracticeIntelligence => "Practice Intelligence",
+            Self::Audit => "Audit Trail",
+        }
+    }
+
+    fn status_label(self) -> &'static str {
+        match self {
+            Self::Visit => "visit",
+            Self::Safety => "clinical safety",
+            Self::NoteStatus => "note status",
+            Self::Documents => "uploaded documents",
+            Self::AgentRequest => "ask agent",
+            Self::ContextPacket => "medical agent plan",
+            Self::AgentInbox => "agent review",
+            Self::Proposals => "note proposals",
+            Self::Addenda => "addenda",
+            Self::Jobs => "jobs",
+            Self::Timeline => "timeline",
+            Self::PracticeLibrary => "practice library",
+            Self::PracticeIntelligence => "practice intelligence",
+            Self::Audit => "audit trail",
+        }
+    }
+
+    fn scope_label(self) -> &'static str {
+        match self {
+            Self::Visit
+            | Self::Safety
+            | Self::NoteStatus
+            | Self::Proposals
+            | Self::Addenda
+            | Self::Jobs
+            | Self::Timeline => "Patient Chart",
+            Self::Documents => "Uploaded Documents",
+            Self::AgentRequest | Self::ContextPacket => "Agent Workpane",
+            Self::AgentInbox => "Agent Review",
+            Self::PracticeLibrary => "Practice Library",
+            Self::PracticeIntelligence => "Practice Intelligence",
+            Self::Audit => "Audit Trail",
+        }
+    }
+
+    fn agent_access_short_label(self) -> &'static str {
+        match self {
+            Self::Visit
+            | Self::Safety
+            | Self::NoteStatus
+            | Self::Documents
+            | Self::Proposals
+            | Self::Addenda
+            | Self::Jobs
+            | Self::Timeline => "selected context",
+            Self::AgentRequest | Self::ContextPacket => "selected context",
+            Self::AgentInbox => "review only",
+            Self::PracticeLibrary => "none",
+            Self::PracticeIntelligence => "disabled",
+            Self::Audit => "none",
+        }
+    }
+
+    fn index(self) -> usize {
+        Self::ALL
+            .iter()
+            .position(|section| *section == self)
+            .unwrap_or(0)
+    }
+
+    fn next(self) -> Self {
+        Self::ALL[(self.index() + 1) % Self::ALL.len()]
+    }
+
+    fn previous(self) -> Self {
+        let index = self.index();
+        Self::ALL[(index + Self::ALL.len() - 1) % Self::ALL.len()]
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MedicalScopeTab {
+    Chart,
+    Safety,
+    Files,
+    Packet,
+    Review,
+    Library,
+    Intelligence,
+    Audit,
+}
+
+impl MedicalScopeTab {
+    const ALL: [Self; 8] = [
+        Self::Chart,
+        Self::Safety,
+        Self::Files,
+        Self::Packet,
+        Self::Review,
+        Self::Library,
+        Self::Intelligence,
+        Self::Audit,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Chart => "Chart",
+            Self::Safety => "Safe",
+            Self::Files => "Files",
+            Self::Packet => "Agent",
+            Self::Review => "Rev",
+            Self::Library => "Lib",
+            Self::Intelligence => "PI",
+            Self::Audit => "Aud",
+        }
+    }
+
+    fn section(self) -> MedicalWorkflowSection {
+        match self {
+            Self::Chart => MedicalWorkflowSection::Visit,
+            Self::Safety => MedicalWorkflowSection::Safety,
+            Self::Files => MedicalWorkflowSection::Documents,
+            Self::Packet => MedicalWorkflowSection::ContextPacket,
+            Self::Review => MedicalWorkflowSection::AgentInbox,
+            Self::Library => MedicalWorkflowSection::PracticeLibrary,
+            Self::Intelligence => MedicalWorkflowSection::PracticeIntelligence,
+            Self::Audit => MedicalWorkflowSection::Audit,
+        }
+    }
+
+    fn index(self) -> usize {
+        Self::ALL.iter().position(|tab| *tab == self).unwrap_or(0)
+    }
+
+    fn next(self) -> Self {
+        Self::ALL[(self.index() + 1) % Self::ALL.len()]
+    }
+
+    fn previous(self) -> Self {
+        let index = self.index();
+        Self::ALL[(index + Self::ALL.len() - 1) % Self::ALL.len()]
+    }
+}
+
+fn medical_scope_tab_for_section(section: MedicalWorkflowSection) -> MedicalScopeTab {
+    match section {
+        MedicalWorkflowSection::Visit
+        | MedicalWorkflowSection::NoteStatus
+        | MedicalWorkflowSection::Proposals
+        | MedicalWorkflowSection::Addenda
+        | MedicalWorkflowSection::Jobs
+        | MedicalWorkflowSection::Timeline => MedicalScopeTab::Chart,
+        MedicalWorkflowSection::Safety => MedicalScopeTab::Safety,
+        MedicalWorkflowSection::Documents => MedicalScopeTab::Files,
+        MedicalWorkflowSection::AgentRequest | MedicalWorkflowSection::ContextPacket => {
+            MedicalScopeTab::Packet
+        }
+        MedicalWorkflowSection::AgentInbox => MedicalScopeTab::Review,
+        MedicalWorkflowSection::PracticeLibrary => MedicalScopeTab::Library,
+        MedicalWorkflowSection::PracticeIntelligence => MedicalScopeTab::Intelligence,
+        MedicalWorkflowSection::Audit => MedicalScopeTab::Audit,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DemographicsField {
+    DisplayName,
+    PreferredName,
+    DateOfBirth,
+    SexOrGender,
+    ExternalId,
+    RecordStartDate,
+    RecordEndDate,
+    Summary,
+}
+
+impl DemographicsField {
+    const ALL: [Self; 8] = [
+        Self::DisplayName,
+        Self::PreferredName,
+        Self::DateOfBirth,
+        Self::SexOrGender,
+        Self::ExternalId,
+        Self::RecordStartDate,
+        Self::RecordEndDate,
+        Self::Summary,
+    ];
+
+    fn index(self) -> usize {
+        Self::ALL
+            .iter()
+            .position(|field| *field == self)
+            .unwrap_or(0)
+    }
+
+    fn next(self) -> Self {
+        Self::ALL[(self.index() + 1) % Self::ALL.len()]
+    }
+
+    fn previous(self) -> Self {
+        let index = self.index();
+        Self::ALL[(index + Self::ALL.len() - 1) % Self::ALL.len()]
+    }
+
+    fn label(self, profile: WorkspaceProfile) -> &'static str {
+        match (profile, self) {
+            (_, Self::DisplayName) => "Display",
+            (_, Self::PreferredName) => "Preferred",
+            (_, Self::DateOfBirth) => "DOB",
+            (_, Self::SexOrGender) => "Sex/Gender",
+            (WorkspaceProfile::Medical, Self::ExternalId) => "Patient ID / MRN",
+            (_, Self::ExternalId) => "External ID",
+            (WorkspaceProfile::Medical, Self::RecordStartDate) => "Chart start",
+            (WorkspaceProfile::Medical, Self::RecordEndDate) => "Chart end",
+            (_, Self::RecordStartDate) => "Record start",
+            (_, Self::RecordEndDate) => "Record end",
+            (_, Self::Summary) => "Summary",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PatientAdminEditMode {
+    Contact,
+    Coverage,
+}
+
+impl PatientAdminEditMode {
+    fn title(self) -> &'static str {
+        match self {
+            Self::Contact => "Patient Demographics Editor",
+            Self::Coverage => "Coverage Editor",
+        }
+    }
+
+    fn fields(self) -> &'static [PatientAdminField] {
+        match self {
+            Self::Contact => &CONTACT_ADMIN_FIELDS,
+            Self::Coverage => &COVERAGE_ADMIN_FIELDS,
+        }
+    }
+
+    fn first_field(self) -> PatientAdminField {
+        self.fields()
+            .first()
+            .copied()
+            .unwrap_or(PatientAdminField::PrimaryPhone)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PatientAdminField {
+    PrimaryPhone,
+    SecondaryPhone,
+    Email,
+    PreferredContactMethod,
+    EmergencyContactName,
+    EmergencyContactRelationship,
+    EmergencyContactPhone,
+    EmergencyContactEmail,
+    ContactNotes,
+    PayerName,
+    PlanName,
+    MemberId,
+    GroupNumber,
+    CoverageType,
+    CoverageStatus,
+    CoverageNotes,
+}
+
+const CONTACT_ADMIN_FIELDS: [PatientAdminField; 9] = [
+    PatientAdminField::PrimaryPhone,
+    PatientAdminField::SecondaryPhone,
+    PatientAdminField::Email,
+    PatientAdminField::PreferredContactMethod,
+    PatientAdminField::EmergencyContactName,
+    PatientAdminField::EmergencyContactRelationship,
+    PatientAdminField::EmergencyContactPhone,
+    PatientAdminField::EmergencyContactEmail,
+    PatientAdminField::ContactNotes,
+];
+
+const COVERAGE_ADMIN_FIELDS: [PatientAdminField; 7] = [
+    PatientAdminField::PayerName,
+    PatientAdminField::PlanName,
+    PatientAdminField::MemberId,
+    PatientAdminField::GroupNumber,
+    PatientAdminField::CoverageType,
+    PatientAdminField::CoverageStatus,
+    PatientAdminField::CoverageNotes,
+];
+
+impl PatientAdminField {
+    fn mode(self) -> PatientAdminEditMode {
+        match self {
+            Self::PrimaryPhone
+            | Self::SecondaryPhone
+            | Self::Email
+            | Self::PreferredContactMethod
+            | Self::EmergencyContactName
+            | Self::EmergencyContactRelationship
+            | Self::EmergencyContactPhone
+            | Self::EmergencyContactEmail
+            | Self::ContactNotes => PatientAdminEditMode::Contact,
+            Self::PayerName
+            | Self::PlanName
+            | Self::MemberId
+            | Self::GroupNumber
+            | Self::CoverageType
+            | Self::CoverageStatus
+            | Self::CoverageNotes => PatientAdminEditMode::Coverage,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::PrimaryPhone => "Primary phone",
+            Self::SecondaryPhone => "Secondary phone",
+            Self::Email => "Email",
+            Self::PreferredContactMethod => "Preferred contact",
+            Self::EmergencyContactName => "Emergency name",
+            Self::EmergencyContactRelationship => "Emergency relation",
+            Self::EmergencyContactPhone => "Emergency phone",
+            Self::EmergencyContactEmail => "Emergency email",
+            Self::ContactNotes => "Contact notes",
+            Self::PayerName => "Payer",
+            Self::PlanName => "Plan name",
+            Self::MemberId => "Member ID / Medicare ID",
+            Self::GroupNumber => "Group number",
+            Self::CoverageType => "Coverage type",
+            Self::CoverageStatus => "Coverage status",
+            Self::CoverageNotes => "Coverage notes",
+        }
+    }
+
+    fn next_in(self, mode: PatientAdminEditMode) -> Self {
+        let fields = mode.fields();
+        let index = fields.iter().position(|field| *field == self).unwrap_or(0);
+        fields[(index + 1) % fields.len()]
+    }
+
+    fn previous_in(self, mode: PatientAdminEditMode) -> Self {
+        let fields = mode.fields();
+        let index = fields.iter().position(|field| *field == self).unwrap_or(0);
+        fields[(index + fields.len() - 1) % fields.len()]
+    }
+
+    fn placeholder(self) -> &'static str {
+        match self.mode() {
+            PatientAdminEditMode::Contact => "missing",
+            PatientAdminEditMode::Coverage => "not set",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ClientDraft {
+    id: Option<String>,
+    display_name: String,
+    preferred_name: String,
+    date_of_birth: String,
+    sex_or_gender: String,
+    external_id: String,
+    record_start_date: String,
+    record_end_date: String,
+    summary: String,
+    primary_phone: String,
+    secondary_phone: String,
+    email: String,
+    preferred_contact_method: String,
+    emergency_contact_name: String,
+    emergency_contact_relationship: String,
+    emergency_contact_phone: String,
+    emergency_contact_email: String,
+    contact_notes: String,
+    payer_name: String,
+    plan_name: String,
+    member_id: String,
+    group_number: String,
+    coverage_type: String,
+    coverage_status: String,
+    coverage_notes: String,
+}
+
+impl Default for ClientDraft {
+    fn default() -> Self {
+        Self {
+            id: None,
+            display_name: "New client".to_string(),
+            preferred_name: String::new(),
+            date_of_birth: String::new(),
+            sex_or_gender: String::new(),
+            external_id: String::new(),
+            record_start_date: String::new(),
+            record_end_date: String::new(),
+            summary: String::new(),
+            primary_phone: String::new(),
+            secondary_phone: String::new(),
+            email: String::new(),
+            preferred_contact_method: String::new(),
+            emergency_contact_name: String::new(),
+            emergency_contact_relationship: String::new(),
+            emergency_contact_phone: String::new(),
+            emergency_contact_email: String::new(),
+            contact_notes: String::new(),
+            payer_name: String::new(),
+            plan_name: String::new(),
+            member_id: String::new(),
+            group_number: String::new(),
+            coverage_type: String::new(),
+            coverage_status: String::new(),
+            coverage_notes: String::new(),
+        }
+    }
+}
+
+impl ClientDraft {
+    fn from_client(client: &WorkspaceClient) -> Self {
+        Self {
+            id: Some(client.id.clone()),
+            display_name: client.display_name.clone(),
+            preferred_name: client.preferred_name.clone().unwrap_or_default(),
+            date_of_birth: client.date_of_birth.clone().unwrap_or_default(),
+            sex_or_gender: client.sex_or_gender.clone().unwrap_or_default(),
+            external_id: client.external_id.clone().unwrap_or_default(),
+            record_start_date: client.record_start_date.clone().unwrap_or_default(),
+            record_end_date: client.record_end_date.clone().unwrap_or_default(),
+            summary: client.summary.clone(),
+            primary_phone: client.primary_phone.clone().unwrap_or_default(),
+            secondary_phone: client.secondary_phone.clone().unwrap_or_default(),
+            email: client.email.clone().unwrap_or_default(),
+            preferred_contact_method: client.preferred_contact_method.clone().unwrap_or_default(),
+            emergency_contact_name: client.emergency_contact_name.clone().unwrap_or_default(),
+            emergency_contact_relationship: client
+                .emergency_contact_relationship
+                .clone()
+                .unwrap_or_default(),
+            emergency_contact_phone: client.emergency_contact_phone.clone().unwrap_or_default(),
+            emergency_contact_email: client.emergency_contact_email.clone().unwrap_or_default(),
+            contact_notes: client.contact_notes.clone().unwrap_or_default(),
+            payer_name: client.payer_name.clone().unwrap_or_default(),
+            plan_name: client.plan_name.clone().unwrap_or_default(),
+            member_id: client.member_id.clone().unwrap_or_default(),
+            group_number: client.group_number.clone().unwrap_or_default(),
+            coverage_type: client.coverage_type.clone().unwrap_or_default(),
+            coverage_status: client.coverage_status.clone().unwrap_or_default(),
+            coverage_notes: client.coverage_notes.clone().unwrap_or_default(),
+        }
+    }
+
+    fn upsert_params(&self) -> WorkspaceClientUpsertParams {
+        WorkspaceClientUpsertParams {
+            id: self.id.clone(),
+            display_name: self.display_name.trim().to_string(),
+            preferred_name: nonempty_option(&self.preferred_name),
+            date_of_birth: nonempty_option(&self.date_of_birth),
+            sex_or_gender: nonempty_option(&self.sex_or_gender),
+            external_id: nonempty_option(&self.external_id),
+            record_start_date: nonempty_option(&self.record_start_date),
+            record_end_date: nonempty_option(&self.record_end_date),
+            summary: self.summary.clone(),
+            primary_phone: nonempty_option(&self.primary_phone),
+            secondary_phone: nonempty_option(&self.secondary_phone),
+            email: nonempty_option(&self.email),
+            preferred_contact_method: nonempty_option(&self.preferred_contact_method),
+            emergency_contact_name: nonempty_option(&self.emergency_contact_name),
+            emergency_contact_relationship: nonempty_option(&self.emergency_contact_relationship),
+            emergency_contact_phone: nonempty_option(&self.emergency_contact_phone),
+            emergency_contact_email: nonempty_option(&self.emergency_contact_email),
+            contact_notes: nonempty_option(&self.contact_notes),
+            payer_name: nonempty_option(&self.payer_name),
+            plan_name: nonempty_option(&self.plan_name),
+            member_id: nonempty_option(&self.member_id),
+            group_number: nonempty_option(&self.group_number),
+            coverage_type: nonempty_option(&self.coverage_type),
+            coverage_status: nonempty_option(&self.coverage_status),
+            coverage_notes: nonempty_option(&self.coverage_notes),
+        }
+    }
+
+    fn value_mut(&mut self, field: DemographicsField) -> &mut String {
+        match field {
+            DemographicsField::DisplayName => &mut self.display_name,
+            DemographicsField::PreferredName => &mut self.preferred_name,
+            DemographicsField::DateOfBirth => &mut self.date_of_birth,
+            DemographicsField::SexOrGender => &mut self.sex_or_gender,
+            DemographicsField::ExternalId => &mut self.external_id,
+            DemographicsField::RecordStartDate => &mut self.record_start_date,
+            DemographicsField::RecordEndDate => &mut self.record_end_date,
+            DemographicsField::Summary => &mut self.summary,
+        }
+    }
+
+    fn admin_value_mut(&mut self, field: PatientAdminField) -> &mut String {
+        match field {
+            PatientAdminField::PrimaryPhone => &mut self.primary_phone,
+            PatientAdminField::SecondaryPhone => &mut self.secondary_phone,
+            PatientAdminField::Email => &mut self.email,
+            PatientAdminField::PreferredContactMethod => &mut self.preferred_contact_method,
+            PatientAdminField::EmergencyContactName => &mut self.emergency_contact_name,
+            PatientAdminField::EmergencyContactRelationship => {
+                &mut self.emergency_contact_relationship
+            }
+            PatientAdminField::EmergencyContactPhone => &mut self.emergency_contact_phone,
+            PatientAdminField::EmergencyContactEmail => &mut self.emergency_contact_email,
+            PatientAdminField::ContactNotes => &mut self.contact_notes,
+            PatientAdminField::PayerName => &mut self.payer_name,
+            PatientAdminField::PlanName => &mut self.plan_name,
+            PatientAdminField::MemberId => &mut self.member_id,
+            PatientAdminField::GroupNumber => &mut self.group_number,
+            PatientAdminField::CoverageType => &mut self.coverage_type,
+            PatientAdminField::CoverageStatus => &mut self.coverage_status,
+            PatientAdminField::CoverageNotes => &mut self.coverage_notes,
+        }
+    }
+
+    fn value(&self, field: DemographicsField) -> &str {
+        match field {
+            DemographicsField::DisplayName => &self.display_name,
+            DemographicsField::PreferredName => &self.preferred_name,
+            DemographicsField::DateOfBirth => &self.date_of_birth,
+            DemographicsField::SexOrGender => &self.sex_or_gender,
+            DemographicsField::ExternalId => &self.external_id,
+            DemographicsField::RecordStartDate => &self.record_start_date,
+            DemographicsField::RecordEndDate => &self.record_end_date,
+            DemographicsField::Summary => &self.summary,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct PatientAdminMetadata {
+    primary_phone: String,
+    secondary_phone: String,
+    email: String,
+    preferred_contact_method: String,
+    emergency_contact_name: String,
+    emergency_contact_relationship: String,
+    emergency_contact_phone: String,
+    emergency_contact_email: String,
+    contact_notes: String,
+    payer_name: String,
+    plan_name: String,
+    member_id: String,
+    group_number: String,
+    coverage_type: String,
+    coverage_status: String,
+    coverage_notes: String,
+}
+
+impl PatientAdminMetadata {
+    fn from_client(client: &WorkspaceClient) -> Self {
+        Self {
+            primary_phone: client.primary_phone.clone().unwrap_or_default(),
+            secondary_phone: client.secondary_phone.clone().unwrap_or_default(),
+            email: client.email.clone().unwrap_or_default(),
+            preferred_contact_method: client.preferred_contact_method.clone().unwrap_or_default(),
+            emergency_contact_name: client.emergency_contact_name.clone().unwrap_or_default(),
+            emergency_contact_relationship: client
+                .emergency_contact_relationship
+                .clone()
+                .unwrap_or_default(),
+            emergency_contact_phone: client.emergency_contact_phone.clone().unwrap_or_default(),
+            emergency_contact_email: client.emergency_contact_email.clone().unwrap_or_default(),
+            contact_notes: client.contact_notes.clone().unwrap_or_default(),
+            payer_name: client.payer_name.clone().unwrap_or_default(),
+            plan_name: client.plan_name.clone().unwrap_or_default(),
+            member_id: client.member_id.clone().unwrap_or_default(),
+            group_number: client.group_number.clone().unwrap_or_default(),
+            coverage_type: client.coverage_type.clone().unwrap_or_default(),
+            coverage_status: client.coverage_status.clone().unwrap_or_default(),
+            coverage_notes: client.coverage_notes.clone().unwrap_or_default(),
+        }
+    }
+
+    fn from_draft(draft: &ClientDraft) -> Self {
+        Self {
+            primary_phone: draft.primary_phone.clone(),
+            secondary_phone: draft.secondary_phone.clone(),
+            email: draft.email.clone(),
+            preferred_contact_method: draft.preferred_contact_method.clone(),
+            emergency_contact_name: draft.emergency_contact_name.clone(),
+            emergency_contact_relationship: draft.emergency_contact_relationship.clone(),
+            emergency_contact_phone: draft.emergency_contact_phone.clone(),
+            emergency_contact_email: draft.emergency_contact_email.clone(),
+            contact_notes: draft.contact_notes.clone(),
+            payer_name: draft.payer_name.clone(),
+            plan_name: draft.plan_name.clone(),
+            member_id: draft.member_id.clone(),
+            group_number: draft.group_number.clone(),
+            coverage_type: draft.coverage_type.clone(),
+            coverage_status: draft.coverage_status.clone(),
+            coverage_notes: draft.coverage_notes.clone(),
+        }
+    }
+
+    fn has_contact(&self) -> bool {
+        [
+            self.primary_phone.as_str(),
+            self.secondary_phone.as_str(),
+            self.email.as_str(),
+        ]
+        .iter()
+        .any(|value| !value.trim().is_empty())
+    }
+
+    fn has_emergency_contact(&self) -> bool {
+        [
+            self.emergency_contact_name.as_str(),
+            self.emergency_contact_phone.as_str(),
+            self.emergency_contact_email.as_str(),
+        ]
+        .iter()
+        .any(|value| !value.trim().is_empty())
+    }
+
+    fn has_coverage(&self) -> bool {
+        [
+            self.payer_name.as_str(),
+            self.plan_name.as_str(),
+            self.member_id.as_str(),
+            self.group_number.as_str(),
+            self.coverage_type.as_str(),
+            self.coverage_status.as_str(),
+        ]
+        .iter()
+        .any(|value| !value.trim().is_empty())
+    }
+
+    fn contact_status_label(&self) -> &'static str {
+        if self.has_contact() {
+            "Contact on file"
+        } else {
+            "Missing contact"
+        }
+    }
+
+    fn emergency_status_label(&self) -> &'static str {
+        if self.has_emergency_contact() {
+            "emergency present"
+        } else {
+            "emergency missing"
+        }
+    }
+
+    fn coverage_status_label(&self) -> &'static str {
+        if self.has_coverage() {
+            "Coverage on file"
+        } else {
+            "Missing coverage"
+        }
+    }
+
+    fn contact_summary(&self) -> String {
+        let phone = nonempty_or(&self.primary_phone, "phone missing");
+        let email = nonempty_or(&self.email, "email missing");
+        let method = nonempty_or(&self.preferred_contact_method, "method not set");
+        format!("{phone}; {email}; {method}")
+    }
+
+    fn emergency_summary(&self) -> String {
+        let name = nonempty_or(&self.emergency_contact_name, "name missing");
+        let relationship =
+            nonempty_or(&self.emergency_contact_relationship, "relationship missing");
+        let phone = nonempty_or(&self.emergency_contact_phone, "phone missing");
+        format!("{name}; {relationship}; {phone}")
+    }
+
+    fn coverage_summary(&self) -> String {
+        let payer = nonempty_or(&self.payer_name, "payer missing");
+        let member = nonempty_or(&self.member_id, "member ID missing");
+        let status = nonempty_or(&self.coverage_status, "status not set");
+        format!("{payer}; {member}; {status}")
+    }
+
+    fn search_values(&self) -> Vec<String> {
+        [
+            &self.primary_phone,
+            &self.secondary_phone,
+            &self.email,
+            &self.preferred_contact_method,
+            &self.emergency_contact_name,
+            &self.emergency_contact_relationship,
+            &self.emergency_contact_phone,
+            &self.emergency_contact_email,
+            &self.contact_notes,
+            &self.payer_name,
+            &self.plan_name,
+            &self.member_id,
+            &self.group_number,
+            &self.coverage_type,
+            &self.coverage_status,
+            &self.coverage_notes,
+        ]
+        .iter()
+        .filter_map(|value| nonempty_option(value))
+        .collect()
+    }
+
+    fn value(&self, field: PatientAdminField) -> &str {
+        match field {
+            PatientAdminField::PrimaryPhone => &self.primary_phone,
+            PatientAdminField::SecondaryPhone => &self.secondary_phone,
+            PatientAdminField::Email => &self.email,
+            PatientAdminField::PreferredContactMethod => &self.preferred_contact_method,
+            PatientAdminField::EmergencyContactName => &self.emergency_contact_name,
+            PatientAdminField::EmergencyContactRelationship => &self.emergency_contact_relationship,
+            PatientAdminField::EmergencyContactPhone => &self.emergency_contact_phone,
+            PatientAdminField::EmergencyContactEmail => &self.emergency_contact_email,
+            PatientAdminField::ContactNotes => &self.contact_notes,
+            PatientAdminField::PayerName => &self.payer_name,
+            PatientAdminField::PlanName => &self.plan_name,
+            PatientAdminField::MemberId => &self.member_id,
+            PatientAdminField::GroupNumber => &self.group_number,
+            PatientAdminField::CoverageType => &self.coverage_type,
+            PatientAdminField::CoverageStatus => &self.coverage_status,
+            PatientAdminField::CoverageNotes => &self.coverage_notes,
+        }
+    }
+}
+
+fn patient_admin_metadata_for_client(client: &WorkspaceClient) -> PatientAdminMetadata {
+    PatientAdminMetadata::from_client(client)
+}
+
+fn patient_admin_metadata_for_draft(draft: &ClientDraft) -> PatientAdminMetadata {
+    PatientAdminMetadata::from_draft(draft)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SafetyField {
+    Category,
+    Name,
+    Reaction,
+    Severity,
+    Dose,
+    Route,
+    Frequency,
+    Status,
+    RecordedDate,
+    Notes,
+}
+
+impl SafetyField {
+    const ALL: [Self; 10] = [
+        Self::Category,
+        Self::Name,
+        Self::Reaction,
+        Self::Severity,
+        Self::Dose,
+        Self::Route,
+        Self::Frequency,
+        Self::Status,
+        Self::RecordedDate,
+        Self::Notes,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Category => "Category",
+            Self::Name => "Name",
+            Self::Reaction => "Reaction",
+            Self::Severity => "Severity",
+            Self::Dose => "Dose",
+            Self::Route => "Route",
+            Self::Frequency => "Frequency",
+            Self::Status => "Status",
+            Self::RecordedDate => "Date",
+            Self::Notes => "Notes",
+        }
+    }
+
+    fn index(self) -> usize {
+        Self::ALL
+            .iter()
+            .position(|field| *field == self)
+            .unwrap_or(0)
+    }
+
+    fn next(self) -> Self {
+        Self::ALL[(self.index() + 1) % Self::ALL.len()]
+    }
+
+    fn previous(self) -> Self {
+        let index = self.index();
+        Self::ALL[(index + Self::ALL.len() - 1) % Self::ALL.len()]
+    }
+}
+
+#[derive(Debug, Clone)]
+struct SafetyDraft {
+    active: bool,
+    id: Option<String>,
+    category: String,
+    name: String,
+    reaction: String,
+    severity: String,
+    dose: String,
+    route: String,
+    frequency: String,
+    status: String,
+    recorded_date: String,
+    notes: String,
+}
+
+impl Default for SafetyDraft {
+    fn default() -> Self {
+        Self {
+            active: false,
+            id: None,
+            category: "allergy".to_string(),
+            name: String::new(),
+            reaction: String::new(),
+            severity: String::new(),
+            dose: String::new(),
+            route: String::new(),
+            frequency: String::new(),
+            status: "active".to_string(),
+            recorded_date: String::new(),
+            notes: String::new(),
+        }
+    }
+}
+
+impl SafetyDraft {
+    fn start(&mut self, category: &str) {
+        *self = Self {
+            active: true,
+            category: normalized_safety_category_label(category).to_string(),
+            ..Self::default()
+        };
+    }
+
+    fn clear(&mut self) {
+        *self = Self::default();
+    }
+
+    fn is_active(&self) -> bool {
+        self.active
+    }
+
+    fn should_save(&self) -> bool {
+        self.active && !self.name.trim().is_empty()
+    }
+
+    fn value_mut(&mut self, field: SafetyField) -> &mut String {
+        match field {
+            SafetyField::Category => &mut self.category,
+            SafetyField::Name => &mut self.name,
+            SafetyField::Reaction => &mut self.reaction,
+            SafetyField::Severity => &mut self.severity,
+            SafetyField::Dose => &mut self.dose,
+            SafetyField::Route => &mut self.route,
+            SafetyField::Frequency => &mut self.frequency,
+            SafetyField::Status => &mut self.status,
+            SafetyField::RecordedDate => &mut self.recorded_date,
+            SafetyField::Notes => &mut self.notes,
+        }
+    }
+
+    fn value(&self, field: SafetyField) -> &str {
+        match field {
+            SafetyField::Category => &self.category,
+            SafetyField::Name => &self.name,
+            SafetyField::Reaction => &self.reaction,
+            SafetyField::Severity => &self.severity,
+            SafetyField::Dose => &self.dose,
+            SafetyField::Route => &self.route,
+            SafetyField::Frequency => &self.frequency,
+            SafetyField::Status => &self.status,
+            SafetyField::RecordedDate => &self.recorded_date,
+            SafetyField::Notes => &self.notes,
+        }
+    }
+
+    fn upsert_params(&self, client_id: String) -> WorkspacePatientSafetyItemUpsertParams {
+        WorkspacePatientSafetyItemUpsertParams {
+            id: self.id.clone(),
+            client_id,
+            category: self.category.trim().to_string(),
+            name: self.name.trim().to_string(),
+            reaction: nonempty_option(&self.reaction),
+            severity: nonempty_option(&self.severity),
+            dose: nonempty_option(&self.dose),
+            route: nonempty_option(&self.route),
+            frequency: nonempty_option(&self.frequency),
+            status: nonempty_option(&self.status),
+            recorded_date: nonempty_option(&self.recorded_date),
+            notes: self.notes.clone(),
+        }
+    }
+}
+
+fn normalized_safety_category_label(category: &str) -> &'static str {
+    match category.trim().to_ascii_lowercase().as_str() {
+        "medication" | "medications" | "med" | "meds" => "medication",
+        "condition" | "conditions" | "problem" | "problems" => "condition",
+        "precaution" | "precautions" | "restriction" | "restrictions" => "precaution",
+        _ => "allergy",
+    }
+}
+
+fn patient_search_matches(client: &WorkspaceClient, query: &str) -> bool {
+    let tokens = patient_search_tokens(query);
+    if tokens.is_empty() {
+        return true;
+    }
+    let values = patient_search_values(client);
+    let haystack = values
+        .iter()
+        .flat_map(|value| {
+            let normalized = normalize_patient_search_text(value);
+            let digits = digits_only(value);
+            if digits.is_empty() {
+                vec![normalized]
+            } else {
+                vec![normalized, digits]
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    tokens.iter().all(|token| haystack.contains(token))
+}
+
+fn patient_search_exact_match(client: &WorkspaceClient, query: &str) -> bool {
+    let query = normalize_patient_search_text(query);
+    if query.is_empty() {
+        return false;
+    }
+    patient_search_values(client)
+        .iter()
+        .any(|value| normalize_patient_search_text(value) == query || digits_only(value) == query)
+}
+
+fn patient_search_tokens(query: &str) -> Vec<String> {
+    let normalized = normalize_patient_search_text(query);
+    if normalized.is_empty() {
+        return Vec::new();
+    }
+    let digits = digits_only(query);
+    let mut tokens = normalized
+        .split_whitespace()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    if !digits.is_empty() && !tokens.iter().any(|token| token == &digits) {
+        tokens.push(digits);
+    }
+    tokens
+}
+
+fn patient_search_values(client: &WorkspaceClient) -> Vec<String> {
+    let mut values = vec![client.display_name.clone()];
+    if let Some(value) = &client.preferred_name {
+        values.push(value.clone());
+    }
+    if let Some(value) = &client.date_of_birth {
+        values.push(value.clone());
+    }
+    if let Some(value) = &client.external_id {
+        values.push(value.clone());
+    }
+    values.extend(patient_admin_metadata_for_client(client).search_values());
+    values
+}
+
+fn normalize_patient_search_text(value: &str) -> String {
+    value
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase()
+}
+
+fn digits_only(value: &str) -> String {
+    value.chars().filter(char::is_ascii_digit).collect()
+}
+
+fn epoch_millis_date_label(ms: i64) -> String {
+    DateTime::<Utc>::from_timestamp_millis(ms)
+        .map(|time| time.format("%Y-%m-%d").to_string())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn medical_note_group_label(note: &WorkspaceNote) -> &'static str {
+    let haystack = format!("{} {}", note.kind, note.title).to_ascii_lowercase();
+    if haystack.contains("addendum") {
+        "Addenda"
+    } else if haystack.contains("phone")
+        || haystack.contains("reception")
+        || haystack.contains("call")
+        || haystack.contains("front desk")
+        || haystack.contains("message")
+        || haystack.contains("portal")
+        || haystack.contains("email")
+        || haystack.contains("voicemail")
+    {
+        "Communication Notes"
+    } else if haystack.contains("coverage")
+        || haystack.contains("insurance")
+        || haystack.contains("authorization")
+        || haystack.contains("referral")
+        || haystack.contains("schedule")
+        || haystack.contains("billing")
+    {
+        "Administrative Notes"
+    } else {
+        "Medical Notes"
+    }
+}
+
+fn note_status_readable_label(status: &str) -> String {
+    match normalize_workspace_command(status).as_str() {
+        "" => "draft".to_string(),
+        "review" | "review pending" | "review_pending" | "needs review" => {
+            "needs review".to_string()
+        }
+        "unsigned" => "draft".to_string(),
+        value => value.replace('_', " "),
+    }
+}
+
+fn patient_file_group_label(document: &WorkspaceDocument) -> &'static str {
+    let haystack = format!(
+        "{} {} {} {} {} {} {}",
+        document.kind,
+        document.title,
+        document.local_path,
+        document.tags,
+        document.source_label,
+        document.detected_kind,
+        document.mime_type.as_deref().unwrap_or_default(),
+    )
+    .to_ascii_lowercase();
+    if haystack.contains("medicare")
+        || haystack.contains("insurance card")
+        || haystack.contains("payer card")
+    {
+        "Medicare / Insurance Cards"
+    } else if haystack.contains("id card")
+        || haystack.contains("driver")
+        || haystack.contains("license")
+        || haystack.contains("photo id")
+        || haystack.contains("patient id")
+        || haystack.contains("patient-id")
+        || haystack.contains("patient_id")
+        || haystack.contains("scanned id")
+    {
+        "ID Cards"
+    } else if haystack.contains("referral") {
+        "Referrals"
+    } else if haystack.contains(" edi")
+        || haystack.contains("edi ")
+        || haystack.contains(".edi")
+        || haystack.contains("-edi")
+        || haystack.contains("_edi")
+        || haystack.contains("x12")
+        || haystack.contains("837")
+        || haystack.contains("835")
+        || haystack.contains("999")
+    {
+        "EDI / X12 References"
+    } else if haystack.contains("spreadsheet")
+        || haystack.contains("csv")
+        || haystack.contains("xlsx")
+        || haystack.contains("xls")
+        || haystack.contains("excel")
+    {
+        "Spreadsheets"
+    } else if haystack.contains("audio")
+        || haystack.contains("dictation")
+        || haystack.contains(".mp3")
+        || haystack.contains(".wav")
+        || haystack.contains(".m4a")
+    {
+        "Audio / Dictation"
+    } else if haystack.contains("video")
+        || haystack.contains(".mp4")
+        || haystack.contains(".mov")
+        || haystack.contains(".webm")
+    {
+        "Video"
+    } else if haystack.contains("image")
+        || haystack.contains(".jpg")
+        || haystack.contains(".jpeg")
+        || haystack.contains(".png")
+        || haystack.contains(".heic")
+    {
+        "Images"
+    } else if haystack.contains("pdf") || haystack.contains(".pdf") {
+        "PDFs"
+    } else {
+        "Other Files"
+    }
+}
+
+fn patient_directory_row_lines(
+    client: &WorkspaceClient,
+    selected: bool,
+    active: bool,
+    exact: bool,
+) -> Vec<Line<'static>> {
+    let marker = if selected { "> " } else { "  " };
+    let selected_style = if selected {
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+    };
+    let active_label = if active { "  active" } else { "" };
+    let exact_label = if exact { "  exact" } else { "" };
+    let dob = compact_preview(client.date_of_birth.as_deref().unwrap_or("DOB blank"), 10);
+    let patient_id = compact_preview(client.external_id.as_deref().unwrap_or("MRN blank"), 14);
+    let identity = compact_preview(&client.display_name, 18);
+    vec![Line::from(vec![
+        Span::styled(marker.to_string(), selected_style),
+        Span::styled(identity, selected_style),
+        Span::raw("  "),
+        Span::styled(dob, Style::default().fg(Color::DarkGray)),
+        Span::raw("  "),
+        Span::styled(patient_id, Style::default().fg(Color::DarkGray)),
+        Span::styled(active_label.to_string(), Style::default().fg(Color::Green)),
+        Span::styled(exact_label.to_string(), Style::default().fg(Color::Yellow)),
+    ])]
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DocumentField {
+    Scope,
+    Kind,
+    Title,
+    LocalPath,
+    Tags,
+    SourceLabel,
+    Notes,
+}
+
+impl DocumentField {
+    const ALL: [Self; 7] = [
+        Self::Title,
+        Self::Scope,
+        Self::Kind,
+        Self::LocalPath,
+        Self::Tags,
+        Self::SourceLabel,
+        Self::Notes,
+    ];
+
+    fn index(self) -> usize {
+        Self::ALL
+            .iter()
+            .position(|field| *field == self)
+            .unwrap_or(0)
+    }
+
+    fn next(self) -> Self {
+        Self::ALL[(self.index() + 1) % Self::ALL.len()]
+    }
+
+    fn previous(self) -> Self {
+        let index = self.index();
+        Self::ALL[(index + Self::ALL.len() - 1) % Self::ALL.len()]
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Scope => "Scope",
+            Self::Kind => "Kind",
+            Self::Title => "Title",
+            Self::LocalPath => "Drop or paste local file path",
+            Self::Tags => "Tags",
+            Self::SourceLabel => "Source",
+            Self::Notes => "Notes",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct NoteDraft {
+    id: Option<String>,
+    encounter_id: Option<String>,
+    title: String,
+    body: String,
+    status: String,
+    current_revision: i64,
+}
+
+#[derive(Debug, Clone, Default)]
+struct DocumentDraft {
+    id: Option<String>,
+    active: bool,
+    scope: String,
+    title: String,
+    kind: String,
+    local_path: String,
+    tags: String,
+    source_label: String,
+    notes: String,
+    original_path: String,
+    reference_kind: String,
+    vault_path: String,
+    content_sha256: Option<String>,
+    thumbnail_path: String,
+    thumbnail_status: String,
+    thumbnail_mime_type: Option<String>,
+    intake_source: String,
+    imported_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DerivativeField {
+    Artifact,
+    Kind,
+    Title,
+    SourceMethod,
+    Tags,
+    Range,
+    Body,
+}
+
+impl DerivativeField {
+    const ALL: [Self; 7] = [
+        Self::Artifact,
+        Self::Kind,
+        Self::Title,
+        Self::SourceMethod,
+        Self::Tags,
+        Self::Range,
+        Self::Body,
+    ];
+
+    fn index(self) -> usize {
+        Self::ALL
+            .iter()
+            .position(|field| *field == self)
+            .unwrap_or(0)
+    }
+
+    fn next(self) -> Self {
+        Self::ALL[(self.index() + 1) % Self::ALL.len()]
+    }
+
+    fn previous(self) -> Self {
+        let index = self.index();
+        Self::ALL[(index + Self::ALL.len() - 1) % Self::ALL.len()]
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Artifact => "File reference",
+            Self::Kind => "Kind",
+            Self::Title => "Title",
+            Self::SourceMethod => "Source",
+            Self::Tags => "Tags",
+            Self::Range => "Range",
+            Self::Body => "Body",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct DerivativeDraft {
+    id: Option<String>,
+    active: bool,
+    document_id: String,
+    kind: String,
+    title: String,
+    body: String,
+    review_status: String,
+    source_method: String,
+    tags: String,
+    page_range: String,
+    timestamp_range: String,
+    segment_label: String,
+}
+
+impl Default for DerivativeDraft {
+    fn default() -> Self {
+        Self {
+            id: None,
+            active: false,
+            document_id: String::new(),
+            kind: "human annotation".to_string(),
+            title: String::new(),
+            body: String::new(),
+            review_status: "draft".to_string(),
+            source_method: "human_typed".to_string(),
+            tags: String::new(),
+            page_range: String::new(),
+            timestamp_range: String::new(),
+            segment_label: String::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClipField {
+    Derivative,
+    Kind,
+    Title,
+    SourceMethod,
+    Tags,
+    Segment,
+    LineRange,
+    Body,
+}
+
+impl ClipField {
+    const ALL: [Self; 8] = [
+        Self::Derivative,
+        Self::Kind,
+        Self::Title,
+        Self::SourceMethod,
+        Self::Tags,
+        Self::Segment,
+        Self::LineRange,
+        Self::Body,
+    ];
+
+    fn index(self) -> usize {
+        Self::ALL
+            .iter()
+            .position(|field| *field == self)
+            .unwrap_or(0)
+    }
+
+    fn next(self) -> Self {
+        Self::ALL[(self.index() + 1) % Self::ALL.len()]
+    }
+
+    fn previous(self) -> Self {
+        let index = self.index();
+        Self::ALL[(index + Self::ALL.len() - 1) % Self::ALL.len()]
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Derivative => "Reviewed text",
+            Self::Kind => "Kind",
+            Self::Title => "Title",
+            Self::SourceMethod => "Source",
+            Self::Tags => "Tags",
+            Self::Segment => "Segment",
+            Self::LineRange => "Lines",
+            Self::Body => "Excerpt",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ClipDraft {
+    id: Option<String>,
+    active: bool,
+    derivative_id: String,
+    document_id: String,
+    kind: String,
+    title: String,
+    body: String,
+    review_status: String,
+    source_method: String,
+    tags: String,
+    page_range: String,
+    timestamp_range: String,
+    line_range: String,
+    segment_label: String,
+}
+
+impl Default for ClipDraft {
+    fn default() -> Self {
+        Self {
+            id: None,
+            active: false,
+            derivative_id: String::new(),
+            document_id: String::new(),
+            kind: "generic excerpt".to_string(),
+            title: String::new(),
+            body: String::new(),
+            review_status: "draft".to_string(),
+            source_method: "human_selected".to_string(),
+            tags: String::new(),
+            page_range: String::new(),
+            timestamp_range: String::new(),
+            line_range: String::new(),
+            segment_label: String::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TaskField {
+    Title,
+    Details,
+    Kind,
+    Priority,
+    DueDate,
+    AssignedTo,
+}
+
+impl TaskField {
+    const ALL: [Self; 6] = [
+        Self::Title,
+        Self::Details,
+        Self::Kind,
+        Self::Priority,
+        Self::DueDate,
+        Self::AssignedTo,
+    ];
+
+    fn index(self) -> usize {
+        Self::ALL
+            .iter()
+            .position(|field| *field == self)
+            .unwrap_or(0)
+    }
+
+    fn next(self) -> Self {
+        Self::ALL[(self.index() + 1) % Self::ALL.len()]
+    }
+
+    fn previous(self) -> Self {
+        let index = self.index();
+        Self::ALL[(index + Self::ALL.len() - 1) % Self::ALL.len()]
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Title => "Title",
+            Self::Details => "Details",
+            Self::Kind => "Kind",
+            Self::Priority => "Priority",
+            Self::DueDate => "Due date",
+            Self::AssignedTo => "Assigned to",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct TaskDraft {
+    id: Option<String>,
+    active: bool,
+    title: String,
+    details: String,
+    kind: String,
+    priority: String,
+    due_date: String,
+    assigned_to: String,
+    status: WorkspaceTaskStatus,
+}
+
+impl Default for TaskDraft {
+    fn default() -> Self {
+        Self {
+            id: None,
+            active: false,
+            title: String::new(),
+            details: String::new(),
+            kind: "follow-up".to_string(),
+            priority: "normal".to_string(),
+            due_date: String::new(),
+            assigned_to: String::new(),
+            status: WorkspaceTaskStatus::Open,
+        }
+    }
+}
+
+impl TaskDraft {
+    fn start_new() -> Self {
+        Self {
+            active: true,
+            ..Self::default()
+        }
+    }
+
+    fn clear(&mut self) {
+        *self = Self::default();
+    }
+
+    fn is_active(&self) -> bool {
+        self.active
+    }
+
+    fn upsert_params(
+        &self,
+        client_id: String,
+        encounter_id: Option<String>,
+        note_id: Option<String>,
+        document_id: Option<String>,
+        priority: WorkspaceTaskPriority,
+    ) -> WorkspaceTaskUpsertParams {
+        WorkspaceTaskUpsertParams {
+            id: self.id.clone(),
+            client_id,
+            encounter_id,
+            note_id,
+            document_id,
+            title: self.title.trim().to_string(),
+            details: self.details.clone(),
+            kind: nonempty_or(&self.kind, "task"),
+            status: self.status,
+            priority,
+            due_date: nonempty_option(&self.due_date),
+            assigned_to: nonempty_option(&self.assigned_to),
+        }
+    }
+
+    fn value_mut(&mut self, field: TaskField) -> &mut String {
+        match field {
+            TaskField::Title => &mut self.title,
+            TaskField::Details => &mut self.details,
+            TaskField::Kind => &mut self.kind,
+            TaskField::Priority => &mut self.priority,
+            TaskField::DueDate => &mut self.due_date,
+            TaskField::AssignedTo => &mut self.assigned_to,
+        }
+    }
+
+    fn value(&self, field: TaskField) -> &str {
+        match field {
+            TaskField::Title => &self.title,
+            TaskField::Details => &self.details,
+            TaskField::Kind => &self.kind,
+            TaskField::Priority => &self.priority,
+            TaskField::DueDate => &self.due_date,
+            TaskField::AssignedTo => &self.assigned_to,
+        }
+    }
+}
+
+impl DocumentDraft {
+    fn from_document(document: &WorkspaceDocument) -> Self {
+        Self {
+            id: Some(document.id.clone()),
+            active: false,
+            scope: nonempty_or(&document.scope, "patient"),
+            title: document.title.clone(),
+            kind: document.kind.clone(),
+            local_path: document.local_path.clone(),
+            tags: document.tags.clone(),
+            source_label: document.source_label.clone(),
+            notes: document.notes.clone(),
+            original_path: document.original_path.clone(),
+            reference_kind: document.reference_kind.clone(),
+            vault_path: document.vault_path.clone(),
+            content_sha256: document.content_sha256.clone(),
+            thumbnail_path: document.thumbnail_path.clone(),
+            thumbnail_status: document.thumbnail_status.clone(),
+            thumbnail_mime_type: document.thumbnail_mime_type.clone(),
+            intake_source: document.intake_source.clone(),
+            imported_at: document.imported_at,
+        }
+    }
+
+    fn start_new() -> Self {
+        Self {
+            active: true,
+            scope: "patient".to_string(),
+            kind: "file".to_string(),
+            ..Self::default()
+        }
+    }
+
+    fn clear(&mut self) {
+        *self = Self::default();
+    }
+
+    fn is_active(&self) -> bool {
+        self.active
+    }
+
+    fn is_new_unsaved_draft(&self) -> bool {
+        self.id.is_none() && self.is_active()
+    }
+
+    fn should_save(&self) -> bool {
+        self.is_active()
+            && (!self.title.trim().is_empty()
+                || !self.local_path.trim().is_empty()
+                || self.id.is_some())
+    }
+
+    fn upsert_params(
+        &self,
+        client_id: String,
+        encounter_id: Option<String>,
+    ) -> WorkspaceDocumentUpsertParams {
+        let detected = detected_artifact_metadata(self);
+        WorkspaceDocumentUpsertParams {
+            id: self.id.clone(),
+            client_id,
+            encounter_id,
+            title: self.title.trim().to_string(),
+            kind: nonempty_or(&self.kind, &detected.detected_kind),
+            local_path: self.local_path.trim().to_string(),
+            notes: self.notes.clone(),
+            scope: normalize_artifact_scope(&self.scope, self, &detected),
+            detected_kind: detected.detected_kind,
+            mime_type: detected.mime_type,
+            file_size_bytes: detected.file_size_bytes,
+            modified_at: detected.modified_at,
+            sha256: detected.sha256,
+            tags: self.tags.clone(),
+            source_label: self.source_label.clone(),
+            existence_status: detected.existence_status,
+            metadata_json: detected.metadata_json,
+            original_path: nonempty_or(&self.original_path, &self.local_path),
+            reference_kind: nonempty_or(&self.reference_kind, "local_reference"),
+            vault_path: self.vault_path.clone(),
+            content_sha256: self.content_sha256.clone(),
+            thumbnail_path: self.thumbnail_path.clone(),
+            thumbnail_status: nonempty_or(&self.thumbnail_status, "none"),
+            thumbnail_mime_type: self.thumbnail_mime_type.clone(),
+            intake_source: self.intake_source.clone(),
+            imported_at: self.imported_at,
+        }
+    }
+
+    fn value_mut(&mut self, field: DocumentField) -> &mut String {
+        match field {
+            DocumentField::Scope => &mut self.scope,
+            DocumentField::Kind => &mut self.kind,
+            DocumentField::Title => &mut self.title,
+            DocumentField::LocalPath => &mut self.local_path,
+            DocumentField::Tags => &mut self.tags,
+            DocumentField::SourceLabel => &mut self.source_label,
+            DocumentField::Notes => &mut self.notes,
+        }
+    }
+
+    fn value(&self, field: DocumentField) -> &str {
+        match field {
+            DocumentField::Scope => &self.scope,
+            DocumentField::Kind => &self.kind,
+            DocumentField::Title => &self.title,
+            DocumentField::LocalPath => &self.local_path,
+            DocumentField::Tags => &self.tags,
+            DocumentField::SourceLabel => &self.source_label,
+            DocumentField::Notes => &self.notes,
+        }
+    }
+}
+
+impl DerivativeDraft {
+    fn start_new(document_id: String, kind: String, title: String) -> Self {
+        Self {
+            active: true,
+            document_id,
+            kind,
+            title,
+            ..Self::default()
+        }
+    }
+
+    fn clear(&mut self) {
+        *self = Self::default();
+    }
+
+    fn is_active(&self) -> bool {
+        self.active
+    }
+
+    fn should_save(&self) -> bool {
+        self.active
+            && (!self.title.trim().is_empty() || !self.body.trim().is_empty() || self.id.is_some())
+    }
+
+    fn range_value(&self) -> String {
+        let mut parts = Vec::new();
+        if !self.page_range.trim().is_empty() {
+            parts.push(format!("page {}", self.page_range.trim()));
+        }
+        if !self.timestamp_range.trim().is_empty() {
+            parts.push(format!("time {}", self.timestamp_range.trim()));
+        }
+        if !self.segment_label.trim().is_empty() {
+            parts.push(format!("segment {}", self.segment_label.trim()));
+        }
+        parts.join("; ")
+    }
+
+    fn value_mut(&mut self, field: DerivativeField) -> &mut String {
+        match field {
+            DerivativeField::Artifact => &mut self.document_id,
+            DerivativeField::Kind => &mut self.kind,
+            DerivativeField::Title => &mut self.title,
+            DerivativeField::SourceMethod => &mut self.source_method,
+            DerivativeField::Tags => &mut self.tags,
+            DerivativeField::Range => &mut self.segment_label,
+            DerivativeField::Body => &mut self.body,
+        }
+    }
+
+    fn value(&self, field: DerivativeField) -> &str {
+        match field {
+            DerivativeField::Artifact => &self.document_id,
+            DerivativeField::Kind => &self.kind,
+            DerivativeField::Title => &self.title,
+            DerivativeField::SourceMethod => &self.source_method,
+            DerivativeField::Tags => &self.tags,
+            DerivativeField::Range => &self.segment_label,
+            DerivativeField::Body => &self.body,
+        }
+    }
+
+    fn upsert_params(
+        &self,
+        client_id: String,
+        encounter_id: Option<String>,
+        note_id: Option<String>,
+    ) -> WorkspaceArtifactDerivativeUpsertParams {
+        WorkspaceArtifactDerivativeUpsertParams {
+            id: self.id.clone(),
+            document_id: self.document_id.trim().to_string(),
+            client_id,
+            encounter_id,
+            note_id,
+            kind: nonempty_or(&self.kind, "human annotation"),
+            title: self.title.trim().to_string(),
+            body: self.body.clone(),
+            review_status: nonempty_or(&self.review_status, "draft"),
+            source_method: nonempty_or(&self.source_method, "human_typed"),
+            page_range: self.page_range.clone(),
+            timestamp_range: self.timestamp_range.clone(),
+            segment_label: self.segment_label.clone(),
+            tags: self.tags.clone(),
+            metadata_json: json!({
+                "humanProvided": true,
+                "referenceOnly": true,
+                "safety": "human-provided derivative text; no automatic OCR/transcription/video/EDI analysis"
+            })
+            .to_string(),
+        }
+    }
+}
+
+impl ClipDraft {
+    fn start_new(derivative: &WorkspaceArtifactDerivative) -> Self {
+        let kind = default_clip_kind_for_derivative(&derivative.kind).to_string();
+        Self {
+            active: true,
+            derivative_id: derivative.id.clone(),
+            document_id: derivative.document_id.clone(),
+            kind: kind.clone(),
+            title: format!(
+                "{} for {}",
+                clip_kind_title(&kind),
+                compact_preview(&derivative.title, 38)
+            ),
+            page_range: derivative.page_range.clone(),
+            timestamp_range: derivative.timestamp_range.clone(),
+            segment_label: derivative.segment_label.clone(),
+            tags: derivative.tags.clone(),
+            ..Self::default()
+        }
+    }
+
+    fn clear(&mut self) {
+        *self = Self::default();
+    }
+
+    fn is_active(&self) -> bool {
+        self.active
+    }
+
+    fn should_save(&self) -> bool {
+        self.active
+            && (!self.title.trim().is_empty() || !self.body.trim().is_empty() || self.id.is_some())
+    }
+
+    fn range_value(&self) -> String {
+        let mut parts = Vec::new();
+        if !self.page_range.trim().is_empty() {
+            parts.push(format!("page {}", self.page_range.trim()));
+        }
+        if !self.timestamp_range.trim().is_empty() {
+            parts.push(format!("time {}", self.timestamp_range.trim()));
+        }
+        if !self.line_range.trim().is_empty() {
+            parts.push(format!("lines {}", self.line_range.trim()));
+        }
+        if !self.segment_label.trim().is_empty() {
+            parts.push(format!("segment {}", self.segment_label.trim()));
+        }
+        parts.join("; ")
+    }
+
+    fn value_mut(&mut self, field: ClipField) -> &mut String {
+        match field {
+            ClipField::Derivative => &mut self.derivative_id,
+            ClipField::Kind => &mut self.kind,
+            ClipField::Title => &mut self.title,
+            ClipField::SourceMethod => &mut self.source_method,
+            ClipField::Tags => &mut self.tags,
+            ClipField::Segment => &mut self.segment_label,
+            ClipField::LineRange => &mut self.line_range,
+            ClipField::Body => &mut self.body,
+        }
+    }
+
+    fn value(&self, field: ClipField) -> &str {
+        match field {
+            ClipField::Derivative => &self.derivative_id,
+            ClipField::Kind => &self.kind,
+            ClipField::Title => &self.title,
+            ClipField::SourceMethod => &self.source_method,
+            ClipField::Tags => &self.tags,
+            ClipField::Segment => &self.segment_label,
+            ClipField::LineRange => &self.line_range,
+            ClipField::Body => &self.body,
+        }
+    }
+
+    fn upsert_params(
+        &self,
+        client_id: String,
+        encounter_id: Option<String>,
+        note_id: Option<String>,
+    ) -> WorkspaceContextClipUpsertParams {
+        WorkspaceContextClipUpsertParams {
+            id: self.id.clone(),
+            derivative_id: self.derivative_id.trim().to_string(),
+            document_id: self.document_id.trim().to_string(),
+            client_id,
+            encounter_id,
+            note_id,
+            kind: nonempty_or(&self.kind, "generic excerpt"),
+            title: self.title.trim().to_string(),
+            body: self.body.clone(),
+            review_status: nonempty_or(&self.review_status, "draft"),
+            source_method: nonempty_or(&self.source_method, "human_selected"),
+            page_range: self.page_range.clone(),
+            timestamp_range: self.timestamp_range.clone(),
+            line_range: self.line_range.clone(),
+            segment_label: self.segment_label.clone(),
+            tags: self.tags.clone(),
+            metadata_json: json!({
+                "humanSelected": true,
+                "referenceOnly": true,
+                "safety": "human-selected excerpt; no automatic OCR/transcription/video/EDI analysis"
+            })
+            .to_string(),
+        }
+    }
+}
+
+impl NoteDraft {
+    fn from_note(note: &WorkspaceNote) -> Self {
+        Self {
+            id: Some(note.id.clone()),
+            encounter_id: note.encounter_id.clone(),
+            title: note.title.clone(),
+            body: note.body.clone(),
+            status: note.status.clone(),
+            current_revision: note.current_revision,
+        }
+    }
+
+    fn should_save(&self) -> bool {
+        self.id.is_some() || !self.title.trim().is_empty() || !self.body.trim().is_empty()
+    }
+
+    fn is_locked(&self) -> bool {
+        matches!(self.status.trim(), "signed" | "addended" | "locked")
+    }
+
+    fn status_label(&self) -> &str {
+        let status = self.status.trim();
+        if status.is_empty() { "draft" } else { status }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct AddendumDraft {
+    active: bool,
+    body: String,
+}
+
+impl AddendumDraft {
+    fn start(&mut self) {
+        self.active = true;
+        self.body.clear();
+    }
+
+    fn clear(&mut self) {
+        self.active = false;
+        self.body.clear();
+    }
+
+    fn should_save(&self) -> bool {
+        self.active && !self.body.trim().is_empty()
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct AgentRequestDraft {
+    active: bool,
+    body: String,
+}
+
+impl AgentRequestDraft {
+    fn start(&mut self) {
+        self.active = true;
+    }
+
+    fn clear(&mut self) {
+        self.active = false;
+        self.body.clear();
+    }
+
+    fn is_active(&self) -> bool {
+        self.active
+    }
+
+    fn has_text(&self) -> bool {
+        !self.body.trim().is_empty()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArtifactSelectionAction {
+    Select,
+    Deselect,
+    Toggle,
+    Inspect,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DerivativeSelectionAction {
+    Select,
+    Deselect,
+    Toggle,
+    Inspect,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClipSelectionAction {
+    Select,
+    Deselect,
+    Toggle,
+    Inspect,
+}
+
+#[derive(Debug, Clone, Default)]
+struct AgentResultDraft {
+    active: bool,
+    packet_id: Option<String>,
+    body: String,
+}
+
+impl AgentResultDraft {
+    fn start(&mut self, packet_id: String) {
+        self.active = true;
+        self.packet_id = Some(packet_id);
+        self.body.clear();
+    }
+
+    fn clear(&mut self) {
+        self.active = false;
+        self.packet_id = None;
+        self.body.clear();
+    }
+
+    fn is_active(&self) -> bool {
+        self.active
+    }
+
+    fn has_text(&self) -> bool {
+        !self.body.trim().is_empty()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct WorkspaceDashboard {
+    profile: WorkspaceProfile,
+    clients: Vec<WorkspaceClient>,
+    encounters: Vec<WorkspaceEncounter>,
+    notes: Vec<WorkspaceNote>,
+    documents: Vec<WorkspaceDocument>,
+    patient_safety_items: Vec<WorkspacePatientSafetyItem>,
+    practice_library_items: Vec<WorkspacePracticeLibraryItem>,
+    derivatives: Vec<WorkspaceArtifactDerivative>,
+    clips: Vec<WorkspaceContextClip>,
+    tasks: Vec<WorkspaceTask>,
+    signatures: Vec<WorkspaceNoteSignature>,
+    addenda: Vec<WorkspaceNoteAddendum>,
+    proposals: Vec<WorkspaceNoteProposal>,
+    audit_events: Vec<WorkspaceAuditEvent>,
+    client_index: usize,
+    encounter_index: usize,
+    note_index: usize,
+    practice_library_index: usize,
+    proposal_index: usize,
+    task_index: usize,
+    patient_files_tree_index: usize,
+    focus: WorkspaceFocus,
+    demographics_field: DemographicsField,
+    patient_admin_edit_mode: Option<PatientAdminEditMode>,
+    patient_admin_field: PatientAdminField,
+    safety_field: SafetyField,
+    document_field: DocumentField,
+    derivative_field: DerivativeField,
+    clip_field: ClipField,
+    task_field: TaskField,
+    workflow_section: MedicalWorkflowSection,
+    last_workflow_section: Option<MedicalWorkflowSection>,
+    workflow_scroll: u16,
+    agent_scroll: u16,
+    draft_client: ClientDraft,
+    draft_note: NoteDraft,
+    draft_document: DocumentDraft,
+    draft_safety: SafetyDraft,
+    derivative_draft: DerivativeDraft,
+    clip_draft: ClipDraft,
+    draft_task: TaskDraft,
+    addendum_draft: AddendumDraft,
+    agent_request: AgentRequestDraft,
+    agent_result: AgentResultDraft,
+    context_packets: Vec<WorkspaceContextPacket>,
+    agent_results: Vec<WorkspaceAgentResult>,
+    selected_agent_result_id: Option<String>,
+    agent_result_inspect: bool,
+    packet_replay_inspect: bool,
+    selected_artifact_ids: BTreeSet<String>,
+    selected_derivative_ids: BTreeSet<String>,
+    selected_clip_ids: BTreeSet<String>,
+    stale_context_notice: Option<String>,
+    inspected_artifact_id: Option<String>,
+    inspected_derivative_id: Option<String>,
+    inspected_clip_id: Option<String>,
+    practice_library_inspect: bool,
+    action_overlay_visible: bool,
+    command_input: Option<String>,
+    command_selection_index: usize,
+    patient_search_query: Option<String>,
+    patient_search_selection_index: usize,
+    patient_search_return_focus: Option<WorkspaceFocus>,
+    patient_search_return_section: Option<MedicalWorkflowSection>,
+    dirty: bool,
+    status: String,
+    store_description: Option<String>,
+}
+
+impl Default for WorkspaceDashboard {
+    fn default() -> Self {
+        Self {
+            profile: WorkspaceProfile::default(),
+            clients: Vec::new(),
+            encounters: Vec::new(),
+            notes: Vec::new(),
+            documents: Vec::new(),
+            patient_safety_items: Vec::new(),
+            practice_library_items: Vec::new(),
+            derivatives: Vec::new(),
+            clips: Vec::new(),
+            tasks: Vec::new(),
+            signatures: Vec::new(),
+            addenda: Vec::new(),
+            proposals: Vec::new(),
+            audit_events: Vec::new(),
+            client_index: 0,
+            encounter_index: 0,
+            note_index: 0,
+            practice_library_index: 0,
+            proposal_index: 0,
+            task_index: 0,
+            patient_files_tree_index: 0,
+            focus: WorkspaceFocus::Demographics,
+            demographics_field: DemographicsField::DisplayName,
+            patient_admin_edit_mode: None,
+            patient_admin_field: PatientAdminField::PrimaryPhone,
+            safety_field: SafetyField::Category,
+            document_field: DocumentField::Title,
+            derivative_field: DerivativeField::Title,
+            clip_field: ClipField::Title,
+            task_field: TaskField::Title,
+            workflow_section: MedicalWorkflowSection::Visit,
+            last_workflow_section: None,
+            workflow_scroll: 0,
+            agent_scroll: 0,
+            draft_client: ClientDraft::default(),
+            draft_note: NoteDraft::default(),
+            draft_document: DocumentDraft::default(),
+            draft_safety: SafetyDraft::default(),
+            derivative_draft: DerivativeDraft::default(),
+            clip_draft: ClipDraft::default(),
+            draft_task: TaskDraft::default(),
+            addendum_draft: AddendumDraft::default(),
+            agent_request: AgentRequestDraft::default(),
+            agent_result: AgentResultDraft::default(),
+            context_packets: Vec::new(),
+            agent_results: Vec::new(),
+            selected_agent_result_id: None,
+            agent_result_inspect: false,
+            packet_replay_inspect: false,
+            selected_artifact_ids: BTreeSet::new(),
+            selected_derivative_ids: BTreeSet::new(),
+            selected_clip_ids: BTreeSet::new(),
+            stale_context_notice: None,
+            inspected_artifact_id: None,
+            inspected_derivative_id: None,
+            inspected_clip_id: None,
+            practice_library_inspect: false,
+            action_overlay_visible: false,
+            command_input: None,
+            command_selection_index: 0,
+            patient_search_query: None,
+            patient_search_selection_index: 0,
+            patient_search_return_focus: None,
+            patient_search_return_section: None,
+            dirty: false,
+            status: "Workspace".to_string(),
+            store_description: None,
+        }
+    }
+}
+
+impl WorkspaceDashboard {
+    pub(crate) fn new(profile: WorkspaceProfile) -> Self {
+        let mut dashboard = Self {
+            profile,
+            ..Self::default()
+        };
+        dashboard.apply_profile_default_client_label();
+        if profile == WorkspaceProfile::Medical {
+            dashboard.open_patient_directory();
+        }
+        dashboard
+    }
+
+    pub(crate) fn set_profile(&mut self, profile: WorkspaceProfile) {
+        self.profile = profile;
+        self.apply_profile_default_client_label();
+        if profile == WorkspaceProfile::Medical {
+            self.open_patient_directory();
+        }
+    }
+
+    pub(crate) fn profile(&self) -> WorkspaceProfile {
+        self.profile
+    }
+
+    pub(crate) fn set_local_store_path(&mut self, path: impl AsRef<Path>) {
+        self.set_store_description(format!("Local SQLite: {}", path.as_ref().display()));
+    }
+
+    pub(crate) fn set_store_description(&mut self, description: impl Into<String>) {
+        self.store_description = Some(description.into());
+    }
+
+    pub(crate) fn set_status(&mut self, status: impl Into<String>) {
+        self.status = status.into();
+    }
+
+    pub(crate) async fn load(&mut self, app_server: &mut AppServerSession) -> Result<()> {
+        self.reload_preserving(app_server, None, None, None, None, None)
+            .await
+    }
+
+    pub(crate) async fn save(&mut self, app_server: &mut AppServerSession) -> Result<()> {
+        if self.draft_client.display_name.trim().is_empty() {
+            self.status = "Display name is required.".to_string();
+            return Ok(());
+        }
+
+        let client = app_server
+            .workspace_client_upsert(self.draft_client.upsert_params())
+            .await?
+            .client;
+        let client_id = client.id.clone();
+        self.draft_client = ClientDraft::from_client(&client);
+
+        if self.draft_safety.is_active() {
+            if !self.draft_safety.should_save() {
+                self.status = "Clinical safety name is required.".to_string();
+                return Ok(());
+            }
+            app_server
+                .workspace_patient_safety_item_upsert(
+                    self.draft_safety.upsert_params(client_id.clone()),
+                )
+                .await?;
+            self.draft_safety.clear();
+        }
+
+        let encounter_id = if self.profile == WorkspaceProfile::Medical {
+            if self.draft_note.should_save()
+                || self.draft_document.should_save()
+                || self.derivative_draft.should_save()
+                || self.clip_draft.should_save()
+            {
+                self.ensure_encounter_for_save(app_server, &client_id)
+                    .await?
+            } else {
+                self.active_encounter_id()
+            }
+        } else {
+            None
+        };
+        let mut saved_note_id = self.draft_note.id.clone();
+        let mut saved_document_id = self.draft_document.id.clone();
+        let mut saved_task_id = self.draft_task.id.clone();
+        if self.draft_note.should_save() && !self.draft_note.is_locked() {
+            let title = if self.draft_note.title.trim().is_empty() {
+                UNTITLED_NOTE_TITLE.to_string()
+            } else {
+                self.draft_note.title.trim().to_string()
+            };
+            let note = app_server
+                .workspace_note_upsert(WorkspaceNoteUpsertParams {
+                    id: self.draft_note.id.clone(),
+                    client_id: client_id.clone(),
+                    encounter_id: encounter_id.clone(),
+                    title,
+                    kind: "note".to_string(),
+                    body: self.draft_note.body.clone(),
+                    status: "draft".to_string(),
+                    summary: None,
+                })
+                .await?
+                .note;
+            saved_note_id = Some(note.id.clone());
+            self.draft_note = NoteDraft::from_note(&note);
+        } else if self.draft_note.is_locked() {
+            self.status =
+                "Signed notes are locked. Use addenda or proposals for changes.".to_string();
+        }
+
+        if self.draft_document.should_save() {
+            if self.draft_document.title.trim().is_empty()
+                || self.draft_document.local_path.trim().is_empty()
+            {
+                self.status = "Document title and local path are required.".to_string();
+                return Ok(());
+            }
+            let document = app_server
+                .workspace_document_upsert(
+                    self.draft_document
+                        .upsert_params(client_id.clone(), encounter_id.clone()),
+                )
+                .await?
+                .document;
+            saved_document_id = Some(document.id.clone());
+            self.draft_document = DocumentDraft::from_document(&document);
+        }
+
+        if self.derivative_draft.should_save() {
+            if self.derivative_draft.document_id.trim().is_empty() {
+                self.status =
+                    "Choose a saved file reference before saving reviewed text.".to_string();
+                return Ok(());
+            }
+            if self.derivative_draft.title.trim().is_empty()
+                || self.derivative_draft.body.trim().is_empty()
+            {
+                self.status = "Derivative title and body are required.".to_string();
+                return Ok(());
+            }
+            if !self
+                .documents
+                .iter()
+                .any(|document| document.id == self.derivative_draft.document_id)
+                && saved_document_id.as_deref() != Some(self.derivative_draft.document_id.as_str())
+            {
+                self.status =
+                    "Save file reference metadata before saving reviewed text.".to_string();
+                return Ok(());
+            }
+            app_server
+                .workspace_artifact_derivative_upsert(self.derivative_draft.upsert_params(
+                    client_id.clone(),
+                    encounter_id.clone(),
+                    saved_note_id.clone(),
+                ))
+                .await?;
+            self.derivative_draft.clear();
+        }
+
+        if self.clip_draft.should_save() {
+            if self.clip_draft.derivative_id.trim().is_empty() {
+                self.status =
+                    "Choose saved reviewed text before saving a context clip.".to_string();
+                return Ok(());
+            }
+            if self.clip_draft.title.trim().is_empty() || self.clip_draft.body.trim().is_empty() {
+                self.status = "Clip title and excerpt are required.".to_string();
+                return Ok(());
+            }
+            if !self
+                .derivatives
+                .iter()
+                .any(|derivative| derivative.id == self.clip_draft.derivative_id)
+            {
+                self.status = "Save reviewed text before saving a context clip.".to_string();
+                return Ok(());
+            }
+            app_server
+                .workspace_context_clip_upsert(self.clip_draft.upsert_params(
+                    client_id.clone(),
+                    encounter_id.clone(),
+                    saved_note_id.clone(),
+                ))
+                .await?;
+            self.clip_draft.clear();
+        }
+
+        if self.draft_task.is_active() {
+            if self.draft_task.title.trim().is_empty() {
+                self.status = "Job title is required.".to_string();
+                return Ok(());
+            }
+            let Some(priority) = workspace_task_priority_from_text(&self.draft_task.priority)
+            else {
+                self.status = "Job priority must be low, normal, high, or urgent.".to_string();
+                return Ok(());
+            };
+            let task = app_server
+                .workspace_task_upsert(self.draft_task.upsert_params(
+                    client_id.clone(),
+                    encounter_id.clone(),
+                    saved_note_id.clone(),
+                    saved_document_id.clone(),
+                    priority,
+                ))
+                .await?
+                .task;
+            saved_task_id = Some(task.id);
+            self.draft_task.clear();
+        }
+
+        self.reload_preserving(
+            app_server,
+            Some(client_id),
+            saved_note_id,
+            saved_document_id,
+            encounter_id,
+            saved_task_id,
+        )
+        .await?;
+        self.dirty = false;
+        self.status = "Saved.".to_string();
+        Ok(())
+    }
+
+    pub(crate) async fn select_client(
+        &mut self,
+        app_server: &mut AppServerSession,
+        index: usize,
+    ) -> Result<()> {
+        if index >= self.clients.len() {
+            self.start_new_client();
+            return Ok(());
+        }
+
+        let client_id = self.clients[index].id.clone();
+        self.reload_preserving(app_server, Some(client_id), None, None, None, None)
+            .await?;
+        Ok(())
+    }
+
+    pub(crate) async fn select_note(
+        &mut self,
+        app_server: &mut AppServerSession,
+        index: usize,
+    ) -> Result<()> {
+        if index >= self.notes.len() {
+            self.start_new_note();
+            return Ok(());
+        }
+
+        self.note_index = index;
+        self.draft_note = NoteDraft::from_note(&self.notes[self.note_index]);
+        self.select_encounter_for_active_note();
+        self.addendum_draft.clear();
+        self.load_active_note_details(app_server).await?;
+        Ok(())
+    }
+
+    pub(crate) async fn ensure_current_encounter(
+        &mut self,
+        app_server: &mut AppServerSession,
+    ) -> Result<()> {
+        let Some(client_id) = self.draft_client.id.clone() else {
+            self.status = "Save the patient before creating an encounter.".to_string();
+            return Ok(());
+        };
+        let encounter_id = self
+            .ensure_encounter_for_save(app_server, &client_id)
+            .await?;
+        self.reload_preserving(
+            app_server,
+            Some(client_id),
+            self.draft_note.id.clone(),
+            self.draft_document.id.clone(),
+            encounter_id,
+            self.selected_task_id(),
+        )
+        .await?;
+        self.status = "Encounter ready.".to_string();
+        Ok(())
+    }
+
+    pub(crate) async fn sign_current_note(
+        &mut self,
+        app_server: &mut AppServerSession,
+    ) -> Result<()> {
+        let Some(note_id) = self.draft_note.id.clone() else {
+            self.status = "Save the note before signing.".to_string();
+            return Ok(());
+        };
+        if self.dirty {
+            self.status = "Save changes before signing the note.".to_string();
+            return Ok(());
+        }
+        if self.draft_note.is_locked() {
+            self.status = "This note is already signed or addended.".to_string();
+            return Ok(());
+        }
+        app_server
+            .workspace_note_sign(WorkspaceNoteSignParams {
+                note_id: note_id.clone(),
+                signer: "local human".to_string(),
+            })
+            .await?;
+        self.reload_preserving(
+            app_server,
+            self.draft_client.id.clone(),
+            Some(note_id),
+            self.draft_document.id.clone(),
+            self.active_encounter_id(),
+            self.selected_task_id(),
+        )
+        .await?;
+        self.status = "Note signed and locked.".to_string();
+        Ok(())
+    }
+
+    pub(crate) async fn resolve_note_proposal(
+        &mut self,
+        app_server: &mut AppServerSession,
+        proposal_id: String,
+        accept: bool,
+    ) -> Result<()> {
+        app_server
+            .workspace_note_proposal_resolve(WorkspaceNoteProposalResolveParams {
+                proposal_id,
+                accept,
+            })
+            .await?;
+        let note_id = self.draft_note.id.clone();
+        self.reload_preserving(
+            app_server,
+            self.draft_client.id.clone(),
+            note_id,
+            self.draft_document.id.clone(),
+            self.active_encounter_id(),
+            self.selected_task_id(),
+        )
+        .await?;
+        self.status = if accept {
+            "Proposal accepted and note updated.".to_string()
+        } else {
+            "Proposal declined.".to_string()
+        };
+        Ok(())
+    }
+
+    pub(crate) async fn save_current_addendum(
+        &mut self,
+        app_server: &mut AppServerSession,
+        note_id: String,
+        base_revision: i64,
+        body: String,
+    ) -> Result<()> {
+        app_server
+            .workspace_note_addendum_create(WorkspaceNoteAddendumCreateParams {
+                note_id: note_id.clone(),
+                base_revision,
+                body,
+                author: "local human".to_string(),
+                source_thread_id: None,
+                source_turn_id: None,
+            })
+            .await?;
+        self.addendum_draft.clear();
+        self.reload_preserving(
+            app_server,
+            self.draft_client.id.clone(),
+            Some(note_id),
+            self.draft_document.id.clone(),
+            self.active_encounter_id(),
+            self.selected_task_id(),
+        )
+        .await?;
+        self.status = "Addendum saved.".to_string();
+        Ok(())
+    }
+
+    pub(crate) async fn update_task_status(
+        &mut self,
+        app_server: &mut AppServerSession,
+        task_id: String,
+        status: WorkspaceTaskStatus,
+    ) -> Result<()> {
+        let Some(client_id) = self.draft_client.id.clone() else {
+            self.status = "Save the patient before updating a job.".to_string();
+            return Ok(());
+        };
+        let response = app_server
+            .workspace_task_status_update(WorkspaceTaskStatusUpdateParams {
+                client_id: client_id.clone(),
+                task_id: task_id.clone(),
+                status,
+            })
+            .await?;
+        let Some(task) = response.task else {
+            self.status = "Selected job was not found for this patient.".to_string();
+            self.reload_preserving(
+                app_server,
+                Some(client_id),
+                self.draft_note.id.clone(),
+                self.draft_document.id.clone(),
+                self.active_encounter_id(),
+                None,
+            )
+            .await?;
+            return Ok(());
+        };
+        self.reload_preserving(
+            app_server,
+            Some(client_id),
+            self.draft_note.id.clone(),
+            self.draft_document.id.clone(),
+            self.active_encounter_id(),
+            Some(task.id),
+        )
+        .await?;
+        self.status = match status {
+            WorkspaceTaskStatus::Done => "Job marked done.".to_string(),
+            WorkspaceTaskStatus::Canceled => "Job canceled.".to_string(),
+            WorkspaceTaskStatus::Open
+            | WorkspaceTaskStatus::InProgress
+            | WorkspaceTaskStatus::Blocked => "Job status updated.".to_string(),
+        };
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn handle_key_event(&mut self, key_event: KeyEvent) -> WorkspaceDashboardAction {
+        self.handle_key_event_for_viewport(key_event, None)
+    }
+
+    pub(crate) fn handle_key_event_for_viewport(
+        &mut self,
+        key_event: KeyEvent,
+        viewport: Option<Rect>,
+    ) -> WorkspaceDashboardAction {
+        if !matches!(key_event.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+            return WorkspaceDashboardAction::Consumed;
+        }
+        let key_event = normalize_workspace_key_event(key_event);
+
+        if self.command_input.is_some() {
+            return self.handle_command_prompt_key_event(key_event);
+        }
+
+        if self.patient_search_query.is_some() {
+            return self.handle_patient_search_key_event(key_event);
+        }
+
+        if key_event.modifiers.contains(KeyModifiers::CONTROL) {
+            match key_event.code {
+                KeyCode::Char(c) if c.eq_ignore_ascii_case(&'s') => {
+                    return WorkspaceDashboardAction::Save;
+                }
+                KeyCode::Char(c) if c.eq_ignore_ascii_case(&'g') => {
+                    return WorkspaceDashboardAction::SendContextToAgent;
+                }
+                KeyCode::Char(c) if c.eq_ignore_ascii_case(&'w') => {
+                    return WorkspaceDashboardAction::Close;
+                }
+                _ => {}
+            }
+        }
+
+        if self.action_overlay_visible {
+            if key_event.code == KeyCode::Esc || workspace_help_shortcut_key(&key_event) {
+                self.action_overlay_visible = false;
+                return WorkspaceDashboardAction::Consumed;
+            }
+            if workspace_command_shortcut_key(&key_event) {
+                self.action_overlay_visible = false;
+                self.open_command_palette();
+                return WorkspaceDashboardAction::Consumed;
+            }
+            return WorkspaceDashboardAction::Consumed;
+        }
+
+        match key_event.code {
+            KeyCode::Esc => {
+                if self.exit_medical_edit_mode() {
+                    return WorkspaceDashboardAction::Consumed;
+                }
+                return WorkspaceDashboardAction::Close;
+            }
+            _ if workspace_help_shortcut_key(&key_event) && self.help_shortcut_opens() => {
+                self.action_overlay_visible = true;
+                return WorkspaceDashboardAction::Consumed;
+            }
+            _ if workspace_command_shortcut_key(&key_event)
+                && self.colon_opens_command_palette() =>
+            {
+                self.open_command_palette();
+                return WorkspaceDashboardAction::Consumed;
+            }
+            _ if patient_search_shortcut_key(&key_event)
+                && self.patient_search_shortcut_opens() =>
+            {
+                self.open_patient_search();
+                return WorkspaceDashboardAction::Consumed;
+            }
+            KeyCode::Tab => {
+                self.focus_next(viewport);
+                return WorkspaceDashboardAction::Consumed;
+            }
+            KeyCode::BackTab => {
+                self.focus_previous(viewport);
+                return WorkspaceDashboardAction::Consumed;
+            }
+            _ => {}
+        }
+
+        match self.focus {
+            WorkspaceFocus::Clients => self.handle_clients_key_event(key_event),
+            WorkspaceFocus::Notes => self.handle_notes_key_event(key_event),
+            WorkspaceFocus::Demographics => self.handle_demographics_key_event(key_event),
+            WorkspaceFocus::NoteTitle => self.handle_note_title_key_event(key_event),
+            WorkspaceFocus::NoteBody => self.handle_note_body_key_event(key_event),
+            WorkspaceFocus::Workflow => self.handle_workflow_key_event(key_event),
+            WorkspaceFocus::Agent => self.handle_agent_key_event(key_event),
+            WorkspaceFocus::PatientFiles => self.handle_patient_files_key_event(key_event),
+        }
+    }
+
+    pub(crate) fn handle_mouse_scroll(
+        &mut self,
+        scroll_event: MouseScrollEvent,
+        viewport: Option<Rect>,
+    ) -> WorkspaceDashboardAction {
+        let delta = match scroll_event.direction {
+            MouseScrollDirection::Up => -1,
+            MouseScrollDirection::Down => 1,
+        };
+        if self.command_input.is_some() {
+            self.move_command_selection(delta);
+            self.status = "Command palette scroll.".to_string();
+            return WorkspaceDashboardAction::Consumed;
+        }
+        let target = self.mouse_scroll_target(scroll_event, viewport);
+        match target {
+            WorkspaceFocus::Clients => self.request_client_delta(delta),
+            WorkspaceFocus::Notes => self.request_note_delta(delta),
+            WorkspaceFocus::PatientFiles => {
+                self.move_patient_file_tree_selection(delta);
+                WorkspaceDashboardAction::Consumed
+            }
+            WorkspaceFocus::Workflow => {
+                self.scroll_center_work_area(delta, 2);
+                WorkspaceDashboardAction::Consumed
+            }
+            WorkspaceFocus::Agent => {
+                self.scroll_agent_workpane(delta, 2);
+                WorkspaceDashboardAction::Consumed
+            }
+            WorkspaceFocus::Demographics | WorkspaceFocus::NoteTitle | WorkspaceFocus::NoteBody => {
+                self.status =
+                    "Trackpad scroll ignored in this editor; typing target unchanged.".to_string();
+                WorkspaceDashboardAction::Consumed
+            }
+        }
+    }
+
+    fn mouse_scroll_target(
+        &self,
+        scroll_event: MouseScrollEvent,
+        viewport: Option<Rect>,
+    ) -> WorkspaceFocus {
+        if self.profile != WorkspaceProfile::Medical {
+            return self.focus;
+        }
+        let Some(area) = viewport else {
+            return self.focus;
+        };
+        if WorkspaceLayoutMode::for_area(area) == WorkspaceLayoutMode::Large {
+            let areas = MedicalLargeAreas::new(area);
+            let point = (scroll_event.column, scroll_event.row);
+            if rect_contains(areas.clients, point) {
+                return WorkspaceFocus::Clients;
+            }
+            if rect_contains(areas.notes, point) {
+                return WorkspaceFocus::Notes;
+            }
+            if rect_contains(areas.patient_files, point) {
+                return WorkspaceFocus::PatientFiles;
+            }
+            if rect_contains(areas.agent, point) {
+                return WorkspaceFocus::Agent;
+            }
+            if rect_contains(areas.demographics, point) {
+                return WorkspaceFocus::Demographics;
+            }
+            if rect_contains(areas.note_title, point) {
+                return WorkspaceFocus::NoteTitle;
+            }
+            if rect_contains(areas.note_body, point) {
+                return WorkspaceFocus::NoteBody;
+            }
+            if rect_contains(areas.active_work, point) {
+                return WorkspaceFocus::Workflow;
+            }
+            return self.focus;
+        }
+        let areas = WorkspaceAreas::new(area);
+        let point = (scroll_event.column, scroll_event.row);
+        if rect_contains(areas.clients, point) {
+            return WorkspaceFocus::Clients;
+        }
+        if rect_contains(areas.notes, point) {
+            return WorkspaceFocus::Notes;
+        }
+        if areas.patient_files.width > 0
+            && areas.patient_files.height > 0
+            && rect_contains(areas.patient_files, point)
+        {
+            return WorkspaceFocus::PatientFiles;
+        }
+        if rect_contains(areas.demographics, point) {
+            return WorkspaceFocus::Demographics;
+        }
+        if rect_contains(areas.note_title, point) {
+            return WorkspaceFocus::NoteTitle;
+        }
+        if rect_contains(areas.note_body, point) {
+            return WorkspaceFocus::NoteBody;
+        }
+        if rect_contains(areas.workflow, point) {
+            if self.focus == WorkspaceFocus::Agent && self.workflow_section_uses_agent_workpane() {
+                return WorkspaceFocus::Agent;
+            }
+            if self.focus == WorkspaceFocus::PatientFiles && areas.patient_files.width == 0 {
+                return WorkspaceFocus::PatientFiles;
+            }
+            return WorkspaceFocus::Workflow;
+        }
+        self.focus
+    }
+
+    fn scroll_center_work_area(&mut self, delta: isize, amount: u16) {
+        if delta.is_negative() {
+            self.workflow_scroll = self.workflow_scroll.saturating_sub(amount);
+            self.status = "Scrolled center work area up.".to_string();
+        } else {
+            self.workflow_scroll = self.workflow_scroll.saturating_add(amount);
+            self.status = "Scrolled center work area down.".to_string();
+        }
+    }
+
+    fn scroll_agent_workpane(&mut self, delta: isize, amount: u16) {
+        if delta.is_negative() {
+            self.agent_scroll = self.agent_scroll.saturating_sub(amount);
+            self.status = "Scrolled Agent Workpane up.".to_string();
+        } else {
+            self.agent_scroll = self.agent_scroll.saturating_add(amount);
+            self.status = "Scrolled Agent Workpane down.".to_string();
+        }
+    }
+
+    fn colon_opens_command_palette(&self) -> bool {
+        match self.focus {
+            WorkspaceFocus::Clients | WorkspaceFocus::Notes => true,
+            WorkspaceFocus::Demographics | WorkspaceFocus::NoteTitle | WorkspaceFocus::NoteBody => {
+                self.profile != WorkspaceProfile::Medical && !self.dirty
+            }
+            WorkspaceFocus::Workflow => self.workflow_colon_opens_command_palette(),
+            WorkspaceFocus::Agent => self.agent_colon_opens_command_palette(),
+            WorkspaceFocus::PatientFiles => true,
+        }
+    }
+
+    fn help_shortcut_opens(&self) -> bool {
+        !matches!(
+            (self.profile, self.focus),
+            (
+                WorkspaceProfile::Medical,
+                WorkspaceFocus::Demographics | WorkspaceFocus::NoteTitle | WorkspaceFocus::NoteBody
+            )
+        )
+    }
+
+    fn agent_colon_opens_command_palette(&self) -> bool {
+        if self.agent_result.is_active() {
+            return self.agent_result.body.trim().is_empty();
+        }
+        if self.agent_request.is_active() {
+            return self.agent_request.body.trim().is_empty();
+        }
+        true
+    }
+
+    fn workflow_colon_opens_command_palette(&self) -> bool {
+        if self.draft_document.is_active() {
+            return self
+                .draft_document
+                .value(self.document_field)
+                .trim()
+                .is_empty();
+        }
+        if self.draft_task.is_active() {
+            return self.draft_task.value(self.task_field).trim().is_empty();
+        }
+        if self.draft_safety.is_active() {
+            return self.draft_safety.value(self.safety_field).trim().is_empty();
+        }
+        if self.derivative_draft.is_active() {
+            return self
+                .derivative_draft
+                .value(self.derivative_field)
+                .trim()
+                .is_empty();
+        }
+        if self.clip_draft.is_active() {
+            return self.clip_draft.value(self.clip_field).trim().is_empty();
+        }
+        if self.addendum_draft.active {
+            return self.addendum_draft.body.trim().is_empty();
+        }
+        if self.agent_request.is_active() {
+            return self.agent_request.body.trim().is_empty();
+        }
+        if self.agent_result.is_active() {
+            return self.agent_result.body.trim().is_empty();
+        }
+        true
+    }
+
+    fn focus_next(&mut self, viewport: Option<Rect>) {
+        self.focus_relative(1, viewport);
+    }
+
+    fn focus_previous(&mut self, viewport: Option<Rect>) {
+        self.focus_relative(-1, viewport);
+    }
+
+    fn focus_relative(&mut self, delta: isize, viewport: Option<Rect>) {
+        if self.profile == WorkspaceProfile::Medical {
+            self.focus_relative_medical(delta, viewport);
+            return;
+        }
+        let mut next = self.focus;
+        for _ in 0..7 {
+            next = if delta.is_negative() {
+                next.previous()
+            } else {
+                next.next()
+            };
+            if next != WorkspaceFocus::PatientFiles || self.can_focus_patient_files_sidepane() {
+                if next == WorkspaceFocus::Agent {
+                    continue;
+                }
+                if next == WorkspaceFocus::PatientFiles {
+                    self.focus_patient_files_tree();
+                    return;
+                }
+                self.focus = next;
+                self.status = match next {
+                    WorkspaceFocus::PatientFiles => unreachable!(),
+                    WorkspaceFocus::Workflow => {
+                        format!("Focused {} workflow.", self.workflow_section.status_label())
+                    }
+                    WorkspaceFocus::Clients => "Focused patient directory.".to_string(),
+                    WorkspaceFocus::Notes => "Focused clinical notes.".to_string(),
+                    WorkspaceFocus::Demographics => "Focused patient demographics.".to_string(),
+                    WorkspaceFocus::NoteTitle => "Focused note title.".to_string(),
+                    WorkspaceFocus::NoteBody => "Focused note body.".to_string(),
+                    WorkspaceFocus::Agent => unreachable!(),
+                };
+                return;
+            }
+        }
+    }
+
+    fn focus_relative_medical(&mut self, delta: isize, viewport: Option<Rect>) {
+        let order = self.medical_focus_order_for_viewport(viewport);
+        let current_slot = self.current_medical_pane_slot();
+        let current = order
+            .iter()
+            .position(|slot| *slot == current_slot)
+            .unwrap_or(0);
+        let mut index = current;
+        for _ in 0..order.len() {
+            index = if delta.is_negative() {
+                index.checked_sub(1).unwrap_or(order.len() - 1)
+            } else {
+                (index + 1) % order.len()
+            };
+            let next = order[index];
+            if next == MedicalPaneSlot::PatientFileTree && !self.can_focus_patient_files_sidepane()
+            {
+                continue;
+            }
+            self.focus_medical_pane_slot(next);
+            return;
+        }
+    }
+
+    fn medical_focus_order_for_viewport(&self, viewport: Option<Rect>) -> Vec<MedicalPaneSlot> {
+        let Some(area) = viewport else {
+            return self.medical_full_focus_order();
+        };
+        match WorkspaceLayoutMode::for_area(area) {
+            WorkspaceLayoutMode::Large | WorkspaceLayoutMode::Medium => {
+                self.medical_full_focus_order()
+            }
+            WorkspaceLayoutMode::Compact => vec![
+                MedicalPaneSlot::PatientDirectory,
+                MedicalPaneSlot::ChartTree,
+                MedicalPaneSlot::CenterWorkArea,
+                MedicalPaneSlot::AgentWorkpane,
+                MedicalPaneSlot::PatientDemographics,
+                MedicalPaneSlot::NoteTitle,
+                MedicalPaneSlot::NoteBody,
+            ],
+            WorkspaceLayoutMode::Tiny => vec![
+                MedicalPaneSlot::PatientDirectory,
+                MedicalPaneSlot::ChartTree,
+                MedicalPaneSlot::CenterWorkArea,
+            ],
+        }
+    }
+
+    fn medical_full_focus_order(&self) -> Vec<MedicalPaneSlot> {
+        vec![
+            MedicalPaneSlot::PatientDirectory,
+            MedicalPaneSlot::ChartTree,
+            MedicalPaneSlot::PatientFileTree,
+            MedicalPaneSlot::PatientDemographics,
+            MedicalPaneSlot::NoteTitle,
+            MedicalPaneSlot::NoteBody,
+            MedicalPaneSlot::CenterWorkArea,
+            MedicalPaneSlot::AgentWorkpane,
+        ]
+    }
+
+    fn current_medical_pane_slot(&self) -> MedicalPaneSlot {
+        match self.focus {
+            WorkspaceFocus::Clients => MedicalPaneSlot::PatientDirectory,
+            WorkspaceFocus::Notes => MedicalPaneSlot::ChartTree,
+            WorkspaceFocus::PatientFiles => MedicalPaneSlot::PatientFileTree,
+            WorkspaceFocus::Agent => MedicalPaneSlot::AgentWorkpane,
+            WorkspaceFocus::Demographics => MedicalPaneSlot::PatientDemographics,
+            WorkspaceFocus::NoteTitle => MedicalPaneSlot::NoteTitle,
+            WorkspaceFocus::NoteBody => MedicalPaneSlot::NoteBody,
+            WorkspaceFocus::Workflow => MedicalPaneSlot::CenterWorkArea,
+        }
+    }
+
+    fn focus_medical_pane_slot(&mut self, slot: MedicalPaneSlot) {
+        match slot {
+            MedicalPaneSlot::PatientDirectory => {
+                self.focus = WorkspaceFocus::Clients;
+                self.status = "Focused patient directory.".to_string();
+            }
+            MedicalPaneSlot::ChartTree => {
+                self.focus = WorkspaceFocus::Notes;
+                self.status = "Focused Patient Notes.".to_string();
+            }
+            MedicalPaneSlot::PatientFileTree => self.focus_patient_files_tree(),
+            MedicalPaneSlot::PatientDemographics => self.focus_patient_demographics(),
+            MedicalPaneSlot::NoteTitle => self.focus_note_title(),
+            MedicalPaneSlot::NoteBody => self.focus_note_body(),
+            MedicalPaneSlot::CenterWorkArea => self.focus_medical_center_work_area(),
+            MedicalPaneSlot::AgentWorkpane => self.focus_medical_agent_workpane(),
+        }
+    }
+
+    fn focus_patient_demographics(&mut self) {
+        self.focus = WorkspaceFocus::Demographics;
+        self.status = "Focused patient demographics.".to_string();
+    }
+
+    fn focus_note_title(&mut self) {
+        self.focus = WorkspaceFocus::NoteTitle;
+        self.status = "Focused note title.".to_string();
+    }
+
+    fn focus_note_body(&mut self) {
+        self.focus = WorkspaceFocus::NoteBody;
+        self.status = "Focused note body.".to_string();
+    }
+
+    fn focus_medical_center_work_area(&mut self) {
+        if !self.workflow_section_uses_agent_workpane()
+            && self.workflow_section != MedicalWorkflowSection::Visit
+        {
+            self.focus = WorkspaceFocus::Workflow;
+            self.status = format!("Focused {} detail.", self.workflow_section.status_label());
+            return;
+        }
+        if self.workflow_section_uses_agent_workpane() {
+            self.set_workflow_section(MedicalWorkflowSection::Visit);
+        }
+        self.focus = WorkspaceFocus::Workflow;
+        self.status = "Focused Today's Visit.".to_string();
+    }
+
+    fn focus_medical_agent_workpane(&mut self) {
+        self.focus = WorkspaceFocus::Agent;
+        if self.agent_result.is_active() {
+            self.set_workflow_section(MedicalWorkflowSection::AgentInbox);
+            self.agent_scroll = 0;
+            self.status = "Focused returned agent work draft.".to_string();
+            return;
+        }
+        self.set_workflow_section(MedicalWorkflowSection::AgentRequest);
+        self.agent_scroll = 0;
+        self.agent_request.start();
+        self.status =
+            "Agent input ready. Type local instructions/context; review packet before Ctrl-G."
+                .to_string();
+    }
+
+    fn can_focus_patient_files_sidepane(&self) -> bool {
+        self.profile == WorkspaceProfile::Medical
+            && !self.patient_file_tree_blocked_by_active_editor()
+    }
+
+    fn open_command_palette(&mut self) {
+        self.action_overlay_visible = false;
+        self.command_input = Some(String::new());
+        self.command_selection_index = 0;
+        self.status = "Workspace command palette.".to_string();
+    }
+
+    fn open_patient_directory(&mut self) {
+        self.patient_search_query = None;
+        self.patient_search_selection_index = 0;
+        self.patient_search_return_focus = None;
+        self.patient_search_return_section = None;
+        self.patient_admin_edit_mode = None;
+        self.action_overlay_visible = false;
+        self.command_input = None;
+        self.focus = WorkspaceFocus::Clients;
+        self.status = "Patient directory.".to_string();
+    }
+
+    fn open_patient_search(&mut self) {
+        if self.profile != WorkspaceProfile::Medical {
+            self.open_command_palette();
+            return;
+        }
+        self.patient_search_query = Some(String::new());
+        self.patient_search_selection_index = 0;
+        self.patient_search_return_focus = Some(self.focus);
+        self.patient_search_return_section = Some(self.workflow_section);
+        self.patient_admin_edit_mode = None;
+        self.action_overlay_visible = false;
+        self.command_input = None;
+        self.focus = WorkspaceFocus::Clients;
+        self.status =
+            "Patient search. Type a name, DOB, Patient ID / MRN, contact, or coverage ID."
+                .to_string();
+    }
+
+    fn open_patient_admin_editor(&mut self, mode: PatientAdminEditMode, field: PatientAdminField) {
+        self.patient_search_query = None;
+        self.patient_search_selection_index = 0;
+        self.patient_search_return_focus = None;
+        self.patient_search_return_section = None;
+        self.action_overlay_visible = false;
+        self.command_input = None;
+        self.patient_admin_edit_mode = Some(mode);
+        self.patient_admin_field = if field.mode() == mode {
+            field
+        } else {
+            mode.first_field()
+        };
+        self.focus = WorkspaceFocus::Demographics;
+        self.status = match mode {
+            PatientAdminEditMode::Contact => {
+                "Editing patient demographics and emergency contact fields. Ctrl-S saves."
+                    .to_string()
+            }
+            PatientAdminEditMode::Coverage => {
+                "Editing coverage fields. Member ID stays under coverage; Ctrl-S saves.".to_string()
+            }
+        };
+    }
+
+    fn close_patient_search(&mut self) {
+        self.patient_search_query = None;
+        self.patient_search_selection_index = 0;
+        if let Some(section) = self.patient_search_return_section.take() {
+            self.workflow_section = section;
+        }
+        if let Some(focus) = self.patient_search_return_focus.take() {
+            self.focus = focus;
+        }
+        self.status = "Returned to patient chart.".to_string();
+    }
+
+    fn patient_search_shortcut_opens(&self) -> bool {
+        if self.profile != WorkspaceProfile::Medical {
+            return false;
+        }
+        match self.focus {
+            WorkspaceFocus::Clients | WorkspaceFocus::Notes => true,
+            WorkspaceFocus::Demographics | WorkspaceFocus::NoteTitle | WorkspaceFocus::NoteBody => {
+                false
+            }
+            WorkspaceFocus::Workflow => self.workflow_colon_opens_command_palette(),
+            WorkspaceFocus::Agent => self.agent_colon_opens_command_palette(),
+            WorkspaceFocus::PatientFiles => true,
+        }
+    }
+
+    fn locked_note_editor_has_focus(&self) -> bool {
+        self.draft_note.is_locked()
+            && matches!(
+                self.focus,
+                WorkspaceFocus::NoteTitle | WorkspaceFocus::NoteBody
+            )
+    }
+
+    fn locked_note_read_only_status(&self) -> String {
+        "Signed note is read-only. Use :addendum start or returned-work proposals for changes."
+            .to_string()
+    }
+
+    fn exit_medical_edit_mode(&mut self) -> bool {
+        if self.profile != WorkspaceProfile::Medical {
+            return false;
+        }
+        if self.patient_admin_edit_mode.take().is_some() {
+            self.focus = WorkspaceFocus::Demographics;
+            self.status = "Closed admin field editor; patient chart remains open.".to_string();
+            return true;
+        }
+        if matches!(
+            self.focus,
+            WorkspaceFocus::NoteTitle | WorkspaceFocus::NoteBody
+        ) && !self.draft_note.is_locked()
+        {
+            self.focus = WorkspaceFocus::Notes;
+            self.status = "Left note editor; patient chart remains open.".to_string();
+            return true;
+        }
+        if self.focus == WorkspaceFocus::Workflow && self.workflow_section_has_active_editor() {
+            self.status =
+                "Active chart draft still open; save or clear it before closing dashboard."
+                    .to_string();
+            return true;
+        }
+        if self.focus == WorkspaceFocus::Agent && self.agent_result.is_active() {
+            self.status =
+                "Returned work draft still open; save or clear it before closing dashboard."
+                    .to_string();
+            return true;
+        }
+        if self.focus == WorkspaceFocus::Agent && self.agent_request.is_active() {
+            self.focus = WorkspaceFocus::Workflow;
+            self.set_workflow_section(MedicalWorkflowSection::Visit);
+            self.status =
+                "Left agent input draft; request remains local until packet review.".to_string();
+            return true;
+        }
+        false
+    }
+
+    fn patient_search_result_indices(&self) -> Vec<usize> {
+        let query = self.patient_search_query.as_deref().unwrap_or_default();
+        self.clients
+            .iter()
+            .enumerate()
+            .filter_map(|(index, client)| {
+                (client.archived_at.is_none() && patient_search_matches(client, query))
+                    .then_some(index)
+            })
+            .collect()
+    }
+
+    fn visible_patient_directory_indices(&self) -> Vec<usize> {
+        self.clients
+            .iter()
+            .enumerate()
+            .filter_map(|(index, client)| client.archived_at.is_none().then_some(index))
+            .collect()
+    }
+
+    fn selected_visible_patient_position(&self, visible_indices: &[usize]) -> usize {
+        if visible_indices.is_empty() {
+            return 0;
+        }
+        if let Some(position) = visible_indices
+            .iter()
+            .position(|index| *index == self.client_index)
+        {
+            return position;
+        }
+        if let Some(active_id) = self.draft_client.id.as_deref()
+            && let Some(position) = visible_indices.iter().position(|index| {
+                self.clients
+                    .get(*index)
+                    .is_some_and(|client| client.id == active_id)
+            })
+        {
+            return position;
+        }
+        0
+    }
+
+    fn selected_patient_search_index(&self, result_count: usize) -> usize {
+        if result_count == 0 {
+            0
+        } else {
+            self.patient_search_selection_index
+                .min(result_count.saturating_sub(1))
+        }
+    }
+
+    fn move_patient_search_selection(&mut self, delta: isize) {
+        let results = self.patient_search_result_indices();
+        self.patient_search_selection_index = apply_delta(
+            self.selected_patient_search_index(results.len()),
+            results.len(),
+            delta,
+        );
+    }
+
+    fn handle_patient_search_key_event(&mut self, key_event: KeyEvent) -> WorkspaceDashboardAction {
+        match key_event.code {
+            KeyCode::Esc => {
+                self.close_patient_search();
+                WorkspaceDashboardAction::Consumed
+            }
+            KeyCode::Up => {
+                self.move_patient_search_selection(-1);
+                WorkspaceDashboardAction::Consumed
+            }
+            KeyCode::Down => {
+                self.move_patient_search_selection(1);
+                WorkspaceDashboardAction::Consumed
+            }
+            KeyCode::Backspace => {
+                if let Some(query) = self.patient_search_query.as_mut() {
+                    query.pop();
+                }
+                self.patient_search_selection_index = 0;
+                WorkspaceDashboardAction::Consumed
+            }
+            KeyCode::Enter => {
+                let results = self.patient_search_result_indices();
+                if results.is_empty() {
+                    if self.dirty || self.has_unsaved_addendum_draft() {
+                        self.status = "Save before creating or switching patients.".to_string();
+                    } else {
+                        self.patient_search_query = None;
+                        self.patient_search_selection_index = 0;
+                        self.patient_search_return_focus = None;
+                        self.patient_search_return_section = None;
+                        self.start_new_client();
+                        self.status = "New patient draft.".to_string();
+                    }
+                    return WorkspaceDashboardAction::Consumed;
+                }
+                if self.dirty || self.has_unsaved_addendum_draft() {
+                    self.status = "Save before switching patients.".to_string();
+                    return WorkspaceDashboardAction::Consumed;
+                }
+                let selected_index = results[self.selected_patient_search_index(results.len())];
+                self.patient_search_query = None;
+                self.patient_search_selection_index = 0;
+                self.patient_search_return_focus = None;
+                self.patient_search_return_section = None;
+                self.focus_workflow_section(MedicalWorkflowSection::Visit);
+                self.status = "Opening selected patient chart.".to_string();
+                WorkspaceDashboardAction::SelectClient(selected_index)
+            }
+            KeyCode::Char(c) => {
+                if let Some(query) = self.patient_search_query.as_mut() {
+                    query.push(c);
+                }
+                self.patient_search_selection_index = 0;
+                WorkspaceDashboardAction::Consumed
+            }
+            _ => WorkspaceDashboardAction::Consumed,
+        }
+    }
+
+    fn handle_command_prompt_key_event(&mut self, key_event: KeyEvent) -> WorkspaceDashboardAction {
+        match key_event.code {
+            KeyCode::Esc => {
+                self.command_input = None;
+                self.command_selection_index = 0;
+                self.status = "Workspace command canceled.".to_string();
+                WorkspaceDashboardAction::Consumed
+            }
+            KeyCode::Up => {
+                self.move_command_selection(-1);
+                WorkspaceDashboardAction::Consumed
+            }
+            KeyCode::Down => {
+                self.move_command_selection(1);
+                WorkspaceDashboardAction::Consumed
+            }
+            KeyCode::Enter => {
+                let selected_action_id = self.selected_command_action_id();
+                let command = self.command_input.take().unwrap_or_default();
+                let normalized_command = normalize_workspace_command(&command);
+                let exact_action_id = action_for_command(self.profile, &normalized_command);
+                let is_artifact_selection_command =
+                    parse_artifact_selection_command(&normalized_command).is_some();
+                let is_derivative_selection_command =
+                    parse_derivative_selection_command(&normalized_command).is_some();
+                let is_clip_selection_command =
+                    parse_clip_selection_command(&normalized_command).is_some();
+                self.command_selection_index = 0;
+                if exact_action_id.is_some()
+                    || is_artifact_selection_command
+                    || is_derivative_selection_command
+                    || is_clip_selection_command
+                {
+                    self.execute_workspace_command(&command)
+                } else if let Some(action_id) = selected_action_id {
+                    self.execute_workspace_action(action_id)
+                } else {
+                    self.execute_workspace_command(&command)
+                }
+            }
+            KeyCode::Backspace => {
+                if let Some(command_input) = self.command_input.as_mut() {
+                    command_input.pop();
+                }
+                self.command_selection_index = 0;
+                WorkspaceDashboardAction::Consumed
+            }
+            KeyCode::Char(c) => {
+                if let Some(command_input) = self.command_input.as_mut() {
+                    command_input.push(c);
+                }
+                self.command_selection_index = 0;
+                WorkspaceDashboardAction::Consumed
+            }
+            _ => WorkspaceDashboardAction::Consumed,
+        }
+    }
+
+    pub(crate) fn execute_workspace_command(&mut self, command: &str) -> WorkspaceDashboardAction {
+        let normalized = normalize_workspace_command(command);
+        if self.profile == WorkspaceProfile::Medical
+            && matches!(normalized.as_str(), "workflow documents" | "workflow files")
+        {
+            self.focus_workflow_section(MedicalWorkflowSection::Documents);
+            return WorkspaceDashboardAction::Consumed;
+        }
+        if let Some((action, selector)) = parse_artifact_selection_command(&normalized) {
+            return self.execute_artifact_selection_command(action, selector);
+        }
+        if let Some((action, selector)) = parse_derivative_selection_command(&normalized) {
+            return self.execute_derivative_selection_command(action, selector);
+        }
+        if let Some((action, selector)) = parse_clip_selection_command(&normalized) {
+            return self.execute_clip_selection_command(action, selector);
+        }
+        let Some(action_id) = action_for_command(self.profile, &normalized) else {
+            self.status = if normalized.is_empty() {
+                "Workspace command canceled.".to_string()
+            } else {
+                format!("Unknown workspace command: :{normalized}")
+            };
+            return WorkspaceDashboardAction::Consumed;
+        };
+        self.execute_workspace_action(action_id)
+    }
+
+    fn execute_workspace_action(
+        &mut self,
+        action_id: WorkspaceActionId,
+    ) -> WorkspaceDashboardAction {
+        if let Some(reason) = self.action_disabled_reason(action_id) {
+            self.status = reason.to_string();
+            return WorkspaceDashboardAction::Consumed;
+        }
+        match action_id {
+            WorkspaceActionId::Actions => {
+                self.action_overlay_visible = true;
+                WorkspaceDashboardAction::Consumed
+            }
+            WorkspaceActionId::AddendumSave => self.request_addendum_save(),
+            WorkspaceActionId::AddendumStart => {
+                self.start_addendum_draft();
+                WorkspaceDashboardAction::Consumed
+            }
+            WorkspaceActionId::AgentClear => {
+                self.agent_request.clear();
+                self.focus_workflow_section(MedicalWorkflowSection::AgentRequest);
+                self.status = "Agent instructions cleared.".to_string();
+                WorkspaceDashboardAction::Consumed
+            }
+            WorkspaceActionId::AgentInbox => {
+                self.packet_replay_inspect = false;
+                self.focus_workflow_section(MedicalWorkflowSection::AgentInbox);
+                WorkspaceDashboardAction::Consumed
+            }
+            WorkspaceActionId::AgentPacketInspect => {
+                if self.packet_for_replay().is_none() {
+                    self.status = "No submitted Medical Agent Plan to inspect.".to_string();
+                    self.focus_workflow_section(MedicalWorkflowSection::AgentInbox);
+                    return WorkspaceDashboardAction::Consumed;
+                }
+                self.packet_replay_inspect = true;
+                self.focus_workflow_section(MedicalWorkflowSection::AgentInbox);
+                self.status = "Inspecting saved Medical Agent Plan history.".to_string();
+                WorkspaceDashboardAction::Consumed
+            }
+            WorkspaceActionId::AgentPreview => {
+                self.focus_workflow_section(MedicalWorkflowSection::ContextPacket);
+                WorkspaceDashboardAction::Consumed
+            }
+            WorkspaceActionId::AgentRequest => {
+                self.start_agent_request();
+                WorkspaceDashboardAction::Consumed
+            }
+            WorkspaceActionId::AgentResult => {
+                self.start_agent_result();
+                WorkspaceDashboardAction::Consumed
+            }
+            WorkspaceActionId::AgentResultClear => {
+                self.agent_result.clear();
+                self.focus_workflow_section(MedicalWorkflowSection::AgentInbox);
+                self.status = "Agent result draft cleared.".to_string();
+                WorkspaceDashboardAction::Consumed
+            }
+            WorkspaceActionId::AgentResultSave => self.request_agent_result_save(),
+            WorkspaceActionId::AgentResultInspect => {
+                self.selected_agent_result_id_for_action();
+                self.agent_result_inspect = true;
+                self.focus_workflow_section(MedicalWorkflowSection::AgentInbox);
+                self.status = "Inspecting selected returned work.".to_string();
+                WorkspaceDashboardAction::Consumed
+            }
+            WorkspaceActionId::AgentResultNext => {
+                self.select_next_agent_result();
+                WorkspaceDashboardAction::Consumed
+            }
+            WorkspaceActionId::AgentResultReviewed => {
+                let Some(result_id) = self.selected_agent_result_id_for_action() else {
+                    self.status = "No saved returned work to review.".to_string();
+                    return WorkspaceDashboardAction::Consumed;
+                };
+                WorkspaceDashboardAction::UpdateAgentResultStatus {
+                    result_id,
+                    status: "reviewed".to_string(),
+                }
+            }
+            WorkspaceActionId::AgentResultDismiss => {
+                let Some(result_id) = self.selected_agent_result_id_for_action() else {
+                    self.status = "No saved returned work to dismiss.".to_string();
+                    return WorkspaceDashboardAction::Consumed;
+                };
+                WorkspaceDashboardAction::UpdateAgentResultStatus {
+                    result_id,
+                    status: "dismissed".to_string(),
+                }
+            }
+            WorkspaceActionId::AgentResultToProposal => {
+                let Some(result_id) = self.selected_agent_result_id_for_action() else {
+                    self.status = "No saved returned work to make a draft.".to_string();
+                    return WorkspaceDashboardAction::Consumed;
+                };
+                WorkspaceDashboardAction::ConvertAgentResultToProposal { result_id }
+            }
+            WorkspaceActionId::AgentResultToAddendum => {
+                self.convert_agent_result_to_addendum_draft();
+                WorkspaceDashboardAction::Consumed
+            }
+            WorkspaceActionId::AgentResultToJob => {
+                self.convert_agent_result_to_job_draft();
+                WorkspaceDashboardAction::Consumed
+            }
+            WorkspaceActionId::ArtifactDeselect => {
+                self.execute_artifact_selection_command(ArtifactSelectionAction::Deselect, None)
+            }
+            WorkspaceActionId::ArtifactClear => {
+                self.draft_document.clear();
+                self.focus_patient_files_tree();
+                self.status = "Artifact draft cleared.".to_string();
+                WorkspaceDashboardAction::Consumed
+            }
+            WorkspaceActionId::ArtifactInspect => {
+                self.execute_artifact_selection_command(ArtifactSelectionAction::Inspect, None)
+            }
+            WorkspaceActionId::ArtifactImport => {
+                let Some(document_id) = self.selected_document_id_for_file_operation() else {
+                    self.status =
+                        "Inspect or select a patient file before importing to local vault."
+                            .to_string();
+                    self.focus_patient_files_tree();
+                    return WorkspaceDashboardAction::Consumed;
+                };
+                WorkspaceDashboardAction::ImportDocumentToVault { document_id }
+            }
+            WorkspaceActionId::DocumentChoose => {
+                self.focus_patient_files_tree();
+                WorkspaceDashboardAction::ChoosePatientFiles
+            }
+            WorkspaceActionId::ArtifactSave => WorkspaceDashboardAction::Save,
+            WorkspaceActionId::ArtifactSelect => {
+                self.execute_artifact_selection_command(ArtifactSelectionAction::Select, None)
+            }
+            WorkspaceActionId::ArtifactThumbnail => {
+                let Some(document_id) = self.selected_document_id_for_file_operation() else {
+                    self.status =
+                        "Inspect or select a patient file before generating a preview.".to_string();
+                    self.focus_patient_files_tree();
+                    return WorkspaceDashboardAction::Consumed;
+                };
+                WorkspaceDashboardAction::GenerateDocumentThumbnail { document_id }
+            }
+            WorkspaceActionId::ArtifactOpen => {
+                let Some(document_id) = self.selected_document_id_for_file_operation() else {
+                    self.status = "Inspect or select a patient file before opening it.".to_string();
+                    self.focus_patient_files_tree();
+                    return WorkspaceDashboardAction::Consumed;
+                };
+                WorkspaceDashboardAction::OpenDocumentFile { document_id }
+            }
+            WorkspaceActionId::ArtifactScope => {
+                if !self.draft_document.is_active() {
+                    self.start_new_document();
+                }
+                self.document_field = DocumentField::Scope;
+                self.focus_workflow_section(MedicalWorkflowSection::Documents);
+                self.status = "Editing file reference scope.".to_string();
+                WorkspaceDashboardAction::Consumed
+            }
+            WorkspaceActionId::ArtifactToggle => {
+                self.execute_artifact_selection_command(ArtifactSelectionAction::Toggle, None)
+            }
+            WorkspaceActionId::DerivativeNew => {
+                self.start_derivative_draft(None);
+                WorkspaceDashboardAction::Consumed
+            }
+            WorkspaceActionId::DerivativeSave => self.request_derivative_save(),
+            WorkspaceActionId::DerivativeClear => {
+                self.derivative_draft.clear();
+                self.focus_workflow_section(MedicalWorkflowSection::Documents);
+                self.status = "Derivative draft cleared.".to_string();
+                WorkspaceDashboardAction::Consumed
+            }
+            WorkspaceActionId::DerivativeDeselect => {
+                self.execute_derivative_selection_command(DerivativeSelectionAction::Deselect, None)
+            }
+            WorkspaceActionId::DerivativeInspect => {
+                self.execute_derivative_selection_command(DerivativeSelectionAction::Inspect, None)
+            }
+            WorkspaceActionId::DerivativeSelect => {
+                self.execute_derivative_selection_command(DerivativeSelectionAction::Select, None)
+            }
+            WorkspaceActionId::DerivativeToggle => {
+                self.execute_derivative_selection_command(DerivativeSelectionAction::Toggle, None)
+            }
+            WorkspaceActionId::DerivativeReviewed => {
+                let Some(derivative_id) = self.selected_derivative_id_for_action() else {
+                    self.status = "No saved reviewed text to mark reviewed.".to_string();
+                    return WorkspaceDashboardAction::Consumed;
+                };
+                WorkspaceDashboardAction::UpdateArtifactDerivativeStatus {
+                    derivative_id,
+                    review_status: "human_reviewed".to_string(),
+                }
+            }
+            WorkspaceActionId::DerivativeArchive => {
+                let Some(derivative_id) = self.selected_derivative_id_for_action() else {
+                    self.status = "No saved reviewed text to archive.".to_string();
+                    return WorkspaceDashboardAction::Consumed;
+                };
+                WorkspaceDashboardAction::UpdateArtifactDerivativeStatus {
+                    derivative_id,
+                    review_status: "archived".to_string(),
+                }
+            }
+            WorkspaceActionId::ClipNew => {
+                self.start_clip_draft(None);
+                WorkspaceDashboardAction::Consumed
+            }
+            WorkspaceActionId::ClipSave => self.request_clip_save(),
+            WorkspaceActionId::ClipClear => {
+                self.clip_draft.clear();
+                self.focus_workflow_section(MedicalWorkflowSection::Documents);
+                self.status = "Clip draft cleared.".to_string();
+                WorkspaceDashboardAction::Consumed
+            }
+            WorkspaceActionId::ClipDeselect => {
+                self.execute_clip_selection_command(ClipSelectionAction::Deselect, None)
+            }
+            WorkspaceActionId::ClipInspect => {
+                self.execute_clip_selection_command(ClipSelectionAction::Inspect, None)
+            }
+            WorkspaceActionId::ClipSelect => {
+                self.execute_clip_selection_command(ClipSelectionAction::Select, None)
+            }
+            WorkspaceActionId::ClipToggle => {
+                self.execute_clip_selection_command(ClipSelectionAction::Toggle, None)
+            }
+            WorkspaceActionId::ClipReviewed => {
+                let Some(clip_id) = self.selected_clip_id_for_action() else {
+                    self.status = "No saved context clip to mark reviewed.".to_string();
+                    return WorkspaceDashboardAction::Consumed;
+                };
+                WorkspaceDashboardAction::UpdateContextClipStatus {
+                    clip_id,
+                    review_status: "human_reviewed".to_string(),
+                }
+            }
+            WorkspaceActionId::ClipArchive => {
+                let Some(clip_id) = self.selected_clip_id_for_action() else {
+                    self.status = "No saved context clip to archive.".to_string();
+                    return WorkspaceDashboardAction::Consumed;
+                };
+                WorkspaceDashboardAction::UpdateContextClipStatus {
+                    clip_id,
+                    review_status: "archived".to_string(),
+                }
+            }
+            WorkspaceActionId::ClientNew => {
+                self.start_new_client();
+                WorkspaceDashboardAction::Consumed
+            }
+            WorkspaceActionId::ContactEdit => {
+                self.open_patient_admin_editor(
+                    PatientAdminEditMode::Contact,
+                    PatientAdminField::PrimaryPhone,
+                );
+                WorkspaceDashboardAction::Consumed
+            }
+            WorkspaceActionId::CoverageEdit => {
+                self.open_patient_admin_editor(
+                    PatientAdminEditMode::Coverage,
+                    PatientAdminField::PayerName,
+                );
+                WorkspaceDashboardAction::Consumed
+            }
+            WorkspaceActionId::SafetyOpen => {
+                self.focus_workflow_section(MedicalWorkflowSection::Safety);
+                WorkspaceDashboardAction::Consumed
+            }
+            WorkspaceActionId::AllergyAdd => {
+                self.start_safety_draft("allergy");
+                WorkspaceDashboardAction::Consumed
+            }
+            WorkspaceActionId::MedicationAdd => {
+                self.start_safety_draft("medication");
+                WorkspaceDashboardAction::Consumed
+            }
+            WorkspaceActionId::ProblemAdd => {
+                self.start_safety_draft("condition");
+                WorkspaceDashboardAction::Consumed
+            }
+            WorkspaceActionId::PrecautionAdd => {
+                self.start_safety_draft("precaution");
+                WorkspaceDashboardAction::Consumed
+            }
+            WorkspaceActionId::DocumentAttach => {
+                self.start_new_document();
+                WorkspaceDashboardAction::Consumed
+            }
+            WorkspaceActionId::EncounterOpen => WorkspaceDashboardAction::EnsureEncounter,
+            WorkspaceActionId::EmergencyContactEdit => {
+                self.open_patient_admin_editor(
+                    PatientAdminEditMode::Contact,
+                    PatientAdminField::EmergencyContactName,
+                );
+                WorkspaceDashboardAction::Consumed
+            }
+            WorkspaceActionId::FocusAddenda => {
+                self.focus_workflow_section(MedicalWorkflowSection::Addenda);
+                WorkspaceDashboardAction::Consumed
+            }
+            WorkspaceActionId::FocusDocuments => {
+                if self.profile == WorkspaceProfile::Medical
+                    && !self.workflow_section_has_active_editor()
+                {
+                    self.focus_patient_files_tree();
+                } else {
+                    self.focus_workflow_section(MedicalWorkflowSection::Documents);
+                }
+                WorkspaceDashboardAction::Consumed
+            }
+            WorkspaceActionId::FocusJobs => {
+                self.focus_workflow_section(MedicalWorkflowSection::Jobs);
+                WorkspaceDashboardAction::Consumed
+            }
+            WorkspaceActionId::FocusNoteBody => {
+                self.focus_workspace_area(WorkspaceFocus::NoteBody, "Focused note body.");
+                WorkspaceDashboardAction::Consumed
+            }
+            WorkspaceActionId::FocusNoteTitle => {
+                self.focus_workspace_area(WorkspaceFocus::NoteTitle, "Focused note title.");
+                WorkspaceDashboardAction::Consumed
+            }
+            WorkspaceActionId::FocusPatientDetails => {
+                self.patient_admin_edit_mode = None;
+                self.focus_workspace_area(
+                    WorkspaceFocus::Demographics,
+                    "Focused patient demographics. Use :demographics edit or :coverage edit for admin fields.",
+                );
+                WorkspaceDashboardAction::Consumed
+            }
+            WorkspaceActionId::FocusPatients => {
+                self.open_patient_directory();
+                WorkspaceDashboardAction::Consumed
+            }
+            WorkspaceActionId::PatientSearch => {
+                self.open_patient_search();
+                WorkspaceDashboardAction::Consumed
+            }
+            WorkspaceActionId::FocusProposals => {
+                self.focus_workflow_section(MedicalWorkflowSection::Proposals);
+                WorkspaceDashboardAction::Consumed
+            }
+            WorkspaceActionId::FocusTimeline => {
+                self.focus_workflow_section(MedicalWorkflowSection::Timeline);
+                WorkspaceDashboardAction::Consumed
+            }
+            WorkspaceActionId::FocusVisit => {
+                self.focus_workflow_section(MedicalWorkflowSection::Visit);
+                WorkspaceDashboardAction::Consumed
+            }
+            WorkspaceActionId::FocusWorkflow => {
+                self.focus_workflow_section(MedicalWorkflowSection::Visit);
+                self.status = "Focused workflow.".to_string();
+                WorkspaceDashboardAction::Consumed
+            }
+            WorkspaceActionId::FocusWorkflowAudit => {
+                self.focus_workflow_section(MedicalWorkflowSection::Audit);
+                WorkspaceDashboardAction::Consumed
+            }
+            WorkspaceActionId::FocusWorkflowNoteStatus => {
+                self.focus_workflow_section(MedicalWorkflowSection::NoteStatus);
+                WorkspaceDashboardAction::Consumed
+            }
+            WorkspaceActionId::Handoff => WorkspaceDashboardAction::SendContextToAgent,
+            WorkspaceActionId::JobCancel => {
+                self.request_task_status_update(WorkspaceTaskStatus::Canceled)
+            }
+            WorkspaceActionId::JobDone => {
+                self.request_task_status_update(WorkspaceTaskStatus::Done)
+            }
+            WorkspaceActionId::JobNew => {
+                self.start_new_task();
+                WorkspaceDashboardAction::Consumed
+            }
+            WorkspaceActionId::JobNext => {
+                self.select_next_task();
+                WorkspaceDashboardAction::Consumed
+            }
+            WorkspaceActionId::NoteNew => {
+                self.start_new_note();
+                WorkspaceDashboardAction::Consumed
+            }
+            WorkspaceActionId::NoteSign => WorkspaceDashboardAction::SignNote,
+            WorkspaceActionId::PracticeLibraryAssociate => {
+                self.request_practice_library_association()
+            }
+            WorkspaceActionId::PracticeLibraryInspect => {
+                self.inspect_selected_practice_library_item();
+                WorkspaceDashboardAction::Consumed
+            }
+            WorkspaceActionId::PracticeLibraryNext => {
+                self.select_next_practice_library_item();
+                WorkspaceDashboardAction::Consumed
+            }
+            WorkspaceActionId::ProposalAccept => self.request_proposal_resolution(true),
+            WorkspaceActionId::ProposalDecline => self.request_proposal_resolution(false),
+            WorkspaceActionId::ProposalNext => {
+                self.select_next_proposal();
+                WorkspaceDashboardAction::Consumed
+            }
+            WorkspaceActionId::Return => WorkspaceDashboardAction::Close,
+            WorkspaceActionId::ScopeAgentPacket => {
+                self.focus_workflow_section(MedicalWorkflowSection::ContextPacket);
+                WorkspaceDashboardAction::Consumed
+            }
+            WorkspaceActionId::ScopeAgentReview => {
+                self.focus_workflow_section(MedicalWorkflowSection::AgentInbox);
+                WorkspaceDashboardAction::Consumed
+            }
+            WorkspaceActionId::ScopeAuditTrail => {
+                self.focus_workflow_section(MedicalWorkflowSection::Audit);
+                WorkspaceDashboardAction::Consumed
+            }
+            WorkspaceActionId::ScopeLast => {
+                self.return_to_last_scope();
+                WorkspaceDashboardAction::Consumed
+            }
+            WorkspaceActionId::ScopeNext => {
+                self.switch_scope_relative(1);
+                WorkspaceDashboardAction::Consumed
+            }
+            WorkspaceActionId::ScopePatientChart => {
+                self.focus_workflow_section(MedicalWorkflowSection::Visit);
+                WorkspaceDashboardAction::Consumed
+            }
+            WorkspaceActionId::ScopePatientFiles => {
+                self.focus_patient_files_tree();
+                WorkspaceDashboardAction::Consumed
+            }
+            WorkspaceActionId::ScopePrevious => {
+                self.switch_scope_relative(-1);
+                WorkspaceDashboardAction::Consumed
+            }
+            WorkspaceActionId::ScopePracticeIntelligence => {
+                self.focus_workflow_section(MedicalWorkflowSection::PracticeIntelligence);
+                WorkspaceDashboardAction::Consumed
+            }
+            WorkspaceActionId::ScopePracticeLibrary => {
+                self.focus_workflow_section(MedicalWorkflowSection::PracticeLibrary);
+                WorkspaceDashboardAction::Consumed
+            }
+            WorkspaceActionId::Save => WorkspaceDashboardAction::Save,
+        }
+    }
+
+    fn focus_workspace_area(&mut self, focus: WorkspaceFocus, status: &str) {
+        self.action_overlay_visible = false;
+        self.command_input = None;
+        self.command_selection_index = 0;
+        self.focus = focus;
+        self.status = status.to_string();
+    }
+
+    fn focus_workflow_section(&mut self, section: MedicalWorkflowSection) {
+        let status = if section == MedicalWorkflowSection::Documents {
+            "Focused Uploaded Documents.".to_string()
+        } else if matches!(
+            section,
+            MedicalWorkflowSection::AgentRequest
+                | MedicalWorkflowSection::ContextPacket
+                | MedicalWorkflowSection::AgentInbox
+        ) {
+            format!("Focused {}.", section.scope_label())
+        } else {
+            format!("Focused {} workflow.", section.status_label())
+        };
+        let focus = if matches!(
+            section,
+            MedicalWorkflowSection::AgentRequest
+                | MedicalWorkflowSection::ContextPacket
+                | MedicalWorkflowSection::AgentInbox
+        ) {
+            WorkspaceFocus::Agent
+        } else {
+            WorkspaceFocus::Workflow
+        };
+        self.focus_workspace_area(focus, &status);
+        self.set_workflow_section(section);
+        if focus == WorkspaceFocus::Agent {
+            self.agent_scroll = 0;
+        }
+    }
+
+    fn focus_patient_files_tree(&mut self) {
+        if self.patient_file_tree_blocked_by_active_editor() {
+            self.focus_workflow_section(MedicalWorkflowSection::Documents);
+            self.status = "Save or clear the active chart editor before using Uploaded Documents."
+                .to_string();
+            return;
+        }
+        self.action_overlay_visible = false;
+        self.command_input = None;
+        self.command_selection_index = 0;
+        if medical_scope_tab_for_section(self.workflow_section) != MedicalScopeTab::Chart {
+            self.set_workflow_section(MedicalWorkflowSection::Visit);
+        }
+        self.focus = WorkspaceFocus::PatientFiles;
+        self.clamp_patient_file_tree_index();
+        self.select_first_patient_file_row_if_needed();
+        if !self.has_patient_file_references() {
+            self.status = "Uploaded Documents focused. Paste/drop a JPG/PDF path.".to_string();
+        } else {
+            self.update_patient_file_tree_highlight_status();
+        }
+    }
+
+    fn set_workflow_section(&mut self, section: MedicalWorkflowSection) {
+        if section != self.workflow_section {
+            self.last_workflow_section = Some(self.workflow_section);
+        }
+        self.workflow_section = section;
+        if self.profile == WorkspaceProfile::Medical && self.workflow_section_uses_agent_workpane()
+        {
+            self.agent_scroll = 0;
+            return;
+        }
+        if self.profile == WorkspaceProfile::Medical
+            && self.medical_large_center_can_render_active_work_detail()
+        {
+            self.workflow_scroll = 0;
+            return;
+        }
+        self.workflow_scroll = match section {
+            MedicalWorkflowSection::AgentInbox if self.agent_result.is_active() => {
+                self.workflow_agent_result_editor_row()
+            }
+            MedicalWorkflowSection::AgentRequest if self.agent_request.is_active() => {
+                self.workflow_agent_request_editor_row()
+            }
+            MedicalWorkflowSection::Addenda if self.addendum_draft.active => {
+                self.workflow_addendum_editor_row()
+            }
+            MedicalWorkflowSection::Documents if self.derivative_draft.is_active() => {
+                self.workflow_derivative_editor_row(self.derivative_field)
+            }
+            MedicalWorkflowSection::Documents if self.clip_draft.is_active() => {
+                self.workflow_clip_editor_row(self.clip_field)
+            }
+            MedicalWorkflowSection::Documents if self.draft_document.is_active() => {
+                self.workflow_document_editor_row(self.document_field)
+            }
+            MedicalWorkflowSection::Jobs if self.draft_task.is_active() => {
+                self.workflow_task_editor_row(self.task_field)
+            }
+            MedicalWorkflowSection::Safety if self.draft_safety.is_active() => {
+                self.workflow_safety_editor_row(self.safety_field)
+            }
+            _ => self.workflow_section_row(section),
+        };
+    }
+
+    fn switch_scope_relative(&mut self, delta: isize) {
+        let current_tab = medical_scope_tab_for_section(self.workflow_section);
+        let target_tab = if delta.is_negative() {
+            current_tab.previous()
+        } else {
+            current_tab.next()
+        };
+        self.focus_workflow_section(target_tab.section());
+        self.status = format!("Focused {} scope.", target_tab.section().scope_label());
+    }
+
+    fn return_to_last_scope(&mut self) {
+        let Some(last_section) = self.last_workflow_section else {
+            self.status = "No previous clinical scope in this workspace session.".to_string();
+            self.focus = WorkspaceFocus::Workflow;
+            return;
+        };
+        self.focus_workflow_section(last_section);
+        self.status = format!("Returned to {} scope.", last_section.scope_label());
+    }
+
+    pub(crate) fn handle_paste(&mut self, pasted: String) -> WorkspaceDashboardAction {
+        if let Some(command_input) = self.command_input.as_mut() {
+            command_input.push_str(pasted.trim());
+            self.command_selection_index = 0;
+            return WorkspaceDashboardAction::Consumed;
+        }
+        if self.should_block_file_path_paste_in_current_focus(&pasted) {
+            self.status =
+                "File drop ignored here. Focus Uploaded Documents, then drop/paste the local file path."
+                    .to_string();
+            return WorkspaceDashboardAction::Consumed;
+        }
+        if self.locked_note_editor_has_focus() {
+            self.status = self.locked_note_read_only_status();
+            return WorkspaceDashboardAction::Consumed;
+        }
+        match self.focus {
+            WorkspaceFocus::Demographics => {
+                self.draft_client
+                    .value_mut(self.demographics_field)
+                    .push_str(&pasted);
+                self.mark_dirty();
+                WorkspaceDashboardAction::Consumed
+            }
+            WorkspaceFocus::NoteTitle => {
+                self.draft_note
+                    .title
+                    .push_str(pasted.trim_end_matches('\n'));
+                self.mark_dirty();
+                WorkspaceDashboardAction::Consumed
+            }
+            WorkspaceFocus::NoteBody => {
+                self.draft_note.body.push_str(&pasted);
+                self.mark_dirty();
+                WorkspaceDashboardAction::Consumed
+            }
+            WorkspaceFocus::Workflow => {
+                if self.profile == WorkspaceProfile::Medical {
+                    if self.addendum_draft.active {
+                        self.addendum_draft.body.push_str(&pasted);
+                        self.status = "Unsaved addendum draft.".to_string();
+                    } else if self.derivative_draft.is_active() {
+                        if self.derivative_field == DerivativeField::Body {
+                            self.derivative_draft.body.push_str(&pasted);
+                        } else {
+                            self.derivative_draft
+                                .value_mut(self.derivative_field)
+                                .push_str(pasted.trim_end_matches('\n'));
+                        }
+                        self.mark_dirty();
+                    } else if self.clip_draft.is_active() {
+                        if self.clip_field == ClipField::Body {
+                            self.clip_draft.body.push_str(&pasted);
+                        } else {
+                            self.clip_draft
+                                .value_mut(self.clip_field)
+                                .push_str(pasted.trim_end_matches('\n'));
+                        }
+                        self.mark_dirty();
+                    } else if self.draft_task.is_active() {
+                        self.draft_task
+                            .value_mut(self.task_field)
+                            .push_str(pasted.trim_end_matches('\n'));
+                        self.mark_dirty();
+                    } else if self.draft_document.is_active() {
+                        self.draft_document
+                            .value_mut(self.document_field)
+                            .push_str(pasted.trim_end_matches('\n'));
+                        self.mark_dirty();
+                    } else if let Some(action) = self.dropped_file_reference_action(&pasted) {
+                        return action;
+                    }
+                }
+                WorkspaceDashboardAction::Consumed
+            }
+            WorkspaceFocus::Agent => {
+                if self.agent_result.is_active() {
+                    self.agent_result.body.push_str(&pasted);
+                    self.status = "Unsaved returned work draft.".to_string();
+                } else if self.agent_request.is_active() {
+                    self.agent_request.body.push_str(&pasted);
+                    self.status = "Local agent instructions draft.".to_string();
+                } else {
+                    self.status =
+                        "Agent Workpane ready. Use :agent request before typing instructions."
+                            .to_string();
+                }
+                WorkspaceDashboardAction::Consumed
+            }
+            WorkspaceFocus::PatientFiles => {
+                if let Some(action) = self.dropped_file_reference_action(&pasted) {
+                    return action;
+                }
+                self.status =
+                    "Uploaded Documents focused. Paste/drop a local file path or use :file drop."
+                        .to_string();
+                WorkspaceDashboardAction::Consumed
+            }
+            WorkspaceFocus::Clients | WorkspaceFocus::Notes => WorkspaceDashboardAction::Consumed,
+        }
+    }
+
+    fn should_block_file_path_paste_in_current_focus(&self, pasted: &str) -> bool {
+        self.profile == WorkspaceProfile::Medical
+            && paste_looks_like_file_path(pasted)
+            && !self.can_accept_file_path_paste_in_current_focus()
+    }
+
+    fn can_accept_file_path_paste_in_current_focus(&self) -> bool {
+        matches!(self.focus, WorkspaceFocus::PatientFiles)
+            || (self.focus == WorkspaceFocus::Workflow && self.draft_document.is_active())
+    }
+
+    fn dropped_file_reference_action(&mut self, pasted: &str) -> Option<WorkspaceDashboardAction> {
+        if !self.is_patient_file_drop_scope() {
+            return None;
+        }
+        let intake = parse_dropped_file_paths(pasted);
+        if !intake.looked_like_paths {
+            return None;
+        }
+        if intake.file_paths.is_empty() {
+            self.focus_patient_files_tree();
+            self.status = if intake.directory_count > 0 {
+                "No file reference added: dropped item is a directory.".to_string()
+            } else {
+                "No file reference added: local path was not found or is not a regular file."
+                    .to_string()
+            };
+            return Some(WorkspaceDashboardAction::Consumed);
+        }
+        let Some(client_id) = self.draft_client.id.clone() else {
+            self.focus_patient_files_tree();
+            self.status = "Select or save a patient before adding files.".to_string();
+            return Some(WorkspaceDashboardAction::Consumed);
+        };
+        let encounter_id = self.active_encounter_id();
+        let params = intake
+            .file_paths
+            .iter()
+            .map(|path| dropped_file_upsert_params(&client_id, encounter_id.clone(), path))
+            .collect::<Vec<_>>();
+        Some(WorkspaceDashboardAction::SaveDroppedFileReferences(params))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn handle_native_medical_file_drop(
+        &mut self,
+        event: NativeMedicalFileDropEvent,
+    ) -> WorkspaceDashboardAction {
+        self.native_medical_file_drop_params(event)
+            .map(WorkspaceDashboardAction::SaveDroppedFileReferences)
+            .unwrap_or(WorkspaceDashboardAction::Consumed)
+    }
+
+    fn native_medical_file_drop_params(
+        &mut self,
+        event: NativeMedicalFileDropEvent,
+    ) -> Option<Vec<WorkspaceDocumentUpsertParams>> {
+        if self.profile != WorkspaceProfile::Medical {
+            self.status =
+                "Native file drop is only available in the medical workspace.".to_string();
+            return None;
+        }
+        if event.schema_version != 1 {
+            self.status = format!(
+                "Native file drop schema version {} is unsupported.",
+                event.schema_version
+            );
+            return None;
+        }
+        if !matches!(
+            event.target_pane.as_str(),
+            "patient_file_tree" | "explicit_file_intake"
+        ) {
+            self.status =
+                "Native file drop ignored here. Target Uploaded Documents before adding files."
+                    .to_string();
+            return None;
+        }
+        if !self.is_patient_file_drop_scope() {
+            self.status =
+                "Native file drop ignored here. Focus Uploaded Documents before adding files."
+                    .to_string();
+            return None;
+        }
+        let Some(client_id) = self.draft_client.id.clone() else {
+            self.focus_patient_files_tree();
+            self.status = "Select or save a patient before adding files.".to_string();
+            return None;
+        };
+        let mut valid_paths = Vec::new();
+        let mut missing_count = 0usize;
+        let mut directory_count = 0usize;
+        let mut unsupported_count = 0usize;
+        let mut seen = BTreeSet::new();
+        for path in event.paths {
+            if !seen.insert(path.display().to_string()) {
+                continue;
+            }
+            if !document_path_is_priority_preview_file(&path) {
+                unsupported_count += 1;
+                continue;
+            }
+            match fs::metadata(&path) {
+                Ok(metadata) if metadata.is_file() => valid_paths.push(path),
+                Ok(metadata) if metadata.is_dir() => directory_count += 1,
+                Ok(_) => missing_count += 1,
+                Err(_) => missing_count += 1,
+            }
+        }
+        if valid_paths.is_empty() {
+            self.focus_patient_files_tree();
+            self.status = if unsupported_count > 0 {
+                "No file reference added: native drop accepts JPG/JPEG/PDF files in this pass."
+                    .to_string()
+            } else if directory_count > 0 {
+                "No file reference added: dropped item is a directory.".to_string()
+            } else if missing_count > 0 {
+                "No file reference added: local path was not found or is not a regular file."
+                    .to_string()
+            } else {
+                "No file reference added: native drop did not include files.".to_string()
+            };
+            return None;
+        }
+        let encounter_id = self.active_encounter_id();
+        let intake_source = nonempty_or(&event.source, "macos_native_drop");
+        let params = valid_paths
+            .iter()
+            .map(|path| {
+                local_file_upsert_params(
+                    &client_id,
+                    encounter_id.clone(),
+                    path,
+                    "macOS native drop",
+                    &intake_source,
+                )
+            })
+            .collect::<Vec<_>>();
+        Some(params)
+    }
+
+    fn is_patient_file_drop_scope(&self) -> bool {
+        self.profile == WorkspaceProfile::Medical
+            && matches!(self.focus, WorkspaceFocus::PatientFiles)
+            && !self.agent_result.is_active()
+            && !self.addendum_draft.active
+            && !self.derivative_draft.is_active()
+            && !self.clip_draft.is_active()
+            && !self.draft_task.is_active()
+            && !self.draft_safety.is_active()
+            && !self.draft_document.is_active()
+            && matches!(
+                self.workflow_section,
+                MedicalWorkflowSection::Visit | MedicalWorkflowSection::Documents
+            )
+            && self.focus == WorkspaceFocus::PatientFiles
+    }
+
+    pub(crate) fn agent_context_prompt(&self) -> String {
+        match self.profile {
+            WorkspaceProfile::Generic => self.generic_agent_context_prompt(),
+            WorkspaceProfile::Medical => self.medical_agent_context_prompt(),
+        }
+    }
+
+    fn generic_agent_context_prompt(&self) -> String {
+        let mut prompt = String::new();
+        prompt.push_str("Workspace context\n\n");
+        prompt.push_str("Active client: ");
+        prompt.push_str(self.draft_client.id.as_deref().unwrap_or("unsaved draft"));
+        prompt.push('\n');
+        prompt.push_str("Active note: ");
+        prompt.push_str(self.draft_note.id.as_deref().unwrap_or("unsaved draft"));
+        prompt.push_str("\n\n");
+        prompt.push_str("Client\n");
+        push_context_line(&mut prompt, "Display name", &self.draft_client.display_name);
+        push_context_line(
+            &mut prompt,
+            "Preferred name",
+            &self.draft_client.preferred_name,
+        );
+        push_context_line(
+            &mut prompt,
+            "Date of birth",
+            &self.draft_client.date_of_birth,
+        );
+        push_context_line(
+            &mut prompt,
+            "Sex or gender",
+            &self.draft_client.sex_or_gender,
+        );
+        push_context_line(&mut prompt, "External ID", &self.draft_client.external_id);
+        push_context_line(
+            &mut prompt,
+            "Record start",
+            &self.draft_client.record_start_date,
+        );
+        push_context_line(
+            &mut prompt,
+            "Record end",
+            &self.draft_client.record_end_date,
+        );
+        push_context_line(&mut prompt, "Summary", &self.draft_client.summary);
+        prompt.push('\n');
+        prompt.push_str("Current note\n");
+        push_context_line(&mut prompt, "Title", &self.draft_note.title);
+        push_context_line(
+            &mut prompt,
+            "Revision",
+            &self.draft_note.current_revision.to_string(),
+        );
+        prompt.push_str("Body:\n");
+        prompt.push_str(&self.draft_note.body);
+        prompt.push_str("\n\nPropose note edits as a clear diff or replacement draft for review; do not assume saved workspace data should be overwritten silently.");
+        prompt
+    }
+
+    fn medical_agent_context_prompt(&self) -> String {
+        self.medical_context_assembly().prompt
+    }
+
+    fn medical_context_assembly(&self) -> MedicalContextAssembly {
+        let encounter_id = self
+            .active_encounter_id()
+            .unwrap_or_else(|| "unsaved draft".to_string());
+        let patient_document_ids = self.patient_document_ids();
+        let selected_artifacts = self.selected_artifacts();
+        let selected_derivatives = self.selected_derivatives();
+        let selected_clips = self.selected_clips();
+        let total_artifact_count = patient_document_ids.len();
+        let total_derivative_count = self
+            .derivatives
+            .iter()
+            .filter(|derivative| patient_document_ids.contains(derivative.document_id.as_str()))
+            .count();
+        let total_clip_count = self
+            .clips
+            .iter()
+            .filter(|clip| patient_document_ids.contains(clip.document_id.as_str()))
+            .count();
+        let active_tasks = self
+            .tasks
+            .iter()
+            .filter(|task| workspace_task_status_is_active(task.status))
+            .collect::<Vec<_>>();
+        let draft_document = (self.draft_document.is_active() && self.draft_document.id.is_none())
+            .then(|| MedicalContextDraftDocument {
+                kind: &self.draft_document.kind,
+                title: &self.draft_document.title,
+                local_path: &self.draft_document.local_path,
+                notes: &self.draft_document.notes,
+            });
+        let draft_task = self
+            .draft_task
+            .is_active()
+            .then(|| MedicalContextDraftTask {
+                title: &self.draft_task.title,
+                details: &self.draft_task.details,
+            });
+
+        assemble_medical_context(MedicalContextAssemblyInput {
+            client_id: self.draft_client.id.as_deref().unwrap_or("unsaved draft"),
+            encounter_id: &encounter_id,
+            note_id: self.draft_note.id.as_deref().unwrap_or("unsaved draft"),
+            source_mode: "ctrl_g_handoff",
+            unsaved_draft_included: self.dirty
+                || self.draft_client.id.is_none()
+                || self.draft_note.id.is_none(),
+            patient_display_name: &self.draft_client.display_name,
+            patient_preferred_name: &self.draft_client.preferred_name,
+            patient_date_of_birth: &self.draft_client.date_of_birth,
+            patient_sex_or_gender: &self.draft_client.sex_or_gender,
+            patient_external_id: &self.draft_client.external_id,
+            patient_record_start_date: &self.draft_client.record_start_date,
+            patient_record_end_date: &self.draft_client.record_end_date,
+            patient_summary: &self.draft_client.summary,
+            agent_request_body: &self.agent_request.body,
+            note_title: self.effective_note_title(),
+            note_status: self.draft_note.status_label(),
+            note_revision: self.draft_note.current_revision,
+            note_body: &self.draft_note.body,
+            note_locked: self.draft_note.is_locked(),
+            signatures: &self.signatures,
+            addenda_count: self.addenda.len(),
+            pending_proposal_count: self.pending_proposal_count(),
+            selected_artifacts,
+            total_artifact_count,
+            draft_document,
+            selected_derivatives,
+            total_derivative_count,
+            selected_clips,
+            total_clip_count,
+            active_tasks,
+            draft_task,
+        })
+    }
+
+    pub(crate) fn context_packet_create_params(
+        &self,
+    ) -> std::result::Result<WorkspaceContextPacketCreateParams, String> {
+        let Some(client_id) = self.draft_client.id.clone() else {
+            return Err("Save the patient before submitting a Medical Agent Plan.".to_string());
+        };
+        let assembly = self.medical_context_assembly();
+        Ok(WorkspaceContextPacketCreateParams {
+            client_id,
+            encounter_id: self.active_encounter_id(),
+            note_id: self.draft_note.id.clone(),
+            human_request: assembly.human_request,
+            selected_artifact_ids_json: assembly.selected_artifact_ids_json,
+            selected_derivative_ids_json: assembly.selected_derivative_ids_json,
+            selected_clip_ids_json: assembly.selected_clip_ids_json,
+            artifact_summary: assembly.artifact_summary,
+            derivative_summary: assembly.derivative_summary,
+            clip_summary: assembly.clip_summary,
+            chart_context_summary: assembly.chart_context_summary,
+            context_envelope_json: assembly.context_envelope_json,
+        })
+    }
+
+    pub(crate) fn mark_agent_context_sent(&mut self, packet: WorkspaceContextPacket) {
+        self.context_packets.retain(|entry| entry.id != packet.id);
+        self.context_packets.insert(0, packet);
+        self.agent_request.clear();
+        self.agent_result.clear();
+        self.stale_context_notice = None;
+        self.focus = WorkspaceFocus::Agent;
+        self.set_workflow_section(MedicalWorkflowSection::AgentInbox);
+        self.agent_scroll = 0;
+        self.status =
+            "Medical Agent Plan opened; return with /workspacemedical, then :agent result."
+                .to_string();
+    }
+
+    pub(crate) async fn save_agent_result(
+        &mut self,
+        app_server: &mut AppServerSession,
+        packet_id: String,
+        body: String,
+    ) -> Result<()> {
+        let packet_hash = self
+            .context_packets
+            .iter()
+            .find(|packet| packet.id == packet_id)
+            .map(|packet| packet.context_envelope_sha256.clone());
+        let result = app_server
+            .workspace_agent_result_create(WorkspaceAgentResultCreateParams {
+                packet_id: packet_id.clone(),
+                body,
+                summary: None,
+                client_id: self.draft_client.id.clone(),
+                note_id: self.draft_note.id.clone(),
+                context_envelope_sha256: packet_hash,
+            })
+            .await?
+            .result;
+        self.agent_result.clear();
+        self.reload_packet_history(app_server).await?;
+        self.agent_results.retain(|entry| entry.id != result.id);
+        self.selected_agent_result_id = Some(result.id.clone());
+        self.agent_result_inspect = true;
+        self.agent_results.insert(0, result);
+        self.focus_workflow_section(MedicalWorkflowSection::AgentInbox);
+        self.status = "Agent result saved for human review.".to_string();
+        Ok(())
+    }
+
+    pub(crate) async fn associate_practice_library_document(
+        &mut self,
+        app_server: &mut AppServerSession,
+        params: WorkspaceDocumentUpsertParams,
+    ) -> Result<()> {
+        let document = app_server.workspace_document_upsert(params).await?.document;
+        let client_id = document.client_id.clone();
+        let document_id = Some(document.id.clone());
+        self.reload_preserving(
+            app_server,
+            Some(client_id),
+            self.draft_note.id.clone(),
+            document_id,
+            self.active_encounter_id(),
+            self.selected_task_id(),
+        )
+        .await?;
+        self.inspected_artifact_id = Some(document.id);
+        self.focus_workflow_section(MedicalWorkflowSection::Documents);
+        self.workflow_scroll = 0;
+        self.status = "Practice record associated with Uploaded Documents; not included for agent."
+            .to_string();
+        Ok(())
+    }
+
+    pub(crate) async fn save_dropped_file_references(
+        &mut self,
+        app_server: &mut AppServerSession,
+        params: Vec<WorkspaceDocumentUpsertParams>,
+    ) -> Result<()> {
+        if params.is_empty() {
+            self.status = "No local file references to add.".to_string();
+            return Ok(());
+        }
+        let client_id = params[0].client_id.clone();
+        let titles = params
+            .iter()
+            .map(|params| params.title.clone())
+            .collect::<Vec<_>>();
+        let preferred_note_id = self.draft_note.id.clone();
+        let preferred_encounter_id = self.active_encounter_id();
+        let preferred_task_id = self.selected_task_id();
+        let dropped_from_patient_files_sidepane = self.focus == WorkspaceFocus::PatientFiles;
+        let prior_workflow_section = self.workflow_section;
+        let mut saved_document_id = None;
+        let mut preview_attempt_count = 0usize;
+        let mut preview_ready_count = 0usize;
+        for params in params {
+            let mut document = app_server.workspace_document_upsert(params).await?.document;
+            if should_auto_generate_preview_after_intake()
+                && document_is_priority_preview_file(&document)
+            {
+                preview_attempt_count += 1;
+                let source_path = document_preferred_file_path(&document);
+                if source_path.is_file() {
+                    let thumbnail = generate_local_thumbnail(&document, &source_path);
+                    let mut params = document_upsert_params_from_document(&document);
+                    if apply_thumbnail_generation_to_params(&mut params, thumbnail) {
+                        preview_ready_count += 1;
+                    }
+                    document = app_server.workspace_document_upsert(params).await?.document;
+                }
+            }
+            saved_document_id = Some(document.id);
+        }
+        let saved_count = titles.len();
+        self.reload_preserving(
+            app_server,
+            Some(client_id),
+            preferred_note_id,
+            saved_document_id.clone(),
+            preferred_encounter_id,
+            preferred_task_id,
+        )
+        .await?;
+        self.inspected_artifact_id = None;
+        self.workflow_scroll = 0;
+        if let Some(document_id) = saved_document_id.as_deref() {
+            self.set_patient_file_tree_index_for_document_id(document_id);
+        }
+        if dropped_from_patient_files_sidepane {
+            self.workflow_section = prior_workflow_section;
+        } else if medical_scope_tab_for_section(self.workflow_section) != MedicalScopeTab::Chart {
+            self.set_workflow_section(MedicalWorkflowSection::Visit);
+        }
+        self.focus = WorkspaceFocus::PatientFiles;
+        let preview_status = match (preview_attempt_count, preview_ready_count) {
+            (0, _) => String::new(),
+            (_, 0) => " Preview not available yet.".to_string(),
+            (1, 1) => " Preview ready.".to_string(),
+            (_, ready) => format!(" {ready} previews ready."),
+        };
+        self.status = if saved_count == 1 {
+            format!(
+                "Added local file reference: {}. Metadata only; not included in agent context.{}",
+                compact_preview(&titles[0], 48),
+                preview_status
+            )
+        } else {
+            format!(
+                "Added {saved_count} local file references. Metadata only; not included in agent context.{preview_status}"
+            )
+        };
+        Ok(())
+    }
+
+    pub(crate) async fn choose_patient_files(
+        &mut self,
+        app_server: &mut AppServerSession,
+    ) -> Result<()> {
+        self.focus_patient_files_tree();
+        if !self.is_patient_file_drop_scope() {
+            self.status = "Save or clear the active chart editor before using Uploaded Documents."
+                .to_string();
+            return Ok(());
+        }
+        let Some(client_id) = self.draft_client.id.clone() else {
+            self.status = "Select or save a patient before adding files.".to_string();
+            return Ok(());
+        };
+        if self.draft_document.is_new_unsaved_draft() {
+            self.status = "Save or clear the current file reference draft first.".to_string();
+            return Ok(());
+        }
+        match run_native_medical_file_drop_panel() {
+            NativeMedicalDropResult::Dropped(event) => {
+                let Some(params) = self.native_medical_file_drop_params(event) else {
+                    return Ok(());
+                };
+                return self.save_dropped_file_references(app_server, params).await;
+            }
+            NativeMedicalDropResult::Canceled => {
+                self.status = "Native file drop canceled; no reference added.".to_string();
+                return Ok(());
+            }
+            NativeMedicalDropResult::Unsupported(_) => {}
+            NativeMedicalDropResult::Failed(message) => {
+                let fallback = choose_macos_patient_file_paths();
+                if matches!(fallback, FileChoiceResult::Unsupported(_)) {
+                    self.status = message;
+                    return Ok(());
+                }
+                return self
+                    .save_chosen_patient_file_paths(app_server, client_id, fallback)
+                    .await;
+            }
+        }
+        let paths = match choose_macos_patient_file_paths() {
+            FileChoiceResult::Selected(paths) => paths,
+            FileChoiceResult::Canceled => {
+                self.status = "File choose canceled; no reference added.".to_string();
+                return Ok(());
+            }
+            FileChoiceResult::Unsupported(message) | FileChoiceResult::Failed(message) => {
+                self.status = message;
+                return Ok(());
+            }
+        };
+        if paths.is_empty() {
+            self.status = "No JPG/PDF files selected.".to_string();
+            return Ok(());
+        }
+        let encounter_id = self.active_encounter_id();
+        let params = paths
+            .iter()
+            .filter(|path| path.is_file())
+            .filter(|path| document_path_is_priority_preview_file(path))
+            .map(|path| {
+                local_file_upsert_params(
+                    &client_id,
+                    encounter_id.clone(),
+                    path,
+                    "macOS file chooser",
+                    "macos_file_chooser",
+                )
+            })
+            .collect::<Vec<_>>();
+        if params.is_empty() {
+            self.status = "No JPG/PDF files selected.".to_string();
+            return Ok(());
+        }
+        self.save_dropped_file_references(app_server, params).await
+    }
+
+    async fn save_chosen_patient_file_paths(
+        &mut self,
+        app_server: &mut AppServerSession,
+        client_id: String,
+        result: FileChoiceResult,
+    ) -> Result<()> {
+        let paths = match result {
+            FileChoiceResult::Selected(paths) => paths,
+            FileChoiceResult::Canceled => {
+                self.status = "File choose canceled; no reference added.".to_string();
+                return Ok(());
+            }
+            FileChoiceResult::Unsupported(message) | FileChoiceResult::Failed(message) => {
+                self.status = message;
+                return Ok(());
+            }
+        };
+        if paths.is_empty() {
+            self.status = "No JPG/PDF files selected.".to_string();
+            return Ok(());
+        }
+        let encounter_id = self.active_encounter_id();
+        let params = paths
+            .iter()
+            .filter(|path| path.is_file())
+            .filter(|path| document_path_is_priority_preview_file(path))
+            .map(|path| {
+                local_file_upsert_params(
+                    &client_id,
+                    encounter_id.clone(),
+                    path,
+                    "macOS file chooser",
+                    "macos_file_chooser",
+                )
+            })
+            .collect::<Vec<_>>();
+        if params.is_empty() {
+            self.status = "No JPG/PDF files selected.".to_string();
+            return Ok(());
+        }
+        self.save_dropped_file_references(app_server, params).await
+    }
+
+    pub(crate) async fn import_document_to_vault(
+        &mut self,
+        app_server: &mut AppServerSession,
+        document_id: String,
+    ) -> Result<()> {
+        let Some(document) = self
+            .documents
+            .iter()
+            .find(|document| document.id == document_id)
+            .cloned()
+        else {
+            self.status = "Selected file reference was not found.".to_string();
+            return Ok(());
+        };
+        if artifact_scope_label(&document) != "patient" {
+            self.status = "Only active-patient file references can be imported.".to_string();
+            return Ok(());
+        }
+        if document.reference_kind == "vault_copy" && !document.vault_path.trim().is_empty() {
+            self.focus_workflow_section(MedicalWorkflowSection::Documents);
+            self.inspected_artifact_id = Some(document.id.clone());
+            self.status = format!(
+                "Local vault copy already recorded: {}.",
+                compact_preview(&document.vault_path, 54)
+            );
+            return Ok(());
+        }
+
+        let source_path = document_original_path(&document);
+        let metadata = match fs::metadata(&source_path) {
+            Ok(metadata) if metadata.is_file() => metadata,
+            Ok(_) => {
+                self.status =
+                    "Selected file reference points to a directory; no vault copy created."
+                        .to_string();
+                return Ok(());
+            }
+            Err(_) => {
+                self.status = "Selected file reference is missing locally; no vault copy created."
+                    .to_string();
+                return Ok(());
+            }
+        };
+        let import = copy_document_to_local_vault(&document, &source_path)?;
+        let mut params = document_upsert_params_from_document(&document);
+        params.reference_kind = "vault_copy".to_string();
+        params.original_path = nonempty_or(&document.original_path, &document.local_path);
+        params.vault_path = import.vault_path.display().to_string();
+        params.content_sha256 = Some(import.sha256.clone());
+        params.sha256 = Some(import.sha256);
+        params.file_size_bytes = i64::try_from(metadata.len()).ok();
+        params.tags = append_csv_tag(&document.tags, "vault-copy");
+        params.intake_source = nonempty_or(&document.intake_source, "manual_file_import");
+        params.imported_at = Some(Utc::now().timestamp());
+
+        let saved = app_server.workspace_document_upsert(params).await?.document;
+        let client_id = saved.client_id.clone();
+        let document_id = Some(saved.id.clone());
+        self.reload_preserving(
+            app_server,
+            Some(client_id),
+            self.draft_note.id.clone(),
+            document_id.clone(),
+            self.active_encounter_id(),
+            self.selected_task_id(),
+        )
+        .await?;
+        self.focus_workflow_section(MedicalWorkflowSection::Documents);
+        self.inspected_artifact_id = document_id;
+        self.workflow_scroll = 0;
+        self.status = format!(
+            "Imported local vault copy: {}. Still not included for agent unless marked.",
+            compact_preview(&saved.title, 46)
+        );
+        Ok(())
+    }
+
+    pub(crate) async fn generate_document_thumbnail(
+        &mut self,
+        app_server: &mut AppServerSession,
+        document_id: String,
+    ) -> Result<()> {
+        let Some(document) = self
+            .documents
+            .iter()
+            .find(|document| document.id == document_id)
+            .cloned()
+        else {
+            self.status = "Selected file reference was not found.".to_string();
+            return Ok(());
+        };
+        if artifact_scope_label(&document) != "patient" {
+            self.status = "Only active-patient file references can get thumbnails.".to_string();
+            return Ok(());
+        }
+        let source_path = document_preferred_file_path(&document);
+        if !source_path.is_file() {
+            self.status =
+                "Selected file reference is missing locally; thumbnail not generated.".to_string();
+            return Ok(());
+        }
+
+        let thumbnail = generate_local_thumbnail(&document, &source_path);
+        let mut params = document_upsert_params_from_document(&document);
+        let ready = apply_thumbnail_generation_to_params(&mut params, thumbnail);
+        if ready {
+            self.status = format!(
+                "Preview ready for {}. No file content sent to agent.",
+                compact_preview(&document.title, 48)
+            );
+        } else {
+            self.status = document_thumbnail_generation_status(&params);
+        }
+
+        let saved = app_server.workspace_document_upsert(params).await?.document;
+        let client_id = saved.client_id.clone();
+        let document_id = Some(saved.id.clone());
+        self.reload_preserving(
+            app_server,
+            Some(client_id),
+            self.draft_note.id.clone(),
+            document_id.clone(),
+            self.active_encounter_id(),
+            self.selected_task_id(),
+        )
+        .await?;
+        self.focus_workflow_section(MedicalWorkflowSection::Documents);
+        self.inspected_artifact_id = document_id;
+        self.workflow_scroll = 0;
+        Ok(())
+    }
+
+    pub(crate) fn open_document_file(&mut self, document_id: String) -> Result<()> {
+        let Some(document) = self
+            .documents
+            .iter()
+            .find(|document| document.id == document_id)
+            .cloned()
+        else {
+            self.status = "Selected file reference was not found.".to_string();
+            return Ok(());
+        };
+        if artifact_scope_label(&document) != "patient" {
+            self.status = "Only active-patient file references can be opened.".to_string();
+            return Ok(());
+        }
+        let source_path = document_preferred_file_path(&document);
+        if !source_path.is_file() {
+            self.status = "Selected file reference is missing locally; nothing opened.".to_string();
+            return Ok(());
+        }
+        match open_local_file_with_default_app(&source_path) {
+            Ok(()) => {
+                self.focus_workflow_section(MedicalWorkflowSection::Documents);
+                self.inspected_artifact_id = Some(document.id.clone());
+                self.status = format!(
+                    "Opened local file: {}. Chart data unchanged.",
+                    compact_preview(&document.title, 48)
+                );
+            }
+            Err(message) => {
+                self.status = message;
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn save_artifact_derivative(
+        &mut self,
+        app_server: &mut AppServerSession,
+        params: WorkspaceArtifactDerivativeUpsertParams,
+    ) -> Result<()> {
+        let derivative = app_server
+            .workspace_artifact_derivative_upsert(params)
+            .await?
+            .derivative;
+        self.derivative_draft.clear();
+        let client_id = derivative.client_id.clone();
+        let note_id = self.draft_note.id.clone();
+        let document_id = Some(derivative.document_id.clone());
+        self.reload_preserving(
+            app_server,
+            Some(client_id),
+            note_id,
+            document_id,
+            self.active_encounter_id(),
+            self.selected_task_id(),
+        )
+        .await?;
+        self.selected_derivative_ids.insert(derivative.id.clone());
+        self.inspected_derivative_id = Some(derivative.id);
+        self.focus_workflow_section(MedicalWorkflowSection::Documents);
+        self.workflow_scroll = self.workflow_derivative_inspector_row();
+        self.status = "Derivative saved as human-provided context; included for agent.".to_string();
+        Ok(())
+    }
+
+    pub(crate) async fn update_artifact_derivative_status(
+        &mut self,
+        app_server: &mut AppServerSession,
+        derivative_id: String,
+        review_status: String,
+    ) -> Result<()> {
+        let response = app_server
+            .workspace_artifact_derivative_status_update(
+                WorkspaceArtifactDerivativeStatusUpdateParams {
+                    derivative_id: derivative_id.clone(),
+                    review_status: review_status.clone(),
+                },
+            )
+            .await?;
+        self.reload_preserving(
+            app_server,
+            self.draft_client.id.clone(),
+            self.draft_note.id.clone(),
+            self.draft_document.id.clone(),
+            self.active_encounter_id(),
+            self.selected_task_id(),
+        )
+        .await?;
+        if review_status == "archived" {
+            self.selected_derivative_ids.remove(&derivative_id);
+            self.inspected_derivative_id = None;
+        } else if let Some(derivative) = response.derivative {
+            self.inspected_derivative_id = Some(derivative.id);
+        }
+        self.focus_workflow_section(MedicalWorkflowSection::Documents);
+        self.status = format!(
+            "Derivative status updated: {}.",
+            derivative_status_label(&review_status)
+        );
+        Ok(())
+    }
+
+    pub(crate) async fn save_context_clip(
+        &mut self,
+        app_server: &mut AppServerSession,
+        params: WorkspaceContextClipUpsertParams,
+    ) -> Result<()> {
+        let clip = app_server.workspace_context_clip_upsert(params).await?.clip;
+        self.clip_draft.clear();
+        let client_id = clip.client_id.clone();
+        let note_id = self.draft_note.id.clone();
+        let document_id = Some(clip.document_id.clone());
+        self.reload_preserving(
+            app_server,
+            Some(client_id),
+            note_id,
+            document_id,
+            self.active_encounter_id(),
+            self.selected_task_id(),
+        )
+        .await?;
+        self.selected_clip_ids.insert(clip.id.clone());
+        self.inspected_clip_id = Some(clip.id);
+        self.focus_workflow_section(MedicalWorkflowSection::Documents);
+        self.workflow_scroll = self.workflow_clip_inspector_row();
+        self.status = "Context clip saved and included for agent.".to_string();
+        Ok(())
+    }
+
+    pub(crate) async fn update_context_clip_status(
+        &mut self,
+        app_server: &mut AppServerSession,
+        clip_id: String,
+        review_status: String,
+    ) -> Result<()> {
+        let response = app_server
+            .workspace_context_clip_status_update(WorkspaceContextClipStatusUpdateParams {
+                clip_id: clip_id.clone(),
+                review_status: review_status.clone(),
+            })
+            .await?;
+        self.reload_preserving(
+            app_server,
+            self.draft_client.id.clone(),
+            self.draft_note.id.clone(),
+            self.draft_document.id.clone(),
+            self.active_encounter_id(),
+            self.selected_task_id(),
+        )
+        .await?;
+        if review_status == "archived" {
+            self.selected_clip_ids.remove(&clip_id);
+            self.inspected_clip_id = None;
+        } else if let Some(clip) = response.clip {
+            self.inspected_clip_id = Some(clip.id);
+        }
+        self.focus_workflow_section(MedicalWorkflowSection::Documents);
+        self.status = format!(
+            "Clip status updated: {}.",
+            derivative_status_label(&review_status)
+        );
+        Ok(())
+    }
+
+    pub(crate) async fn update_agent_result_status(
+        &mut self,
+        app_server: &mut AppServerSession,
+        result_id: String,
+        status: String,
+    ) -> Result<()> {
+        let response = app_server
+            .workspace_agent_result_status_update(WorkspaceAgentResultStatusUpdateParams {
+                result_id: result_id.clone(),
+                status: status.clone(),
+            })
+            .await?;
+        self.selected_agent_result_id = Some(result_id);
+        self.reload_packet_history(app_server).await?;
+        self.agent_result_inspect = true;
+        self.focus_workflow_section(MedicalWorkflowSection::AgentInbox);
+        self.status = if response.result.is_some() {
+            format!(
+                "Agent result marked {}.",
+                agent_result_status_label(&status)
+            )
+        } else {
+            "Agent result was not found.".to_string()
+        };
+        Ok(())
+    }
+
+    pub(crate) async fn convert_agent_result_to_proposal(
+        &mut self,
+        app_server: &mut AppServerSession,
+        result_id: String,
+    ) -> Result<()> {
+        let Some(result) = self
+            .agent_results
+            .iter()
+            .find(|result| result.id == result_id)
+            .cloned()
+        else {
+            self.status = "Returned work was not found.".to_string();
+            return Ok(());
+        };
+        let Some(note_id) = self.draft_note.id.clone() else {
+            self.status = "Save the note before making a proposal draft.".to_string();
+            return Ok(());
+        };
+        if self.draft_note.is_locked() {
+            self.status = "Signed notes require an addendum draft from returned work.".to_string();
+            return Ok(());
+        }
+        if self.dirty {
+            self.status =
+                "Save or discard draft changes before making a proposal draft.".to_string();
+            return Ok(());
+        }
+        if let Some(message) = self.agent_result_conversion_guard_failure(&result) {
+            self.focus_workflow_section(MedicalWorkflowSection::AgentInbox);
+            self.status = message;
+            return Ok(());
+        }
+        app_server
+            .workspace_note_proposal_create(WorkspaceNoteProposalCreateParams {
+                note_id: note_id.clone(),
+                base_revision: self.draft_note.current_revision,
+                proposed_body: result.body.clone(),
+                summary: format!(
+                    "Returned work {}: {}",
+                    compact_preview(&result.id, 8),
+                    compact_preview(&result.summary, 64)
+                ),
+                source_thread_id: None,
+                source_turn_id: Some(result.id.clone()),
+            })
+            .await?;
+        app_server
+            .workspace_agent_result_status_update(WorkspaceAgentResultStatusUpdateParams {
+                result_id: result.id.clone(),
+                status: "converted".to_string(),
+            })
+            .await?;
+        self.selected_agent_result_id = Some(result.id);
+        self.reload_packet_history(app_server).await?;
+        self.load_active_note_details(app_server).await?;
+        self.focus_workflow_section(MedicalWorkflowSection::Proposals);
+        self.status =
+            "Returned work copied to a pending proposal; accept explicitly to update the note."
+                .to_string();
+        Ok(())
+    }
+
+    fn convert_agent_result_to_addendum_draft(&mut self) {
+        let Some(result) = self.selected_agent_result().cloned() else {
+            self.status = "No saved returned work to make an addendum draft.".to_string();
+            return;
+        };
+        if self.draft_note.id.is_none() {
+            self.status = "Save the note before making an addendum draft.".to_string();
+            return;
+        }
+        if !self.draft_note.is_locked() {
+            self.status =
+                "Unsigned notes should use a proposal draft from returned work.".to_string();
+            return;
+        }
+        if self.has_unsaved_addendum_draft() {
+            self.status = "Save the current addendum draft first.".to_string();
+            return;
+        }
+        if let Some(message) = self.agent_result_conversion_guard_failure(&result) {
+            self.focus_workflow_section(MedicalWorkflowSection::AgentInbox);
+            self.status = message;
+            return;
+        }
+        self.addendum_draft.active = true;
+        self.addendum_draft.body = result.body;
+        self.selected_agent_result_id = Some(result.id);
+        self.focus_workflow_section(MedicalWorkflowSection::Addenda);
+        self.status =
+            "Returned work copied to addendum draft; review and :addendum save.".to_string();
+    }
+
+    fn convert_agent_result_to_job_draft(&mut self) {
+        let Some(result) = self.selected_agent_result().cloned() else {
+            self.status = "No saved returned work to make a job draft.".to_string();
+            return;
+        };
+        if self.draft_client.id.is_none() {
+            self.status = "Save the patient before making a job draft.".to_string();
+            return;
+        }
+        if self.draft_task.is_active() {
+            self.status = "Save the current job draft first.".to_string();
+            return;
+        }
+        if let Some(message) = self.agent_result_conversion_guard_failure(&result) {
+            self.focus_workflow_section(MedicalWorkflowSection::AgentInbox);
+            self.status = message;
+            return;
+        }
+        self.draft_task = TaskDraft::start_new();
+        self.draft_task.title = if result.summary.trim().is_empty() {
+            "Review returned work".to_string()
+        } else {
+            compact_preview(&result.summary, 72)
+        };
+        self.draft_task.details = format!(
+            "From returned work {} for Medical Agent Plan {}.\n\n{}",
+            compact_preview(&result.id, 8),
+            compact_preview(&result.packet_id, 8),
+            result.body
+        );
+        self.draft_task.kind = "follow-up".to_string();
+        self.draft_task.priority = "normal".to_string();
+        self.selected_agent_result_id = Some(result.id);
+        self.focus_workflow_section(MedicalWorkflowSection::Jobs);
+        self.status = "Agent result copied to job draft; review and :save.".to_string();
+    }
+
+    fn request_agent_result_save(&mut self) -> WorkspaceDashboardAction {
+        let Some(packet_id) = self.agent_result.packet_id.clone() else {
+            self.status = "Start a returned work draft before saving.".to_string();
+            return WorkspaceDashboardAction::Consumed;
+        };
+        if !self.agent_result.has_text() {
+            self.status = "Paste or type returned agent work before saving.".to_string();
+            return WorkspaceDashboardAction::Consumed;
+        }
+        WorkspaceDashboardAction::SaveAgentResult {
+            packet_id,
+            body: self.agent_result.body.trim().to_string(),
+        }
+    }
+
+    fn request_derivative_save(&mut self) -> WorkspaceDashboardAction {
+        let Some(client_id) = self.draft_client.id.clone() else {
+            self.status = "Save the patient before saving reviewed text.".to_string();
+            return WorkspaceDashboardAction::Consumed;
+        };
+        if self.derivative_draft.document_id.trim().is_empty() {
+            self.status = "Choose a saved file reference before saving reviewed text.".to_string();
+            return WorkspaceDashboardAction::Consumed;
+        }
+        if self.derivative_draft.title.trim().is_empty()
+            || self.derivative_draft.body.trim().is_empty()
+        {
+            self.status = "Reviewed text title and body are required.".to_string();
+            return WorkspaceDashboardAction::Consumed;
+        }
+        WorkspaceDashboardAction::SaveArtifactDerivative(Box::new(
+            self.derivative_draft.upsert_params(
+                client_id,
+                self.active_encounter_id(),
+                self.draft_note.id.clone(),
+            ),
+        ))
+    }
+
+    fn request_clip_save(&mut self) -> WorkspaceDashboardAction {
+        let Some(client_id) = self.draft_client.id.clone() else {
+            self.status = "Save the patient before saving a context clip.".to_string();
+            return WorkspaceDashboardAction::Consumed;
+        };
+        if self.clip_draft.derivative_id.trim().is_empty() {
+            self.status = "Choose saved reviewed text before saving a context clip.".to_string();
+            return WorkspaceDashboardAction::Consumed;
+        }
+        if self.clip_draft.title.trim().is_empty() || self.clip_draft.body.trim().is_empty() {
+            self.status = "Clip title and excerpt are required.".to_string();
+            return WorkspaceDashboardAction::Consumed;
+        }
+        WorkspaceDashboardAction::SaveContextClip(Box::new(self.clip_draft.upsert_params(
+            client_id,
+            self.active_encounter_id(),
+            self.draft_note.id.clone(),
+        )))
+    }
+
+    fn start_derivative_draft(&mut self, document_id: Option<String>) {
+        let Some(document_id) = document_id
+            .or_else(|| self.inspected_artifact_id.clone())
+            .or_else(|| {
+                self.selected_artifacts()
+                    .first()
+                    .map(|document| document.id.clone())
+            })
+            .or_else(|| self.documents.first().map(|document| document.id.clone()))
+        else {
+            self.status = "Save a file reference before adding reviewed text.".to_string();
+            return;
+        };
+        let Some(document) = self
+            .documents
+            .iter()
+            .find(|document| document.id == document_id)
+            .cloned()
+        else {
+            self.status = "Selected file reference was not found.".to_string();
+            return;
+        };
+        let kind = default_derivative_kind_for_document(&document).to_string();
+        let title = format!(
+            "{} for {}",
+            derivative_kind_title(&kind),
+            compact_preview(&document.title, 38)
+        );
+        self.derivative_draft = DerivativeDraft::start_new(document.id.clone(), kind, title);
+        self.derivative_field = DerivativeField::Body;
+        self.inspected_artifact_id = Some(document.id);
+        self.focus = WorkspaceFocus::Workflow;
+        self.set_workflow_section(MedicalWorkflowSection::Documents);
+        self.workflow_scroll = self
+            .workflow_derivative_editor_row(DerivativeField::Artifact)
+            .saturating_sub(1);
+        self.mark_dirty();
+        self.status =
+            "Reviewed text draft ready. Paste reviewed text, then :derivative save.".to_string();
+    }
+
+    fn start_clip_draft(&mut self, derivative_id: Option<String>) {
+        let Some(derivative_id) = derivative_id
+            .or_else(|| self.inspected_derivative_id.clone())
+            .or_else(|| {
+                self.selected_derivatives()
+                    .first()
+                    .map(|derivative| derivative.id.clone())
+            })
+            .or_else(|| {
+                self.derivatives
+                    .first()
+                    .map(|derivative| derivative.id.clone())
+            })
+        else {
+            self.status = "Save reviewed text before adding a context clip.".to_string();
+            return;
+        };
+        let Some(derivative) = self
+            .derivatives
+            .iter()
+            .find(|derivative| derivative.id == derivative_id)
+            .cloned()
+        else {
+            self.status = "Selected reviewed text was not found.".to_string();
+            return;
+        };
+        self.clip_draft = ClipDraft::start_new(&derivative);
+        self.clip_field = ClipField::Body;
+        self.inspected_derivative_id = Some(derivative.id);
+        self.focus = WorkspaceFocus::Workflow;
+        self.set_workflow_section(MedicalWorkflowSection::Documents);
+        self.workflow_scroll = self
+            .workflow_clip_editor_row(ClipField::Derivative)
+            .saturating_sub(1);
+        self.mark_dirty();
+        self.status = "Clip draft ready. Paste exact excerpt, then :clip save.".to_string();
+    }
+
+    fn start_agent_result(&mut self) {
+        let Some(packet_id) = self
+            .latest_packet_without_result()
+            .map(|packet| packet.id.clone())
+        else {
+            self.status = "Submit a Medical Agent Plan before saving returned work.".to_string();
+            self.focus_workflow_section(MedicalWorkflowSection::AgentInbox);
+            return;
+        };
+        self.agent_request.clear();
+        self.agent_result.start(packet_id.clone());
+        self.focus = WorkspaceFocus::Agent;
+        self.set_workflow_section(MedicalWorkflowSection::AgentInbox);
+        self.workflow_scroll = 0;
+        self.status = format!(
+            "Returned work draft ready for Medical Agent Plan {}. Paste returned work, then :agent result save.",
+            compact_preview(&packet_id, 8)
+        );
+    }
+
+    fn latest_packet_without_result(&self) -> Option<&WorkspaceContextPacket> {
+        self.context_packets
+            .iter()
+            .find(|packet| !self.packet_has_result(&packet.id))
+            .or_else(|| self.context_packets.first())
+    }
+
+    fn packet_has_result(&self, packet_id: &str) -> bool {
+        self.agent_results
+            .iter()
+            .any(|result| result.packet_id == packet_id)
+    }
+
+    fn latest_result_for_packet(&self, packet_id: &str) -> Option<&WorkspaceAgentResult> {
+        self.agent_results
+            .iter()
+            .find(|result| result.packet_id == packet_id)
+    }
+
+    fn selected_agent_result(&self) -> Option<&WorkspaceAgentResult> {
+        self.selected_agent_result_id
+            .as_deref()
+            .and_then(|id| self.agent_results.iter().find(|result| result.id == id))
+            .or_else(|| {
+                self.agent_results
+                    .iter()
+                    .find(|result| result.status == "review_pending")
+            })
+            .or_else(|| self.agent_results.first())
+    }
+
+    fn selected_agent_result_id_for_action(&mut self) -> Option<String> {
+        let result_id = self.selected_agent_result().map(|result| result.id.clone());
+        if let Some(result_id) = result_id.as_ref() {
+            self.selected_agent_result_id = Some(result_id.clone());
+        }
+        result_id
+    }
+
+    fn packet_for_agent_result(
+        &self,
+        result: &WorkspaceAgentResult,
+    ) -> Option<&WorkspaceContextPacket> {
+        self.context_packets
+            .iter()
+            .find(|packet| packet.id == result.packet_id)
+    }
+
+    fn agent_result_conversion_guard_failure(
+        &self,
+        result: &WorkspaceAgentResult,
+    ) -> Option<String> {
+        let Some(active_client_id) = self.draft_client.id.as_deref() else {
+            return Some("Save the patient before making a draft from returned work.".to_string());
+        };
+        if result.client_id != active_client_id {
+            return Some(
+                "Agent result plan does not match the active patient; reload the matching chart or submit a new Medical Agent Plan."
+                    .to_string(),
+            );
+        }
+        if let Some(active_note_id) = self.draft_note.id.as_deref()
+            && result.note_id.as_deref() != Some(active_note_id)
+        {
+            return Some(
+                "Agent result plan does not match the active note; reload the matching chart or submit a new Medical Agent Plan."
+                    .to_string(),
+            );
+        }
+        let Some(packet) = self.packet_for_agent_result(result) else {
+            return Some(
+                "Agent result plan metadata is not loaded; replay or reload before converting."
+                    .to_string(),
+            );
+        };
+        if packet.client_id != result.client_id || packet.note_id != result.note_id {
+            return Some(
+                "Agent result provenance does not match its Medical Agent Plan metadata; conversion blocked."
+                    .to_string(),
+            );
+        }
+        if packet.context_envelope_sha256.trim().is_empty()
+            || result.context_envelope_sha256.trim().is_empty()
+        {
+            return Some(
+                "Agent result plan hash is unavailable; conversion blocked for review safety."
+                    .to_string(),
+            );
+        }
+        if packet.context_envelope_sha256 != result.context_envelope_sha256 {
+            return Some(
+                "Agent result plan hash does not match the sent context; conversion blocked."
+                    .to_string(),
+            );
+        }
+        None
+    }
+
+    fn packet_for_replay(&self) -> Option<&WorkspaceContextPacket> {
+        self.selected_agent_result()
+            .and_then(|result| self.packet_for_agent_result(result))
+            .or_else(|| self.context_packets.first())
+    }
+
+    fn select_next_agent_result(&mut self) {
+        if self.agent_results.is_empty() {
+            self.status = "No saved returned work for this chart.".to_string();
+            self.focus_workflow_section(MedicalWorkflowSection::AgentInbox);
+            return;
+        }
+        let current_index = self
+            .selected_agent_result_id
+            .as_deref()
+            .and_then(|id| self.agent_results.iter().position(|result| result.id == id))
+            .unwrap_or(0);
+        let next_index = apply_delta(current_index, self.agent_results.len(), 1);
+        self.selected_agent_result_id = Some(self.agent_results[next_index].id.clone());
+        self.agent_result_inspect = true;
+        self.focus_workflow_section(MedicalWorkflowSection::AgentInbox);
+        self.status = "Selected next returned work.".to_string();
+    }
+
+    #[cfg(test)]
+    fn push_context_packet_for_tests(&mut self, packet: WorkspaceContextPacket) {
+        self.context_packets.insert(0, packet);
+    }
+
+    #[cfg(test)]
+    fn push_agent_result_for_tests(&mut self, result: WorkspaceAgentResult) {
+        self.selected_agent_result_id = Some(result.id.clone());
+        self.agent_results.insert(0, result);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn context_packet_count_for_tests(&self) -> usize {
+        self.context_packets.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn agent_result_count_for_tests(&self) -> usize {
+        self.agent_results.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn first_context_packet_for_tests(&self) -> Option<&WorkspaceContextPacket> {
+        self.context_packets.first()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn agent_result_body_for_tests(&self) -> Option<&str> {
+        self.agent_results
+            .first()
+            .map(|result| result.body.as_str())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn agent_result_status_for_tests(&self) -> Option<&str> {
+        self.agent_results
+            .first()
+            .map(|result| result.status.as_str())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pending_proposal_count_for_tests(&self) -> usize {
+        self.pending_proposal_count()
+    }
+
+    fn context_packet_preview_lines(&self) -> Vec<String> {
+        let mut lines = self.medical_context_assembly().preview_lines;
+        if let Some(notice) = &self.stale_context_notice {
+            lines.insert(0, notice.clone());
+        }
+        lines
+    }
+
+    fn execute_artifact_selection_command(
+        &mut self,
+        action: ArtifactSelectionAction,
+        selector: Option<String>,
+    ) -> WorkspaceDashboardAction {
+        if self.profile != WorkspaceProfile::Medical {
+            self.status =
+                "Artifact selection is only available in the medical workspace.".to_string();
+            return WorkspaceDashboardAction::Consumed;
+        }
+        let index = match self.resolve_artifact_selector(selector.as_deref(), action) {
+            Ok(index) => index,
+            Err(status) => {
+                self.focus_patient_files_tree();
+                self.status = status;
+                return WorkspaceDashboardAction::Consumed;
+            }
+        };
+        let document = &self.documents[index];
+        let document_id = document.id.clone();
+        let artifact_number = index + 1;
+        let label = document_context_label(document);
+        match action {
+            ArtifactSelectionAction::Select => {
+                let inserted = self.selected_artifact_ids.insert(document_id.clone());
+                self.status = if inserted {
+                    format!("Included file reference {artifact_number}: {label}.")
+                } else {
+                    format!("File reference {artifact_number} already included: {label}.")
+                };
+            }
+            ArtifactSelectionAction::Deselect => {
+                let removed = self.selected_artifact_ids.remove(&document_id);
+                self.status = if removed {
+                    format!("Excluded file reference {artifact_number}: {label}.")
+                } else {
+                    format!("File reference {artifact_number} already excluded: {label}.")
+                };
+            }
+            ArtifactSelectionAction::Toggle => {
+                if self.selected_artifact_ids.remove(&document_id) {
+                    self.status = format!("Excluded file reference {artifact_number}: {label}.");
+                } else {
+                    self.selected_artifact_ids.insert(document_id.clone());
+                    self.status = format!("Included file reference {artifact_number}: {label}.");
+                }
+            }
+            ArtifactSelectionAction::Inspect => {
+                self.inspected_artifact_id = Some(document_id.clone());
+                let state = if self.selected_artifact_ids.contains(&document_id) {
+                    "included"
+                } else {
+                    "excluded"
+                };
+                self.status = format!(
+                    "Inspecting file reference {artifact_number} ({state}): file reference only {}; path {}; notes {}",
+                    label,
+                    compact_preview(&document.local_path, 48),
+                    compact_preview(&document.notes, 48)
+                );
+            }
+        }
+        self.stale_context_notice = None;
+        self.set_patient_file_tree_index_for_document_id(&document_id);
+        if !self.workflow_section_has_active_editor() {
+            if action == ArtifactSelectionAction::Inspect {
+                self.focus = WorkspaceFocus::Workflow;
+                self.set_workflow_section(MedicalWorkflowSection::Documents);
+                self.workflow_scroll = 0;
+            } else {
+                if medical_scope_tab_for_section(self.workflow_section) != MedicalScopeTab::Chart {
+                    self.set_workflow_section(MedicalWorkflowSection::Visit);
+                }
+                self.focus = WorkspaceFocus::PatientFiles;
+            }
+        }
+        WorkspaceDashboardAction::Consumed
+    }
+
+    fn resolve_artifact_selector(
+        &self,
+        selector: Option<&str>,
+        action: ArtifactSelectionAction,
+    ) -> std::result::Result<usize, String> {
+        let patient_documents = self
+            .documents
+            .iter()
+            .enumerate()
+            .filter(|(_, document)| artifact_scope_label(document) == "patient")
+            .collect::<Vec<_>>();
+        if patient_documents.is_empty() {
+            return Err("No file references for the active patient.".to_string());
+        }
+        let selector = selector
+            .map(str::trim)
+            .filter(|selector| !selector.is_empty());
+        if let Some(selector) = selector {
+            if let Ok(number) = selector.parse::<usize>() {
+                if (1..=patient_documents.len()).contains(&number) {
+                    return Ok(patient_documents[number - 1].0);
+                }
+                return Err(format!(
+                    "File reference number {number} is outside 1..{}.",
+                    patient_documents.len()
+                ));
+            }
+            let selector_lower = selector.to_ascii_lowercase();
+            if let Some((index, _)) = patient_documents.into_iter().find(|(_, document)| {
+                document.id == selector
+                    || document.id.starts_with(selector)
+                    || document
+                        .title
+                        .to_ascii_lowercase()
+                        .contains(&selector_lower)
+            }) {
+                return Ok(index);
+            }
+            return Err(format!("No file reference matches `{selector}`."));
+        }
+        match action {
+            ArtifactSelectionAction::Select => patient_documents
+                .iter()
+                .find(|(_, document)| !self.selected_artifact_ids.contains(&document.id))
+                .map(|(index, _)| *index)
+                .ok_or_else(|| {
+                    "All saved patient file references are already included.".to_string()
+                }),
+            ArtifactSelectionAction::Deselect => patient_documents
+                .iter()
+                .find(|(_, document)| self.selected_artifact_ids.contains(&document.id))
+                .map(|(index, _)| *index)
+                .ok_or_else(|| {
+                    "No patient file references are included in the Medical Agent Plan.".to_string()
+                }),
+            ArtifactSelectionAction::Toggle => Ok(patient_documents[0].0),
+            ArtifactSelectionAction::Inspect => patient_documents
+                .iter()
+                .find(|(_, document)| self.selected_artifact_ids.contains(&document.id))
+                .map(|(index, _)| *index)
+                .or(Some(patient_documents[0].0))
+                .ok_or_else(|| "No file references for the active patient.".to_string()),
+        }
+    }
+
+    fn patient_file_tree_rows(&self) -> Vec<PatientFileTreeRow> {
+        self.documents
+            .iter()
+            .enumerate()
+            .filter(|(_, document)| artifact_scope_label(document) == "patient")
+            .map(|(document_index, _)| PatientFileTreeRow::File { document_index })
+            .collect()
+    }
+
+    fn clamp_patient_file_tree_index(&mut self) {
+        let row_count = self.patient_file_tree_rows().len();
+        if row_count == 0 {
+            self.patient_files_tree_index = 0;
+        } else {
+            self.patient_files_tree_index = self.patient_files_tree_index.min(row_count - 1);
+        }
+    }
+
+    fn has_patient_file_references(&self) -> bool {
+        self.documents
+            .iter()
+            .any(|document| artifact_scope_label(document) == "patient")
+    }
+
+    fn select_first_patient_file_row_if_needed(&mut self) {
+        self.clamp_patient_file_tree_index();
+    }
+
+    fn patient_file_tree_row_for_current_index(&self) -> Option<PatientFileTreeRow> {
+        let rows = self.patient_file_tree_rows();
+        rows.get(self.patient_files_tree_index).cloned()
+    }
+
+    fn patient_file_tree_index_for_document_id(&self, document_id: &str) -> Option<usize> {
+        self.patient_file_tree_rows()
+            .iter()
+            .position(|row| match row {
+                PatientFileTreeRow::File { document_index, .. } => self
+                    .documents
+                    .get(*document_index)
+                    .is_some_and(|document| document.id == document_id),
+            })
+    }
+
+    fn set_patient_file_tree_index_for_document_id(&mut self, document_id: &str) {
+        if let Some(index) = self.patient_file_tree_index_for_document_id(document_id) {
+            self.patient_files_tree_index = index;
+        } else {
+            self.clamp_patient_file_tree_index();
+        }
+    }
+
+    fn highlighted_patient_file_document_index(&self) -> Option<usize> {
+        match self.patient_file_tree_row_for_current_index()? {
+            PatientFileTreeRow::File { document_index, .. } => Some(document_index),
+        }
+    }
+
+    fn highlighted_patient_file_document_id(&self) -> Option<String> {
+        self.highlighted_patient_file_document_index()
+            .and_then(|index| self.documents.get(index))
+            .map(|document| document.id.clone())
+    }
+
+    fn move_patient_file_tree_selection(&mut self, delta: isize) {
+        let rows = self.patient_file_tree_rows();
+        if rows.is_empty() {
+            self.patient_files_tree_index = 0;
+            self.status = "No patient files yet. Paste/drop a JPG/PDF path.".to_string();
+            return;
+        }
+        let current = self
+            .patient_files_tree_index
+            .min(rows.len().saturating_sub(1));
+        self.patient_files_tree_index = apply_delta(current, rows.len(), delta);
+        self.update_patient_file_tree_highlight_status();
+    }
+
+    fn move_patient_file_tree_to_edge(&mut self, last: bool) {
+        let rows = self.patient_file_tree_rows();
+        if rows.is_empty() {
+            self.patient_files_tree_index = 0;
+            self.status = "No patient files yet. Paste/drop a JPG/PDF path.".to_string();
+            return;
+        }
+        self.patient_files_tree_index = if last { rows.len() - 1 } else { 0 };
+        self.update_patient_file_tree_highlight_status();
+    }
+
+    fn update_patient_file_tree_highlight_status(&mut self) {
+        self.clamp_patient_file_tree_index();
+        self.status = match self.patient_file_tree_row_for_current_index() {
+            Some(PatientFileTreeRow::File { document_index, .. }) => {
+                let Some(document) = self.documents.get(document_index) else {
+                    self.status = "Highlighted file reference was not found.".to_string();
+                    return;
+                };
+                let state = if self.selected_artifact_ids.contains(&document.id) {
+                    "included"
+                } else {
+                    "not included"
+                };
+                format!(
+                    "{}: {state}. Enter opens detail; Space includes for packet.",
+                    compact_preview(&document.title, 40)
+                )
+            }
+            None => "No patient files yet. Paste/drop a JPG/PDF path.".to_string(),
+        };
+    }
+
+    fn collapse_patient_file_tree_row(&mut self) {
+        self.status = if self.patient_file_tree_rows().is_empty() {
+            "No patient files yet. Paste/drop a JPG/PDF path.".to_string()
+        } else {
+            "Uploaded Documents is a flat list. Use Up/Down, Enter detail, Space include."
+                .to_string()
+        };
+    }
+
+    fn expand_patient_file_tree_row(&mut self) {
+        match self.patient_file_tree_row_for_current_index() {
+            Some(PatientFileTreeRow::File { document_index, .. }) => {
+                if let Some(document) = self.documents.get(document_index) {
+                    self.inspected_artifact_id = Some(document.id.clone());
+                    self.status = format!(
+                        "Inspecting file reference: {}.",
+                        compact_preview(&document.title, 48)
+                    );
+                }
+            }
+            None => {
+                self.status = "No patient files yet. Paste/drop a JPG/PDF path.".to_string();
+            }
+        }
+    }
+
+    fn activate_patient_file_tree_row(&mut self) {
+        match self.patient_file_tree_row_for_current_index() {
+            Some(PatientFileTreeRow::File { document_index, .. }) => {
+                if let Some((document_id, title)) = self
+                    .documents
+                    .get(document_index)
+                    .map(|document| (document.id.clone(), document.title.clone()))
+                {
+                    self.inspected_artifact_id = Some(document_id);
+                    self.focus = WorkspaceFocus::Workflow;
+                    self.set_workflow_section(MedicalWorkflowSection::Documents);
+                    self.workflow_scroll = 0;
+                    self.status = format!(
+                        "File detail: {}. Space includes it for the packet.",
+                        compact_preview(&title, 40)
+                    );
+                }
+            }
+            None => {
+                self.status = "No patient files yet. Paste/drop a JPG/PDF path.".to_string();
+            }
+        }
+    }
+
+    fn toggle_highlighted_patient_file_inclusion(&mut self) {
+        let Some(document_index) = self.highlighted_patient_file_document_index() else {
+            self.status = "Highlight a file row before including it for agent context.".to_string();
+            return;
+        };
+        let Some(document) = self.documents.get(document_index) else {
+            self.status = "Highlighted file reference was not found.".to_string();
+            return;
+        };
+        let document_id = document.id.clone();
+        let title = compact_preview(&document.title, 48);
+        if self.selected_artifact_ids.remove(&document_id) {
+            self.status = format!("Not included: {title}.");
+        } else {
+            self.selected_artifact_ids.insert(document_id);
+            self.status = format!("Included: {title}.");
+        }
+        self.stale_context_notice = None;
+    }
+
+    fn selected_artifacts(&self) -> Vec<&WorkspaceDocument> {
+        self.documents
+            .iter()
+            .filter(|document| {
+                artifact_scope_label(document) == "patient"
+                    && self.selected_artifact_ids.contains(&document.id)
+            })
+            .collect()
+    }
+
+    fn selected_document_id_for_file_operation(&mut self) -> Option<String> {
+        let document_id = self
+            .highlighted_patient_file_document_id()
+            .or_else(|| {
+                self.inspected_artifact()
+                    .filter(|document| artifact_scope_label(document) == "patient")
+                    .map(|document| document.id.clone())
+            })
+            .or_else(|| {
+                self.selected_artifacts()
+                    .first()
+                    .map(|document| document.id.clone())
+            })
+            .or_else(|| {
+                self.documents
+                    .iter()
+                    .find(|document| artifact_scope_label(document) == "patient")
+                    .map(|document| document.id.clone())
+            });
+        if let Some(document_id) = &document_id {
+            self.inspected_artifact_id = Some(document_id.clone());
+            self.set_patient_file_tree_index_for_document_id(document_id);
+        }
+        document_id
+    }
+
+    fn patient_file_count(&self) -> usize {
+        self.documents
+            .iter()
+            .filter(|document| artifact_scope_label(document) == "patient")
+            .count()
+    }
+
+    fn patient_file_group_count(&self, group: &str) -> usize {
+        self.documents
+            .iter()
+            .filter(|document| {
+                artifact_scope_label(document) == "patient"
+                    && patient_file_group_label(document) == group
+            })
+            .count()
+    }
+
+    fn patient_document_ids(&self) -> BTreeSet<&str> {
+        self.documents
+            .iter()
+            .filter(|document| artifact_scope_label(document) == "patient")
+            .map(|document| document.id.as_str())
+            .collect()
+    }
+
+    fn selected_practice_library_item(&self) -> Option<&WorkspacePracticeLibraryItem> {
+        self.practice_library_items
+            .get(self.practice_library_index)
+            .or_else(|| self.practice_library_items.first())
+    }
+
+    fn select_next_practice_library_item(&mut self) {
+        if self.practice_library_items.is_empty() {
+            self.status = "No practice library records loaded.".to_string();
+            self.focus_workflow_section(MedicalWorkflowSection::PracticeLibrary);
+            return;
+        }
+        self.practice_library_index = apply_delta(
+            self.practice_library_index,
+            self.practice_library_items.len(),
+            1,
+        );
+        self.practice_library_inspect = false;
+        self.focus_workflow_section(MedicalWorkflowSection::PracticeLibrary);
+        if let Some(item) = self.selected_practice_library_item() {
+            self.status = format!(
+                "Selected practice library record: {}.",
+                document_context_label(&item.document)
+            );
+        }
+    }
+
+    fn inspect_selected_practice_library_item(&mut self) {
+        if self.practice_library_items.is_empty() {
+            self.status = "No practice library records to inspect.".to_string();
+            self.focus_workflow_section(MedicalWorkflowSection::PracticeLibrary);
+            return;
+        }
+        self.practice_library_inspect = true;
+        self.focus_workflow_section(MedicalWorkflowSection::PracticeLibrary);
+        if let Some(item) = self.selected_practice_library_item() {
+            self.status = format!(
+                "Inspecting practice library record: {}.",
+                document_context_label(&item.document)
+            );
+        }
+    }
+
+    fn request_practice_library_association(&mut self) -> WorkspaceDashboardAction {
+        let Some(client_id) = self.draft_client.id.clone() else {
+            self.status = "Save the patient before associating practice records.".to_string();
+            return WorkspaceDashboardAction::Consumed;
+        };
+        let Some(item) = self.selected_practice_library_item().cloned() else {
+            self.status = "No practice library record selected.".to_string();
+            self.focus_workflow_section(MedicalWorkflowSection::PracticeLibrary);
+            return WorkspaceDashboardAction::Consumed;
+        };
+        if item.linked_to_active_client {
+            if let Some(linked_document_id) = item.linked_document_id.as_deref() {
+                self.inspected_artifact_id = Some(linked_document_id.to_string());
+            }
+            self.focus_workflow_section(MedicalWorkflowSection::Documents);
+            self.status =
+                "Practice record is already associated with this patient file shelf.".to_string();
+            return WorkspaceDashboardAction::Consumed;
+        }
+        let params = self.practice_library_association_params(&item, client_id);
+        WorkspaceDashboardAction::AssociatePracticeLibraryDocument(Box::new(params))
+    }
+
+    fn practice_library_association_params(
+        &self,
+        item: &WorkspacePracticeLibraryItem,
+        client_id: String,
+    ) -> WorkspaceDocumentUpsertParams {
+        let document = &item.document;
+        let source_metadata = serde_json::from_str::<serde_json::Value>(&document.metadata_json)
+            .unwrap_or_else(|_| {
+                json!({
+                    "rawMetadata": document.metadata_json,
+                })
+            });
+        WorkspaceDocumentUpsertParams {
+            id: None,
+            client_id,
+            encounter_id: self.active_encounter_id(),
+            title: nonempty_or(&document.title, "Practice library reference"),
+            kind: nonempty_or(&document.kind, "file"),
+            local_path: document.local_path.clone(),
+            notes: associated_practice_document_notes(document),
+            scope: "patient".to_string(),
+            detected_kind: document.detected_kind.clone(),
+            mime_type: document.mime_type.clone(),
+            file_size_bytes: document.file_size_bytes,
+            modified_at: document.modified_at,
+            sha256: document.sha256.clone(),
+            tags: document.tags.clone(),
+            source_label: nonempty_or(&document.source_label, "Practice Library"),
+            existence_status: document.existence_status.clone(),
+            metadata_json: json!({
+                "referenceOnly": true,
+                "associatedFromDocumentId": document.id,
+                "associatedFromClientId": item.owner_client_id,
+                "associatedFromClientDisplayName": item.owner_display_name,
+                "associatedFromTitle": document.title,
+                "associatedFromScopeReason": item.scope_reason,
+                "associationReviewedBy": "human",
+                "associatedAt": Utc::now().to_rfc3339(),
+                "sourceMetadata": source_metadata,
+                "safety": "patient association metadata only; original file unchanged; no automatic copy/upload/parse/OCR/transcription"
+            })
+            .to_string(),
+            original_path: nonempty_or(&document.original_path, &document.local_path),
+            reference_kind: nonempty_or(&document.reference_kind, "local_reference"),
+            vault_path: document.vault_path.clone(),
+            content_sha256: document.content_sha256.clone(),
+            thumbnail_path: document.thumbnail_path.clone(),
+            thumbnail_status: nonempty_or(&document.thumbnail_status, "none"),
+            thumbnail_mime_type: document.thumbnail_mime_type.clone(),
+            intake_source: nonempty_or(&document.intake_source, "practice_library_association"),
+            imported_at: document.imported_at,
+        }
+    }
+
+    fn execute_derivative_selection_command(
+        &mut self,
+        action: DerivativeSelectionAction,
+        selector: Option<String>,
+    ) -> WorkspaceDashboardAction {
+        if self.profile != WorkspaceProfile::Medical {
+            self.status =
+                "Reviewed text selection is only available in the medical workspace.".to_string();
+            return WorkspaceDashboardAction::Consumed;
+        }
+        let index = match self.resolve_derivative_selector(selector.as_deref(), action) {
+            Ok(index) => index,
+            Err(status) => {
+                self.focus_workflow_section(MedicalWorkflowSection::Documents);
+                self.status = status;
+                return WorkspaceDashboardAction::Consumed;
+            }
+        };
+        let derivative = &self.derivatives[index];
+        let derivative_id = derivative.id.clone();
+        let derivative_number = index + 1;
+        let label = derivative_context_label(derivative);
+        match action {
+            DerivativeSelectionAction::Select => {
+                let inserted = self.selected_derivative_ids.insert(derivative_id);
+                self.status = if inserted {
+                    format!("Included reviewed text {derivative_number}: {label}.")
+                } else {
+                    format!("Reviewed text {derivative_number} already included: {label}.")
+                };
+            }
+            DerivativeSelectionAction::Deselect => {
+                let removed = self.selected_derivative_ids.remove(&derivative_id);
+                self.status = if removed {
+                    format!("Excluded reviewed text {derivative_number}: {label}.")
+                } else {
+                    format!("Reviewed text {derivative_number} already excluded: {label}.")
+                };
+            }
+            DerivativeSelectionAction::Toggle => {
+                if self.selected_derivative_ids.remove(&derivative_id) {
+                    self.status = format!("Excluded reviewed text {derivative_number}: {label}.");
+                } else {
+                    self.selected_derivative_ids.insert(derivative_id);
+                    self.status = format!("Included reviewed text {derivative_number}: {label}.");
+                }
+            }
+            DerivativeSelectionAction::Inspect => {
+                self.inspected_derivative_id = Some(derivative_id.clone());
+                let state = if self.selected_derivative_ids.contains(&derivative_id) {
+                    "included"
+                } else {
+                    "excluded"
+                };
+                self.status = format!(
+                    "Inspecting reviewed text {derivative_number} ({state}): {}",
+                    compact_preview(&label, 96)
+                );
+            }
+        }
+        self.stale_context_notice = None;
+        self.focus = WorkspaceFocus::Workflow;
+        self.set_workflow_section(MedicalWorkflowSection::Documents);
+        if action == DerivativeSelectionAction::Inspect {
+            self.workflow_scroll = self.workflow_derivative_inspector_row();
+        }
+        WorkspaceDashboardAction::Consumed
+    }
+
+    fn resolve_derivative_selector(
+        &self,
+        selector: Option<&str>,
+        action: DerivativeSelectionAction,
+    ) -> std::result::Result<usize, String> {
+        let patient_document_ids = self.patient_document_ids();
+        let patient_derivatives = self
+            .derivatives
+            .iter()
+            .enumerate()
+            .filter(|(_, derivative)| {
+                patient_document_ids.contains(derivative.document_id.as_str())
+            })
+            .collect::<Vec<_>>();
+        if patient_derivatives.is_empty() {
+            return Err("No human-provided reviewed text for the active patient.".to_string());
+        }
+        let selector = selector
+            .map(str::trim)
+            .filter(|selector| !selector.is_empty());
+        if let Some(selector) = selector {
+            if let Ok(number) = selector.parse::<usize>() {
+                if (1..=patient_derivatives.len()).contains(&number) {
+                    return Ok(patient_derivatives[number - 1].0);
+                }
+                return Err(format!(
+                    "Reviewed text number {number} is outside 1..{}.",
+                    patient_derivatives.len()
+                ));
+            }
+            let selector_lower = selector.to_ascii_lowercase();
+            if let Some((index, _)) = patient_derivatives.iter().find(|(_, derivative)| {
+                derivative.id == selector
+                    || derivative.id.starts_with(selector)
+                    || derivative
+                        .title
+                        .to_ascii_lowercase()
+                        .contains(&selector_lower)
+                    || derivative
+                        .kind
+                        .to_ascii_lowercase()
+                        .contains(&selector_lower)
+            }) {
+                return Ok(*index);
+            }
+            return Err(format!("No reviewed text matches `{selector}`."));
+        }
+        match action {
+            DerivativeSelectionAction::Select => patient_derivatives
+                .iter()
+                .find(|(_, derivative)| !self.selected_derivative_ids.contains(&derivative.id))
+                .map(|(index, _)| *index)
+                .ok_or_else(|| "All saved reviewed text is already included.".to_string()),
+            DerivativeSelectionAction::Deselect => patient_derivatives
+                .iter()
+                .find(|(_, derivative)| self.selected_derivative_ids.contains(&derivative.id))
+                .map(|(index, _)| *index)
+                .ok_or_else(|| {
+                    "No reviewed text is included in the Medical Agent Plan.".to_string()
+                }),
+            DerivativeSelectionAction::Toggle => Ok(patient_derivatives[0].0),
+            DerivativeSelectionAction::Inspect => patient_derivatives
+                .iter()
+                .find(|(_, derivative)| self.selected_derivative_ids.contains(&derivative.id))
+                .map(|(index, _)| *index)
+                .or(Some(patient_derivatives[0].0))
+                .ok_or_else(|| "No human-provided reviewed text for this patient.".to_string()),
+        }
+    }
+
+    fn execute_clip_selection_command(
+        &mut self,
+        action: ClipSelectionAction,
+        selector: Option<String>,
+    ) -> WorkspaceDashboardAction {
+        if self.profile != WorkspaceProfile::Medical {
+            self.status = "Context clips are only available in the medical workspace.".to_string();
+            return WorkspaceDashboardAction::Consumed;
+        }
+        let index = match self.resolve_clip_selector(selector.as_deref(), action) {
+            Ok(index) => index,
+            Err(status) => {
+                self.focus_workflow_section(MedicalWorkflowSection::Documents);
+                self.status = status;
+                return WorkspaceDashboardAction::Consumed;
+            }
+        };
+        let clip = &self.clips[index];
+        let clip_id = clip.id.clone();
+        let clip_number = index + 1;
+        let label = clip_context_label(clip);
+        match action {
+            ClipSelectionAction::Select => {
+                let inserted = self.selected_clip_ids.insert(clip_id);
+                self.status = if inserted {
+                    format!("Included clip {clip_number}: {label}.")
+                } else {
+                    format!("Clip {clip_number} already included: {label}.")
+                };
+            }
+            ClipSelectionAction::Deselect => {
+                let removed = self.selected_clip_ids.remove(&clip_id);
+                self.status = if removed {
+                    format!("Excluded clip {clip_number}: {label}.")
+                } else {
+                    format!("Clip {clip_number} already excluded: {label}.")
+                };
+            }
+            ClipSelectionAction::Toggle => {
+                if self.selected_clip_ids.remove(&clip_id) {
+                    self.status = format!("Excluded clip {clip_number}: {label}.");
+                } else {
+                    self.selected_clip_ids.insert(clip_id);
+                    self.status = format!("Included clip {clip_number}: {label}.");
+                }
+            }
+            ClipSelectionAction::Inspect => {
+                self.inspected_clip_id = Some(clip_id.clone());
+                let state = if self.selected_clip_ids.contains(&clip_id) {
+                    "included"
+                } else {
+                    "excluded"
+                };
+                self.status = format!(
+                    "Inspecting clip {clip_number} ({state}): {}",
+                    compact_preview(&label, 96)
+                );
+            }
+        }
+        self.stale_context_notice = None;
+        self.focus = WorkspaceFocus::Workflow;
+        self.set_workflow_section(MedicalWorkflowSection::Documents);
+        if action == ClipSelectionAction::Inspect {
+            self.workflow_scroll = self.workflow_clip_inspector_row();
+        }
+        WorkspaceDashboardAction::Consumed
+    }
+
+    fn resolve_clip_selector(
+        &self,
+        selector: Option<&str>,
+        action: ClipSelectionAction,
+    ) -> std::result::Result<usize, String> {
+        let patient_document_ids = self.patient_document_ids();
+        let patient_clips = self
+            .clips
+            .iter()
+            .enumerate()
+            .filter(|(_, clip)| patient_document_ids.contains(clip.document_id.as_str()))
+            .collect::<Vec<_>>();
+        if patient_clips.is_empty() {
+            return Err("No human-selected context clips for the active patient.".to_string());
+        }
+        let selector = selector
+            .map(str::trim)
+            .filter(|selector| !selector.is_empty());
+        if let Some(selector) = selector {
+            if let Ok(number) = selector.parse::<usize>() {
+                if (1..=patient_clips.len()).contains(&number) {
+                    return Ok(patient_clips[number - 1].0);
+                }
+                return Err(format!(
+                    "Clip number {number} is outside 1..{}.",
+                    patient_clips.len()
+                ));
+            }
+            let selector_lower = selector.to_ascii_lowercase();
+            if let Some((index, _)) = patient_clips.iter().find(|(_, clip)| {
+                clip.id == selector
+                    || clip.id.starts_with(selector)
+                    || clip.title.to_ascii_lowercase().contains(&selector_lower)
+                    || clip.kind.to_ascii_lowercase().contains(&selector_lower)
+                    || clip.body.to_ascii_lowercase().contains(&selector_lower)
+            }) {
+                return Ok(*index);
+            }
+            return Err(format!("No context clip matches `{selector}`."));
+        }
+        match action {
+            ClipSelectionAction::Select => patient_clips
+                .iter()
+                .find(|(_, clip)| !self.selected_clip_ids.contains(&clip.id))
+                .map(|(index, _)| *index)
+                .ok_or_else(|| "All saved clips are already included.".to_string()),
+            ClipSelectionAction::Deselect => patient_clips
+                .iter()
+                .find(|(_, clip)| self.selected_clip_ids.contains(&clip.id))
+                .map(|(index, _)| *index)
+                .ok_or_else(|| "No clips are included in the Medical Agent Plan.".to_string()),
+            ClipSelectionAction::Toggle => Ok(patient_clips[0].0),
+            ClipSelectionAction::Inspect => patient_clips
+                .iter()
+                .find(|(_, clip)| self.selected_clip_ids.contains(&clip.id))
+                .map(|(index, _)| *index)
+                .or(Some(patient_clips[0].0))
+                .ok_or_else(|| "No human-selected context clips for this patient.".to_string()),
+        }
+    }
+
+    fn selected_derivatives(&self) -> Vec<&WorkspaceArtifactDerivative> {
+        let patient_document_ids = self.patient_document_ids();
+        self.derivatives
+            .iter()
+            .filter(|derivative| {
+                patient_document_ids.contains(derivative.document_id.as_str())
+                    && self.selected_derivative_ids.contains(&derivative.id)
+            })
+            .collect()
+    }
+
+    fn selected_clips(&self) -> Vec<&WorkspaceContextClip> {
+        let patient_document_ids = self.patient_document_ids();
+        self.clips
+            .iter()
+            .filter(|clip| {
+                patient_document_ids.contains(clip.document_id.as_str())
+                    && self.selected_clip_ids.contains(&clip.id)
+            })
+            .collect()
+    }
+
+    fn inspected_derivative(&self) -> Option<&WorkspaceArtifactDerivative> {
+        self.inspected_derivative_id.as_deref().and_then(|id| {
+            self.derivatives
+                .iter()
+                .find(|derivative| derivative.id == id)
+        })
+    }
+
+    fn selected_derivative_id_for_action(&mut self) -> Option<String> {
+        let derivative_id = self
+            .inspected_derivative()
+            .or_else(|| {
+                self.derivatives
+                    .iter()
+                    .find(|derivative| self.selected_derivative_ids.contains(&derivative.id))
+            })
+            .or_else(|| self.derivatives.first())
+            .map(|derivative| derivative.id.clone());
+        if let Some(derivative_id) = &derivative_id {
+            self.inspected_derivative_id = Some(derivative_id.clone());
+        }
+        derivative_id
+    }
+
+    fn inspected_clip(&self) -> Option<&WorkspaceContextClip> {
+        self.inspected_clip_id
+            .as_deref()
+            .and_then(|id| self.clips.iter().find(|clip| clip.id == id))
+    }
+
+    fn selected_clip_id_for_action(&mut self) -> Option<String> {
+        let clip_id = self
+            .inspected_clip()
+            .or_else(|| {
+                self.clips
+                    .iter()
+                    .find(|clip| self.selected_clip_ids.contains(&clip.id))
+            })
+            .or_else(|| self.clips.first())
+            .map(|clip| clip.id.clone());
+        if let Some(clip_id) = &clip_id {
+            self.inspected_clip_id = Some(clip_id.clone());
+        }
+        clip_id
+    }
+
+    fn inspected_artifact(&self) -> Option<&WorkspaceDocument> {
+        self.inspected_artifact_id
+            .as_deref()
+            .and_then(|id| self.documents.iter().find(|document| document.id == id))
+    }
+
+    fn document_label_for_id(&self, document_id: &str) -> String {
+        self.documents
+            .iter()
+            .find(|document| document.id == document_id)
+            .map(|document| format!("{} ({})", document_context_label(document), document.id))
+            .unwrap_or_else(|| document_id.to_string())
+    }
+
+    fn derivative_label_for_id(&self, derivative_id: &str) -> String {
+        self.derivatives
+            .iter()
+            .find(|derivative| derivative.id == derivative_id)
+            .map(|derivative| {
+                format!(
+                    "{} ({})",
+                    derivative_context_label(derivative),
+                    derivative.id
+                )
+            })
+            .unwrap_or_else(|| derivative_id.to_string())
+    }
+
+    fn patient_file_detail_lines(&self, document: &WorkspaceDocument) -> Vec<Line<'static>> {
+        let included = if self.selected_artifact_ids.contains(&document.id) {
+            "included in agent context"
+        } else {
+            "not included in agent context"
+        };
+        let reviewed_text_count = self
+            .derivatives
+            .iter()
+            .filter(|derivative| derivative.document_id == document.id)
+            .count();
+        let clip_count = self
+            .clips
+            .iter()
+            .filter(|clip| {
+                self.derivatives.iter().any(|derivative| {
+                    derivative.document_id == document.id && derivative.id == clip.derivative_id
+                })
+            })
+            .count();
+        let preferred_path = nonempty_or(&document.local_path, &document.original_path);
+        let source = nonempty_or(&document.source_label, "drop/paste local path");
+        let mut lines = vec![
+            Line::from(Span::styled(
+                "File Detail",
+                Style::default().add_modifier(Modifier::BOLD),
+            )),
+            Line::from(format!("  title: {}", compact_preview(&document.title, 86))),
+            Line::from(format!(
+                "  category: {}",
+                patient_file_group_label(document)
+            )),
+            Line::from(format!("  selection: {included}")),
+            Line::from(format!(
+                "  reference: {}; {}; {}",
+                document_storage_status_label(document),
+                artifact_presence_compact_label(document),
+                artifact_size_label(document)
+            )),
+            Line::from(format!(
+                "  kind: {}; detected: {}; MIME: {}",
+                compact_preview(&document.kind, 24),
+                compact_preview(&nonempty_or(&document.detected_kind, "unknown"), 24),
+                compact_preview(document.mime_type.as_deref().unwrap_or("unknown"), 32)
+            )),
+            Line::from(format!(
+                "  preview: {}",
+                document_thumbnail_status_label(document)
+            )),
+            Line::from(format!("  source: {}", compact_preview(&source, 72))),
+            Line::from(format!("  path: {}", compact_preview(&preferred_path, 86))),
+            Line::from(format!(
+                "  reviewed text/clips: {reviewed_text_count} text; {clip_count} clips"
+            )),
+            Line::from("  metadata only; original file stays in place"),
+            Line::from("  no upload, OCR, transcription, EDI parsing, signing, or payer action"),
+            Line::from(""),
+            Line::from("  Uploaded Documents: Space includes for packet; Enter opens detail"),
+        ];
+        if document.thumbnail_status.trim() == "ready" {
+            lines.push(Line::from(""));
+            lines.extend(document_preview_lines(document));
+        }
+        lines
+    }
+
+    fn derivative_inspector_lines(
+        &self,
+        derivative: &WorkspaceArtifactDerivative,
+    ) -> Vec<Line<'static>> {
+        let included = if self.selected_derivative_ids.contains(&derivative.id) {
+            "included"
+        } else {
+            "excluded"
+        };
+        let mut lines = vec![
+            Line::from(Span::styled(
+                "Reviewed Text Inspector",
+                Style::default().add_modifier(Modifier::BOLD),
+            )),
+            Line::from(format!(
+                "  {} [{}] {} via {}",
+                derivative_context_label(derivative),
+                included,
+                derivative_status_label(&derivative.review_status),
+                nonempty_or(&derivative.source_method, "unknown")
+            )),
+            Line::from(format!(
+                "  file reference: {}",
+                compact_preview(&self.document_label_for_id(&derivative.document_id), 84)
+            )),
+            Line::from(format!(
+                "  range: {}; tags: {}",
+                derivative_range_label(derivative),
+                compact_preview(&derivative.tags, 48)
+            )),
+            Line::from(format!("  text: {}", compact_preview(&derivative.body, 86))),
+            Line::from(
+                "  human-provided reviewed text; original file unchanged; no automatic analysis",
+            ),
+        ];
+        let linked_clips = self
+            .clips
+            .iter()
+            .enumerate()
+            .filter(|(_, clip)| clip.derivative_id == derivative.id)
+            .collect::<Vec<_>>();
+        if linked_clips.is_empty() {
+            lines.push(Line::from("  clips: none linked"));
+        } else {
+            lines.push(Line::from("  clips:"));
+            for (index, clip) in linked_clips.into_iter().take(4) {
+                let selected = if self.selected_clip_ids.contains(&clip.id) {
+                    "in"
+                } else {
+                    "out"
+                };
+                lines.push(Line::from(format!(
+                    "    [{selected}] {}. {} [{}] {}",
+                    index + 1,
+                    clip_context_label(clip),
+                    derivative_status_label(&clip.review_status),
+                    compact_preview(&clip.body, 52)
+                )));
+            }
+        }
+        lines
+    }
+
+    fn clip_inspector_lines(&self, clip: &WorkspaceContextClip) -> Vec<Line<'static>> {
+        let included = if self.selected_clip_ids.contains(&clip.id) {
+            "included"
+        } else {
+            "excluded"
+        };
+        vec![
+            Line::from(Span::styled(
+                "Clip Inspector",
+                Style::default().add_modifier(Modifier::BOLD),
+            )),
+            Line::from(format!(
+                "  {} [{}] {} via {}",
+                clip_context_label(clip),
+                included,
+                derivative_status_label(&clip.review_status),
+                nonempty_or(&clip.source_method, "unknown")
+            )),
+            Line::from(format!(
+                "  reviewed text: {}",
+                compact_preview(&self.derivative_label_for_id(&clip.derivative_id), 84)
+            )),
+            Line::from(format!(
+                "  file reference: {}",
+                compact_preview(&self.document_label_for_id(&clip.document_id), 84)
+            )),
+            Line::from(format!(
+                "  range: {}; tags: {}",
+                clip_range_label(clip),
+                compact_preview(&clip.tags, 48)
+            )),
+            Line::from(format!("  excerpt: {}", compact_preview(&clip.body, 86))),
+            Line::from(
+                "  human-selected excerpt; original file and reviewed text unchanged; no automatic analysis",
+            ),
+        ]
+    }
+
+    pub(crate) fn render(&self, area: Rect, buf: &mut Buffer) {
+        Clear.render(area, buf);
+        let mode = WorkspaceLayoutMode::for_area(area);
+        if mode == WorkspaceLayoutMode::Tiny {
+            self.render_tiny(area, buf);
+            if self.action_overlay_visible {
+                self.render_action_overlay(area, buf);
+            }
+            if self.command_input.is_some() {
+                self.render_command_palette(area, buf);
+            }
+            return;
+        }
+        if self.render_medical_large_chart_workspace(area, buf) {
+            if self.action_overlay_visible {
+                self.render_action_overlay(area, buf);
+            }
+            if self.command_input.is_some() {
+                self.render_command_palette(area, buf);
+            }
+            return;
+        }
+        if self.render_medical_focus_first_workspace(area, buf) {
+            if self.action_overlay_visible {
+                self.render_action_overlay(area, buf);
+            }
+            if self.command_input.is_some() {
+                self.render_command_palette(area, buf);
+            }
+            return;
+        }
+        if self.render_medical_dedicated_workpane(area, buf) {
+            if self.action_overlay_visible {
+                self.render_action_overlay(area, buf);
+            }
+            if self.command_input.is_some() {
+                self.render_command_palette(area, buf);
+            }
+            return;
+        }
+        let areas = WorkspaceAreas::new(area);
+        Paragraph::new(self.header_lines())
+            .wrap(Wrap { trim: true })
+            .render(areas.header, buf);
+
+        self.render_clients(areas.clients, buf);
+        self.render_notes(areas.notes, buf);
+        let patient_files_visible_elsewhere = self.profile == WorkspaceProfile::Medical
+            && areas.patient_files.width > 0
+            && areas.patient_files.height > 0;
+        if patient_files_visible_elsewhere {
+            self.render_patient_files_sidepane(areas.patient_files, buf);
+        }
+        self.render_demographics(areas.demographics, buf);
+        self.render_note_title(areas.note_title, buf);
+        self.render_note_body(areas.note_body, buf);
+        self.render_chart_workflow_area(areas.workflow, mode, patient_files_visible_elsewhere, buf);
+
+        Paragraph::new(self.status_line(areas.status.width)).render(areas.status, buf);
+        if self.action_overlay_visible {
+            self.render_action_overlay(area, buf);
+        }
+        if self.command_input.is_some() {
+            self.render_command_palette(area, buf);
+        }
+    }
+
+    fn render_medical_large_chart_workspace(&self, area: Rect, buf: &mut Buffer) -> bool {
+        if self.profile != WorkspaceProfile::Medical
+            || WorkspaceLayoutMode::for_area(area) != WorkspaceLayoutMode::Large
+        {
+            return false;
+        }
+
+        let areas = MedicalLargeAreas::new(area);
+        Paragraph::new(self.header_lines())
+            .wrap(Wrap { trim: true })
+            .render(areas.header, buf);
+
+        self.render_clients(areas.clients, buf);
+        self.render_notes(areas.notes, buf);
+        self.render_patient_files_sidepane(areas.patient_files, buf);
+
+        if self.medical_large_center_shows_workflow() {
+            if self.medical_large_center_can_render_active_work_detail() {
+                self.render_medical_active_work_area(areas.active_work, buf);
+            } else {
+                self.render_workflow_without_patient_files_section(areas.active_work, buf);
+            }
+        } else {
+            self.render_demographics(areas.demographics, buf);
+            self.render_note_title(areas.note_title, buf);
+            self.render_note_body(areas.note_body, buf);
+        }
+
+        self.render_agent_workpane(areas.agent, buf);
+        Paragraph::new(self.status_line(areas.status.width)).render(areas.status, buf);
+        true
+    }
+
+    fn render_medical_focus_first_workspace(&self, area: Rect, buf: &mut Buffer) -> bool {
+        if self.profile != WorkspaceProfile::Medical
+            || WorkspaceLayoutMode::for_area(area) != WorkspaceLayoutMode::Compact
+        {
+            return false;
+        }
+
+        let header_height = if area.width >= 100 && area.height >= 24 {
+            2
+        } else {
+            1
+        };
+        let vertical = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(header_height),
+                Constraint::Min(3),
+                Constraint::Length(1),
+            ])
+            .split(area);
+        Paragraph::new(self.header_lines())
+            .wrap(Wrap { trim: true })
+            .render(vertical[0], buf);
+
+        self.render_medical_focused_pane(vertical[1], buf);
+        Paragraph::new(self.status_line(vertical[2].width)).render(vertical[2], buf);
+        true
+    }
+
+    fn render_medical_focused_pane(&self, area: Rect, buf: &mut Buffer) {
+        match self.current_medical_pane_slot() {
+            MedicalPaneSlot::PatientDirectory => self.render_clients(area, buf),
+            MedicalPaneSlot::ChartTree => self.render_notes(area, buf),
+            MedicalPaneSlot::PatientFileTree => self.render_patient_files_sidepane(area, buf),
+            MedicalPaneSlot::PatientDemographics => self.render_demographics(area, buf),
+            MedicalPaneSlot::NoteTitle => self.render_note_title(area, buf),
+            MedicalPaneSlot::NoteBody => self.render_note_body(area, buf),
+            MedicalPaneSlot::CenterWorkArea => self.render_workflow(area, buf),
+            MedicalPaneSlot::AgentWorkpane => self.render_agent_workpane(area, buf),
+        }
+    }
+
+    fn medical_large_center_shows_workflow(&self) -> bool {
+        if self.workflow_section_uses_agent_workpane() {
+            return false;
+        }
+        self.focus == WorkspaceFocus::Workflow
+            || self.workflow_section != MedicalWorkflowSection::Visit
+            || self.draft_document.is_active()
+            || self.derivative_draft.is_active()
+            || self.clip_draft.is_active()
+            || self.draft_task.is_active()
+            || self.draft_safety.is_active()
+            || self.addendum_draft.active
+    }
+
+    fn medical_large_center_can_render_active_work_detail(&self) -> bool {
+        self.profile == WorkspaceProfile::Medical
+            && !self.draft_document.is_active()
+            && !self.derivative_draft.is_active()
+            && !self.clip_draft.is_active()
+            && !self.draft_task.is_active()
+            && !self.draft_safety.is_active()
+            && !self.addendum_draft.active
+    }
+
+    fn render_medical_active_work_area(&self, area: Rect, buf: &mut Buffer) {
+        let active = self.focus == WorkspaceFocus::Workflow;
+        let block = pane_block(self.medical_workpane_title(), active);
+        let inner = block.inner(area);
+        block.render(area, buf);
+        if inner.width == 0 || inner.height == 0 {
+            return;
+        }
+        let lines = self.medical_active_work_lines();
+        let max_scroll = lines.len().saturating_sub(inner.height as usize) as u16;
+        let scroll = if active {
+            self.workflow_scroll.min(max_scroll)
+        } else {
+            0
+        };
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .scroll((scroll, 0))
+            .render(inner, buf);
+    }
+
+    fn workflow_section_uses_agent_workpane(&self) -> bool {
+        matches!(
+            self.workflow_section,
+            MedicalWorkflowSection::AgentRequest
+                | MedicalWorkflowSection::ContextPacket
+                | MedicalWorkflowSection::AgentInbox
+        )
+    }
+
+    fn render_medical_dedicated_workpane(&self, area: Rect, buf: &mut Buffer) -> bool {
+        if !self.uses_medical_dedicated_workpane_layout() {
+            return false;
+        }
+        let mode = WorkspaceLayoutMode::for_area(area);
+        if mode == WorkspaceLayoutMode::Tiny {
+            return false;
+        }
+        let vertical = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(if mode == WorkspaceLayoutMode::Compact {
+                    1
+                } else {
+                    2
+                }),
+                Constraint::Min(3),
+                Constraint::Length(1),
+            ])
+            .split(area);
+        Paragraph::new(self.header_lines())
+            .wrap(Wrap { trim: true })
+            .render(vertical[0], buf);
+
+        if mode == WorkspaceLayoutMode::Compact {
+            self.render_workflow(vertical[1], buf);
+        } else {
+            let columns = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Length(32), Constraint::Min(40)])
+                .split(vertical[1]);
+            let left = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+                .split(columns[0]);
+            self.render_clients(left[0], buf);
+            self.render_notes(left[1], buf);
+            self.render_workflow(columns[1], buf);
+        }
+
+        Paragraph::new(self.status_line(vertical[2].width)).render(vertical[2], buf);
+        true
+    }
+
+    fn uses_medical_dedicated_workpane_layout(&self) -> bool {
+        self.profile == WorkspaceProfile::Medical
+            && matches!(self.workflow_section, MedicalWorkflowSection::Documents)
+            && (self.workflow_section_has_active_editor()
+                || self.inspected_artifact_id.is_some()
+                || self.inspected_derivative_id.is_some()
+                || self.inspected_clip_id.is_some())
+    }
+
+    fn render_chart_workflow_area(
+        &self,
+        area: Rect,
+        mode: WorkspaceLayoutMode,
+        patient_files_visible_elsewhere: bool,
+        buf: &mut Buffer,
+    ) {
+        if self.profile == WorkspaceProfile::Medical
+            && self.focus == WorkspaceFocus::PatientFiles
+            && !patient_files_visible_elsewhere
+            && !self.workflow_section_has_active_editor()
+        {
+            self.render_patient_files_sidepane(area, buf);
+            return;
+        }
+        if self.profile == WorkspaceProfile::Medical
+            && self.focus == WorkspaceFocus::Agent
+            && self.workflow_section_uses_agent_workpane()
+        {
+            self.render_agent_workpane(area, buf);
+            return;
+        }
+        if !self.should_render_patient_files_sidepane(mode, area) {
+            self.render_workflow(area, buf);
+            return;
+        }
+
+        let files_height = if area.height >= 36 { 16 } else { 13 };
+        let panes = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(10), Constraint::Length(files_height)])
+            .split(area);
+        self.render_workflow_without_patient_files_section(panes[0], buf);
+        self.render_patient_files_sidepane(panes[1], buf);
+    }
+
+    fn should_render_patient_files_sidepane(&self, mode: WorkspaceLayoutMode, area: Rect) -> bool {
+        self.profile == WorkspaceProfile::Medical
+            && mode == WorkspaceLayoutMode::Large
+            && area.height >= 26
+            && area.width >= 28
+            && (matches!(
+                self.workflow_section,
+                MedicalWorkflowSection::Visit | MedicalWorkflowSection::Documents
+            ) || self.focus == WorkspaceFocus::PatientFiles)
+            && !self.workflow_section_has_active_editor()
+    }
+
+    pub(crate) fn cursor_pos(&self, area: Rect) -> Option<(u16, u16)> {
+        if WorkspaceLayoutMode::for_area(area) == WorkspaceLayoutMode::Tiny {
+            return None;
+        }
+        let areas = WorkspaceAreas::new(area);
+        if let Some(command_input) = &self.command_input {
+            let overlay = self.command_palette_rect(area);
+            let inner = inner_rect(overlay);
+            if inner.width > 0 && inner.height > 1 {
+                let label_len = "Search commands  :".len();
+                return Some(cursor_at_text_end(inner, 0, label_len, command_input));
+            }
+            let label_len = "Commands  :".len();
+            return Some(cursor_at_text_end(
+                areas.status,
+                0,
+                label_len,
+                command_input,
+            ));
+        }
+        if self.profile == WorkspaceProfile::Medical
+            && WorkspaceLayoutMode::for_area(area) == WorkspaceLayoutMode::Large
+        {
+            return self.cursor_pos_medical_large(area);
+        }
+        match self.focus {
+            WorkspaceFocus::Demographics => {
+                let inner = inner_rect(areas.demographics);
+                if inner.width == 0 || inner.height == 0 {
+                    return None;
+                }
+                let row = self.demographics_field.index() as u16;
+                if row >= inner.height {
+                    return None;
+                }
+                let label_len = self.demographics_field.label(self.profile).len() + 2;
+                Some(cursor_at_text_end(
+                    inner,
+                    row,
+                    label_len,
+                    self.draft_client.value(self.demographics_field),
+                ))
+            }
+            WorkspaceFocus::NoteTitle => {
+                let inner = inner_rect(areas.note_title);
+                if inner.width == 0 || inner.height == 0 {
+                    return None;
+                }
+                Some(cursor_at_text_end(inner, 0, 0, &self.draft_note.title))
+            }
+            WorkspaceFocus::NoteBody => {
+                let inner = inner_rect(areas.note_body);
+                if inner.width == 0 || inner.height == 0 {
+                    return None;
+                }
+                let lines: Vec<&str> = self.draft_note.body.lines().collect();
+                let line_count = lines.len().max(1);
+                let row = (line_count - 1).min(inner.height.saturating_sub(1) as usize) as u16;
+                let text = lines.last().copied().unwrap_or("");
+                Some(cursor_at_text_end(inner, row, 0, text))
+            }
+            WorkspaceFocus::Workflow => {
+                if self.profile != WorkspaceProfile::Medical {
+                    return None;
+                }
+                let inner = inner_rect(areas.workflow);
+                if inner.width == 0 || inner.height == 0 {
+                    return None;
+                }
+                self.cursor_pos_in_workflow_inner(inner)
+            }
+            WorkspaceFocus::Agent => {
+                if self.profile != WorkspaceProfile::Medical {
+                    return None;
+                }
+                let inner = inner_rect(areas.workflow);
+                if inner.width == 0 || inner.height == 0 {
+                    return None;
+                }
+                self.cursor_pos_in_agent_workpane_inner(inner)
+            }
+            WorkspaceFocus::Clients | WorkspaceFocus::Notes | WorkspaceFocus::PatientFiles => None,
+        }
+    }
+
+    fn cursor_pos_medical_large(&self, area: Rect) -> Option<(u16, u16)> {
+        let areas = MedicalLargeAreas::new(area);
+        match self.focus {
+            WorkspaceFocus::Demographics => {
+                let inner = inner_rect(areas.demographics);
+                if inner.width == 0 || inner.height == 0 {
+                    return None;
+                }
+                let row = self.demographics_field.index() as u16;
+                if row >= inner.height {
+                    return None;
+                }
+                let label_len = self.demographics_field.label(self.profile).len() + 2;
+                Some(cursor_at_text_end(
+                    inner,
+                    row,
+                    label_len,
+                    self.draft_client.value(self.demographics_field),
+                ))
+            }
+            WorkspaceFocus::NoteTitle => {
+                let inner = inner_rect(areas.note_title);
+                if inner.width == 0 || inner.height == 0 {
+                    return None;
+                }
+                Some(cursor_at_text_end(inner, 0, 0, &self.draft_note.title))
+            }
+            WorkspaceFocus::NoteBody => {
+                let inner = inner_rect(areas.note_body);
+                if inner.width == 0 || inner.height == 0 {
+                    return None;
+                }
+                let lines: Vec<&str> = self.draft_note.body.lines().collect();
+                let line_count = lines.len().max(1);
+                let row = (line_count - 1).min(inner.height.saturating_sub(1) as usize) as u16;
+                let text = lines.last().copied().unwrap_or("");
+                Some(cursor_at_text_end(inner, row, 0, text))
+            }
+            WorkspaceFocus::Workflow => {
+                let inner = inner_rect(areas.active_work);
+                if inner.width == 0 || inner.height == 0 {
+                    return None;
+                }
+                self.cursor_pos_in_workflow_inner(inner)
+            }
+            WorkspaceFocus::Agent => {
+                let inner = inner_rect(areas.agent);
+                if inner.width == 0 || inner.height == 0 {
+                    return None;
+                }
+                self.cursor_pos_in_agent_workpane_inner(inner)
+            }
+            WorkspaceFocus::Clients | WorkspaceFocus::Notes | WorkspaceFocus::PatientFiles => None,
+        }
+    }
+
+    fn cursor_pos_in_agent_workpane_inner(&self, inner: Rect) -> Option<(u16, u16)> {
+        if self.agent_request.is_active() {
+            let lines = self.agent_workpane_active_lines();
+            let (logical_row, label_len) = agent_request_cursor_row_and_label_len(&lines)?;
+            let text = text_after_last_newline(&self.agent_request.body);
+            return cursor_at_wrapped_line_text_end(
+                inner,
+                &lines,
+                logical_row,
+                self.agent_scroll as usize,
+                label_len,
+                text,
+            );
+        }
+        if self.agent_result.is_active() {
+            let lines = self.agent_workpane_active_lines();
+            let base_row = lines
+                .iter()
+                .position(|line| line_plain_text(line).contains("Returned Work Draft"))?
+                .saturating_add(1);
+            let body_line_count = self.agent_result.body.lines().count().max(1);
+            let logical_row = base_row.saturating_add(body_line_count.saturating_sub(1));
+            let text = self.agent_result.body.lines().last().unwrap_or_default();
+            return cursor_at_wrapped_line_text_end(
+                inner,
+                &lines,
+                logical_row,
+                self.agent_scroll as usize,
+                2,
+                text,
+            );
+        }
+        None
+    }
+
+    fn cursor_pos_in_workflow_inner(&self, inner: Rect) -> Option<(u16, u16)> {
+        if self.agent_result.is_active() {
+            let row = self.workflow_agent_result_editor_row();
+            let row = self.workflow_visible_row(row, inner.width, inner.height)?;
+            let text = self.agent_result.body.lines().last().unwrap_or_default();
+            return Some(cursor_at_text_end(inner, row, 2, text));
+        }
+        if self.agent_request.is_active() {
+            let storage = self
+                .store_description
+                .as_deref()
+                .unwrap_or("App-server workspace store");
+            let lines = self.medical_workflow_lines(storage);
+            let (row, label_len) = agent_request_cursor_row_and_label_len(&lines)?;
+            let row = self.workflow_visible_row(
+                row.min(u16::MAX as usize) as u16,
+                inner.width,
+                inner.height,
+            )?;
+            let text = text_after_last_newline(&self.agent_request.body);
+            return Some(cursor_at_text_end(inner, row, label_len, text));
+        }
+        if self.addendum_draft.active {
+            let row = self.workflow_addendum_editor_row();
+            let row = self.workflow_visible_row(row, inner.width, inner.height)?;
+            let text = self.addendum_draft.body.lines().last().unwrap_or_default();
+            return Some(cursor_at_text_end(inner, row, 2, text));
+        }
+        if self.derivative_draft.is_active() {
+            let row = self.workflow_derivative_editor_row(self.derivative_field);
+            let row = self.workflow_visible_row(row, inner.width, inner.height)?;
+            let label_len = self.derivative_field.label().len() + 2;
+            return Some(cursor_at_text_end(
+                inner,
+                row,
+                label_len,
+                self.derivative_draft.value(self.derivative_field),
+            ));
+        }
+        if self.clip_draft.is_active() {
+            let row = self.workflow_clip_editor_row(self.clip_field);
+            let row = self.workflow_visible_row(row, inner.width, inner.height)?;
+            let label_len = self.clip_field.label().len() + 2;
+            return Some(cursor_at_text_end(
+                inner,
+                row,
+                label_len,
+                self.clip_draft.value(self.clip_field),
+            ));
+        }
+        if self.draft_task.is_active() {
+            let row = self.workflow_task_editor_row(self.task_field);
+            let row = self.workflow_visible_row(row, inner.width, inner.height)?;
+            let label_len = self.task_field.label().len() + 2;
+            return Some(cursor_at_text_end(
+                inner,
+                row,
+                label_len,
+                self.draft_task.value(self.task_field),
+            ));
+        }
+        if self.draft_document.is_active() {
+            let row = self.workflow_document_editor_row(self.document_field);
+            let row = self.workflow_visible_row(row, inner.width, inner.height)?;
+            let label_len = self.document_field.label().len() + 2;
+            return Some(cursor_at_text_end(
+                inner,
+                row,
+                label_len,
+                self.draft_document.value(self.document_field),
+            ));
+        }
+        None
+    }
+
+    pub(crate) fn cursor_style(&self) -> SetCursorStyle {
+        SetCursorStyle::SteadyBar
+    }
+
+    async fn reload_preserving(
+        &mut self,
+        app_server: &mut AppServerSession,
+        preferred_client_id: Option<String>,
+        preferred_note_id: Option<String>,
+        preferred_document_id: Option<String>,
+        preferred_encounter_id: Option<String>,
+        preferred_task_id: Option<String>,
+    ) -> Result<()> {
+        self.clients = app_server.workspace_client_list().await?.clients;
+        if self.clients.is_empty() {
+            self.start_new_client();
+            self.status = "New workspace draft.".to_string();
+            return Ok(());
+        }
+
+        self.client_index = preferred_client_id
+            .as_deref()
+            .and_then(|id| self.clients.iter().position(|client| client.id == id))
+            .unwrap_or_else(|| self.client_index.min(self.clients.len().saturating_sub(1)));
+        self.draft_client = ClientDraft::from_client(&self.clients[self.client_index]);
+
+        let client_id = self.clients[self.client_index].id.clone();
+        self.notes = app_server.workspace_note_list(client_id).await?.notes;
+        self.note_index = preferred_note_id
+            .as_deref()
+            .and_then(|id| self.notes.iter().position(|note| note.id == id))
+            .unwrap_or_else(|| self.note_index.min(self.notes.len().saturating_sub(1)));
+        self.draft_note = self
+            .notes
+            .get(self.note_index)
+            .map(NoteDraft::from_note)
+            .unwrap_or_default();
+        let client_id = self.clients[self.client_index].id.clone();
+        self.encounters = app_server
+            .workspace_encounter_list(client_id.clone())
+            .await?
+            .encounters;
+        let selected_encounter_id = preferred_encounter_id
+            .or_else(|| self.draft_note.encounter_id.clone())
+            .or_else(|| self.active_encounter_id());
+        self.encounter_index = selected_encounter_id
+            .as_deref()
+            .and_then(|id| {
+                self.encounters
+                    .iter()
+                    .position(|encounter| encounter.id == id)
+            })
+            .unwrap_or_else(|| {
+                self.encounter_index
+                    .min(self.encounters.len().saturating_sub(1))
+            });
+        self.documents = app_server
+            .workspace_document_list(client_id.clone())
+            .await?
+            .documents;
+        self.patient_safety_items = app_server
+            .workspace_patient_safety_item_list(client_id.clone())
+            .await?
+            .items;
+        self.practice_library_items = app_server
+            .workspace_practice_library_list(WorkspacePracticeLibraryListParams {
+                active_client_id: Some(client_id.clone()),
+                query: None,
+                limit: Some(100),
+            })
+            .await?
+            .items;
+        self.practice_library_index = self
+            .practice_library_index
+            .min(self.practice_library_items.len().saturating_sub(1));
+        if self.practice_library_items.is_empty() {
+            self.practice_library_inspect = false;
+        }
+        let client_id = self.clients[self.client_index].id.clone();
+        self.derivatives = app_server
+            .workspace_artifact_derivative_list(WorkspaceArtifactDerivativeListParams {
+                client_id,
+                document_id: None,
+                note_id: None,
+                limit: Some(100),
+            })
+            .await?
+            .derivatives;
+        let client_id = self.clients[self.client_index].id.clone();
+        self.clips = app_server
+            .workspace_context_clip_list(WorkspaceContextClipListParams {
+                client_id,
+                derivative_id: None,
+                document_id: None,
+                note_id: None,
+                limit: Some(100),
+            })
+            .await?
+            .clips;
+        let document_ids = self
+            .documents
+            .iter()
+            .map(|document| document.id.clone())
+            .collect::<BTreeSet<_>>();
+        if !self
+            .inspected_artifact_id
+            .as_ref()
+            .is_some_and(|id| document_ids.contains(id.as_str()))
+        {
+            self.inspected_artifact_id = None;
+        }
+        let derivative_ids = self
+            .derivatives
+            .iter()
+            .map(|derivative| derivative.id.clone())
+            .collect::<BTreeSet<_>>();
+        if !self
+            .inspected_derivative_id
+            .as_ref()
+            .is_some_and(|id| derivative_ids.contains(id.as_str()))
+        {
+            self.inspected_derivative_id = None;
+        }
+        let clip_ids = self
+            .clips
+            .iter()
+            .map(|clip| clip.id.clone())
+            .collect::<BTreeSet<_>>();
+        self.prune_stale_selected_context_with_ids(&document_ids, &derivative_ids, &clip_ids);
+        if !self
+            .inspected_clip_id
+            .as_ref()
+            .is_some_and(|id| clip_ids.contains(id.as_str()))
+        {
+            self.inspected_clip_id = None;
+        }
+        self.draft_document = preferred_document_id
+            .as_deref()
+            .and_then(|id| {
+                self.documents
+                    .iter()
+                    .find(|document| document.id == id)
+                    .map(DocumentDraft::from_document)
+            })
+            .unwrap_or_default();
+        if self.derivative_draft.document_id.trim().is_empty()
+            || !document_ids.contains(self.derivative_draft.document_id.as_str())
+        {
+            self.derivative_draft.clear();
+        }
+        if self.clip_draft.derivative_id.trim().is_empty()
+            || !derivative_ids.contains(self.clip_draft.derivative_id.as_str())
+        {
+            self.clip_draft.clear();
+        }
+        let client_id = self.clients[self.client_index].id.clone();
+        self.tasks = app_server.workspace_task_list(client_id).await?.tasks;
+        self.task_index = preferred_task_id
+            .as_deref()
+            .and_then(|id| self.tasks.iter().position(|task| task.id == id))
+            .unwrap_or_else(|| self.task_index.min(self.tasks.len().saturating_sub(1)));
+        self.reload_packet_history(app_server).await?;
+        self.draft_task.clear();
+        self.addendum_draft.clear();
+        self.load_active_note_details(app_server).await?;
+        self.dirty = false;
+        if self.status.is_empty() || self.status == "Workspace" {
+            self.status = "Loaded.".to_string();
+        }
+        Ok(())
+    }
+
+    fn prune_stale_selected_context_with_ids(
+        &mut self,
+        document_ids: &BTreeSet<String>,
+        derivative_ids: &BTreeSet<String>,
+        clip_ids: &BTreeSet<String>,
+    ) {
+        let pruned_artifacts = prune_selected_ids(&mut self.selected_artifact_ids, document_ids);
+        let pruned_derivatives =
+            prune_selected_ids(&mut self.selected_derivative_ids, derivative_ids);
+        let pruned_clips = prune_selected_ids(&mut self.selected_clip_ids, clip_ids);
+        self.stale_context_notice =
+            stale_context_recovery_notice(pruned_artifacts, pruned_derivatives, pruned_clips);
+        if let Some(notice) = &self.stale_context_notice {
+            self.status = notice.clone();
+        }
+    }
+
+    #[cfg(test)]
+    fn prune_stale_selected_context_for_tests(&mut self) {
+        let document_ids = self
+            .documents
+            .iter()
+            .map(|document| document.id.clone())
+            .collect::<BTreeSet<_>>();
+        let derivative_ids = self
+            .derivatives
+            .iter()
+            .map(|derivative| derivative.id.clone())
+            .collect::<BTreeSet<_>>();
+        let clip_ids = self
+            .clips
+            .iter()
+            .map(|clip| clip.id.clone())
+            .collect::<BTreeSet<_>>();
+        self.prune_stale_selected_context_with_ids(&document_ids, &derivative_ids, &clip_ids);
+    }
+
+    async fn reload_packet_history(&mut self, app_server: &mut AppServerSession) -> Result<()> {
+        let Some(client_id) = self.draft_client.id.clone() else {
+            self.context_packets.clear();
+            self.agent_results.clear();
+            self.selected_agent_result_id = None;
+            self.packet_replay_inspect = false;
+            return Ok(());
+        };
+        let previous_result_id = self.selected_agent_result_id.clone();
+        let note_id = self.draft_note.id.clone();
+        self.context_packets = app_server
+            .workspace_context_packet_list(WorkspaceContextPacketListParams {
+                client_id: client_id.clone(),
+                note_id: note_id.clone(),
+                limit: Some(8),
+            })
+            .await?
+            .packets;
+        self.agent_results = app_server
+            .workspace_agent_result_list(WorkspaceAgentResultListParams {
+                client_id,
+                note_id,
+                packet_id: None,
+                limit: Some(8),
+            })
+            .await?
+            .results;
+        self.selected_agent_result_id = previous_result_id
+            .filter(|id| self.agent_results.iter().any(|result| result.id == *id))
+            .or_else(|| {
+                self.agent_results
+                    .iter()
+                    .find(|result| result.status == "review_pending")
+                    .or_else(|| self.agent_results.first())
+                    .map(|result| result.id.clone())
+            });
+        Ok(())
+    }
+
+    async fn ensure_encounter_for_save(
+        &mut self,
+        app_server: &mut AppServerSession,
+        client_id: &str,
+    ) -> Result<Option<String>> {
+        if let Some(encounter_id) = self.active_encounter_id() {
+            return Ok(Some(encounter_id));
+        }
+        let title = if self.draft_note.title.trim().is_empty() {
+            "Open encounter".to_string()
+        } else {
+            self.draft_note.title.trim().to_string()
+        };
+        let encounter = app_server
+            .workspace_encounter_upsert(WorkspaceEncounterUpsertParams {
+                id: None,
+                client_id: client_id.to_string(),
+                kind: "visit".to_string(),
+                title,
+                status: "open".to_string(),
+                started_at: Some(Utc::now().timestamp()),
+                ended_at: None,
+            })
+            .await?
+            .encounter;
+        Ok(Some(encounter.id))
+    }
+
+    async fn load_active_note_details(&mut self, app_server: &mut AppServerSession) -> Result<()> {
+        let Some(note_id) = self.draft_note.id.clone() else {
+            self.signatures.clear();
+            self.addenda.clear();
+            self.proposals.clear();
+            self.audit_events.clear();
+            self.proposal_index = 0;
+            return Ok(());
+        };
+        self.signatures = app_server
+            .workspace_note_signature_list(note_id.clone())
+            .await?
+            .signatures;
+        self.addenda = app_server
+            .workspace_note_addendum_list(note_id.clone())
+            .await?
+            .addenda;
+        self.proposals = app_server
+            .workspace_note_proposal_list(note_id.clone())
+            .await?
+            .proposals;
+        self.proposal_index = self
+            .proposal_index
+            .min(self.proposals.len().saturating_sub(1));
+        self.audit_events = app_server
+            .workspace_audit_list(WorkspaceAuditListParams {
+                entity_type: None,
+                entity_id: None,
+                client_id: self.draft_client.id.clone(),
+                note_id: Some(note_id),
+                cursor: None,
+                limit: Some(8),
+            })
+            .await?
+            .data;
+        Ok(())
+    }
+
+    fn select_encounter_for_active_note(&mut self) {
+        let Some(encounter_id) = self.draft_note.encounter_id.as_deref() else {
+            return;
+        };
+        if let Some(index) = self
+            .encounters
+            .iter()
+            .position(|encounter| encounter.id == encounter_id)
+        {
+            self.encounter_index = index;
+        }
+    }
+
+    fn active_encounter_id(&self) -> Option<String> {
+        self.encounters
+            .get(self.encounter_index)
+            .map(|encounter| encounter.id.clone())
+    }
+
+    fn start_new_client(&mut self) {
+        self.patient_search_query = None;
+        self.patient_search_selection_index = 0;
+        self.patient_search_return_focus = None;
+        self.patient_search_return_section = None;
+        self.client_index = self.clients.len();
+        self.encounters.clear();
+        self.notes.clear();
+        self.documents.clear();
+        self.patient_safety_items.clear();
+        self.derivatives.clear();
+        self.clips.clear();
+        self.tasks.clear();
+        self.signatures.clear();
+        self.addenda.clear();
+        self.proposals.clear();
+        self.audit_events.clear();
+        self.encounter_index = 0;
+        self.note_index = 0;
+        self.proposal_index = 0;
+        self.task_index = 0;
+        self.draft_client = ClientDraft::default();
+        self.apply_profile_default_client_label();
+        self.draft_note = NoteDraft::default();
+        self.draft_document = DocumentDraft::default();
+        self.draft_safety.clear();
+        self.derivative_draft.clear();
+        self.clip_draft.clear();
+        self.draft_task.clear();
+        self.addendum_draft.clear();
+        self.agent_request.clear();
+        self.agent_result.clear();
+        self.context_packets.clear();
+        self.agent_results.clear();
+        self.packet_replay_inspect = false;
+        self.selected_artifact_ids.clear();
+        self.selected_derivative_ids.clear();
+        self.selected_clip_ids.clear();
+        self.inspected_artifact_id = None;
+        self.inspected_derivative_id = None;
+        self.inspected_clip_id = None;
+        self.dirty = false;
+        self.status = "New workspace draft.".to_string();
+        self.focus = WorkspaceFocus::Demographics;
+    }
+
+    fn start_new_note(&mut self) {
+        self.note_index = self.notes.len();
+        self.draft_note = NoteDraft::default();
+        self.signatures.clear();
+        self.addenda.clear();
+        self.proposals.clear();
+        self.derivatives.clear();
+        self.clips.clear();
+        self.audit_events.clear();
+        self.proposal_index = 0;
+        self.addendum_draft.clear();
+        self.draft_task.clear();
+        self.derivative_draft.clear();
+        self.clip_draft.clear();
+        self.agent_request.clear();
+        self.agent_result.clear();
+        self.context_packets.clear();
+        self.agent_results.clear();
+        self.packet_replay_inspect = false;
+        self.selected_derivative_ids.clear();
+        self.selected_clip_ids.clear();
+        self.inspected_derivative_id = None;
+        self.inspected_clip_id = None;
+        self.status = "New note draft.".to_string();
+        self.focus = WorkspaceFocus::NoteBody;
+    }
+
+    fn start_new_document(&mut self) {
+        self.draft_document = DocumentDraft::start_new();
+        self.document_field = DocumentField::Title;
+        self.focus = WorkspaceFocus::Workflow;
+        self.set_workflow_section(MedicalWorkflowSection::Documents);
+        self.workflow_scroll = self
+            .workflow_document_editor_row(DocumentField::Title)
+            .saturating_sub(1);
+        self.mark_dirty();
+        self.status =
+            "New file reference draft. Drop or paste a local file path; metadata only.".to_string();
+    }
+
+    fn start_new_task(&mut self) {
+        self.draft_task = TaskDraft::start_new();
+        self.task_field = TaskField::Title;
+        self.focus = WorkspaceFocus::Workflow;
+        self.set_workflow_section(MedicalWorkflowSection::Jobs);
+        self.mark_dirty();
+        self.status = "Job draft ready. Type in workflow, then Ctrl-S or :save.".to_string();
+    }
+
+    fn start_safety_draft(&mut self, category: &str) {
+        self.draft_safety.start(category);
+        self.safety_field = SafetyField::Name;
+        self.focus = WorkspaceFocus::Workflow;
+        self.set_workflow_section(MedicalWorkflowSection::Safety);
+        self.mark_dirty();
+        self.status =
+            "Clinical safety draft ready. Enter name/details, then Ctrl-S or :save.".to_string();
+    }
+
+    fn start_agent_request(&mut self) {
+        self.agent_result.clear();
+        self.agent_request.start();
+        self.focus = WorkspaceFocus::Agent;
+        self.set_workflow_section(MedicalWorkflowSection::AgentRequest);
+        self.workflow_scroll = 0;
+        self.status =
+            "Agent input ready. Typing is local until Medical Agent Plan review.".to_string();
+    }
+
+    fn start_addendum_draft(&mut self) {
+        if self.profile != WorkspaceProfile::Medical {
+            self.status = "Addenda are only available in the medical workspace.".to_string();
+            return;
+        }
+        if self.draft_note.id.is_none() {
+            self.status = "Save the note before adding an addendum.".to_string();
+            return;
+        }
+        if !self.draft_note.is_locked() {
+            self.status = "Sign the note before adding an addendum.".to_string();
+            return;
+        }
+        self.addendum_draft.start();
+        self.focus = WorkspaceFocus::Workflow;
+        self.set_workflow_section(MedicalWorkflowSection::Addenda);
+        self.status = "Addendum draft ready. Type in workflow, then :addendum save.".to_string();
+    }
+
+    fn request_addendum_save(&mut self) -> WorkspaceDashboardAction {
+        let Some(note_id) = self.draft_note.id.clone() else {
+            self.status = "Save the note before adding an addendum.".to_string();
+            return WorkspaceDashboardAction::Consumed;
+        };
+        if !self.draft_note.is_locked() {
+            self.status = "Sign the note before adding an addendum.".to_string();
+            return WorkspaceDashboardAction::Consumed;
+        }
+        if !self.addendum_draft.should_save() {
+            self.status = "Type addendum text before saving.".to_string();
+            return WorkspaceDashboardAction::Consumed;
+        }
+        WorkspaceDashboardAction::CreateAddendum {
+            note_id,
+            base_revision: self.draft_note.current_revision,
+            body: self.addendum_draft.body.trim().to_string(),
+        }
+    }
+
+    fn request_proposal_resolution(&mut self, accept: bool) -> WorkspaceDashboardAction {
+        let Some(proposal) = self.selected_pending_proposal() else {
+            self.status = "No pending proposal selected.".to_string();
+            return WorkspaceDashboardAction::Consumed;
+        };
+        if accept {
+            if self.draft_note.is_locked() {
+                self.status =
+                    "Signed notes require addenda; replacement proposals cannot be accepted."
+                        .to_string();
+                return WorkspaceDashboardAction::Consumed;
+            }
+            if self.dirty {
+                self.status =
+                    "Save or discard draft changes before accepting a proposal.".to_string();
+                return WorkspaceDashboardAction::Consumed;
+            }
+            if proposal.base_revision != self.draft_note.current_revision {
+                self.status = "Proposal is stale; ask the agent for a fresh proposal.".to_string();
+                return WorkspaceDashboardAction::Consumed;
+            }
+        }
+        WorkspaceDashboardAction::ResolveProposal {
+            proposal_id: proposal.id.clone(),
+            accept,
+        }
+    }
+
+    fn select_next_proposal(&mut self) {
+        let pending = self.pending_proposal_indexes();
+        if pending.is_empty() {
+            self.status = "No pending proposals for the active note.".to_string();
+            return;
+        }
+        let current = pending
+            .iter()
+            .position(|index| *index == self.proposal_index)
+            .unwrap_or(0);
+        self.proposal_index = pending[(current + 1) % pending.len()];
+        self.set_workflow_section(MedicalWorkflowSection::Proposals);
+        self.status = "Selected next proposal.".to_string();
+    }
+
+    fn selected_pending_proposal(&self) -> Option<&WorkspaceNoteProposal> {
+        self.proposals
+            .get(self.proposal_index)
+            .filter(|proposal| proposal.status == WorkspaceNoteProposalStatus::Pending)
+            .or_else(|| {
+                self.proposals
+                    .iter()
+                    .find(|proposal| proposal.status == WorkspaceNoteProposalStatus::Pending)
+            })
+    }
+
+    fn pending_proposal_indexes(&self) -> Vec<usize> {
+        self.proposals
+            .iter()
+            .enumerate()
+            .filter_map(|(index, proposal)| {
+                (proposal.status == WorkspaceNoteProposalStatus::Pending).then_some(index)
+            })
+            .collect()
+    }
+
+    fn pending_proposal_count(&self) -> usize {
+        self.proposals
+            .iter()
+            .filter(|proposal| proposal.status == WorkspaceNoteProposalStatus::Pending)
+            .count()
+    }
+
+    fn request_task_status_update(
+        &mut self,
+        status: WorkspaceTaskStatus,
+    ) -> WorkspaceDashboardAction {
+        let Some(task) = self.selected_active_task() else {
+            self.status = "Select an open job before completing or canceling.".to_string();
+            return WorkspaceDashboardAction::Consumed;
+        };
+        WorkspaceDashboardAction::UpdateTaskStatus {
+            task_id: task.id.clone(),
+            status,
+        }
+    }
+
+    fn selected_task(&self) -> Option<&WorkspaceTask> {
+        self.tasks
+            .get(self.task_index)
+            .or_else(|| self.tasks.first())
+    }
+
+    fn selected_task_id(&self) -> Option<String> {
+        self.selected_task().map(|task| task.id.clone())
+    }
+
+    fn selected_active_task(&self) -> Option<&WorkspaceTask> {
+        self.selected_task()
+            .filter(|task| workspace_task_status_is_active(task.status))
+    }
+
+    fn select_next_task(&mut self) {
+        if self.tasks.is_empty() {
+            self.status = "No jobs for the active patient.".to_string();
+            return;
+        }
+        self.task_index = apply_delta(self.task_index, self.tasks.len(), 1);
+        self.set_workflow_section(MedicalWorkflowSection::Jobs);
+        self.status = "Selected next job.".to_string();
+    }
+
+    fn action_disabled_reason(&self, action_id: WorkspaceActionId) -> Option<&'static str> {
+        match action_id {
+            WorkspaceActionId::AddendumSave => {
+                if self.draft_note.id.is_none() {
+                    Some("Save the note before adding an addendum.")
+                } else if !self.draft_note.is_locked() {
+                    Some("Sign the note before adding an addendum.")
+                } else if !self.addendum_draft.should_save() {
+                    Some("Type addendum text before saving.")
+                } else {
+                    None
+                }
+            }
+            WorkspaceActionId::AddendumStart => {
+                if self.draft_note.id.is_none() {
+                    Some("Save the note before adding an addendum.")
+                } else if !self.draft_note.is_locked() {
+                    Some("Sign the note before adding an addendum.")
+                } else if self.draft_task.is_active() {
+                    Some("Save the current job draft first.")
+                } else if self.draft_document.is_new_unsaved_draft() {
+                    Some("Save the document draft before adding an addendum.")
+                } else {
+                    None
+                }
+            }
+            WorkspaceActionId::AgentRequest => {
+                if self.draft_task.is_active() {
+                    Some("Save the current job draft first.")
+                } else if self.draft_document.is_new_unsaved_draft() {
+                    Some("Save the file reference draft before asking the agent.")
+                } else if self.has_unsaved_addendum_draft() {
+                    Some("Save the addendum draft before asking the agent.")
+                } else {
+                    None
+                }
+            }
+            WorkspaceActionId::AgentResult => {
+                if self.latest_packet_without_result().is_none() {
+                    Some("Submit a Medical Agent Plan before saving returned work.")
+                } else {
+                    None
+                }
+            }
+            WorkspaceActionId::AgentResultSave => {
+                if self.agent_result.packet_id.is_none() {
+                    Some("Start a returned work draft before saving.")
+                } else if !self.agent_result.has_text() {
+                    Some("Paste or type returned agent work before saving.")
+                } else {
+                    None
+                }
+            }
+            WorkspaceActionId::AgentResultInspect
+            | WorkspaceActionId::AgentResultNext
+            | WorkspaceActionId::AgentResultReviewed
+            | WorkspaceActionId::AgentResultDismiss => {
+                if self.agent_results.is_empty() {
+                    Some("No saved returned work for this chart.")
+                } else {
+                    None
+                }
+            }
+            WorkspaceActionId::AgentResultToProposal => {
+                if self.agent_results.is_empty() {
+                    Some("No saved returned work for this chart.")
+                } else if self.draft_note.id.is_none() {
+                    Some("Save the note before making a proposal draft.")
+                } else if self.draft_note.is_locked() {
+                    Some("Signed notes require an addendum draft from returned work.")
+                } else if self.dirty {
+                    Some("Save or discard draft changes before making a proposal draft.")
+                } else {
+                    None
+                }
+            }
+            WorkspaceActionId::AgentResultToAddendum => {
+                if self.agent_results.is_empty() {
+                    Some("No saved returned work for this chart.")
+                } else if self.draft_note.id.is_none() {
+                    Some("Save the note before making an addendum draft.")
+                } else if !self.draft_note.is_locked() {
+                    Some("Unsigned notes should use a proposal draft from returned work.")
+                } else if self.has_unsaved_addendum_draft() {
+                    Some("Save the current addendum draft first.")
+                } else {
+                    None
+                }
+            }
+            WorkspaceActionId::AgentResultToJob => {
+                if self.agent_results.is_empty() {
+                    Some("No saved returned work for this chart.")
+                } else if self.draft_client.id.is_none() {
+                    Some("Save the patient before making a job draft.")
+                } else if self.draft_task.is_active() {
+                    Some("Save the current job draft first.")
+                } else {
+                    None
+                }
+            }
+            WorkspaceActionId::AgentPacketInspect => {
+                if self.context_packets.is_empty() {
+                    Some("No submitted Medical Agent Plan to inspect.")
+                } else {
+                    None
+                }
+            }
+            WorkspaceActionId::ArtifactDeselect
+            | WorkspaceActionId::ArtifactInspect
+            | WorkspaceActionId::ArtifactImport
+            | WorkspaceActionId::ArtifactOpen
+            | WorkspaceActionId::ArtifactSelect
+            | WorkspaceActionId::ArtifactThumbnail
+            | WorkspaceActionId::ArtifactToggle => {
+                if self.documents.is_empty() {
+                    Some("No file references for the active patient.")
+                } else {
+                    None
+                }
+            }
+            WorkspaceActionId::DocumentChoose => {
+                if self.draft_client.id.is_none() {
+                    Some("Select or save a patient before adding files.")
+                } else if self.draft_document.is_new_unsaved_draft() {
+                    Some("Save or clear the current file reference draft first.")
+                } else {
+                    None
+                }
+            }
+            WorkspaceActionId::AllergyAdd
+            | WorkspaceActionId::MedicationAdd
+            | WorkspaceActionId::ProblemAdd
+            | WorkspaceActionId::PrecautionAdd => {
+                if self.draft_safety.is_active() {
+                    Some("Save or clear the current clinical safety draft first.")
+                } else {
+                    None
+                }
+            }
+            WorkspaceActionId::ArtifactSave => {
+                if !self.draft_document.is_active() {
+                    Some("Start a file reference draft before saving.")
+                } else if self.draft_document.title.trim().is_empty()
+                    || self.draft_document.local_path.trim().is_empty()
+                {
+                    Some("File reference title and local path are required.")
+                } else {
+                    None
+                }
+            }
+            WorkspaceActionId::ArtifactClear => {
+                if !self.draft_document.is_active() {
+                    Some("No file reference draft to clear.")
+                } else {
+                    None
+                }
+            }
+            WorkspaceActionId::ArtifactScope => None,
+            WorkspaceActionId::DerivativeNew => {
+                if self.documents.is_empty() {
+                    Some("Save a file reference before adding reviewed text.")
+                } else if self.draft_document.is_new_unsaved_draft() {
+                    Some("Save the file reference draft before adding reviewed text.")
+                } else {
+                    None
+                }
+            }
+            WorkspaceActionId::DerivativeSave => {
+                if !self.derivative_draft.is_active() {
+                    Some("Start a reviewed text draft before saving.")
+                } else if self.derivative_draft.document_id.trim().is_empty() {
+                    Some("Choose a saved file reference before saving reviewed text.")
+                } else if self.derivative_draft.title.trim().is_empty()
+                    || self.derivative_draft.body.trim().is_empty()
+                {
+                    Some("Reviewed text title and body are required.")
+                } else {
+                    None
+                }
+            }
+            WorkspaceActionId::DerivativeClear => {
+                if !self.derivative_draft.is_active() {
+                    Some("No reviewed text draft to clear.")
+                } else {
+                    None
+                }
+            }
+            WorkspaceActionId::DerivativeDeselect
+            | WorkspaceActionId::DerivativeInspect
+            | WorkspaceActionId::DerivativeReviewed
+            | WorkspaceActionId::DerivativeArchive
+            | WorkspaceActionId::DerivativeSelect
+            | WorkspaceActionId::DerivativeToggle => {
+                if self.derivatives.is_empty() {
+                    Some("No human-reviewed text for the active patient.")
+                } else {
+                    None
+                }
+            }
+            WorkspaceActionId::ClipNew => {
+                if self.derivatives.is_empty() {
+                    Some("Save reviewed text before adding a context clip.")
+                } else {
+                    None
+                }
+            }
+            WorkspaceActionId::ClipSave => {
+                if !self.clip_draft.is_active() {
+                    Some("Start a clip draft before saving.")
+                } else if self.clip_draft.derivative_id.trim().is_empty() {
+                    Some("Choose saved reviewed text before saving a context clip.")
+                } else if self.clip_draft.title.trim().is_empty()
+                    || self.clip_draft.body.trim().is_empty()
+                {
+                    Some("Clip title and excerpt are required.")
+                } else {
+                    None
+                }
+            }
+            WorkspaceActionId::ClipClear => {
+                if !self.clip_draft.is_active() {
+                    Some("No clip draft to clear.")
+                } else {
+                    None
+                }
+            }
+            WorkspaceActionId::ClipDeselect
+            | WorkspaceActionId::ClipInspect
+            | WorkspaceActionId::ClipReviewed
+            | WorkspaceActionId::ClipArchive
+            | WorkspaceActionId::ClipSelect
+            | WorkspaceActionId::ClipToggle => {
+                if self.clips.is_empty() {
+                    Some("No human-selected context clips for the active patient.")
+                } else {
+                    None
+                }
+            }
+            WorkspaceActionId::ClientNew | WorkspaceActionId::NoteNew
+                if self.dirty || self.has_unsaved_addendum_draft() =>
+            {
+                Some("Save before switching workspace records.")
+            }
+            WorkspaceActionId::EncounterOpen if self.draft_client.id.is_none() => {
+                Some("Save the patient before creating an encounter.")
+            }
+            WorkspaceActionId::DocumentAttach => {
+                if self.draft_task.is_active() {
+                    Some("Save the current job draft first.")
+                } else if self.has_unsaved_addendum_draft() {
+                    Some("Save the addendum draft before attaching a document.")
+                } else {
+                    None
+                }
+            }
+            WorkspaceActionId::JobNew => {
+                if self.draft_client.id.is_none() {
+                    Some("Save the patient before creating a job.")
+                } else if self.draft_task.is_active() {
+                    Some("Save the current job draft first.")
+                } else if self.draft_document.is_new_unsaved_draft() {
+                    Some("Save the document draft before creating a job.")
+                } else if self.has_unsaved_addendum_draft() {
+                    Some("Save the addendum draft before creating a job.")
+                } else {
+                    None
+                }
+            }
+            WorkspaceActionId::JobNext => {
+                if self.tasks.is_empty() {
+                    Some("No jobs for the active patient.")
+                } else {
+                    None
+                }
+            }
+            WorkspaceActionId::JobDone | WorkspaceActionId::JobCancel => {
+                if self.selected_active_task().is_none() {
+                    Some("Select an open job before completing or canceling.")
+                } else {
+                    None
+                }
+            }
+            WorkspaceActionId::NoteSign => {
+                if self.draft_note.id.is_none() {
+                    Some("Save the note before signing.")
+                } else if self.dirty {
+                    Some("Save changes before signing the note.")
+                } else if self.draft_note.is_locked() {
+                    Some("This note is already signed or addended.")
+                } else {
+                    None
+                }
+            }
+            WorkspaceActionId::PracticeLibraryAssociate => {
+                if self.draft_client.id.is_none() {
+                    Some("Save the patient before associating practice records.")
+                } else if self.practice_library_items.is_empty() {
+                    Some("No practice library records loaded.")
+                } else if self
+                    .selected_practice_library_item()
+                    .is_some_and(|item| item.linked_to_active_client)
+                {
+                    Some("Selected practice record is already associated with this patient.")
+                } else {
+                    None
+                }
+            }
+            WorkspaceActionId::PracticeLibraryInspect | WorkspaceActionId::PracticeLibraryNext => {
+                if self.practice_library_items.is_empty() {
+                    Some("No practice library records loaded.")
+                } else {
+                    None
+                }
+            }
+            WorkspaceActionId::ScopeLast => {
+                if self.last_workflow_section.is_none() {
+                    Some("No previous clinical scope in this workspace session.")
+                } else {
+                    None
+                }
+            }
+            WorkspaceActionId::ProposalAccept => {
+                if let Some(proposal) = self.selected_pending_proposal() {
+                    if self.draft_note.is_locked() {
+                        Some(
+                            "Signed notes require addenda; replacement proposals cannot be accepted.",
+                        )
+                    } else if self.dirty {
+                        Some("Save or discard draft changes before accepting a proposal.")
+                    } else if proposal.base_revision != self.draft_note.current_revision {
+                        Some("Proposal is stale; ask the agent for a fresh proposal.")
+                    } else {
+                        None
+                    }
+                } else {
+                    Some("No pending proposals for the active note.")
+                }
+            }
+            WorkspaceActionId::ProposalDecline | WorkspaceActionId::ProposalNext => {
+                if self.pending_proposal_count() == 0 {
+                    Some("No pending proposals for the active note.")
+                } else {
+                    None
+                }
+            }
+            WorkspaceActionId::Actions
+            | WorkspaceActionId::AgentClear
+            | WorkspaceActionId::AgentInbox
+            | WorkspaceActionId::AgentPreview
+            | WorkspaceActionId::AgentResultClear
+            | WorkspaceActionId::ClientNew
+            | WorkspaceActionId::ContactEdit
+            | WorkspaceActionId::CoverageEdit
+            | WorkspaceActionId::EncounterOpen
+            | WorkspaceActionId::EmergencyContactEdit
+            | WorkspaceActionId::SafetyOpen
+            | WorkspaceActionId::FocusAddenda
+            | WorkspaceActionId::FocusDocuments
+            | WorkspaceActionId::FocusJobs
+            | WorkspaceActionId::FocusNoteBody
+            | WorkspaceActionId::FocusNoteTitle
+            | WorkspaceActionId::FocusPatientDetails
+            | WorkspaceActionId::FocusPatients
+            | WorkspaceActionId::PatientSearch
+            | WorkspaceActionId::FocusProposals
+            | WorkspaceActionId::FocusTimeline
+            | WorkspaceActionId::FocusVisit
+            | WorkspaceActionId::FocusWorkflow
+            | WorkspaceActionId::FocusWorkflowAudit
+            | WorkspaceActionId::FocusWorkflowNoteStatus
+            | WorkspaceActionId::Handoff
+            | WorkspaceActionId::Return
+            | WorkspaceActionId::NoteNew
+            | WorkspaceActionId::ScopeAgentPacket
+            | WorkspaceActionId::ScopeAgentReview
+            | WorkspaceActionId::ScopeAuditTrail
+            | WorkspaceActionId::ScopeNext
+            | WorkspaceActionId::ScopePatientChart
+            | WorkspaceActionId::ScopePatientFiles
+            | WorkspaceActionId::ScopePrevious
+            | WorkspaceActionId::ScopePracticeIntelligence
+            | WorkspaceActionId::ScopePracticeLibrary
+            | WorkspaceActionId::Save => None,
+        }
+    }
+
+    fn handle_clients_key_event(&mut self, key_event: KeyEvent) -> WorkspaceDashboardAction {
+        match key_event.code {
+            KeyCode::Up => self.request_client_delta(-1),
+            KeyCode::Down => self.request_client_delta(1),
+            KeyCode::Char('c') => {
+                if self.dirty || self.has_unsaved_addendum_draft() {
+                    self.status = "Save before switching workspace records.".to_string();
+                } else {
+                    self.start_new_client();
+                }
+                WorkspaceDashboardAction::Consumed
+            }
+            KeyCode::Enter => {
+                if self.profile == WorkspaceProfile::Medical {
+                    self.focus_workflow_section(MedicalWorkflowSection::Visit);
+                    self.status = "Opened active patient chart.".to_string();
+                } else {
+                    self.focus = WorkspaceFocus::Demographics;
+                }
+                WorkspaceDashboardAction::Consumed
+            }
+            _ => WorkspaceDashboardAction::Consumed,
+        }
+    }
+
+    fn request_client_delta(&mut self, delta: isize) -> WorkspaceDashboardAction {
+        if self.profile == WorkspaceProfile::Medical {
+            return self.request_visible_patient_delta(delta);
+        }
+        let total = self.total_client_rows();
+        if total == 0 {
+            return WorkspaceDashboardAction::Consumed;
+        }
+        if self.dirty || self.has_unsaved_addendum_draft() {
+            self.status = "Save before switching workspace records.".to_string();
+            return WorkspaceDashboardAction::Consumed;
+        }
+        let current = self.client_index.min(total.saturating_sub(1));
+        let next = apply_delta(current, total, delta);
+        if next == current {
+            WorkspaceDashboardAction::Consumed
+        } else {
+            WorkspaceDashboardAction::SelectClient(next)
+        }
+    }
+
+    fn request_visible_patient_delta(&mut self, delta: isize) -> WorkspaceDashboardAction {
+        let visible_indices = self.visible_patient_directory_indices();
+        if visible_indices.is_empty() {
+            return WorkspaceDashboardAction::Consumed;
+        }
+        if self.dirty || self.has_unsaved_addendum_draft() {
+            self.status = "Save before switching patients.".to_string();
+            return WorkspaceDashboardAction::Consumed;
+        }
+        let current = self.selected_visible_patient_position(&visible_indices);
+        let next = apply_delta(current, visible_indices.len(), delta);
+        let Some(next_client_index) = visible_indices.get(next).copied() else {
+            return WorkspaceDashboardAction::Consumed;
+        };
+        if next_client_index == self.client_index {
+            WorkspaceDashboardAction::Consumed
+        } else {
+            WorkspaceDashboardAction::SelectClient(next_client_index)
+        }
+    }
+
+    fn handle_notes_key_event(&mut self, key_event: KeyEvent) -> WorkspaceDashboardAction {
+        match key_event.code {
+            KeyCode::Up => self.request_note_delta(-1),
+            KeyCode::Down => self.request_note_delta(1),
+            KeyCode::Char('n') => {
+                if self.dirty || self.has_unsaved_addendum_draft() {
+                    self.status = "Save before switching notes.".to_string();
+                } else {
+                    self.start_new_note();
+                }
+                WorkspaceDashboardAction::Consumed
+            }
+            KeyCode::Enter => {
+                self.set_workflow_section(MedicalWorkflowSection::Visit);
+                self.focus = WorkspaceFocus::NoteBody;
+                self.status = format!(
+                    "Opened note for editing: {}.",
+                    compact_preview(&nonempty_or(&self.draft_note.title, "untitled note"), 48)
+                );
+                WorkspaceDashboardAction::Consumed
+            }
+            _ => WorkspaceDashboardAction::Consumed,
+        }
+    }
+
+    fn request_note_delta(&mut self, delta: isize) -> WorkspaceDashboardAction {
+        let total = self.total_note_rows();
+        if total == 0 {
+            return WorkspaceDashboardAction::Consumed;
+        }
+        if self.dirty || self.has_unsaved_addendum_draft() {
+            self.status = "Save before switching notes.".to_string();
+            return WorkspaceDashboardAction::Consumed;
+        }
+        let current = self.note_index.min(total.saturating_sub(1));
+        let next = apply_delta(current, total, delta);
+        if next == current {
+            WorkspaceDashboardAction::Consumed
+        } else {
+            WorkspaceDashboardAction::SelectNote(next)
+        }
+    }
+
+    fn handle_demographics_key_event(&mut self, key_event: KeyEvent) -> WorkspaceDashboardAction {
+        if self.profile == WorkspaceProfile::Medical
+            && let Some(mode) = self.patient_admin_edit_mode
+        {
+            return self.handle_patient_admin_key_event(mode, key_event);
+        }
+        match key_event.code {
+            KeyCode::Up => self.demographics_field = self.demographics_field.previous(),
+            KeyCode::Down | KeyCode::Enter => {
+                self.demographics_field = self.demographics_field.next()
+            }
+            KeyCode::Backspace => {
+                self.draft_client.value_mut(self.demographics_field).pop();
+                self.mark_dirty();
+            }
+            KeyCode::Char(c) => {
+                self.draft_client.value_mut(self.demographics_field).push(c);
+                self.mark_dirty();
+            }
+            _ if text_cursor_navigation_key(&key_event) => {
+                self.status =
+                    "Text fields are end-anchored: type appends, Backspace deletes, Up/Down changes field."
+                        .to_string();
+            }
+            _ => {}
+        }
+        WorkspaceDashboardAction::Consumed
+    }
+
+    fn handle_patient_admin_key_event(
+        &mut self,
+        mode: PatientAdminEditMode,
+        key_event: KeyEvent,
+    ) -> WorkspaceDashboardAction {
+        match key_event.code {
+            KeyCode::Up => self.patient_admin_field = self.patient_admin_field.previous_in(mode),
+            KeyCode::Down | KeyCode::Enter => {
+                self.patient_admin_field = self.patient_admin_field.next_in(mode)
+            }
+            KeyCode::Backspace => {
+                self.draft_client
+                    .admin_value_mut(self.patient_admin_field)
+                    .pop();
+                self.mark_dirty();
+            }
+            KeyCode::Char(c) => {
+                self.draft_client
+                    .admin_value_mut(self.patient_admin_field)
+                    .push(c);
+                self.mark_dirty();
+            }
+            _ if text_cursor_navigation_key(&key_event) => {
+                self.status =
+                    "Text fields are end-anchored: type appends, Backspace deletes, Up/Down changes field."
+                        .to_string();
+            }
+            _ => {}
+        }
+        WorkspaceDashboardAction::Consumed
+    }
+
+    fn handle_note_title_key_event(&mut self, key_event: KeyEvent) -> WorkspaceDashboardAction {
+        if self.draft_note.is_locked() {
+            self.status = self.locked_note_read_only_status();
+            return WorkspaceDashboardAction::Consumed;
+        }
+        match key_event.code {
+            KeyCode::Enter | KeyCode::Down => self.focus = WorkspaceFocus::NoteBody,
+            KeyCode::Up => self.focus = WorkspaceFocus::Notes,
+            KeyCode::Backspace => {
+                self.draft_note.title.pop();
+                self.mark_dirty();
+            }
+            KeyCode::Char(c) => {
+                self.draft_note.title.push(c);
+                self.mark_dirty();
+            }
+            _ if text_cursor_navigation_key(&key_event) => {
+                self.status =
+                    "Note title is end-anchored: type appends and Backspace deletes.".to_string();
+            }
+            _ => {}
+        }
+        WorkspaceDashboardAction::Consumed
+    }
+
+    fn handle_note_body_key_event(&mut self, key_event: KeyEvent) -> WorkspaceDashboardAction {
+        if self.draft_note.is_locked() {
+            self.status = self.locked_note_read_only_status();
+            return WorkspaceDashboardAction::Consumed;
+        }
+        match key_event.code {
+            KeyCode::Up if self.draft_note.body.is_empty() => {
+                self.focus = WorkspaceFocus::NoteTitle
+            }
+            KeyCode::Backspace => {
+                self.draft_note.body.pop();
+                self.mark_dirty();
+            }
+            KeyCode::Enter => {
+                self.draft_note.body.push('\n');
+                self.mark_dirty();
+            }
+            KeyCode::Char(c) => {
+                self.draft_note.body.push(c);
+                self.mark_dirty();
+            }
+            _ if text_cursor_navigation_key(&key_event) => {
+                self.status =
+                    "Note body is end-anchored: type appends and Backspace deletes.".to_string();
+            }
+            _ => {}
+        }
+        WorkspaceDashboardAction::Consumed
+    }
+
+    fn handle_patient_files_key_event(&mut self, key_event: KeyEvent) -> WorkspaceDashboardAction {
+        match key_event.code {
+            KeyCode::Up => self.move_patient_file_tree_selection(-1),
+            KeyCode::Down => self.move_patient_file_tree_selection(1),
+            KeyCode::PageUp => self.move_patient_file_tree_selection(-5),
+            KeyCode::PageDown => self.move_patient_file_tree_selection(5),
+            KeyCode::Home => self.move_patient_file_tree_to_edge(false),
+            KeyCode::End => self.move_patient_file_tree_to_edge(true),
+            KeyCode::Left => self.collapse_patient_file_tree_row(),
+            KeyCode::Right => self.expand_patient_file_tree_row(),
+            KeyCode::Enter => self.activate_patient_file_tree_row(),
+            KeyCode::Char(' ') => self.toggle_highlighted_patient_file_inclusion(),
+            KeyCode::Char('d') | KeyCode::Char('a') => {
+                self.start_new_document();
+            }
+            KeyCode::Char('o') => {
+                if let Some(document_id) = self.selected_document_id_for_file_operation() {
+                    return WorkspaceDashboardAction::OpenDocumentFile { document_id };
+                }
+            }
+            _ => {}
+        }
+        WorkspaceDashboardAction::Consumed
+    }
+
+    fn handle_agent_key_event(&mut self, key_event: KeyEvent) -> WorkspaceDashboardAction {
+        if self.profile != WorkspaceProfile::Medical {
+            return WorkspaceDashboardAction::Consumed;
+        }
+        if self.agent_result.is_active() {
+            match key_event.code {
+                KeyCode::Backspace => {
+                    self.agent_result.body.pop();
+                    self.status = "Unsaved returned work draft.".to_string();
+                }
+                KeyCode::Enter => {
+                    self.agent_result.body.push('\n');
+                    self.status = "Unsaved returned work draft.".to_string();
+                }
+                KeyCode::PageUp => {
+                    self.scroll_agent_workpane(-1, 8);
+                }
+                KeyCode::PageDown => {
+                    self.scroll_agent_workpane(1, 8);
+                }
+                _ if text_cursor_navigation_key(&key_event) => {
+                    self.status =
+                        "Returned work draft is end-anchored: type appends and Backspace deletes."
+                            .to_string();
+                }
+                KeyCode::Char(c) => {
+                    self.agent_result.body.push(c);
+                    self.status = "Unsaved returned work draft.".to_string();
+                }
+                _ => {}
+            }
+            return WorkspaceDashboardAction::Consumed;
+        }
+        if self.agent_request.is_active() {
+            match key_event.code {
+                KeyCode::Backspace => {
+                    self.agent_request.body.pop();
+                    self.status = "Local agent instructions draft.".to_string();
+                }
+                KeyCode::Enter => {
+                    self.agent_request.body.push('\n');
+                    self.status = "Local agent instructions draft.".to_string();
+                }
+                KeyCode::PageUp => {
+                    self.scroll_agent_workpane(-1, 8);
+                }
+                KeyCode::PageDown => {
+                    self.scroll_agent_workpane(1, 8);
+                }
+                _ if text_cursor_navigation_key(&key_event) => {
+                    self.status =
+                        "Agent input is end-anchored: type appends and Backspace deletes."
+                            .to_string();
+                }
+                KeyCode::Char(c) => {
+                    self.agent_request.body.push(c);
+                    self.status = "Local agent instructions draft.".to_string();
+                }
+                _ => {}
+            }
+            return WorkspaceDashboardAction::Consumed;
+        }
+        match key_event.code {
+            KeyCode::Up | KeyCode::PageUp => {
+                self.scroll_agent_workpane(-1, 4);
+            }
+            KeyCode::Down | KeyCode::PageDown => {
+                self.scroll_agent_workpane(1, 4);
+            }
+            KeyCode::Home => {
+                self.agent_scroll = 0;
+                self.status = "Agent Workpane top.".to_string();
+            }
+            KeyCode::Char('r') => {
+                self.set_workflow_section(MedicalWorkflowSection::AgentRequest);
+                self.agent_scroll = 0;
+                self.status = "Focused agent instructions.".to_string();
+            }
+            KeyCode::Char('p') => {
+                self.set_workflow_section(MedicalWorkflowSection::ContextPacket);
+                self.agent_scroll = 0;
+                self.status = "Focused Medical Agent Plan review.".to_string();
+            }
+            KeyCode::Char('i') => {
+                self.set_workflow_section(MedicalWorkflowSection::AgentInbox);
+                self.agent_scroll = 0;
+                self.status = "Focused returned agent work.".to_string();
+            }
+            _ => {}
+        }
+        WorkspaceDashboardAction::Consumed
+    }
+
+    fn handle_workflow_key_event(&mut self, key_event: KeyEvent) -> WorkspaceDashboardAction {
+        if self.profile != WorkspaceProfile::Medical {
+            return WorkspaceDashboardAction::Consumed;
+        }
+        if self.addendum_draft.active {
+            match key_event.code {
+                KeyCode::Backspace => {
+                    self.addendum_draft.body.pop();
+                    self.status = "Unsaved addendum draft.".to_string();
+                }
+                KeyCode::Enter => {
+                    self.addendum_draft.body.push('\n');
+                    self.status = "Unsaved addendum draft.".to_string();
+                }
+                KeyCode::Char(c) => {
+                    self.addendum_draft.body.push(c);
+                    self.status = "Unsaved addendum draft.".to_string();
+                }
+                _ if text_cursor_navigation_key(&key_event) => {
+                    self.status =
+                        "Addendum draft is end-anchored: type appends and Backspace deletes."
+                            .to_string();
+                }
+                _ => {}
+            }
+            return WorkspaceDashboardAction::Consumed;
+        }
+        if self.derivative_draft.is_active() {
+            match key_event.code {
+                KeyCode::Up => {
+                    self.derivative_field = self.derivative_field.previous();
+                    self.scroll_to_active_workflow_editor();
+                }
+                KeyCode::Down | KeyCode::Enter
+                    if self.derivative_field != DerivativeField::Body =>
+                {
+                    self.derivative_field = self.derivative_field.next();
+                    self.scroll_to_active_workflow_editor();
+                }
+                KeyCode::Enter => {
+                    self.derivative_draft.body.push('\n');
+                    self.mark_dirty();
+                }
+                KeyCode::Backspace => {
+                    self.derivative_draft.value_mut(self.derivative_field).pop();
+                    self.mark_dirty();
+                }
+                KeyCode::Char(c) => {
+                    self.derivative_draft
+                        .value_mut(self.derivative_field)
+                        .push(c);
+                    self.mark_dirty();
+                }
+                _ if text_cursor_navigation_key(&key_event) => {
+                    self.status =
+                        "Reviewed text fields are end-anchored: type appends, Backspace deletes, Up/Down changes field."
+                            .to_string();
+                }
+                _ => {}
+            }
+            return WorkspaceDashboardAction::Consumed;
+        }
+        if self.clip_draft.is_active() {
+            match key_event.code {
+                KeyCode::Up => {
+                    self.clip_field = self.clip_field.previous();
+                    self.scroll_to_active_workflow_editor();
+                }
+                KeyCode::Down | KeyCode::Enter if self.clip_field != ClipField::Body => {
+                    self.clip_field = self.clip_field.next();
+                    self.scroll_to_active_workflow_editor();
+                }
+                KeyCode::Enter => {
+                    self.clip_draft.body.push('\n');
+                    self.mark_dirty();
+                }
+                KeyCode::Backspace => {
+                    self.clip_draft.value_mut(self.clip_field).pop();
+                    self.mark_dirty();
+                }
+                KeyCode::Char(c) => {
+                    self.clip_draft.value_mut(self.clip_field).push(c);
+                    self.mark_dirty();
+                }
+                _ if text_cursor_navigation_key(&key_event) => {
+                    self.status =
+                        "Context clip fields are end-anchored: type appends, Backspace deletes, Up/Down changes field."
+                            .to_string();
+                }
+                _ => {}
+            }
+            return WorkspaceDashboardAction::Consumed;
+        }
+        if self.draft_task.is_active() {
+            match key_event.code {
+                KeyCode::Up => {
+                    self.task_field = self.task_field.previous();
+                    self.scroll_to_active_workflow_editor();
+                }
+                KeyCode::Down | KeyCode::Enter => {
+                    self.task_field = self.task_field.next();
+                    self.scroll_to_active_workflow_editor();
+                }
+                KeyCode::Backspace => {
+                    self.draft_task.value_mut(self.task_field).pop();
+                    self.mark_dirty();
+                }
+                KeyCode::Char(c) => {
+                    self.draft_task.value_mut(self.task_field).push(c);
+                    self.mark_dirty();
+                }
+                _ if text_cursor_navigation_key(&key_event) => {
+                    self.status =
+                        "Job fields are end-anchored: type appends, Backspace deletes, Up/Down changes field."
+                            .to_string();
+                }
+                _ => {}
+            }
+            return WorkspaceDashboardAction::Consumed;
+        }
+        if self.draft_safety.is_active() {
+            match key_event.code {
+                KeyCode::Up => {
+                    self.safety_field = self.safety_field.previous();
+                    self.scroll_to_active_workflow_editor();
+                }
+                KeyCode::Down | KeyCode::Enter if self.safety_field != SafetyField::Notes => {
+                    self.safety_field = self.safety_field.next();
+                    self.scroll_to_active_workflow_editor();
+                }
+                KeyCode::Enter => {
+                    self.draft_safety.notes.push('\n');
+                    self.mark_dirty();
+                }
+                KeyCode::Backspace => {
+                    self.draft_safety.value_mut(self.safety_field).pop();
+                    self.mark_dirty();
+                }
+                KeyCode::Char(c) => {
+                    self.draft_safety.value_mut(self.safety_field).push(c);
+                    self.mark_dirty();
+                }
+                _ if text_cursor_navigation_key(&key_event) => {
+                    self.status =
+                        "Clinical safety fields are end-anchored: type appends, Backspace deletes, Up/Down changes field."
+                            .to_string();
+                }
+                _ => {}
+            }
+            return WorkspaceDashboardAction::Consumed;
+        }
+        if !self.draft_document.is_active() {
+            if self.workflow_section == MedicalWorkflowSection::Visit {
+                match key_event.code {
+                    KeyCode::Down => {
+                        self.focus_patient_files_tree();
+                        return WorkspaceDashboardAction::Consumed;
+                    }
+                    KeyCode::Up | KeyCode::Home | KeyCode::End => {
+                        self.status =
+                            "Today's Visit is read-only. Use :demographics, :files, or :agent request."
+                                .to_string();
+                        return WorkspaceDashboardAction::Consumed;
+                    }
+                    _ => {}
+                }
+            }
+            match key_event.code {
+                KeyCode::PageUp => {
+                    self.scroll_center_work_area(-1, 8);
+                    return WorkspaceDashboardAction::Consumed;
+                }
+                KeyCode::PageDown => {
+                    self.scroll_center_work_area(1, 8);
+                    return WorkspaceDashboardAction::Consumed;
+                }
+                KeyCode::Up => {
+                    self.set_workflow_section(self.workflow_section.previous());
+                    self.status =
+                        format!("Focused {} workflow.", self.workflow_section.status_label());
+                    return WorkspaceDashboardAction::Consumed;
+                }
+                KeyCode::Down => {
+                    self.set_workflow_section(self.workflow_section.next());
+                    self.status =
+                        format!("Focused {} workflow.", self.workflow_section.status_label());
+                    return WorkspaceDashboardAction::Consumed;
+                }
+                KeyCode::Home => {
+                    self.set_workflow_section(MedicalWorkflowSection::Visit);
+                    self.status = "Focused visit workflow.".to_string();
+                    return WorkspaceDashboardAction::Consumed;
+                }
+                KeyCode::End => {
+                    self.set_workflow_section(MedicalWorkflowSection::Audit);
+                    self.status = "Focused audit workflow.".to_string();
+                    return WorkspaceDashboardAction::Consumed;
+                }
+                _ => {}
+            }
+        }
+        match key_event.code {
+            KeyCode::Char('e') if !self.draft_document.is_active() => {
+                return WorkspaceDashboardAction::EnsureEncounter;
+            }
+            KeyCode::Char('l') if !self.draft_document.is_active() => {
+                return WorkspaceDashboardAction::SignNote;
+            }
+            KeyCode::Char('d') if !self.draft_document.is_active() => {
+                self.start_new_document();
+            }
+            KeyCode::Up if self.draft_document.is_active() => {
+                self.document_field = self.document_field.previous();
+                self.scroll_to_active_workflow_editor();
+            }
+            KeyCode::Down | KeyCode::Enter if self.draft_document.is_active() => {
+                self.document_field = self.document_field.next();
+                self.scroll_to_active_workflow_editor();
+            }
+            KeyCode::Backspace if self.draft_document.is_active() => {
+                self.draft_document.value_mut(self.document_field).pop();
+                self.mark_dirty();
+            }
+            KeyCode::Char(c) if self.draft_document.is_active() => {
+                self.draft_document.value_mut(self.document_field).push(c);
+                self.mark_dirty();
+            }
+            _ if self.draft_document.is_active() && text_cursor_navigation_key(&key_event) => {
+                self.status =
+                    "File draft fields are end-anchored: type appends, Backspace deletes, Up/Down changes field."
+                        .to_string();
+            }
+            _ => {}
+        }
+        WorkspaceDashboardAction::Consumed
+    }
+
+    fn mark_dirty(&mut self) {
+        self.dirty = true;
+        self.status = "Unsaved changes.".to_string();
+    }
+
+    fn has_unsaved_addendum_draft(&self) -> bool {
+        self.addendum_draft.should_save()
+    }
+
+    fn effective_note_title(&self) -> &str {
+        let title = self.draft_note.title.trim();
+        if title.is_empty() {
+            UNTITLED_NOTE_TITLE
+        } else {
+            title
+        }
+    }
+
+    fn header_lines(&self) -> Vec<Line<'static>> {
+        let mut lines = vec![Line::from(vec![
+            Span::styled(
+                self.profile.header_title(),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(status_suffix(self.dirty)),
+        ])];
+        if self.profile == WorkspaceProfile::Medical {
+            let admin = patient_admin_metadata_for_draft(&self.draft_client);
+            let patient = self.draft_client.display_name.trim();
+            let patient = if patient.is_empty()
+                || (self.draft_client.id.is_none() && patient == self.profile.client_draft_label())
+            {
+                "No patient selected"
+            } else {
+                patient
+            };
+            let dob = nonempty_or(&self.draft_client.date_of_birth, "blank");
+            let identifier = nonempty_or(&self.draft_client.external_id, "blank");
+            let encounter = self
+                .encounters
+                .get(self.encounter_index)
+                .map(|encounter| encounter.status.as_str())
+                .unwrap_or("No encounter");
+            lines.push(Line::from(vec![
+                Span::styled("Patient: ", Style::default().fg(Color::DarkGray)),
+                Span::raw(compact_preview(patient, 28)),
+                Span::styled("  DOB: ", Style::default().fg(Color::DarkGray)),
+                Span::raw(dob),
+                Span::styled("  MRN: ", Style::default().fg(Color::DarkGray)),
+                Span::raw(compact_preview(&identifier, 20)),
+                Span::styled("  Contact: ", Style::default().fg(Color::DarkGray)),
+                Span::raw(admin.contact_status_label()),
+                Span::styled("  Coverage: ", Style::default().fg(Color::DarkGray)),
+                Span::raw(admin.coverage_status_label()),
+                Span::styled("  Encounter: ", Style::default().fg(Color::DarkGray)),
+                Span::raw(compact_preview(encounter, 14)),
+            ]));
+        }
+        lines
+    }
+
+    fn render_tiny(&self, area: Rect, buf: &mut Buffer) {
+        Paragraph::new(vec![
+            Line::from(Span::styled(
+                self.profile.header_title(),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from("Terminal too small for the workspace dashboard."),
+            Line::from("Increase the terminal size, or press Ctrl-W/Esc to return."),
+        ])
+        .wrap(Wrap { trim: true })
+        .render(area, buf);
+    }
+
+    fn status_line(&self, width: u16) -> Line<'static> {
+        if let Some(patient_search_query) = &self.patient_search_query {
+            return Line::from(compose_footer_text(
+                &[
+                    "Mode: Patient search".to_string(),
+                    format!("/{patient_search_query}"),
+                    "Enter open".to_string(),
+                    "Esc chart".to_string(),
+                    "Up/Down move".to_string(),
+                ],
+                width,
+            ));
+        }
+        if let Some(command_input) = &self.command_input {
+            return Line::from(compose_footer_text(
+                &[
+                    "Mode: Commands".to_string(),
+                    format!(":{command_input}"),
+                    "Enter run".to_string(),
+                    "Esc close".to_string(),
+                    "Up/Down move".to_string(),
+                ],
+                width,
+            ));
+        }
+        if self.profile == WorkspaceProfile::Medical {
+            return Line::from(self.medical_footer_text(width));
+        }
+        Line::from(vec![
+            Span::raw(self.status.clone()),
+            Span::styled(
+                "  ? actions  : command  Ctrl-S save  Ctrl-G agent  Ctrl-W/Esc return",
+                Style::default().fg(Color::DarkGray),
+            ),
+        ])
+    }
+
+    fn medical_footer_text(&self, width: u16) -> String {
+        let input_mode = self.medical_input_mode();
+        compose_footer_text(
+            &[
+                format!("Focus: {}", self.medical_focus_footer_label()),
+                format!("Mode: {}", input_mode.label()),
+                format!("Next: {}", self.medical_footer_next_label()),
+                format!("Status: {}", self.status),
+                input_mode.hint().to_string(),
+            ],
+            width,
+        )
+    }
+
+    fn medical_input_mode(&self) -> WorkspaceInputMode {
+        if self.patient_search_query.is_some() {
+            return WorkspaceInputMode::PatientSearch;
+        }
+        if self.command_input.is_some() {
+            return WorkspaceInputMode::CommandPalette;
+        }
+        match self.focus {
+            WorkspaceFocus::Clients | WorkspaceFocus::Notes => WorkspaceInputMode::Navigation,
+            WorkspaceFocus::PatientFiles => WorkspaceInputMode::FileTree,
+            WorkspaceFocus::Demographics if self.patient_admin_edit_mode.is_some() => {
+                WorkspaceInputMode::PatientAdminField
+            }
+            WorkspaceFocus::Demographics => WorkspaceInputMode::PatientField,
+            WorkspaceFocus::NoteTitle | WorkspaceFocus::NoteBody if self.draft_note.is_locked() => {
+                WorkspaceInputMode::LockedNote
+            }
+            WorkspaceFocus::NoteTitle => WorkspaceInputMode::NoteTitle,
+            WorkspaceFocus::NoteBody => WorkspaceInputMode::NoteBody,
+            WorkspaceFocus::Workflow if self.workflow_section_has_active_editor() => {
+                WorkspaceInputMode::WorkflowEditor
+            }
+            WorkspaceFocus::Workflow => WorkspaceInputMode::CenterReadOnly,
+            WorkspaceFocus::Agent if self.agent_result.is_active() => {
+                WorkspaceInputMode::ReturnedWorkDraft
+            }
+            WorkspaceFocus::Agent if self.agent_request.is_active() => {
+                WorkspaceInputMode::AgentInput
+            }
+            WorkspaceFocus::Agent
+                if self.workflow_section == MedicalWorkflowSection::ContextPacket =>
+            {
+                WorkspaceInputMode::PacketReview
+            }
+            WorkspaceFocus::Agent
+                if self.workflow_section == MedicalWorkflowSection::AgentInbox =>
+            {
+                WorkspaceInputMode::ReturnedWorkReview
+            }
+            WorkspaceFocus::Agent => WorkspaceInputMode::Navigation,
+        }
+    }
+
+    fn medical_footer_next_label(&self) -> String {
+        match self.focus {
+            WorkspaceFocus::Clients => "Search/open patient".to_string(),
+            WorkspaceFocus::Notes => "Open selected chart item".to_string(),
+            WorkspaceFocus::PatientFiles => {
+                if self.patient_file_count() > 0 {
+                    "Enter detail | Space marks agent".to_string()
+                } else {
+                    "Paste/drop JPG/PDF".to_string()
+                }
+            }
+            WorkspaceFocus::Demographics => {
+                if self.patient_admin_edit_mode.is_some() {
+                    "Type patient admin field".to_string()
+                } else {
+                    "Edit patient data".to_string()
+                }
+            }
+            WorkspaceFocus::NoteTitle if self.draft_note.is_locked() => {
+                "Read-only | addendum/proposal".to_string()
+            }
+            WorkspaceFocus::NoteBody if self.draft_note.is_locked() => {
+                "Read-only | addendum/proposal".to_string()
+            }
+            WorkspaceFocus::NoteTitle => "Type note title".to_string(),
+            WorkspaceFocus::NoteBody => "Type note body".to_string(),
+            WorkspaceFocus::Agent => match self.workflow_section {
+                MedicalWorkflowSection::AgentRequest => "type local instructions".to_string(),
+                MedicalWorkflowSection::ContextPacket => "Ctrl-G sends packet".to_string(),
+                MedicalWorkflowSection::AgentInbox => "review returned work".to_string(),
+                _ => "r input | p packet | i returned".to_string(),
+            },
+            WorkspaceFocus::Workflow => {
+                let next_label = self.workflow_single_line_next_action_label();
+                next_label
+                    .strip_prefix("Next: ")
+                    .unwrap_or(next_label.as_str())
+                    .to_string()
+            }
+        }
+    }
+
+    fn medical_focus_footer_label(&self) -> &'static str {
+        match self.current_medical_pane_slot() {
+            MedicalPaneSlot::PatientDirectory => "Directory",
+            MedicalPaneSlot::ChartTree => "Patient Notes",
+            MedicalPaneSlot::PatientFileTree => "Documents",
+            MedicalPaneSlot::PatientDemographics => "Demographics",
+            MedicalPaneSlot::NoteTitle => "Note Title",
+            MedicalPaneSlot::NoteBody => "Note Body",
+            MedicalPaneSlot::CenterWorkArea => "Center",
+            MedicalPaneSlot::AgentWorkpane => "Agent",
+        }
+    }
+
+    fn render_action_overlay(&self, area: Rect, buf: &mut Buffer) {
+        let overlay = centered_action_rect(area);
+        Clear.render(overlay, buf);
+        Paragraph::new(self.action_overlay_lines())
+            .block(
+                Block::default()
+                    .title("Workspace Actions")
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::Cyan)),
+            )
+            .wrap(Wrap { trim: false })
+            .render(overlay, buf);
+    }
+
+    fn action_overlay_lines(&self) -> Vec<Line<'static>> {
+        let mut lines = vec![Line::from(Span::styled(
+            "?/Esc close   : command",
+            Style::default().fg(Color::DarkGray),
+        ))];
+        for group in WorkspaceActionGroup::ALL {
+            let mut group_lines = WORKSPACE_ACTIONS
+                .iter()
+                .filter(|action| action.group == group && action.applies_to(self.profile))
+                .map(|action| {
+                    let shortcut = action.shortcut.unwrap_or("");
+                    let shortcut = if shortcut.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" [{shortcut}]")
+                    };
+                    let command = format!(":{}{shortcut}", action.command);
+                    let disabled_reason = self.action_disabled_reason(action.id);
+                    let detail = disabled_reason
+                        .map(|reason| format!(" {command} disabled: {reason}"))
+                        .unwrap_or_else(|| format!(" {command}"));
+                    let detail_style = if disabled_reason.is_some() {
+                        Style::default().fg(Color::DarkGray)
+                    } else {
+                        Style::default().fg(Color::Cyan)
+                    };
+                    Line::from(vec![
+                        Span::raw("  "),
+                        Span::styled(action.label, Style::default().add_modifier(Modifier::BOLD)),
+                        Span::styled(detail, detail_style),
+                    ])
+                })
+                .collect::<Vec<_>>();
+            if !group_lines.is_empty() {
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    group.title(),
+                    Style::default().fg(Color::DarkGray),
+                )));
+                lines.append(&mut group_lines);
+            }
+        }
+        lines
+    }
+
+    fn render_command_palette(&self, area: Rect, buf: &mut Buffer) {
+        let overlay = centered_command_palette_rect(area);
+        let lines = self.command_palette_lines_for_area(overlay.width, overlay.height);
+        Clear.render(overlay, buf);
+        Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .title("Commands")
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::Cyan)),
+            )
+            .wrap(Wrap { trim: true })
+            .render(overlay, buf);
+    }
+
+    fn command_palette_rect(&self, area: Rect) -> Rect {
+        centered_command_palette_rect(area)
+    }
+
+    fn command_palette_lines_for_area(&self, width: u16, height: u16) -> Vec<Line<'static>> {
+        let command_input = self.command_input.as_deref().unwrap_or_default();
+        let matches = self.command_palette_actions();
+        let selected_index = self.selected_command_index(matches.len());
+        let inner_width = width.saturating_sub(4) as usize;
+        let mut lines = vec![
+            Line::from(vec![
+                Span::styled("Search commands  ", Style::default().fg(Color::DarkGray)),
+                Span::styled(":", Style::default().fg(Color::Cyan)),
+                Span::raw(command_input.to_string()),
+            ]),
+            Line::from(Span::styled(
+                "Enter run   Esc close   ↑/↓ move",
+                Style::default().fg(Color::DarkGray),
+            )),
+            Line::from(""),
+        ];
+
+        if matches.is_empty() {
+            lines.push(Line::from(Span::styled(
+                "No matching workspace commands.",
+                Style::default().fg(Color::DarkGray),
+            )));
+            return lines;
+        }
+
+        let visible_rows = height.saturating_sub(7).max(3) as usize;
+        let start = if selected_index >= visible_rows {
+            selected_index + 1 - visible_rows
+        } else {
+            0
+        };
+        let end = (start + visible_rows).min(matches.len());
+        if start > 0 {
+            lines.push(Line::from(Span::styled(
+                format!("… {start} earlier"),
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+        for (index, action) in matches[start..end].iter().enumerate() {
+            let absolute_index = start + index;
+            lines.push(self.command_palette_action_line(
+                action,
+                absolute_index == selected_index,
+                inner_width,
+            ));
+        }
+        if end < matches.len() {
+            lines.push(Line::from(Span::styled(
+                format!("… {} more", matches.len() - end),
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+        if let Some(reason) = matches
+            .get(selected_index)
+            .and_then(|action| self.action_disabled_reason(action.id))
+        {
+            lines.push(Line::from(""));
+            lines.push(Line::from(vec![
+                Span::styled("Disabled: ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    compact_preview(reason, inner_width.saturating_sub(10)),
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ]));
+        }
+
+        lines
+    }
+
+    fn command_palette_action_line(
+        &self,
+        action: &'static WorkspaceActionDef,
+        selected: bool,
+        width: usize,
+    ) -> Line<'static> {
+        let disabled_reason = self.action_disabled_reason(action.id);
+        let marker = if selected { "> " } else { "  " };
+        let marker_style = if selected {
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        let label_style = if disabled_reason.is_some() {
+            Style::default().fg(Color::DarkGray)
+        } else if selected {
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().add_modifier(Modifier::BOLD)
+        };
+        let command_style = if disabled_reason.is_some() {
+            Style::default().fg(Color::DarkGray)
+        } else {
+            Style::default().fg(Color::Cyan)
+        };
+        let shortcut = action
+            .shortcut
+            .map(|shortcut| format!(" [{shortcut}]"))
+            .unwrap_or_default();
+        let disabled = if disabled_reason.is_some() {
+            " off"
+        } else {
+            ""
+        };
+        let command = format!(":{}{}{}", action.command, shortcut, disabled);
+        let command_width = command.chars().count();
+        let reserved = 2usize.saturating_add(command_width).saturating_add(3);
+        let label_width = width.saturating_sub(reserved).max(12);
+        let label = compact_preview(action.label, label_width);
+        let padding = width
+            .saturating_sub(2 + label.chars().count() + command_width)
+            .max(1);
+
+        Line::from(vec![
+            Span::styled(marker, marker_style),
+            Span::styled(label, label_style),
+            Span::raw(" ".repeat(padding)),
+            Span::styled(command, command_style),
+        ])
+    }
+
+    fn command_palette_actions(&self) -> Vec<&'static WorkspaceActionDef> {
+        self.command_palette_sections()
+            .into_iter()
+            .flat_map(|(_, actions)| actions)
+            .collect()
+    }
+
+    fn command_palette_sections(&self) -> Vec<(String, Vec<&'static WorkspaceActionDef>)> {
+        let filter = self.command_input.as_deref().unwrap_or_default();
+        let mut used = Vec::<WorkspaceActionId>::new();
+        let mut sections = Vec::<(String, Vec<&'static WorkspaceActionDef>)>::new();
+
+        if self.profile == WorkspaceProfile::Medical {
+            let current_scope_actions = self
+                .focused_medical_action_ids()
+                .into_iter()
+                .filter_map(workspace_action_by_id)
+                .filter(|action| {
+                    action.applies_to(self.profile) && command_action_matches_filter(action, filter)
+                })
+                .collect::<Vec<_>>();
+            if !current_scope_actions.is_empty() {
+                used.extend(current_scope_actions.iter().map(|action| action.id));
+                sections.push(("Quick actions now".to_string(), current_scope_actions));
+            }
+
+            let bridge_actions = [
+                WorkspaceActionId::AgentRequest,
+                WorkspaceActionId::AgentPreview,
+                WorkspaceActionId::Handoff,
+                WorkspaceActionId::AgentInbox,
+                WorkspaceActionId::ScopeLast,
+            ]
+            .into_iter()
+            .filter(|action_id| !used.contains(action_id))
+            .filter_map(workspace_action_by_id)
+            .filter(|action| {
+                action.applies_to(self.profile) && command_action_matches_filter(action, filter)
+            })
+            .collect::<Vec<_>>();
+            if !bridge_actions.is_empty() {
+                used.extend(bridge_actions.iter().map(|action| action.id));
+                sections.push(("Agent bridge".to_string(), bridge_actions));
+            }
+        }
+
+        for group in WorkspaceActionGroup::ALL {
+            let group_actions = WORKSPACE_ACTIONS
+                .iter()
+                .filter(|action| !used.contains(&action.id))
+                .filter(|action| {
+                    action.group == group
+                        && action.applies_to(self.profile)
+                        && command_action_matches_filter(action, filter)
+                })
+                .collect::<Vec<_>>();
+            if !group_actions.is_empty() {
+                sections.push((group.title().to_string(), group_actions));
+            }
+        }
+
+        sections
+    }
+
+    fn focused_medical_action_ids(&self) -> Vec<WorkspaceActionId> {
+        match self.focus {
+            WorkspaceFocus::Clients => vec![
+                WorkspaceActionId::PatientSearch,
+                WorkspaceActionId::FocusPatients,
+                WorkspaceActionId::FocusPatientDetails,
+            ],
+            WorkspaceFocus::Notes => vec![
+                WorkspaceActionId::NoteNew,
+                WorkspaceActionId::FocusVisit,
+                WorkspaceActionId::FocusWorkflowNoteStatus,
+                WorkspaceActionId::ScopePatientChart,
+            ],
+            WorkspaceFocus::PatientFiles => {
+                if self.patient_file_count() > 0 {
+                    vec![
+                        WorkspaceActionId::ArtifactInspect,
+                        WorkspaceActionId::ArtifactToggle,
+                        WorkspaceActionId::DocumentChoose,
+                        WorkspaceActionId::DocumentAttach,
+                        WorkspaceActionId::ArtifactOpen,
+                    ]
+                } else {
+                    vec![
+                        WorkspaceActionId::DocumentChoose,
+                        WorkspaceActionId::DocumentAttach,
+                        WorkspaceActionId::ScopeAgentPacket,
+                    ]
+                }
+            }
+            WorkspaceFocus::Demographics => vec![
+                WorkspaceActionId::ContactEdit,
+                WorkspaceActionId::EmergencyContactEdit,
+                WorkspaceActionId::CoverageEdit,
+                WorkspaceActionId::FocusNoteTitle,
+            ],
+            WorkspaceFocus::NoteTitle => vec![
+                WorkspaceActionId::FocusNoteBody,
+                WorkspaceActionId::NoteNew,
+                WorkspaceActionId::NoteSign,
+                WorkspaceActionId::AddendumStart,
+            ],
+            WorkspaceFocus::NoteBody => vec![
+                WorkspaceActionId::NoteSign,
+                WorkspaceActionId::AddendumStart,
+                WorkspaceActionId::AgentRequest,
+                WorkspaceActionId::AgentPreview,
+            ],
+            WorkspaceFocus::Agent => match self.workflow_section {
+                MedicalWorkflowSection::ContextPacket => vec![
+                    WorkspaceActionId::Handoff,
+                    WorkspaceActionId::AgentRequest,
+                    WorkspaceActionId::ScopeAgentReview,
+                ],
+                MedicalWorkflowSection::AgentInbox => vec![
+                    WorkspaceActionId::AgentResultInspect,
+                    WorkspaceActionId::AgentResultNext,
+                    WorkspaceActionId::AgentRequest,
+                    WorkspaceActionId::ScopeAgentPacket,
+                ],
+                _ => vec![
+                    WorkspaceActionId::AgentRequest,
+                    WorkspaceActionId::AgentPreview,
+                    WorkspaceActionId::Handoff,
+                    WorkspaceActionId::AgentInbox,
+                ],
+            },
+            WorkspaceFocus::Workflow => self.current_scope_action_ids(),
+        }
+    }
+
+    fn selected_command_index(&self, match_count: usize) -> usize {
+        if match_count == 0 {
+            0
+        } else {
+            self.command_selection_index
+                .min(match_count.saturating_sub(1))
+        }
+    }
+
+    fn selected_command_action_id(&self) -> Option<WorkspaceActionId> {
+        let matches = self.command_palette_actions();
+        matches
+            .get(self.selected_command_index(matches.len()))
+            .map(|action| action.id)
+    }
+
+    fn move_command_selection(&mut self, delta: isize) {
+        let matches = self.command_palette_actions();
+        self.command_selection_index = apply_delta(
+            self.selected_command_index(matches.len()),
+            matches.len(),
+            delta,
+        );
+    }
+
+    fn apply_profile_default_client_label(&mut self) {
+        if self.draft_client.id.is_some() {
+            return;
+        }
+        let display_name = self.draft_client.display_name.trim();
+        if display_name == WorkspaceProfile::Generic.client_draft_label()
+            || display_name == WorkspaceProfile::Medical.client_draft_label()
+        {
+            self.draft_client.display_name = self.profile.client_draft_label().to_string();
+        }
+    }
+
+    fn total_client_rows(&self) -> usize {
+        let draft_row = usize::from(self.draft_client.id.is_none());
+        (self.clients.len() + draft_row).max(1)
+    }
+
+    fn total_note_rows(&self) -> usize {
+        let draft_row = usize::from(self.draft_note.id.is_none());
+        (self.notes.len() + draft_row).max(1)
+    }
+
+    fn render_clients(&self, area: Rect, buf: &mut Buffer) {
+        if self.profile == WorkspaceProfile::Medical {
+            self.render_patient_directory(area, buf);
+            return;
+        }
+        let lines = if self.clients.is_empty() {
+            vec![
+                selected_line(self.profile.client_draft_label(), true),
+                Line::from(Span::styled(
+                    match self.profile {
+                        WorkspaceProfile::Generic => "Edit client details, then Ctrl-S to save.",
+                        WorkspaceProfile::Medical => "Edit patient details, then Ctrl-S to save.",
+                    },
+                    Style::default().fg(Color::DarkGray),
+                )),
+            ]
+        } else {
+            let mut lines = self
+                .clients
+                .iter()
+                .enumerate()
+                .map(|(index, client)| {
+                    let mut label = client.display_name.clone();
+                    if self.profile == WorkspaceProfile::Medical {
+                        let dob = client.date_of_birth.as_deref().unwrap_or("DOB blank");
+                        let start = client.record_start_date.as_deref().unwrap_or("start");
+                        let end = client.record_end_date.as_deref().unwrap_or("end");
+                        label = format!("{label}  {dob}  {start}->{end}");
+                    }
+                    selected_line(
+                        label.as_str(),
+                        index == self.client_index && self.draft_client.id.is_some(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            if self.draft_client.id.is_none() {
+                lines.push(selected_line(
+                    self.profile.client_draft_label(),
+                    self.client_index >= self.clients.len(),
+                ));
+            }
+            lines
+        };
+        render_pane(
+            self.profile.clients_title(),
+            area,
+            self.focus == WorkspaceFocus::Clients,
+            Paragraph::new(lines),
+            buf,
+        );
+    }
+
+    fn render_patient_directory(&self, area: Rect, buf: &mut Buffer) {
+        let mut lines = self.patient_directory_lines();
+        if self.profile != WorkspaceProfile::Medical
+            && self.draft_client.id.is_none()
+            && self.patient_search_query.is_none()
+            && (self.clients.is_empty() || self.client_index >= self.clients.len())
+        {
+            lines.push(selected_line(
+                self.profile.client_draft_label(),
+                self.focus == WorkspaceFocus::Clients,
+            ));
+            lines.push(Line::from(Span::styled(
+                "  Edit patient details, then Ctrl-S to save.",
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+        render_pane(
+            self.profile.clients_title(),
+            area,
+            self.focus == WorkspaceFocus::Clients,
+            Paragraph::new(lines).wrap(Wrap { trim: false }),
+            buf,
+        );
+    }
+
+    fn patient_directory_lines(&self) -> Vec<Line<'static>> {
+        let search_query = self.patient_search_query.as_deref();
+        let active_patient_count = self
+            .clients
+            .iter()
+            .filter(|client| client.archived_at.is_none())
+            .count();
+        let patient_count_label = match active_patient_count {
+            1 => "1 active patient".to_string(),
+            count => format!("{count} active patients"),
+        };
+        let mut lines = vec![
+            Line::from(vec![
+                Span::styled("Local search: ", Style::default().fg(Color::DarkGray)),
+                Span::styled("/", Style::default().fg(Color::Cyan)),
+                Span::raw(search_query.unwrap_or("").to_string()),
+            ]),
+            Line::from(format!("{patient_count_label}; local only")),
+        ];
+        if search_query.is_some() {
+            lines.push(Line::from(Span::styled(
+                "Enter opens chart; search is not agent context.",
+                Style::default().fg(Color::DarkGray),
+            )));
+        } else if !self.clients.is_empty() {
+            lines.push(Line::from(Span::styled(
+                "New: :patient new; / searches.",
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+
+        if self.clients.is_empty() {
+            lines.extend([
+                Line::from("No saved patients yet."),
+                Line::from("New patient: :patient new"),
+            ]);
+            return lines;
+        }
+
+        let result_indices = if search_query.is_some() {
+            self.patient_search_result_indices()
+        } else {
+            self.visible_patient_directory_indices()
+        };
+        if result_indices.is_empty() {
+            lines.extend([
+                Line::from("No matching saved patients."),
+                Line::from("New patient: :patient new"),
+                Line::from(Span::styled(
+                    "Search stays local and is not agent context.",
+                    Style::default().fg(Color::DarkGray),
+                )),
+            ]);
+            return lines;
+        }
+
+        let selected_search_index = self.selected_patient_search_index(result_indices.len());
+        let selected_directory_index = self.selected_visible_patient_position(&result_indices);
+        for (row, client_index) in result_indices.into_iter().enumerate() {
+            let client = &self.clients[client_index];
+            let active = self.draft_client.id.as_deref() == Some(client.id.as_str());
+            let selected = if search_query.is_some() {
+                row == selected_search_index
+            } else {
+                row == selected_directory_index
+            };
+            let exact = search_query.is_some_and(|query| patient_search_exact_match(client, query));
+            lines.extend(patient_directory_row_lines(client, selected, active, exact));
+        }
+        lines
+    }
+
+    fn render_notes(&self, area: Rect, buf: &mut Buffer) {
+        if self.profile == WorkspaceProfile::Medical {
+            self.render_medical_notes(area, buf);
+            return;
+        }
+        let lines = if self.notes.is_empty() {
+            vec![selected_line("New note", true)]
+        } else {
+            let mut lines = self
+                .notes
+                .iter()
+                .enumerate()
+                .map(|(index, note)| {
+                    let label = if self.profile == WorkspaceProfile::Medical {
+                        format!(
+                            "{}  [{} r{}]",
+                            note.title, note.status, note.current_revision
+                        )
+                    } else {
+                        note.title.clone()
+                    };
+                    selected_line(
+                        label.as_str(),
+                        index == self.note_index && self.draft_note.id.is_some(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            if self.draft_note.id.is_none() {
+                lines.push(selected_line(
+                    "New note",
+                    self.note_index >= self.notes.len(),
+                ));
+            }
+            lines
+        };
+        render_pane(
+            self.profile.notes_title(),
+            area,
+            self.focus == WorkspaceFocus::Notes,
+            Paragraph::new(lines),
+            buf,
+        );
+    }
+
+    fn render_medical_notes(&self, area: Rect, buf: &mut Buffer) {
+        let mut lines = Vec::new();
+        lines.push(Line::from(Span::styled(
+            "Patient Notes",
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        )));
+        if self.notes.is_empty() {
+            lines.push(selected_line(
+                "New note",
+                self.focus == WorkspaceFocus::Notes,
+            ));
+            lines.push(Line::from(Span::styled(
+                "  No patient notes yet. Use :note new.",
+                Style::default().fg(Color::DarkGray),
+            )));
+            lines.push(Line::from(Span::styled(
+                "  Medical, communication, and admin notes appear here.",
+                Style::default().fg(Color::DarkGray),
+            )));
+        } else {
+            for group in MEDICAL_NOTE_GROUPS {
+                let group_notes = self
+                    .notes
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, note)| medical_note_group_label(note) == *group)
+                    .collect::<Vec<_>>();
+                if group_notes.is_empty() {
+                    continue;
+                }
+                lines.push(Line::from(Span::styled(
+                    format!("  {group}"),
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::BOLD),
+                )));
+                for (index, note) in group_notes {
+                    let marker = if index == self.note_index && self.draft_note.id.is_some() {
+                        "> "
+                    } else {
+                        "  "
+                    };
+                    lines.push(Line::from(format!(
+                        "{marker}{}  {}  {} [{}]",
+                        compact_preview(&note.kind, 16),
+                        epoch_millis_date_label(note.created_at),
+                        compact_preview(&note.title, 28),
+                        note_status_readable_label(&note.status),
+                    )));
+                }
+            }
+            if self.draft_note.id.is_none() {
+                lines.push(selected_line(
+                    "New note",
+                    self.note_index >= self.notes.len(),
+                ));
+            }
+        }
+        render_pane(
+            self.profile.notes_title(),
+            area,
+            self.focus == WorkspaceFocus::Notes,
+            Paragraph::new(lines).wrap(Wrap { trim: false }),
+            buf,
+        );
+    }
+
+    fn patient_admin_editor_lines(&self, mode: PatientAdminEditMode) -> Vec<Line<'static>> {
+        let admin = patient_admin_metadata_for_draft(&self.draft_client);
+        let mut lines = vec![
+            Line::from(format!(
+                "Patient: {}",
+                nonempty_or(&self.draft_client.display_name, "unsaved patient")
+            )),
+            Line::from(format!(
+                "DOB: {}; Patient ID / MRN: {}",
+                nonempty_or(&self.draft_client.date_of_birth, "blank"),
+                nonempty_or(&self.draft_client.external_id, "blank")
+            )),
+            Line::from(Span::styled(
+                mode.title(),
+                Style::default().add_modifier(Modifier::BOLD),
+            )),
+        ];
+        if mode == PatientAdminEditMode::Contact {
+            lines.push(Line::from(format!(
+                "Contact info: {}",
+                admin.contact_summary()
+            )));
+            lines.push(Line::from(format!(
+                "Emergency contact: {}",
+                admin.emergency_summary()
+            )));
+        } else {
+            lines.push(Line::from(Span::styled(
+                "Coverage/member ID is separate from Patient ID / MRN.",
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+        for field in mode.fields() {
+            if mode == PatientAdminEditMode::Contact
+                && *field == PatientAdminField::EmergencyContactName
+            {
+                lines.push(Line::from(Span::styled(
+                    "Emergency Contact",
+                    Style::default().fg(Color::Gray),
+                )));
+            }
+            let active =
+                self.focus == WorkspaceFocus::Demographics && self.patient_admin_field == *field;
+            lines.push(patient_admin_editor_field_line(
+                field.label(),
+                admin.value(*field),
+                active,
+                field.placeholder(),
+            ));
+        }
+        lines.push(Line::from(""));
+        match mode {
+            PatientAdminEditMode::Contact => {
+                lines.push(Line::from(Span::styled(
+                    "Local fake demographics metadata only; Ctrl-S saves the patient.",
+                    Style::default().fg(Color::DarkGray),
+                )));
+            }
+            PatientAdminEditMode::Coverage => {
+                lines.push(Line::from(Span::styled(
+                    "No eligibility checks, payer messages, claims, or submissions.",
+                    Style::default().fg(Color::DarkGray),
+                )));
+            }
+        }
+        lines
+    }
+
+    fn render_demographics(&self, area: Rect, buf: &mut Buffer) {
+        if self.profile == WorkspaceProfile::Medical
+            && let Some(mode) = self.patient_admin_edit_mode
+        {
+            render_pane(
+                mode.title(),
+                area,
+                self.focus == WorkspaceFocus::Demographics,
+                Paragraph::new(self.patient_admin_editor_lines(mode)).wrap(Wrap { trim: false }),
+                buf,
+            );
+            return;
+        }
+        let mut lines = DemographicsField::ALL
+            .iter()
+            .map(|field| {
+                let active =
+                    self.focus == WorkspaceFocus::Demographics && *field == self.demographics_field;
+                field_line(
+                    field.label(self.profile),
+                    self.draft_client.value(*field),
+                    active,
+                )
+            })
+            .collect::<Vec<_>>();
+        if self.profile == WorkspaceProfile::Medical {
+            let admin = patient_admin_metadata_for_draft(&self.draft_client);
+            lines.extend([
+                Line::from(""),
+                Line::from(Span::styled(
+                    "Patient Demographics",
+                    Style::default().add_modifier(Modifier::BOLD),
+                )),
+                Line::from(format!("Contact info: {}", admin.contact_summary())),
+                Line::from(format!("Emergency contact: {}", admin.emergency_summary())),
+                Line::from(format!("Coverage: {}", admin.coverage_summary())),
+                Line::from(Span::styled(
+                    "Local fake metadata only; no eligibility checks or payer communication.",
+                    Style::default().fg(Color::DarkGray),
+                )),
+            ]);
+        }
+        render_pane(
+            self.profile.demographics_title(),
+            area,
+            self.focus == WorkspaceFocus::Demographics,
+            Paragraph::new(lines).wrap(Wrap { trim: false }),
+            buf,
+        );
+    }
+
+    fn render_note_title(&self, area: Rect, buf: &mut Buffer) {
+        let title_text = nonempty_or(&self.draft_note.title, UNTITLED_NOTE_TITLE);
+        let title = if self.profile == WorkspaceProfile::Medical && self.draft_note.is_locked() {
+            Line::from(vec![
+                Span::styled(
+                    "READ ONLY ",
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(title_text),
+            ])
+        } else if self.draft_note.title.is_empty() {
+            Line::from(Span::styled(
+                title_text,
+                Style::default().fg(Color::DarkGray),
+            ))
+        } else {
+            Line::from(title_text)
+        };
+        render_pane(
+            self.profile.note_title_label(),
+            area,
+            self.focus == WorkspaceFocus::NoteTitle,
+            Paragraph::new(title),
+            buf,
+        );
+    }
+
+    fn render_note_body(&self, area: Rect, buf: &mut Buffer) {
+        if self.profile == WorkspaceProfile::Medical && self.draft_note.is_locked() {
+            let mut lines = vec![
+                Line::from(Span::styled(
+                    "READ ONLY - signed note",
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                Line::from(Span::styled(
+                    "Use addenda/proposals; direct edits are blocked.",
+                    Style::default().fg(Color::DarkGray),
+                )),
+            ];
+            if self.draft_note.body.trim().is_empty() {
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    "No signed note body stored.",
+                    Style::default().fg(Color::DarkGray),
+                )));
+            } else {
+                lines.extend(
+                    self.draft_note
+                        .body
+                        .lines()
+                        .map(|line| Line::from(line.to_string())),
+                );
+            }
+            render_pane(
+                self.profile.note_body_label(),
+                area,
+                self.focus == WorkspaceFocus::NoteBody,
+                Paragraph::new(lines).wrap(Wrap { trim: false }),
+                buf,
+            );
+            return;
+        }
+        if self.profile == WorkspaceProfile::Medical && self.draft_note.body.trim().is_empty() {
+            render_pane(
+                self.profile.note_body_label(),
+                area,
+                self.focus == WorkspaceFocus::NoteBody,
+                Paragraph::new(vec![
+                    Line::from(Span::styled("HPI:", Style::default().fg(Color::DarkGray))),
+                    Line::from(Span::styled("Exam:", Style::default().fg(Color::DarkGray))),
+                    Line::from(Span::styled(
+                        "Assessment:",
+                        Style::default().fg(Color::DarkGray),
+                    )),
+                    Line::from(Span::styled("Plan:", Style::default().fg(Color::DarkGray))),
+                ])
+                .wrap(Wrap { trim: false }),
+                buf,
+            );
+            return;
+        }
+        render_pane(
+            self.profile.note_body_label(),
+            area,
+            self.focus == WorkspaceFocus::NoteBody,
+            Paragraph::new(self.draft_note.body.clone()).wrap(Wrap { trim: false }),
+            buf,
+        );
+    }
+
+    fn render_workflow(&self, area: Rect, buf: &mut Buffer) {
+        self.render_workflow_with_options(area, buf, false);
+    }
+
+    fn render_workflow_without_patient_files_section(&self, area: Rect, buf: &mut Buffer) {
+        self.render_workflow_with_options(area, buf, true);
+    }
+
+    fn render_workflow_with_options(
+        &self,
+        area: Rect,
+        buf: &mut Buffer,
+        omit_patient_files_section: bool,
+    ) {
+        let storage = self
+            .store_description
+            .as_deref()
+            .unwrap_or("App-server workspace store");
+        let lines = vec![
+            Line::from(vec![
+                Span::styled("Storage", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(format!("  {storage}")),
+            ]),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("Tasks", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw("  No tasks yet"),
+            ]),
+            Line::from(vec![
+                Span::styled("Documents", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw("  No linked documents"),
+            ]),
+            Line::from(vec![
+                Span::styled("History", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw("  Save notes to build revision history"),
+            ]),
+            Line::from(""),
+            Line::from("Use this pane for workflow-specific surfaces as they are added."),
+        ];
+        let lines = match self.profile {
+            WorkspaceProfile::Generic => lines,
+            WorkspaceProfile::Medical => {
+                self.render_medical_workflow(storage, area, buf, omit_patient_files_section);
+                return;
+            }
+        };
+        render_pane(
+            self.profile.workflow_title(),
+            area,
+            self.focus == WorkspaceFocus::Workflow,
+            Paragraph::new(lines).wrap(Wrap { trim: false }),
+            buf,
+        );
+    }
+
+    fn render_medical_workflow(
+        &self,
+        storage: &str,
+        area: Rect,
+        buf: &mut Buffer,
+        omit_patient_files_section: bool,
+    ) {
+        if self.workflow_section == MedicalWorkflowSection::Visit
+            && !self.workflow_section_has_active_editor()
+        {
+            self.render_chart_worklist_pane(area, buf);
+            return;
+        }
+
+        Clear.render(area, buf);
+        let block = pane_block(
+            self.medical_workpane_title(),
+            self.focus == WorkspaceFocus::Workflow,
+        );
+        let inner = block.inner(area);
+        block.render(area, buf);
+        if inner.width == 0 || inner.height == 0 {
+            return;
+        }
+
+        if self.workflow_section == MedicalWorkflowSection::Documents
+            && !self.workflow_section_has_active_editor()
+            && let Some(document) = self
+                .inspected_artifact()
+                .filter(|document| artifact_scope_label(document) == "patient")
+        {
+            let lines = self.patient_file_detail_lines(document);
+            let scroll = self.capped_workflow_scroll_for_anchor(
+                &lines,
+                inner.width,
+                inner.height,
+                self.workflow_scroll,
+            );
+            Paragraph::new(lines)
+                .scroll((scroll, 0))
+                .wrap(Wrap { trim: false })
+                .render(inner, buf);
+            return;
+        }
+
+        let mut lines =
+            self.medical_workflow_lines_with_options(storage, omit_patient_files_section);
+        let mut body_lines = if lines.len() > MEDICAL_WORKFLOW_CHART_CONTEXT_LINE_COUNT {
+            lines.split_off(MEDICAL_WORKFLOW_CHART_CONTEXT_LINE_COUNT)
+        } else {
+            Vec::new()
+        };
+        let scope_body_starts_at_active_section = match self.workflow_section {
+            MedicalWorkflowSection::Safety => !self.workflow_section_has_active_editor(),
+            MedicalWorkflowSection::Documents => {
+                !self.workflow_section_has_active_editor()
+                    && self.inspected_artifact_id.is_none()
+                    && self.inspected_derivative_id.is_none()
+                    && self.inspected_clip_id.is_none()
+            }
+            MedicalWorkflowSection::AgentRequest
+            | MedicalWorkflowSection::ContextPacket
+            | MedicalWorkflowSection::AgentInbox
+            | MedicalWorkflowSection::PracticeLibrary
+            | MedicalWorkflowSection::PracticeIntelligence
+            | MedicalWorkflowSection::Audit => true,
+            _ => false,
+        };
+        if scope_body_starts_at_active_section
+            && let Some(index) = body_lines
+                .iter()
+                .position(|line| workflow_line_matches_section(line, self.workflow_section))
+        {
+            body_lines = body_lines.split_off(index);
+        }
+        let context_height = medical_workflow_sticky_context_height(inner.height);
+        let context_lines = self.workflow_sticky_chart_context_lines(lines, context_height);
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(context_height), Constraint::Min(0)])
+            .split(inner);
+
+        Paragraph::new(context_lines).render(chunks[0], buf);
+        if chunks[1].height == 0 {
+            return;
+        }
+
+        let scroll = if scope_body_starts_at_active_section {
+            0
+        } else {
+            let anchor_row = self
+                .workflow_body_scroll_anchor_row()
+                .saturating_sub(MEDICAL_WORKFLOW_CHART_CONTEXT_LINE_COUNT as u16);
+            self.capped_workflow_scroll_for_anchor(
+                &body_lines,
+                chunks[1].width,
+                chunks[1].height,
+                anchor_row,
+            )
+        };
+        Paragraph::new(body_lines)
+            .scroll((scroll, 0))
+            .wrap(Wrap { trim: false })
+            .render(chunks[1], buf);
+    }
+
+    fn render_chart_worklist_pane(&self, area: Rect, buf: &mut Buffer) {
+        let lines = if area.height <= 4 {
+            self.chart_worklist_compact_lines(area.width.saturating_sub(2))
+        } else {
+            self.chart_worklist_lines()
+        };
+        render_pane(
+            "Today's Visit",
+            area,
+            self.focus == WorkspaceFocus::Workflow,
+            Paragraph::new(lines).wrap(Wrap { trim: false }),
+            buf,
+        );
+    }
+
+    fn render_patient_files_sidepane(&self, area: Rect, buf: &mut Buffer) {
+        Clear.render(area, buf);
+        let block = pane_block(
+            "Uploaded Documents",
+            self.focus == WorkspaceFocus::PatientFiles,
+        );
+        let inner = block.inner(area);
+        block.render(area, buf);
+        if inner.width == 0 || inner.height == 0 {
+            return;
+        }
+        let include_patient_context = inner.width >= 48;
+        let (lines, selected_line_index) =
+            self.patient_files_sidepane_content(inner.width, include_patient_context);
+        let scroll = selected_line_index
+            .map(|line_index| {
+                let visible_height = inner.height as usize;
+                if visible_height == 0 || line_index < visible_height {
+                    0
+                } else {
+                    line_index + 1 - visible_height
+                }
+            })
+            .unwrap_or(0)
+            .min(u16::MAX as usize) as u16;
+        Paragraph::new(lines).scroll((scroll, 0)).render(inner, buf);
+    }
+
+    fn render_agent_workpane(&self, area: Rect, buf: &mut Buffer) {
+        let active = self.focus == WorkspaceFocus::Agent;
+        let block = pane_block("Agent Workpane", active);
+        let inner = block.inner(area);
+        block.render(area, buf);
+        if inner.width == 0 || inner.height == 0 {
+            return;
+        }
+        let compact_summary = self.profile == WorkspaceProfile::Medical && inner.height <= 1;
+        let lines = if compact_summary {
+            vec![Line::from(self.workflow_single_line_chart_context())]
+        } else if active {
+            self.agent_workpane_active_lines()
+        } else {
+            self.agent_workpane_summary_lines()
+        };
+        let max_scroll = lines.len().saturating_sub(inner.height as usize) as u16;
+        let scroll = if active && !compact_summary {
+            self.agent_scroll.min(max_scroll)
+        } else {
+            0
+        };
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .scroll((scroll, 0))
+            .render(inner, buf);
+    }
+
+    fn agent_workpane_active_lines(&self) -> Vec<Line<'static>> {
+        let mut lines = vec![Line::from(self.workflow_single_line_chart_context())];
+        lines.extend(match self.workflow_section {
+            MedicalWorkflowSection::AgentRequest => self.agent_workpane_request_lines(),
+            MedicalWorkflowSection::ContextPacket => self.agent_workpane_handoff_lines(),
+            MedicalWorkflowSection::AgentInbox => self.agent_workpane_review_lines(),
+            _ => self.agent_workpane_summary_lines(),
+        });
+        lines
+    }
+
+    fn agent_workpane_summary_lines(&self) -> Vec<Line<'static>> {
+        let selected_file_count = self.selected_artifacts().len();
+        let selected_text_count = self.selected_derivatives().len();
+        let selected_clip_count = self.selected_clips().len();
+        let request = if self.agent_request.has_text() {
+            compact_preview(&self.agent_request.body, 42)
+        } else {
+            "No instructions drafted".to_string()
+        };
+        let plan = self
+            .latest_packet_without_result()
+            .map(|packet| format!("sent {}", compact_preview(&packet.id, 10)))
+            .or_else(|| {
+                self.context_packets
+                    .first()
+                    .map(|packet| format!("sent {}", compact_preview(&packet.id, 10)))
+            })
+            .unwrap_or_else(|| "not sent".to_string());
+        let returned = if self.agent_result.is_active() {
+            "draft in progress".to_string()
+        } else if let Some(result) = self.selected_agent_result() {
+            format!(
+                "{} {}",
+                compact_preview(&result.id, 10),
+                agent_result_status_label(&result.status)
+            )
+        } else if self.latest_packet_without_result().is_some() {
+            "waiting".to_string()
+        } else {
+            "none".to_string()
+        };
+        let context_tone = if selected_file_count + selected_text_count + selected_clip_count == 0 {
+            WorkflowTone::Caution
+        } else {
+            WorkflowTone::Ready
+        };
+
+        vec![
+            self.agent_workpane_mode_line("Input"),
+            workflow_context_signal_line(WorkflowTone::Agent, "draft", request),
+            workflow_context_signal_line(
+                context_tone,
+                "context",
+                format!(
+                    "{selected_file_count} files | {selected_text_count} text | {selected_clip_count} clips"
+                ),
+            ),
+            workflow_context_signal_line(WorkflowTone::Agent, "plan", plan),
+            workflow_context_signal_line(WorkflowTone::Review, "returned", returned),
+            Line::from(""),
+            workflow_action_hint_line("review: :agent preview, then Ctrl-G"),
+            Line::from("  No upload/OCR/payer action/auto-apply."),
+        ]
+    }
+
+    fn agent_workpane_request_lines(&self) -> Vec<Line<'static>> {
+        let mut lines = vec![
+            self.agent_workpane_mode_line("Input"),
+            workflow_action_hint_line("request: type local instructions"),
+        ];
+        lines.extend(agent_request_input_lines(&self.agent_request.body, true, 8));
+        if self.agent_request.body.trim().is_empty() {
+            lines.push(Line::from("  Nothing is sent until Packet review."));
+        }
+        lines.push(Line::from("  Local only; preview packet before Ctrl-G."));
+        lines.push(Line::from(""));
+        lines.extend(self.agent_workpane_selected_context_lines());
+        lines.extend(self.agent_workpane_note_history_lines(1));
+        lines
+    }
+
+    fn agent_workpane_handoff_lines(&self) -> Vec<Line<'static>> {
+        let mut lines = vec![self.agent_workpane_mode_line("Packet")];
+        lines.extend(self.workflow_active_action_lines(MedicalWorkflowSection::ContextPacket));
+        lines.push(Line::from(Span::styled(
+            "Review Packet",
+            Style::default().add_modifier(Modifier::BOLD),
+        )));
+        for line in self.context_packet_preview_lines().into_iter().take(10) {
+            lines.push(Line::from(format!("  {line}")));
+        }
+        lines.push(Line::from(""));
+        lines.push(selected_line(
+            "Ctrl-G sends reviewed packet to Codex harness.",
+            true,
+        ));
+        lines.push(Line::from("  :agent request returns to Input."));
+        lines.push(Line::from("  Search state is not included."));
+        lines
+    }
+
+    fn agent_workpane_note_history_lines(&self, limit: usize) -> Vec<Line<'static>> {
+        let mut lines = vec![Line::from(Span::styled(
+            "Recent History",
+            Style::default().add_modifier(Modifier::BOLD),
+        ))];
+        if self.context_packets.is_empty() {
+            lines.push(Line::from("  No saved agent work for this note."));
+            return lines;
+        }
+        for packet in self.context_packets.iter().take(limit) {
+            let result = self.latest_result_for_packet(&packet.id);
+            let status = result
+                .map(|result| agent_result_status_label(&result.status).to_string())
+                .unwrap_or_else(|| "awaiting returned work".to_string());
+            lines.push(Line::from(format!(
+                "  request: {}",
+                compact_preview(&packet.human_request, 42)
+            )));
+            lines.push(Line::from(format!(
+                "  result: {status}; plan {}",
+                compact_preview(&packet.id, 10)
+            )));
+        }
+        lines
+    }
+
+    fn agent_workpane_review_lines(&self) -> Vec<Line<'static>> {
+        let mut lines = vec![self.agent_workpane_mode_line("Returned")];
+        lines.extend(self.workflow_active_action_lines(MedicalWorkflowSection::AgentInbox));
+        lines.extend(self.workflow_agent_review_workbench_lines());
+        lines
+    }
+
+    fn agent_workpane_selected_context_lines(&self) -> Vec<Line<'static>> {
+        let selected_file_count = self.selected_artifacts().len();
+        let selected_text_count = self.selected_derivatives().len();
+        let selected_clip_count = self.selected_clips().len();
+        vec![
+            workflow_context_signal_line(
+                if selected_file_count + selected_text_count + selected_clip_count == 0 {
+                    WorkflowTone::Caution
+                } else {
+                    WorkflowTone::Ready
+                },
+                "context",
+                format!(
+                    "{selected_file_count} files | {selected_text_count} text | {selected_clip_count} clips"
+                ),
+            ),
+            workflow_action_hint_line("review: :agent preview"),
+        ]
+    }
+
+    fn agent_workpane_mode_line(&self, active: &str) -> Line<'static> {
+        let mode_style = |label: &'static str| {
+            if label == active {
+                Span::styled(
+                    format!("> {label}"),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                )
+            } else {
+                Span::styled(format!("  {label}"), Style::default().fg(Color::DarkGray))
+            }
+        };
+        Line::from(vec![
+            Span::styled("Mode: ", Style::default().fg(Color::DarkGray)),
+            mode_style("Input"),
+            Span::styled(" | ", Style::default().fg(Color::DarkGray)),
+            mode_style("Packet"),
+            Span::styled(" | ", Style::default().fg(Color::DarkGray)),
+            mode_style("Returned"),
+        ])
+    }
+
+    fn patient_files_sidepane_content(
+        &self,
+        width: u16,
+        include_patient_context: bool,
+    ) -> (Vec<Line<'static>>, Option<usize>) {
+        let patient_documents = self
+            .documents
+            .iter()
+            .enumerate()
+            .filter(|(_, document)| artifact_scope_label(document) == "patient")
+            .collect::<Vec<_>>();
+        let selected_file_count = patient_documents
+            .iter()
+            .filter(|(_, document)| self.selected_artifact_ids.contains(&document.id))
+            .count();
+        let tree_rows = self.patient_file_tree_rows();
+        let selected_tree_index = self.patient_files_sidepane_selected_tree_index(&tree_rows);
+
+        let line_width = width.saturating_sub(4) as usize;
+        let file_summary = if patient_documents.is_empty() {
+            "No files yet".to_string()
+        } else if selected_file_count == 0 {
+            format!("{} files", patient_documents.len())
+        } else {
+            format!(
+                "{} files, {selected_file_count} included",
+                patient_documents.len()
+            )
+        };
+        let mut lines = vec![Line::from(Span::styled(
+            "Uploaded Documents",
+            Style::default().add_modifier(Modifier::BOLD),
+        ))];
+        if include_patient_context {
+            lines.push(Line::from(compact_preview(
+                &format!(
+                    "Patient: {}",
+                    nonempty_or(&self.draft_client.display_name, "unsaved patient")
+                ),
+                line_width,
+            )));
+        }
+        lines.extend([
+            Line::from(compact_preview(&file_summary, line_width)),
+            Line::from(Span::styled(
+                compact_preview("Paste/drop JPG/PDF. Space includes for packet.", line_width),
+                Style::default().fg(Color::DarkGray),
+            )),
+            Line::from(""),
+        ]);
+        let tree_start = lines.len();
+        for (row_index, row) in tree_rows.iter().enumerate() {
+            let selected =
+                self.focus == WorkspaceFocus::PatientFiles && row_index == selected_tree_index;
+            match row {
+                PatientFileTreeRow::File { document_index, .. } => {
+                    if let Some(document) = self.documents.get(*document_index) {
+                        let included = self.selected_artifact_ids.contains(&document.id);
+                        let suffix = if included { "  agent" } else { "" };
+                        let label_width = line_width.saturating_sub(2 + suffix.chars().count());
+                        let label = compact_preview(&document.title, label_width);
+                        lines.push(selected_line(&format!("• {label}{suffix}"), selected));
+                    }
+                }
+            }
+        }
+        if tree_rows.is_empty() {
+            return (lines, None);
+        }
+        let selected_line_index = Some(tree_start + selected_tree_index);
+        (lines, selected_line_index)
+    }
+
+    fn patient_files_sidepane_selected_tree_index(&self, rows: &[PatientFileTreeRow]) -> usize {
+        let clamped = self
+            .patient_files_tree_index
+            .min(rows.len().saturating_sub(1));
+        if rows.is_empty() || self.focus == WorkspaceFocus::PatientFiles {
+            return clamped;
+        }
+        rows.iter()
+            .position(|row| match row {
+                PatientFileTreeRow::File { document_index, .. } => self
+                    .documents
+                    .get(*document_index)
+                    .is_some_and(|document| self.selected_artifact_ids.contains(&document.id)),
+            })
+            .unwrap_or(clamped)
+    }
+
+    fn medical_workpane_title(&self) -> &'static str {
+        match self.workflow_section {
+            MedicalWorkflowSection::Visit
+            | MedicalWorkflowSection::NoteStatus
+            | MedicalWorkflowSection::Proposals
+            | MedicalWorkflowSection::Addenda
+            | MedicalWorkflowSection::Jobs
+            | MedicalWorkflowSection::Timeline => "Patient Chart",
+            MedicalWorkflowSection::Safety => "Clinical Safety",
+            MedicalWorkflowSection::Documents => "Patient File Detail",
+            MedicalWorkflowSection::AgentRequest
+            | MedicalWorkflowSection::ContextPacket
+            | MedicalWorkflowSection::AgentInbox => "Agent Workpane",
+            MedicalWorkflowSection::PracticeLibrary => "Practice Library",
+            MedicalWorkflowSection::PracticeIntelligence => "Practice Intelligence",
+            MedicalWorkflowSection::Audit => "Audit Trail",
+        }
+    }
+
+    fn medical_active_work_lines(&self) -> Vec<Line<'static>> {
+        match self.workflow_section {
+            MedicalWorkflowSection::Visit => self.medical_active_visit_lines(),
+            MedicalWorkflowSection::Safety => {
+                let mut lines = vec![workflow_header_line("Clinical Safety", WorkflowTone::Ready)];
+                lines.extend(self.workflow_active_action_lines(MedicalWorkflowSection::Safety));
+                lines.extend(self.workflow_clinical_safety_lines());
+                lines
+            }
+            MedicalWorkflowSection::NoteStatus => self.medical_active_note_status_lines(),
+            MedicalWorkflowSection::Documents => self.medical_active_file_detail_lines(),
+            MedicalWorkflowSection::Proposals => self.medical_active_proposal_lines(),
+            MedicalWorkflowSection::Addenda => self.medical_active_addenda_lines(),
+            MedicalWorkflowSection::Jobs => self.medical_active_jobs_lines(),
+            MedicalWorkflowSection::Timeline => self.medical_active_timeline_lines(),
+            MedicalWorkflowSection::PracticeLibrary => self.medical_active_practice_library_lines(),
+            MedicalWorkflowSection::PracticeIntelligence => vec![
+                workflow_section_line(
+                    MedicalWorkflowSection::PracticeIntelligence,
+                    self.workflow_section,
+                    MedicalWorkflowSection::PracticeIntelligence.heading(),
+                    Some("  :scope intelligence"),
+                ),
+                Line::from("  Deferred. No practice-wide agent prompt is built here."),
+                Line::from("  Use Patient Chart and Uploaded Documents for active-patient work."),
+            ],
+            MedicalWorkflowSection::Audit => self.medical_active_audit_lines(),
+            MedicalWorkflowSection::AgentRequest
+            | MedicalWorkflowSection::ContextPacket
+            | MedicalWorkflowSection::AgentInbox => self.agent_workpane_summary_lines(),
+        }
+    }
+
+    fn medical_active_visit_lines(&self) -> Vec<Line<'static>> {
+        let signature_label = self.workflow_signature_label();
+        let addendum_label = match self.addenda.len() {
+            0 => "0 addenda".to_string(),
+            1 => "1 addendum".to_string(),
+            count => format!("{count} addenda"),
+        };
+        let note_lock_label = if self.draft_note.is_locked() {
+            "locked"
+        } else {
+            "editable"
+        };
+        let mut lines =
+            self.workflow_chart_context_lines(&signature_label, &addendum_label, note_lock_label);
+        lines.extend(self.workflow_active_action_lines(MedicalWorkflowSection::Visit));
+        lines.push(Line::from(""));
+        lines.push(workflow_header_line("Today's Visit", WorkflowTone::Ready));
+        for line in self.chart_worklist_lines().into_iter().take(10) {
+            lines.push(line);
+        }
+        lines
+    }
+
+    fn medical_active_note_status_lines(&self) -> Vec<Line<'static>> {
+        let signature_label = self.workflow_signature_label();
+        let addendum_label = match self.addenda.len() {
+            0 => "0 addenda".to_string(),
+            1 => "1 addendum".to_string(),
+            count => format!("{count} addenda"),
+        };
+        let note_lock_label = if self.draft_note.is_locked() {
+            "locked"
+        } else {
+            "editable"
+        };
+        let note_action_hint = if self.draft_note.is_locked() {
+            "locked; addenda/proposals only"
+        } else {
+            "l signs and locks saved draft"
+        };
+        let mut lines = vec![
+            workflow_header_line("Note Status", WorkflowTone::Ready),
+            workflow_context_signal_line(
+                WorkflowTone::Ready,
+                note_lock_label,
+                format!(
+                    "{} r{}; {signature_label}; {addendum_label}",
+                    self.draft_note.status_label(),
+                    self.draft_note.current_revision,
+                ),
+            ),
+            workflow_action_hint_line(note_action_hint),
+            workflow_action_hint_line(":note sign | :addendum start | :proposal next"),
+        ];
+        if let Some(signature) = self.signatures.first() {
+            lines.push(Line::from(format!("  signed by {}", signature.signer)));
+        }
+        lines
+    }
+
+    fn medical_active_file_detail_lines(&self) -> Vec<Line<'static>> {
+        let patient_document_ids = self
+            .documents
+            .iter()
+            .filter(|document| artifact_scope_label(document) == "patient")
+            .map(|document| document.id.as_str())
+            .collect::<BTreeSet<_>>();
+        let patient_file_count = patient_document_ids.len();
+        let selected_file_count = self
+            .documents
+            .iter()
+            .filter(|document| {
+                patient_document_ids.contains(document.id.as_str())
+                    && self.selected_artifact_ids.contains(&document.id)
+            })
+            .count();
+        let patient_derivative_count = self
+            .derivatives
+            .iter()
+            .filter(|derivative| patient_document_ids.contains(derivative.document_id.as_str()))
+            .count();
+        let selected_derivative_count = self
+            .derivatives
+            .iter()
+            .filter(|derivative| {
+                patient_document_ids.contains(derivative.document_id.as_str())
+                    && self.selected_derivative_ids.contains(&derivative.id)
+            })
+            .count();
+        let patient_clip_count = self
+            .clips
+            .iter()
+            .filter(|clip| patient_document_ids.contains(clip.document_id.as_str()))
+            .count();
+        let selected_clip_count = self
+            .clips
+            .iter()
+            .filter(|clip| {
+                patient_document_ids.contains(clip.document_id.as_str())
+                    && self.selected_clip_ids.contains(&clip.id)
+            })
+            .count();
+
+        let mut lines = vec![workflow_section_line(
+            MedicalWorkflowSection::Documents,
+            self.workflow_section,
+            MedicalWorkflowSection::Documents.heading(),
+            None,
+        )];
+        lines.push(workflow_context_signal_line(
+            if selected_file_count + selected_derivative_count + selected_clip_count == 0 {
+                WorkflowTone::Caution
+            } else {
+                WorkflowTone::Ready
+            },
+            "included",
+            format!(
+                "{selected_file_count}/{patient_file_count} files; {selected_derivative_count}/{patient_derivative_count} text; {selected_clip_count}/{patient_clip_count} clips"
+            ),
+        ));
+        lines.push(workflow_action_hint_line(":file drop/add/open/preview"));
+        lines.push(Line::from(
+            "  List: arrows move; Enter opens detail; Space includes for packet.",
+        ));
+        if patient_file_count == 0 {
+            lines.push(Line::from(""));
+            lines.push(Line::from(
+                "  No file references yet. Focus Uploaded Documents, then drop/paste JPG/PDF.",
+            ));
+            lines.push(Line::from("  Metadata only; originals stay in place."));
+            return lines;
+        }
+
+        if let Some(derivative) = self
+            .inspected_derivative()
+            .filter(|derivative| patient_document_ids.contains(derivative.document_id.as_str()))
+        {
+            lines.push(Line::from(""));
+            lines.extend(self.derivative_inspector_lines(derivative));
+            return lines;
+        }
+        if let Some(clip) = self
+            .inspected_clip()
+            .filter(|clip| patient_document_ids.contains(clip.document_id.as_str()))
+        {
+            lines.push(Line::from(""));
+            lines.extend(self.clip_inspector_lines(clip));
+            return lines;
+        }
+        if let Some(document) = self.current_patient_file_detail_document() {
+            lines.push(Line::from(""));
+            lines.extend(self.patient_file_detail_lines(document));
+            return lines;
+        }
+
+        lines.push(Line::from(""));
+        lines.push(Line::from(
+            "  Choose a file in Uploaded Documents, then press Enter.",
+        ));
+        lines
+    }
+
+    fn current_patient_file_detail_document(&self) -> Option<&WorkspaceDocument> {
+        self.inspected_artifact()
+            .filter(|document| artifact_scope_label(document) == "patient")
+            .or_else(|| {
+                self.documents.iter().find(|document| {
+                    artifact_scope_label(document) == "patient"
+                        && self.selected_artifact_ids.contains(&document.id)
+                })
+            })
+            .or_else(|| {
+                self.highlighted_patient_file_document_index()
+                    .and_then(|index| self.documents.get(index))
+                    .filter(|document| artifact_scope_label(document) == "patient")
+            })
+            .or_else(|| {
+                self.documents
+                    .iter()
+                    .find(|document| artifact_scope_label(document) == "patient")
+            })
+    }
+
+    fn medical_active_proposal_lines(&self) -> Vec<Line<'static>> {
+        let pending_proposal_count = self.pending_proposal_count();
+        let mut lines = vec![workflow_section_line(
+            MedicalWorkflowSection::Proposals,
+            self.workflow_section,
+            "Note Proposals",
+            None,
+        )];
+        lines.extend(self.workflow_active_action_lines(MedicalWorkflowSection::Proposals));
+        lines.push(Line::from(format!(
+            "  {pending_proposal_count} pending proposals"
+        )));
+        if let Some(proposal) = self.selected_pending_proposal() {
+            lines.push(Line::from(format!(
+                "  selected r{} [{}] {}",
+                proposal.base_revision,
+                proposal_status_label(proposal.status),
+                compact_preview(&proposal.summary, 72)
+            )));
+            lines.push(Line::from(format!(
+                "  preview: {}",
+                compact_preview(&proposal.proposed_body, 96)
+            )));
+        } else {
+            lines.push(Line::from("  No returned-work proposal selected."));
+        }
+        lines
+    }
+
+    fn medical_active_addenda_lines(&self) -> Vec<Line<'static>> {
+        let mut lines = vec![workflow_header_line("Addenda", WorkflowTone::Review)];
+        lines.extend(self.workflow_active_action_lines(MedicalWorkflowSection::Addenda));
+        if self.addenda.is_empty() {
+            lines.push(Line::from("  No addenda saved for this note."));
+        } else {
+            for addendum in self.addenda.iter().take(8) {
+                lines.push(Line::from(format!(
+                    "  r{} {} by {}",
+                    addendum.base_revision,
+                    compact_preview(&addendum.created_at.to_string(), 16),
+                    compact_preview(&addendum.author, 32)
+                )));
+                lines.push(Line::from(format!(
+                    "    {}",
+                    compact_preview(&addendum.body, 96)
+                )));
+            }
+        }
+        lines.push(workflow_action_hint_line(
+            ":addendum start creates a manual draft",
+        ));
+        lines
+    }
+
+    fn medical_active_jobs_lines(&self) -> Vec<Line<'static>> {
+        let mut lines = vec![workflow_section_line(
+            MedicalWorkflowSection::Jobs,
+            self.workflow_section,
+            "Jobs",
+            None,
+        )];
+        lines.extend(self.workflow_active_action_lines(MedicalWorkflowSection::Jobs));
+        if self.tasks.is_empty() {
+            lines.push(Line::from("  No chart tasks yet."));
+            lines.push(workflow_action_hint_line(":job new"));
+            return lines;
+        }
+        for (index, task) in self.tasks.iter().take(10).enumerate() {
+            let marker = if index == self.task_index { "> " } else { "  " };
+            let due = task.due_date.as_deref().unwrap_or("no due date");
+            lines.push(Line::from(format!(
+                "{marker}[{}/{}] {due}  {}",
+                workspace_task_status_label(task.status),
+                workspace_task_priority_label(task.priority),
+                compact_preview(&task.title, 72)
+            )));
+        }
+        lines
+    }
+
+    fn medical_active_timeline_lines(&self) -> Vec<Line<'static>> {
+        let mut lines = vec![workflow_section_line(
+            MedicalWorkflowSection::Timeline,
+            self.workflow_section,
+            "Timeline",
+            None,
+        )];
+        lines.extend(self.workflow_active_action_lines(MedicalWorkflowSection::Timeline));
+        if self.encounters.is_empty() {
+            lines.push(Line::from("  No encounter yet. Use e or :encounter new."));
+        } else {
+            for encounter in self.encounters.iter().take(8) {
+                lines.push(Line::from(format!(
+                    "  {} [{}] {}",
+                    compact_preview(&encounter.title, 56),
+                    encounter.status,
+                    compact_preview(&encounter.id, 18)
+                )));
+            }
+        }
+        lines
+    }
+
+    fn medical_active_practice_library_lines(&self) -> Vec<Line<'static>> {
+        let mut lines = vec![workflow_section_line(
+            MedicalWorkflowSection::PracticeLibrary,
+            self.workflow_section,
+            MedicalWorkflowSection::PracticeLibrary.heading(),
+            Some("  :scope practice"),
+        )];
+        lines.extend(self.workflow_active_action_lines(MedicalWorkflowSection::PracticeLibrary));
+        lines.push(Line::from(format!(
+            "  read-only practice records: {}",
+            self.practice_library_items.len()
+        )));
+        lines.push(Line::from(
+            "  separate from Uploaded Documents until linked by a human.",
+        ));
+        lines.push(Line::from(
+            "  no agent selection or model access without explicit patient association.",
+        ));
+        append_practice_library_item_lines(
+            &mut lines,
+            &self.practice_library_items,
+            self.practice_library_index,
+        );
+        if self.practice_library_inspect
+            && let Some(item) = self.selected_practice_library_item()
+        {
+            lines.push(Line::from(""));
+            lines.extend(practice_library_inspector_lines(item));
+        }
+        lines
+    }
+
+    fn medical_active_audit_lines(&self) -> Vec<Line<'static>> {
+        let mut lines = vec![workflow_section_line(
+            MedicalWorkflowSection::Audit,
+            self.workflow_section,
+            "Audit Trail",
+            None,
+        )];
+        lines.extend(self.workflow_active_action_lines(MedicalWorkflowSection::Audit));
+        if self.audit_events.is_empty() {
+            lines.push(Line::from("  No audit events for the active note yet."));
+        } else {
+            for event in self.audit_events.iter().take(12) {
+                lines.push(Line::from(format!(
+                    "  {} {} via {}",
+                    event.actor_kind,
+                    event.action,
+                    compact_preview(&event.source, 48)
+                )));
+            }
+        }
+        lines
+    }
+
+    fn workflow_chart_context_lines(
+        &self,
+        signature_label: &str,
+        addendum_label: &str,
+        note_lock_label: &str,
+    ) -> Vec<Line<'static>> {
+        let admin = patient_admin_metadata_for_draft(&self.draft_client);
+        let patient = compact_preview(
+            &nonempty_or(&self.draft_client.display_name, "unsaved patient"),
+            28,
+        );
+        let dob = compact_preview(
+            &nonempty_or(&self.draft_client.date_of_birth, "DOB blank"),
+            14,
+        );
+        let preferred = compact_preview(
+            &nonempty_or(&self.draft_client.preferred_name, "preferred blank"),
+            20,
+        );
+        let identifier = compact_preview(
+            &nonempty_or(&self.draft_client.external_id, "Patient ID / MRN blank"),
+            20,
+        );
+        let note_title = compact_preview(&nonempty_or(&self.draft_note.title, "untitled note"), 32);
+        let allergy_count = self.safety_items_for_category("allergy").len();
+        let allergy_label = if allergy_count == 0 {
+            "not recorded".to_string()
+        } else {
+            format!("{allergy_count} item(s)")
+        };
+        let note_save_label = if self.dirty { "unsaved" } else { "saved" };
+        let addendum_draft_label = if self.has_unsaved_addendum_draft() {
+            "; addendum draft"
+        } else {
+            ""
+        };
+
+        vec![
+            workflow_header_line(
+                self.workflow_section.scope_label(),
+                self.workflow_chart_context_tone(),
+            ),
+            self.workflow_scope_bar_line(),
+            Line::from(format!(
+                "  pt: {patient}; DOB: {dob}; preferred: {preferred}; Patient ID / MRN: {identifier}",
+            )),
+            workflow_context_signal_line(
+                if admin.has_contact() && admin.has_coverage() {
+                    WorkflowTone::Ready
+                } else {
+                    WorkflowTone::Caution
+                },
+                "admin",
+                format!(
+                    "{}; {}; {}",
+                    admin.contact_status_label(),
+                    admin.emergency_status_label(),
+                    admin.coverage_status_label()
+                ),
+            ),
+            workflow_context_signal_line(
+                if allergy_count == 0 {
+                    WorkflowTone::Caution
+                } else {
+                    WorkflowTone::Attention
+                },
+                "allergies",
+                allergy_label,
+            ),
+            workflow_context_signal_line(
+                self.workflow_state_tone(),
+                "note",
+                format!(
+                    "{note_title} [{} r{}]; {note_save_label}; {note_lock_label}; {signature_label}; {addendum_label}{addendum_draft_label}",
+                    self.draft_note.status_label(),
+                    self.draft_note.current_revision,
+                ),
+            ),
+            workflow_context_signal_line(
+                self.workflow_primary_next_action_tone(),
+                self.workflow_primary_next_action_signal_label(),
+                self.workflow_primary_next_action_detail(),
+            ),
+            workflow_context_signal_line(WorkflowTone::Agent, "agent", self.agent_bridge_summary()),
+        ]
+    }
+
+    fn workflow_scope_bar_line(&self) -> Line<'static> {
+        let active_tab = medical_scope_tab_for_section(self.workflow_section);
+        let mut spans = vec![Span::raw("  ")];
+        for (index, tab) in MedicalScopeTab::ALL.iter().copied().enumerate() {
+            if index > 0 {
+                spans.push(Span::raw(" "));
+            }
+            let label = if tab == active_tab {
+                format!("[{}]", tab.label())
+            } else {
+                tab.label().to_string()
+            };
+            let style = if tab == active_tab {
+                workflow_tone_style(workflow_tone_for_scope_tab(tab)).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            };
+            spans.push(Span::styled(label, style));
+        }
+        Line::from(spans)
+    }
+
+    fn workflow_chart_context_tone(&self) -> WorkflowTone {
+        if self.dirty || self.has_unsaved_addendum_draft() {
+            WorkflowTone::Attention
+        } else if self.agent_result.is_active()
+            || self
+                .selected_agent_result()
+                .is_some_and(|result| agent_result_status_label(&result.status) == "review pending")
+        {
+            WorkflowTone::Review
+        } else {
+            WorkflowTone::Ready
+        }
+    }
+
+    fn chart_worklist_lines(&self) -> Vec<Line<'static>> {
+        let admin = patient_admin_metadata_for_draft(&self.draft_client);
+        let demographics_complete = !self.draft_client.display_name.trim().is_empty()
+            && !self.draft_client.date_of_birth.trim().is_empty()
+            && !self.draft_client.external_id.trim().is_empty();
+        let id_card_count = self.patient_file_group_count("ID Cards");
+        let insurance_card_count = self.patient_file_group_count("Medicare / Insurance Cards");
+        let referral_count = self.patient_file_group_count("Referrals");
+        let allergy_count = self.safety_items_for_category("allergy").len();
+        let note_started =
+            !self.draft_note.title.trim().is_empty() || !self.draft_note.body.trim().is_empty();
+        let note_label = if self.draft_note.is_locked() {
+            "signed"
+        } else if self.dirty {
+            "needs save"
+        } else if note_started {
+            "started"
+        } else {
+            "not started"
+        };
+
+        vec![
+            Line::from(format!(
+                "Patient: {}; note: {}",
+                compact_preview(
+                    &nonempty_or(&self.draft_client.display_name, "unsaved patient"),
+                    28
+                ),
+                compact_preview(&nonempty_or(&self.draft_note.title, "untitled note"), 28)
+            )),
+            workflow_header_line("Next", self.workflow_primary_next_action_tone()),
+            workflow_action_hint_line(self.workflow_primary_next_action_text()),
+            Line::from(""),
+            workflow_header_line(
+                "Intake Checklist",
+                intake_checklist_tone(&[
+                    demographics_complete,
+                    admin.has_emergency_contact(),
+                    admin.has_coverage(),
+                    id_card_count > 0,
+                    insurance_card_count > 0,
+                    referral_count > 0,
+                    allergy_count > 0,
+                    note_started && !self.dirty,
+                ]),
+            ),
+            checklist_line(
+                "Demographics",
+                demographics_complete,
+                if demographics_complete {
+                    "complete"
+                } else {
+                    "missing DOB or Patient ID / MRN"
+                },
+            ),
+            checklist_line(
+                "Emergency contact",
+                admin.has_emergency_contact(),
+                if admin.has_emergency_contact() {
+                    "complete"
+                } else {
+                    "missing"
+                },
+            ),
+            checklist_line(
+                "Coverage",
+                admin.has_coverage(),
+                if admin.has_coverage() {
+                    "complete"
+                } else {
+                    "missing"
+                },
+            ),
+            checklist_line(
+                "ID card",
+                id_card_count > 0,
+                if id_card_count > 0 {
+                    "scanned"
+                } else {
+                    "missing"
+                },
+            ),
+            checklist_line(
+                "Insurance card",
+                insurance_card_count > 0,
+                if insurance_card_count > 0 {
+                    "scanned"
+                } else {
+                    "missing"
+                },
+            ),
+            checklist_line(
+                "Referral",
+                referral_count > 0,
+                if referral_count > 0 {
+                    "present"
+                } else {
+                    "missing"
+                },
+            ),
+            checklist_line(
+                "Allergies",
+                allergy_count > 0,
+                if allergy_count > 0 {
+                    "reviewed"
+                } else {
+                    "not recorded"
+                },
+            ),
+            checklist_line("Note", note_started && !self.dirty, note_label),
+        ]
+    }
+
+    fn chart_worklist_compact_lines(&self, max_width: u16) -> Vec<Line<'static>> {
+        let patient = nonempty_or(&self.draft_client.display_name, "unsaved patient");
+        let note_title = nonempty_or(&self.draft_note.title, "untitled note");
+        let next = self.workflow_primary_next_action_text();
+        let next = next.strip_prefix("Next: ").unwrap_or(&next);
+        let mut line = format!(
+            "Patient: {}; note: {}; Next: {}",
+            compact_preview(&patient, 18),
+            compact_preview(&note_title, 18),
+            next
+        );
+        let width = max_width as usize;
+        if width > 0 && line.chars().count() > width {
+            line = compact_preview(&line, width);
+        }
+        vec![Line::from(line)]
+    }
+
+    fn workflow_state_tone(&self) -> WorkflowTone {
+        if self.dirty || self.has_unsaved_addendum_draft() {
+            WorkflowTone::Attention
+        } else if self.draft_note.is_locked() {
+            WorkflowTone::Caution
+        } else {
+            WorkflowTone::Ready
+        }
+    }
+
+    fn workflow_packet_result_tone(&self) -> WorkflowTone {
+        if self.agent_result.is_active() {
+            WorkflowTone::Review
+        } else if let Some(result) = self.selected_agent_result() {
+            match agent_result_status_label(&result.status) {
+                "review pending" => WorkflowTone::Review,
+                "dismissed" => WorkflowTone::Attention,
+                "reviewed" | "converted" => WorkflowTone::Ready,
+                _ => WorkflowTone::Caution,
+            }
+        } else if self.context_packets.is_empty() {
+            WorkflowTone::Muted
+        } else {
+            WorkflowTone::Caution
+        }
+    }
+
+    fn agent_bridge_summary(&self) -> String {
+        let selected_files = self.selected_artifacts().len();
+        let selected_reviewed_text = self.selected_derivatives().len();
+        let selected_clips = self.selected_clips().len();
+        match self.workflow_section {
+            MedicalWorkflowSection::PracticeLibrary => "none; associate file".to_string(),
+            MedicalWorkflowSection::PracticeIntelligence => "read-only practice".to_string(),
+            MedicalWorkflowSection::Audit => "none; audit is read-only".to_string(),
+            MedicalWorkflowSection::AgentInbox => "review only; no edit".to_string(),
+            MedicalWorkflowSection::AgentRequest | MedicalWorkflowSection::ContextPacket => {
+                format!("agent; {selected_files}F/{selected_reviewed_text}T/{selected_clips}C")
+            }
+            _ => format!("pt ctx; {selected_files}F/{selected_reviewed_text}T/{selected_clips}C"),
+        }
+    }
+
+    fn first_eval_next_action_text(&self) -> String {
+        if self.draft_client.id.is_none() || self.draft_note.id.is_none() {
+            return "Next: Save first eval".to_string();
+        }
+        if self.active_encounter_id().is_none() {
+            return "Next: Open encounter".to_string();
+        }
+        if self.draft_note.body.trim().is_empty() {
+            return "Next: Write eval note".to_string();
+        }
+        if self.dirty {
+            return "Next: Save first eval".to_string();
+        }
+        if self.latest_packet_without_result().is_some() {
+            return "Next: Paste returned work".to_string();
+        }
+        if self.agent_request.has_text() {
+            return "Next: Review Packet".to_string();
+        }
+        if self.patient_file_count() == 0 {
+            return "Next: Add files or ask agent".to_string();
+        }
+        if self.selected_artifacts().is_empty()
+            && self.selected_derivatives().is_empty()
+            && self.selected_clips().is_empty()
+        {
+            return "Next: Choose agent context".to_string();
+        }
+        if !self.agent_request.has_text() && self.context_packets.is_empty() {
+            return "Next: Ask Agent about eval".to_string();
+        }
+        "Next: Return to chart work".to_string()
+    }
+
+    fn first_eval_action_ids(&self) -> Vec<WorkspaceActionId> {
+        if self.draft_client.id.is_none() || self.draft_note.id.is_none() {
+            return vec![WorkspaceActionId::Save, WorkspaceActionId::FocusNoteBody];
+        }
+        if self.dirty {
+            return vec![
+                WorkspaceActionId::Save,
+                WorkspaceActionId::EncounterOpen,
+                WorkspaceActionId::FocusNoteBody,
+            ];
+        }
+        if self.active_encounter_id().is_none() {
+            return vec![
+                WorkspaceActionId::EncounterOpen,
+                WorkspaceActionId::FocusNoteBody,
+                WorkspaceActionId::DocumentAttach,
+            ];
+        }
+        if self.draft_note.body.trim().is_empty() {
+            return vec![
+                WorkspaceActionId::FocusNoteBody,
+                WorkspaceActionId::Save,
+                WorkspaceActionId::DocumentAttach,
+            ];
+        }
+        if self.latest_packet_without_result().is_some() {
+            return vec![
+                WorkspaceActionId::ScopeAgentReview,
+                WorkspaceActionId::AgentResult,
+                WorkspaceActionId::ScopePatientChart,
+            ];
+        }
+        if self.agent_request.has_text() {
+            return vec![
+                WorkspaceActionId::AgentPreview,
+                WorkspaceActionId::Handoff,
+                WorkspaceActionId::ScopeAgentReview,
+            ];
+        }
+        if self.patient_file_count() == 0 {
+            return vec![
+                WorkspaceActionId::DocumentAttach,
+                WorkspaceActionId::AgentRequest,
+                WorkspaceActionId::ScopePatientFiles,
+            ];
+        }
+        if self.selected_artifacts().is_empty()
+            && self.selected_derivatives().is_empty()
+            && self.selected_clips().is_empty()
+        {
+            return vec![
+                WorkspaceActionId::ArtifactToggle,
+                WorkspaceActionId::ScopeAgentPacket,
+                WorkspaceActionId::AgentRequest,
+            ];
+        }
+        vec![
+            WorkspaceActionId::AgentRequest,
+            WorkspaceActionId::ScopeAgentPacket,
+            WorkspaceActionId::ScopePatientFiles,
+        ]
+    }
+
+    fn workflow_first_eval_lines(&self) -> Vec<Line<'static>> {
+        if medical_scope_tab_for_section(self.workflow_section) != MedicalScopeTab::Chart {
+            return Vec::new();
+        }
+
+        let now_tone = self.workflow_primary_next_action_tone();
+        let now_detail = self.workflow_primary_next_action_detail();
+        let path_detail = "encounter -> note -> files -> ask agent -> review";
+        let safety_detail = if self.active_encounter_id().is_some() {
+            if self.draft_note.body.trim().is_empty() {
+                "write HPI / Exam / Assessment / Plan"
+            } else if self.latest_packet_without_result().is_some() {
+                "paste agent work, then human review"
+            } else if self.agent_request.has_text() {
+                "review selected agent context before Ctrl-G"
+            } else {
+                "files optional; ask agent only with selected context"
+            }
+        } else if self.draft_client.id.is_some() {
+            "open encounter with e or :encounter open"
+        } else {
+            "save patient before encounter"
+        };
+
+        vec![
+            workflow_header_line("First Eval", WorkflowTone::Ready),
+            workflow_context_signal_line(WorkflowTone::Agent, "safe", safety_detail),
+            workflow_context_signal_line(WorkflowTone::Muted, "path", path_detail),
+            workflow_context_signal_line(now_tone, "now", now_detail),
+        ]
+    }
+
+    fn workflow_compact_packet_result_line(&self) -> Line<'static> {
+        let detail = if self.selected_agent_result().is_some() {
+            format!(
+                "{}; {}",
+                self.workflow_compact_result_label(),
+                self.workflow_compact_packet_label()
+            )
+        } else {
+            format!(
+                "{}; {}",
+                self.workflow_compact_packet_label(),
+                self.workflow_compact_result_label()
+            )
+        };
+        workflow_context_signal_line(self.workflow_packet_result_tone(), "trace", detail)
+    }
+
+    fn workflow_sticky_patient_note_line(&self) -> String {
+        let patient = compact_preview(
+            &nonempty_or(&self.draft_client.display_name, "unsaved patient"),
+            14,
+        );
+        let note_title = compact_preview(&nonempty_or(&self.draft_note.title, "untitled note"), 14);
+        format!(
+            "  pt: {patient}; note: {note_title} r{}",
+            self.draft_note.current_revision
+        )
+    }
+
+    fn workflow_sticky_patient_note_state_line(&self) -> String {
+        let patient = compact_preview(
+            &nonempty_or(&self.draft_client.display_name, "unsaved patient"),
+            14,
+        );
+        let note_title = compact_preview(&nonempty_or(&self.draft_note.title, "untitled note"), 12);
+        let note_save_label = if self.dirty { "unsaved" } else { "saved" };
+        let note_lock_label = if self.draft_note.is_locked() {
+            "locked"
+        } else {
+            "edit"
+        };
+        let signature_label = self.workflow_signature_label();
+        format!(
+            "  pt: {patient}; note: {note_title} r{}; {note_save_label}/{note_lock_label}/{signature_label}",
+            self.draft_note.current_revision
+        )
+    }
+
+    fn workflow_sticky_state_line(&self) -> Line<'static> {
+        let note_save_label = if self.dirty { "unsaved" } else { "saved" };
+        let note_lock_label = if self.draft_note.is_locked() {
+            "locked"
+        } else {
+            "editable"
+        };
+        let signature_label = self.workflow_signature_label();
+        workflow_context_signal_line(
+            self.workflow_state_tone(),
+            "state",
+            format!("{note_save_label}; {note_lock_label}; {signature_label}"),
+        )
+    }
+
+    fn workflow_signature_label(&self) -> String {
+        if let Some(signature) = self.signatures.first() {
+            return format!("signed r{}", signature.revision);
+        }
+        match self.draft_note.status.trim() {
+            "signed" => format!("signed r{}", self.draft_note.current_revision),
+            "addended" => format!("addended r{}", self.draft_note.current_revision),
+            "locked" => "locked".to_string(),
+            _ => "unsigned".to_string(),
+        }
+    }
+
+    fn workflow_compact_packet_label(&self) -> String {
+        let result = self.selected_agent_result();
+        let result_packet = result.and_then(|result| self.packet_for_agent_result(result));
+        result_packet
+            .or_else(|| self.context_packets.first())
+            .map(|packet| {
+                format!(
+                    "plan: {} sha256 {}",
+                    compact_preview(&packet.id, 10),
+                    packet_hash_prefix(packet)
+                )
+            })
+            .unwrap_or_else(|| "plan: none submitted".to_string())
+    }
+
+    fn workflow_compact_result_label(&self) -> String {
+        if let Some(result) = self.selected_agent_result() {
+            format!("result: {}", compact_preview(&result.id, 10))
+        } else if self.context_packets.is_empty() {
+            "result: none".to_string()
+        } else {
+            "result: none saved".to_string()
+        }
+    }
+
+    fn workflow_single_line_chart_context(&self) -> String {
+        let scope = compact_preview(self.workflow_section.scope_label(), 15);
+        let patient = compact_preview(&nonempty_or(&self.draft_client.display_name, "unsaved"), 9);
+        let next_action = self.workflow_single_line_next_action_label();
+        let next_short = next_action.strip_prefix("Next: ").unwrap_or(&next_action);
+        if matches!(
+            self.workflow_section,
+            MedicalWorkflowSection::AgentRequest
+                | MedicalWorkflowSection::ContextPacket
+                | MedicalWorkflowSection::AgentInbox
+        ) {
+            return format!("Agent: {patient}; {next_short}");
+        }
+        if let Some(editor_label) = self.workflow_active_editor_label() {
+            return format!("{scope}: {editor_label}; {patient}; {next_short}");
+        }
+        format!("{scope}: {patient}; {next_short}")
+    }
+
+    fn workflow_single_line_next_action_label(&self) -> String {
+        match self.workflow_section {
+            MedicalWorkflowSection::AgentRequest => {
+                if self.agent_request.has_text() {
+                    "Next: preview".to_string()
+                } else {
+                    "Next: type instructions".to_string()
+                }
+            }
+            MedicalWorkflowSection::ContextPacket => {
+                if !self.agent_request.has_text() {
+                    "Blocked: ask agent".to_string()
+                } else if self.draft_client.id.is_none() {
+                    "Blocked: save".to_string()
+                } else {
+                    "Next: Ctrl-G opens agent".to_string()
+                }
+            }
+            MedicalWorkflowSection::AgentInbox => {
+                if self.agent_result.is_active() {
+                    "Next: save result".to_string()
+                } else if self.selected_agent_result().is_some() {
+                    "Next: inspect result".to_string()
+                } else if self.latest_packet_without_result().is_some() {
+                    "Next: paste result".to_string()
+                } else {
+                    "Blocked: submit plan".to_string()
+                }
+            }
+            _ => {
+                let primary = self.workflow_primary_next_action_text();
+                let brief = primary.split("  :").next().unwrap_or(&primary);
+                compact_preview(brief, 22)
+            }
+        }
+    }
+
+    fn workflow_active_editor_label(&self) -> Option<&'static str> {
+        if self.agent_result.is_active() {
+            Some("Returned Work Draft")
+        } else if self.agent_request.is_active() {
+            Some("Agent Instructions")
+        } else if self.addendum_draft.active {
+            Some("Addendum Draft")
+        } else if self.derivative_draft.is_active() {
+            Some("Reviewed Text Draft")
+        } else if self.clip_draft.is_active() {
+            Some("Context Clip Draft")
+        } else if self.draft_task.is_active() {
+            Some("Job Draft Title:")
+        } else if self.draft_safety.is_active() {
+            Some("Clinical Safety Draft")
+        } else if self.draft_document.is_active() {
+            Some("File Reference Draft")
+        } else {
+            None
+        }
+    }
+
+    fn workflow_sticky_chart_context_lines(
+        &self,
+        context_lines: Vec<Line<'static>>,
+        context_height: u16,
+    ) -> Vec<Line<'static>> {
+        if context_height >= MEDICAL_WORKFLOW_CHART_CONTEXT_LINE_COUNT as u16 {
+            return context_lines
+                .into_iter()
+                .take(context_height as usize)
+                .collect();
+        }
+        if context_height >= 6 {
+            let mut lines = context_lines.into_iter().take(1).collect::<Vec<_>>();
+            lines.push(Line::from(self.workflow_sticky_patient_note_line()));
+            lines.push(self.workflow_sticky_state_line());
+            lines.push(workflow_context_signal_line(
+                workflow_tone_for_scope_tab(medical_scope_tab_for_section(self.workflow_section)),
+                "scope",
+                format!(
+                    "{}; access: {}",
+                    self.workflow_section.scope_label(),
+                    self.workflow_section.agent_access_short_label()
+                ),
+            ));
+            lines.push(self.workflow_compact_packet_result_line());
+            return lines;
+        }
+        if context_height == 1 {
+            return vec![Line::from(self.workflow_single_line_chart_context())];
+        }
+        let mut lines = Vec::new();
+        if let Some(line) = context_lines.first() {
+            lines.push(line.clone());
+        }
+        if context_height >= 2 {
+            if context_height == 3 {
+                lines.push(Line::from(self.workflow_sticky_patient_note_state_line()));
+            } else {
+                lines.push(Line::from(self.workflow_sticky_patient_note_line()));
+            }
+        }
+        if context_height >= 3 {
+            lines.push(workflow_context_signal_line(
+                self.workflow_primary_next_action_tone(),
+                self.workflow_primary_next_action_signal_label(),
+                self.workflow_primary_next_action_detail(),
+            ));
+        }
+        if context_height >= 4 {
+            lines.push(self.workflow_sticky_state_line());
+        }
+        if context_height >= 5 {
+            lines.push(workflow_context_signal_line(
+                WorkflowTone::Agent,
+                "agent",
+                self.agent_bridge_summary(),
+            ));
+        }
+        lines
+    }
+
+    fn workflow_active_action_lines(&self, section: MedicalWorkflowSection) -> Vec<Line<'static>> {
+        if section != self.workflow_section {
+            return Vec::new();
+        }
+
+        let mut lines = self.workflow_current_scope_next_action_lines();
+        if section == MedicalWorkflowSection::Visit {
+            lines.extend(self.workflow_first_eval_lines());
+        }
+        lines.extend(self.workflow_scope_boundary_lines(section));
+        lines
+    }
+
+    fn workflow_current_scope_next_action_lines(&self) -> Vec<Line<'static>> {
+        if let Some(lines) = self.workflow_bridge_next_action_lines() {
+            return lines;
+        }
+
+        let actions = self.current_scope_action_ids();
+        if actions.is_empty() {
+            return Vec::new();
+        }
+        let mut lines = vec![
+            workflow_header_line("Next Action", self.workflow_primary_next_action_tone()),
+            self.workflow_primary_next_action_line(),
+        ];
+        for action_id in actions.into_iter().skip(1).take(2) {
+            let Some(action) = workspace_action_by_id(action_id) else {
+                continue;
+            };
+            let disabled_reason = self.action_disabled_reason(action.id);
+            let label = workflow_action_rail_label(action.id, action.label);
+            let text = if let Some(reason) = disabled_reason {
+                format!(
+                    "blocked: {label} - {}",
+                    workflow_blocked_reason_label(action.id, reason)
+                )
+            } else if self.workflow_section == MedicalWorkflowSection::Visit {
+                format!("next: {label}")
+            } else {
+                format!("next: {label}  :{}", action.command)
+            };
+            lines.push(workflow_action_hint_line(text));
+        }
+        lines
+    }
+
+    fn workflow_primary_next_action_line(&self) -> Line<'static> {
+        workflow_action_hint_line(self.workflow_primary_next_action_text())
+    }
+
+    fn workflow_primary_next_action_tone(&self) -> WorkflowTone {
+        workflow_tone_for_action_text(&self.workflow_primary_next_action_text())
+    }
+
+    fn workflow_primary_next_action_signal_label(&self) -> &'static str {
+        let text = self.workflow_primary_next_action_text();
+        let lower = text.trim_start().to_ascii_lowercase();
+        if lower.starts_with("blocked") {
+            "blocked"
+        } else if lower.starts_with("read-only") {
+            "read-only"
+        } else {
+            "next"
+        }
+    }
+
+    fn workflow_primary_next_action_detail(&self) -> String {
+        let text = self.workflow_primary_next_action_text();
+        if text
+            .trim_start()
+            .to_ascii_lowercase()
+            .starts_with("read-only ")
+        {
+            return text
+                .trim_start()
+                .trim_start_matches("Read-only ")
+                .to_string();
+        }
+        workflow_split_action_prefix(&text)
+            .map(|(_prefix, detail)| detail.trim().to_string())
+            .unwrap_or(text)
+    }
+
+    fn workflow_primary_next_action_text(&self) -> String {
+        match self.workflow_section {
+            MedicalWorkflowSection::AgentRequest => {
+                if self.agent_request.has_text() {
+                    return "Next: Review Packet".to_string();
+                }
+                return "Next: type instructions".to_string();
+            }
+            MedicalWorkflowSection::ContextPacket => {
+                if !self.agent_request.has_text() {
+                    return "Blocked: Ask Agent".to_string();
+                }
+                if self.draft_client.id.is_none() {
+                    return "Blocked: Save workspace".to_string();
+                }
+                return "Next: Ctrl-G opens agent".to_string();
+            }
+            MedicalWorkflowSection::AgentInbox => {
+                if self.agent_result.is_active() {
+                    return "Next: Save result".to_string();
+                }
+                if self.selected_agent_result().is_some() {
+                    if self.agent_result_inspect {
+                        return "Next: Mark reviewed or convert".to_string();
+                    }
+                    return "Next: Inspect result".to_string();
+                }
+                if self.latest_packet_without_result().is_some() {
+                    return "Next: Paste result".to_string();
+                }
+                return "Blocked: Submit Packet first".to_string();
+            }
+            MedicalWorkflowSection::Documents => {
+                if self.draft_document.is_new_unsaved_draft() {
+                    return "Next: Save file reference".to_string();
+                }
+                if self.patient_file_count() > 0 {
+                    return "Next: Choose file".to_string();
+                }
+                return "Next: Add file reference".to_string();
+            }
+            MedicalWorkflowSection::Safety => {
+                if self.draft_safety.is_active() {
+                    return "Next: Save clinical safety item".to_string();
+                }
+                if self.patient_safety_items.is_empty() {
+                    return "Next: Add allergies/meds/problems".to_string();
+                }
+                return "Next: Review or add clinical safety".to_string();
+            }
+            MedicalWorkflowSection::PracticeLibrary => {
+                if let Some(item) = self.selected_practice_library_item() {
+                    if item.linked_to_active_client {
+                        return "Next: Inspect record".to_string();
+                    }
+                    return "Next: Associate file".to_string();
+                }
+                return "Next: Select practice record".to_string();
+            }
+            MedicalWorkflowSection::PracticeIntelligence => {
+                return "Read-only: Practice Intelligence".to_string();
+            }
+            MedicalWorkflowSection::Audit => {
+                return "Read-only provenance".to_string();
+            }
+            MedicalWorkflowSection::Visit => {
+                return self.first_eval_next_action_text();
+            }
+            _ => {}
+        }
+
+        for action_id in self.current_scope_action_ids() {
+            let Some(action) = workspace_action_by_id(action_id) else {
+                continue;
+            };
+            if let Some(reason) = self.action_disabled_reason(action.id) {
+                return format!(
+                    "Blocked: {} - {}",
+                    workflow_action_rail_label(action.id, action.label),
+                    compact_preview(reason, 32)
+                );
+            }
+            return format!(
+                "Next: {}",
+                workflow_action_rail_label(action.id, action.label)
+            );
+        }
+        "Next: choose scope".to_string()
+    }
+
+    fn workflow_bridge_next_action_lines(&self) -> Option<Vec<Line<'static>>> {
+        let mut lines = vec![
+            workflow_header_line("Next Action", self.workflow_primary_next_action_tone()),
+            self.workflow_primary_next_action_line(),
+        ];
+        match self.workflow_section {
+            MedicalWorkflowSection::AgentRequest => {
+                if self.agent_request.has_text() {
+                    lines.push(workflow_action_hint_line(
+                        "next: Review Packet, then Ctrl-G",
+                    ));
+                } else {
+                    lines.push(workflow_action_hint_line(
+                        "blocked: Type agent instructions first",
+                    ));
+                }
+                Some(lines)
+            }
+            MedicalWorkflowSection::ContextPacket => {
+                if !self.agent_request.has_text() {
+                    lines.push(workflow_action_hint_line(
+                        "blocked: Type agent instructions first",
+                    ));
+                } else if self.draft_client.id.is_none() {
+                    lines.push(workflow_action_hint_line(
+                        "blocked: Save workspace - Save patient first",
+                    ));
+                } else {
+                    lines.push(workflow_action_hint_line(
+                        "next: Review agent work  :scope review",
+                    ));
+                }
+                Some(lines)
+            }
+            MedicalWorkflowSection::AgentInbox => {
+                if self.agent_result.is_active() {
+                    lines.push(workflow_action_hint_line("next: Save result"));
+                    lines.push(workflow_action_hint_line("next: Clear draft"));
+                } else if let Some(result) = self.selected_agent_result() {
+                    let status = agent_result_status_label(&result.status);
+                    let next = if self.agent_result_inspect {
+                        "Mark reviewed or convert"
+                    } else {
+                        "Inspect result"
+                    };
+                    lines.push(workflow_action_hint_line(format!(
+                        "next: {next} ({status})"
+                    )));
+                } else if self.latest_packet_without_result().is_some() {
+                    lines.push(workflow_action_hint_line("next: Paste result"));
+                }
+                Some(lines)
+            }
+            _ => None,
+        }
+    }
+
+    fn workflow_scope_boundary_lines(&self, section: MedicalWorkflowSection) -> Vec<Line<'static>> {
+        match section {
+            MedicalWorkflowSection::Safety => vec![workflow_action_hint_line(
+                "safety: active-patient clinical metadata; not sent to agent unless selected context includes it later",
+            )],
+            MedicalWorkflowSection::Documents => vec![workflow_action_hint_line(
+                "files: patient references only; reviewed text/clips selected separately",
+            )],
+            MedicalWorkflowSection::ContextPacket => vec![workflow_action_hint_line(
+                "boundary: selected active-patient context only",
+            )],
+            MedicalWorkflowSection::AgentInbox => {
+                if self.context_packets.is_empty() {
+                    vec![workflow_action_hint_line(
+                        "safety: submit a Medical Agent Plan before returned work review",
+                    )]
+                } else if self.agent_result.is_active() || self.selected_agent_result().is_some() {
+                    vec![workflow_action_hint_line(
+                        "safety: review-pending; no chart mutation",
+                    )]
+                } else {
+                    vec![workflow_action_hint_line(
+                        "safety: paste returned work only after matching Medical Agent Plan",
+                    )]
+                }
+            }
+            MedicalWorkflowSection::PracticeLibrary => vec![workflow_action_hint_line(
+                "boundary: read-only library; associate before patient agent use",
+            )],
+            MedicalWorkflowSection::PracticeIntelligence => vec![workflow_action_hint_line(
+                "safety: no model submit, chart mutation, claim, or payer action",
+            )],
+            MedicalWorkflowSection::Audit => {
+                vec![workflow_action_hint_line("boundary: read-only provenance")]
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    fn workflow_agent_review_workbench_lines(&self) -> Vec<Line<'static>> {
+        let mut lines = Vec::new();
+
+        if self.agent_result.is_active() {
+            lines.extend(self.workflow_agent_result_draft_lines());
+        } else if self.context_packets.is_empty() {
+            lines.push(workflow_header_line("Returned Work", WorkflowTone::Muted));
+            lines.push(workflow_context_signal_line(
+                WorkflowTone::Muted,
+                "state",
+                "no Medical Agent Plan history recorded for this note",
+            ));
+            lines.push(workflow_header_line(
+                "Safe Actions",
+                WorkflowTone::Attention,
+            ));
+            lines.push(workflow_action_hint_line(
+                "blocked: Submit Medical Agent Plan first",
+            ));
+        } else if let Some(result) = self.selected_agent_result() {
+            lines.extend(self.workflow_agent_result_workbench_lines(result));
+        } else {
+            lines.push(workflow_header_line("Returned Work", WorkflowTone::Caution));
+            lines.push(workflow_context_signal_line(
+                WorkflowTone::Caution,
+                "state",
+                "Medical Agent Plan submitted; no returned work saved",
+            ));
+            lines.push(workflow_header_line(
+                "Medical Plan History",
+                WorkflowTone::Agent,
+            ));
+            for packet in self.context_packets.iter().take(2) {
+                lines.extend(self.workflow_agent_packet_waiting_lines(packet));
+            }
+            lines.push(workflow_header_line("Safe Actions", WorkflowTone::Ready));
+            lines.push(workflow_action_hint_line(
+                "next: Paste returned agent work  :agent result",
+            ));
+            lines.push(workflow_action_hint_line(
+                "safety: paste only after matching the Medical Agent Plan",
+            ));
+        }
+
+        if self.packet_replay_inspect
+            && let Some(packet) = self.packet_for_replay()
+        {
+            lines.push(workflow_header_line(
+                "Medical Plan Replay",
+                WorkflowTone::Agent,
+            ));
+            lines.extend(packet_replay_lines(packet));
+        }
+
+        lines
+    }
+
+    fn workflow_agent_result_draft_lines(&self) -> Vec<Line<'static>> {
+        let mut lines = vec![workflow_header_line(
+            "Returned Work Draft",
+            WorkflowTone::Review,
+        )];
+        if let Some(packet_id) = self.agent_result.packet_id.as_deref() {
+            lines.push(workflow_context_signal_line(
+                WorkflowTone::Agent,
+                "plan",
+                format!(
+                    "{}  :agent result save/clear",
+                    compact_preview(packet_id, 10)
+                ),
+            ));
+        }
+        if self.agent_result.body.trim().is_empty() {
+            lines.push(workflow_context_signal_line(
+                WorkflowTone::Review,
+                "review",
+                "paste returned agent work here for human review",
+            ));
+        } else {
+            lines.push(workflow_context_signal_line(
+                WorkflowTone::Review,
+                "review",
+                "draft only; save result before converting",
+            ));
+            for line in self.agent_result.body.lines().take(4) {
+                lines.push(Line::from(format!("  {line}")));
+            }
+        }
+        lines.push(workflow_header_line("Safe Actions", WorkflowTone::Ready));
+        lines.push(workflow_action_hint_line("next: Save returned agent work"));
+        lines.push(workflow_action_hint_line(
+            "safety: saved results stay review-pending",
+        ));
+        lines
+    }
+
+    fn workflow_agent_result_workbench_lines(
+        &self,
+        result: &WorkspaceAgentResult,
+    ) -> Vec<Line<'static>> {
+        let mut lines = Vec::new();
+        let result_tone = workflow_tone_for_agent_result_status(&result.status);
+        let status = agent_result_status_label(&result.status);
+        let title = if self.agent_result_inspect {
+            "Result Inspect"
+        } else {
+            "Returned Work"
+        };
+
+        lines.push(workflow_header_line(title, result_tone));
+        lines.push(workflow_context_signal_line(
+            result_tone,
+            "result",
+            format!("{} [{status}]", compact_preview(&result.id, 12)),
+        ));
+        lines.push(workflow_context_signal_line(
+            result_tone,
+            "status",
+            workflow_agent_result_status_guidance(status),
+        ));
+        lines.push(Line::from(format!(
+            "  returned: {}",
+            compact_preview(&result.summary, 76)
+        )));
+
+        lines.push(workflow_header_line(
+            "Medical Plan History",
+            WorkflowTone::Agent,
+        ));
+        if let Some(packet) = self.packet_for_agent_result(result) {
+            lines.push(workflow_context_signal_line(
+                WorkflowTone::Agent,
+                "plan",
+                format!(
+                    "{}; hash {}; {}",
+                    compact_preview(&packet.id, 12),
+                    packet_hash_prefix(packet),
+                    agent_result_provenance_label(result, packet)
+                ),
+            ));
+            lines.push(workflow_context_signal_line(
+                WorkflowTone::Muted,
+                "origin",
+                compact_preview(&packet.chart_context_summary, 76),
+            ));
+
+            lines.push(workflow_header_line("What Agent Saw", WorkflowTone::Agent));
+            lines.push(workflow_context_signal_line(
+                WorkflowTone::Agent,
+                "request",
+                compact_preview(&packet.human_request, 76),
+            ));
+            lines.push(Line::from(format!(
+                "  files: {}",
+                compact_preview(
+                    &provider_file_reference_summary(&packet.artifact_summary),
+                    76
+                )
+            )));
+            lines.push(Line::from(format!(
+                "  reviewed text: {}",
+                compact_preview(
+                    &provider_reviewed_text_summary(&packet.derivative_summary),
+                    76
+                )
+            )));
+            lines.push(Line::from(format!(
+                "  clips: {}",
+                compact_preview(&packet.clip_summary, 76)
+            )));
+            lines.push(workflow_context_signal_line(
+                WorkflowTone::Muted,
+                "replay",
+                workflow_packet_replay_summary(packet),
+            ));
+        } else {
+            lines.push(workflow_context_signal_line(
+                WorkflowTone::Attention,
+                "plan",
+                format!(
+                    "{} metadata not loaded; result hash {}",
+                    compact_preview(&result.packet_id, 12),
+                    agent_result_hash_prefix(result)
+                ),
+            ));
+            lines.push(workflow_header_line(
+                "What Agent Saw",
+                WorkflowTone::Attention,
+            ));
+            lines.push(workflow_context_signal_line(
+                WorkflowTone::Attention,
+                "request",
+                "plan metadata unavailable; do not convert until history is verified",
+            ));
+        }
+
+        if self.agent_result_inspect {
+            lines.push(workflow_header_line("Returned Body", result_tone));
+            for line in result.body.lines().take(5) {
+                lines.push(Line::from(format!("  > {line}")));
+            }
+        }
+
+        lines.push(workflow_header_line("Safe Actions", WorkflowTone::Ready));
+        lines.extend(self.workflow_agent_result_conversion_lines(result));
+
+        lines.push(workflow_header_line("Review Status", result_tone));
+        lines.push(workflow_context_signal_line(
+            WorkflowTone::Review,
+            "safety",
+            "no chart changes until a human accepts or saves a converted draft",
+        ));
+
+        lines
+    }
+
+    fn workflow_agent_packet_waiting_lines(
+        &self,
+        packet: &WorkspaceContextPacket,
+    ) -> Vec<Line<'static>> {
+        let result = self.latest_result_for_packet(&packet.id);
+        let result_status = result
+            .map(|result| {
+                format!(
+                    "returned work {}",
+                    agent_result_status_label(&result.status)
+                )
+            })
+            .unwrap_or_else(|| "sent/no returned work recorded yet".to_string());
+        let packet_tone = result
+            .map(|result| workflow_tone_for_agent_result_status(&result.status))
+            .unwrap_or(WorkflowTone::Caution);
+        let mut lines = vec![
+            workflow_context_signal_line(
+                packet_tone,
+                "plan",
+                format!("{}: {result_status}", compact_preview(&packet.id, 8)),
+            ),
+            Line::from(format!(
+                "  instructions: {}",
+                compact_preview(&packet.human_request, 64)
+            )),
+            workflow_context_signal_line(
+                WorkflowTone::Muted,
+                "replay",
+                workflow_packet_replay_summary(packet),
+            ),
+            Line::from(format!(
+                "  files: {}",
+                compact_preview(
+                    &provider_file_reference_summary(&packet.artifact_summary),
+                    64
+                )
+            )),
+            Line::from(format!(
+                "  reviewed text: {}",
+                compact_preview(
+                    &provider_reviewed_text_summary(&packet.derivative_summary),
+                    64
+                )
+            )),
+            Line::from(format!(
+                "  clips: {}",
+                compact_preview(&packet.clip_summary, 64)
+            )),
+        ];
+        if let Some(result) = result {
+            lines.push(Line::from(format!(
+                "  returned: {}",
+                compact_preview(&result.summary, 64)
+            )));
+        }
+        lines
+    }
+
+    fn workflow_agent_result_conversion_lines(
+        &self,
+        result: &WorkspaceAgentResult,
+    ) -> Vec<Line<'static>> {
+        let provenance_blocker = self.agent_result_conversion_guard_failure(result);
+        let mut lines = vec![workflow_action_hint_line(
+            "review: inspect, mark reviewed, or dismiss",
+        )];
+        if let Some(blocker) = provenance_blocker {
+            lines.push(workflow_action_hint_line(format!(
+                "blocked: Convert returned work - {blocker}"
+            )));
+            return lines;
+        }
+
+        if self.draft_note.is_locked() {
+            lines.push(workflow_action_hint_line(
+                "next: Make addendum  :agent result to addendum",
+            ));
+            lines.push(workflow_action_hint_line(
+                "next: Make job  :agent result to job",
+            ));
+            lines.push(workflow_action_hint_line(
+                "blocked: Make note proposal - signed note requires addendum",
+            ));
+        } else {
+            lines.push(workflow_action_hint_line(
+                "next: Make note proposal  :agent result to proposal",
+            ));
+            lines.push(workflow_action_hint_line(
+                "next: Make job  :agent result to job",
+            ));
+            lines.push(workflow_action_hint_line(
+                "blocked: Make addendum - requires signed note",
+            ));
+        }
+        lines
+    }
+
+    fn workflow_clinical_safety_lines(&self) -> Vec<Line<'static>> {
+        let mut lines = Vec::new();
+        if self.draft_safety.is_active() {
+            lines.push(Line::from(Span::styled(
+                "Clinical Safety Draft",
+                Style::default().add_modifier(Modifier::BOLD),
+            )));
+            for field in SafetyField::ALL {
+                let active = self.focus == WorkspaceFocus::Workflow && field == self.safety_field;
+                lines.push(field_line(
+                    field.label(),
+                    self.draft_safety.value(field),
+                    active,
+                ));
+            }
+            lines.push(Line::from(
+                "  patient-level metadata; Ctrl-S saves locally; not sent to agent automatically",
+            ));
+            return lines;
+        }
+
+        let active_allergies = self.safety_items_for_category("allergy");
+        let medication_count = self.safety_items_for_category("medication").len();
+        let condition_count = self.safety_items_for_category("condition").len();
+        let precaution_count = self.safety_items_for_category("precaution").len();
+        let allergy_summary = if active_allergies.is_empty() {
+            "allergies not recorded".to_string()
+        } else {
+            active_allergies
+                .iter()
+                .take(2)
+                .map(|item| item.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        lines.push(workflow_context_signal_line(
+            if active_allergies.is_empty() {
+                WorkflowTone::Caution
+            } else {
+                WorkflowTone::Attention
+            },
+            "allergies",
+            allergy_summary,
+        ));
+        lines.push(workflow_context_signal_line(
+            WorkflowTone::Ready,
+            "meds/problems",
+            format!(
+                "{medication_count} medication(s); {condition_count} problem(s); {precaution_count} precaution(s)"
+            ),
+        ));
+
+        for category in ["allergy", "medication", "condition", "precaution"] {
+            let items = self.safety_items_for_category(category);
+            lines.push(Line::from(Span::styled(
+                safety_category_heading(category),
+                Style::default().fg(Color::Cyan),
+            )));
+            if items.is_empty() {
+                lines.push(Line::from(format!(
+                    "  - none recorded; :{} add",
+                    safety_category_command(category)
+                )));
+            } else {
+                for item in items.iter().take(4) {
+                    lines.push(Line::from(format!(
+                        "  - {}{}{}",
+                        item.name,
+                        safety_item_detail_suffix(item),
+                        safety_item_status_suffix(item)
+                    )));
+                }
+            }
+        }
+        lines.push(Line::from(
+            "  :allergy add | :medication add | :problem add | :precaution add",
+        ));
+        lines.push(Line::from(
+            "  active patient only; search/directory and safety lists are not agent context by themselves",
+        ));
+        lines
+    }
+
+    fn safety_items_for_category(&self, category: &str) -> Vec<&WorkspacePatientSafetyItem> {
+        self.patient_safety_items
+            .iter()
+            .filter(|item| item.category == category && item.archived_at.is_none())
+            .collect()
+    }
+
+    fn current_scope_action_ids(&self) -> Vec<WorkspaceActionId> {
+        match self.workflow_section {
+            MedicalWorkflowSection::Visit => self.first_eval_action_ids(),
+            MedicalWorkflowSection::Safety => {
+                if self.draft_safety.is_active() {
+                    vec![WorkspaceActionId::Save, WorkspaceActionId::SafetyOpen]
+                } else {
+                    vec![
+                        WorkspaceActionId::AllergyAdd,
+                        WorkspaceActionId::MedicationAdd,
+                        WorkspaceActionId::ProblemAdd,
+                        WorkspaceActionId::PrecautionAdd,
+                    ]
+                }
+            }
+            MedicalWorkflowSection::NoteStatus => vec![
+                WorkspaceActionId::NoteSign,
+                WorkspaceActionId::Save,
+                WorkspaceActionId::ScopePatientFiles,
+            ],
+            MedicalWorkflowSection::Documents => {
+                if self.draft_document.is_new_unsaved_draft() {
+                    vec![
+                        WorkspaceActionId::ArtifactSave,
+                        WorkspaceActionId::ArtifactClear,
+                        WorkspaceActionId::ScopeAgentPacket,
+                    ]
+                } else if self.patient_file_count() > 0 {
+                    vec![
+                        WorkspaceActionId::ArtifactToggle,
+                        WorkspaceActionId::DocumentChoose,
+                        WorkspaceActionId::DocumentAttach,
+                        WorkspaceActionId::ArtifactImport,
+                        WorkspaceActionId::ArtifactThumbnail,
+                        WorkspaceActionId::ArtifactOpen,
+                        WorkspaceActionId::ScopeAgentPacket,
+                    ]
+                } else {
+                    vec![
+                        WorkspaceActionId::DocumentChoose,
+                        WorkspaceActionId::DocumentAttach,
+                        WorkspaceActionId::ScopeAgentPacket,
+                    ]
+                }
+            }
+            MedicalWorkflowSection::AgentRequest => vec![
+                WorkspaceActionId::AgentRequest,
+                WorkspaceActionId::AgentPreview,
+                WorkspaceActionId::Handoff,
+            ],
+            MedicalWorkflowSection::ContextPacket => vec![
+                WorkspaceActionId::Handoff,
+                WorkspaceActionId::AgentRequest,
+                WorkspaceActionId::ScopeAgentReview,
+            ],
+            MedicalWorkflowSection::AgentInbox => {
+                if self.agent_result.is_active() {
+                    vec![
+                        WorkspaceActionId::AgentResultSave,
+                        WorkspaceActionId::AgentResultClear,
+                        WorkspaceActionId::ScopeAgentPacket,
+                    ]
+                } else {
+                    vec![
+                        WorkspaceActionId::AgentResult,
+                        WorkspaceActionId::AgentResultInspect,
+                        WorkspaceActionId::AgentResultNext,
+                    ]
+                }
+            }
+            MedicalWorkflowSection::Proposals => vec![
+                WorkspaceActionId::ProposalAccept,
+                WorkspaceActionId::ProposalDecline,
+                WorkspaceActionId::ProposalNext,
+            ],
+            MedicalWorkflowSection::Addenda => vec![
+                WorkspaceActionId::AddendumStart,
+                WorkspaceActionId::AddendumSave,
+                WorkspaceActionId::ScopeAgentReview,
+            ],
+            MedicalWorkflowSection::Jobs => vec![
+                WorkspaceActionId::JobNew,
+                WorkspaceActionId::JobNext,
+                WorkspaceActionId::JobDone,
+            ],
+            MedicalWorkflowSection::Timeline => vec![
+                WorkspaceActionId::ScopePatientChart,
+                WorkspaceActionId::ScopePatientFiles,
+                WorkspaceActionId::ScopeAuditTrail,
+            ],
+            MedicalWorkflowSection::PracticeLibrary => {
+                if let Some(item) = self.selected_practice_library_item() {
+                    if item.linked_to_active_client {
+                        vec![
+                            WorkspaceActionId::PracticeLibraryInspect,
+                            WorkspaceActionId::PracticeLibraryNext,
+                            WorkspaceActionId::PracticeLibraryAssociate,
+                        ]
+                    } else {
+                        vec![
+                            WorkspaceActionId::PracticeLibraryAssociate,
+                            WorkspaceActionId::PracticeLibraryInspect,
+                            WorkspaceActionId::PracticeLibraryNext,
+                        ]
+                    }
+                } else {
+                    vec![
+                        WorkspaceActionId::PracticeLibraryNext,
+                        WorkspaceActionId::PracticeLibraryInspect,
+                        WorkspaceActionId::ScopePatientChart,
+                    ]
+                }
+            }
+            MedicalWorkflowSection::PracticeIntelligence => vec![
+                WorkspaceActionId::ScopePracticeLibrary,
+                WorkspaceActionId::ScopePatientChart,
+                WorkspaceActionId::ScopeLast,
+            ],
+            MedicalWorkflowSection::Audit => vec![
+                WorkspaceActionId::ScopeLast,
+                WorkspaceActionId::ScopePatientChart,
+                WorkspaceActionId::ScopePatientFiles,
+            ],
+        }
+    }
+
+    fn workflow_chart_file_status_lines(
+        &self,
+        patient_file_count: usize,
+        patient_derivative_count: usize,
+        patient_clip_count: usize,
+    ) -> Vec<Line<'static>> {
+        let tone = if patient_file_count == 0 {
+            WorkflowTone::Muted
+        } else {
+            WorkflowTone::Ready
+        };
+        let selected_file_count = self
+            .documents
+            .iter()
+            .filter(|document| {
+                artifact_scope_label(document) == "patient"
+                    && self.selected_artifact_ids.contains(&document.id)
+            })
+            .count();
+        vec![
+            Line::from(""),
+            workflow_header_line("Uploaded Documents", tone),
+            Line::from(format!(
+                "  {patient_file_count} refs, {patient_derivative_count} text, {patient_clip_count} clips"
+            )),
+            Line::from(format!("  Packet: {selected_file_count} included")),
+            Line::from("  :files opens Uploaded Documents"),
+        ]
+    }
+
+    fn medical_workflow_lines(&self, storage: &str) -> Vec<Line<'static>> {
+        self.medical_workflow_lines_with_options(storage, false)
+    }
+
+    fn medical_workflow_lines_with_options(
+        &self,
+        storage: &str,
+        omit_patient_files_section: bool,
+    ) -> Vec<Line<'static>> {
+        let encounter_lines = if self.encounters.is_empty() {
+            vec![Line::from("  No encounter yet. e creates open visit.")]
+        } else {
+            self.encounters
+                .iter()
+                .take(3)
+                .map(|encounter| {
+                    Line::from(format!(
+                        "  {} [{}] {}",
+                        encounter.title, encounter.status, encounter.id
+                    ))
+                })
+                .collect::<Vec<_>>()
+        };
+        let signature = self.signatures.first().map(|signature| {
+            (
+                format!("signed r{}", signature.revision),
+                format!("  signed by {}", signature.signer),
+            )
+        });
+        let signature_label = signature
+            .as_ref()
+            .map(|(label, _detail)| label.clone())
+            .unwrap_or_else(|| self.workflow_signature_label());
+        let signature_detail = signature.as_ref().map(|(_label, detail)| detail.clone());
+        let addendum_label = match self.addenda.len() {
+            0 => "0 addenda".to_string(),
+            1 => "1 addendum".to_string(),
+            count => format!("{count} addenda"),
+        };
+        let note_lock_label = if self.draft_note.is_locked() {
+            "locked"
+        } else {
+            "editable"
+        };
+        let note_action_hint = if self.draft_note.is_locked() {
+            "locked; addenda/proposals only"
+        } else {
+            "l signs and locks saved draft"
+        };
+        let pending_proposal_count = self.pending_proposal_count();
+        let proposal_label = if pending_proposal_count == 0 {
+            "no pending proposals".to_string()
+        } else {
+            format!("{pending_proposal_count} pending proposals")
+        };
+        let patient_document_ids = self
+            .documents
+            .iter()
+            .filter(|document| artifact_scope_label(document) == "patient")
+            .map(|document| document.id.as_str())
+            .collect::<BTreeSet<_>>();
+        let patient_file_count = patient_document_ids.len();
+        let practice_file_count = self.practice_library_items.len();
+        let patient_derivative_count = self
+            .derivatives
+            .iter()
+            .filter(|derivative| patient_document_ids.contains(derivative.document_id.as_str()))
+            .count();
+        let practice_derivative_count: i64 = self
+            .practice_library_items
+            .iter()
+            .map(|item| item.reviewed_text_count)
+            .sum();
+        let patient_clip_count = self
+            .clips
+            .iter()
+            .filter(|clip| patient_document_ids.contains(clip.document_id.as_str()))
+            .count();
+        let practice_clip_count: i64 = self
+            .practice_library_items
+            .iter()
+            .map(|item| item.clip_count)
+            .sum();
+        let mut lines =
+            self.workflow_chart_context_lines(&signature_label, &addendum_label, note_lock_label);
+        if medical_scope_tab_for_section(self.workflow_section) == MedicalScopeTab::Chart
+            && !omit_patient_files_section
+        {
+            lines.extend(self.workflow_chart_file_status_lines(
+                patient_file_count,
+                patient_derivative_count,
+                patient_clip_count,
+            ));
+        }
+        lines.extend([workflow_section_line(
+            MedicalWorkflowSection::Visit,
+            self.workflow_section,
+            MedicalWorkflowSection::Visit.heading(),
+            None,
+        )]);
+        lines.extend(self.workflow_active_action_lines(MedicalWorkflowSection::Visit));
+        lines.extend(self.workflow_chart_navigation_lines());
+        lines.extend(encounter_lines);
+        lines.extend([
+            Line::from(""),
+            workflow_section_line(
+                MedicalWorkflowSection::Safety,
+                self.workflow_section,
+                MedicalWorkflowSection::Safety.heading(),
+                Some("  :safety"),
+            ),
+        ]);
+        lines.extend(self.workflow_active_action_lines(MedicalWorkflowSection::Safety));
+        lines.extend(self.workflow_clinical_safety_lines());
+        lines.extend([
+            Line::from(""),
+            workflow_section_line(
+                MedicalWorkflowSection::NoteStatus,
+                self.workflow_section,
+                MedicalWorkflowSection::NoteStatus.heading(),
+                None,
+            ),
+        ]);
+        lines.extend(self.workflow_active_action_lines(MedicalWorkflowSection::NoteStatus));
+        lines.extend([Line::from(format!(
+            "  {note_lock_label}: {} r{}  {signature_label}  {addendum_label}; {note_action_hint}",
+            self.draft_note.status_label(),
+            self.draft_note.current_revision,
+        ))]);
+        if let Some(signature_detail) = signature_detail {
+            lines.push(Line::from(signature_detail));
+        }
+        let show_patient_files_section = !omit_patient_files_section
+            || self.workflow_section == MedicalWorkflowSection::Documents
+            || self.draft_document.is_active()
+            || self.derivative_draft.is_active()
+            || self.clip_draft.is_active();
+        let files_expanded = self.workflow_section == MedicalWorkflowSection::Documents
+            || self.draft_document.is_active()
+            || self.derivative_draft.is_active()
+            || self.clip_draft.is_active()
+            || self.inspected_artifact_id.is_some()
+            || self.inspected_derivative_id.is_some()
+            || self.inspected_clip_id.is_some();
+        if show_patient_files_section {
+            lines.extend([
+                Line::from(""),
+                workflow_section_line(
+                    MedicalWorkflowSection::Documents,
+                    self.workflow_section,
+                    MedicalWorkflowSection::Documents.heading(),
+                    None,
+                ),
+            ]);
+            lines.extend(self.workflow_active_action_lines(MedicalWorkflowSection::Documents));
+            if self.draft_document.is_active() {
+                lines.extend([Line::from(Span::styled(
+                    "File Reference Draft",
+                    Style::default().add_modifier(Modifier::BOLD),
+                ))]);
+                for field in DocumentField::ALL {
+                    let active =
+                        self.focus == WorkspaceFocus::Workflow && field == self.document_field;
+                    lines.push(field_line(
+                        field.label(),
+                        self.draft_document.value(field),
+                        active,
+                    ));
+                }
+                lines.push(Line::from(
+                    "  :file drop opens native JPG/PDF drop on macOS; path paste still works",
+                ));
+                lines.push(Line::from(
+                    "  no file copy/upload/OCR/transcription/parsing",
+                ));
+                lines.push(Line::from(""));
+            }
+            if self.derivative_draft.is_active() {
+                lines.extend([Line::from(Span::styled(
+                    "Reviewed Text Draft",
+                    Style::default().add_modifier(Modifier::BOLD),
+                ))]);
+                for field in DerivativeField::ALL {
+                    let active =
+                        self.focus == WorkspaceFocus::Workflow && field == self.derivative_field;
+                    let value = if field == DerivativeField::Artifact {
+                        self.document_label_for_id(&self.derivative_draft.document_id)
+                    } else if field == DerivativeField::Range {
+                        self.derivative_draft.range_value()
+                    } else {
+                        self.derivative_draft.value(field).to_string()
+                    };
+                    lines.push(field_line(field.label(), &value, active));
+                }
+                lines.push(Line::from(
+                    "  human-provided text only; no automatic OCR/transcription/video/EDI analysis",
+                ));
+                lines.push(Line::from(""));
+            }
+            if self.clip_draft.is_active() {
+                lines.extend([Line::from(Span::styled(
+                    "Context Clip Draft",
+                    Style::default().add_modifier(Modifier::BOLD),
+                ))]);
+                for field in ClipField::ALL {
+                    let active = self.focus == WorkspaceFocus::Workflow && field == self.clip_field;
+                    let value = if field == ClipField::Derivative {
+                        self.derivative_label_for_id(&self.clip_draft.derivative_id)
+                    } else if field == ClipField::Segment {
+                        self.clip_draft.range_value()
+                    } else {
+                        self.clip_draft.value(field).to_string()
+                    };
+                    lines.push(field_line(field.label(), &value, active));
+                }
+                lines.push(Line::from(
+                    "  human-selected excerpt only; no automatic parsing or chart mutation",
+                ));
+                lines.push(Line::from(""));
+            }
+            if !files_expanded {
+                let selected_count = self
+                    .documents
+                    .iter()
+                    .filter(|document| {
+                        patient_document_ids.contains(document.id.as_str())
+                            && self.selected_artifact_ids.contains(&document.id)
+                    })
+                    .count();
+                let selected_derivative_count = self
+                    .derivatives
+                    .iter()
+                    .filter(|derivative| {
+                        patient_document_ids.contains(derivative.document_id.as_str())
+                            && self.selected_derivative_ids.contains(&derivative.id)
+                    })
+                    .count();
+                let selected_clip_count = self
+                    .clips
+                    .iter()
+                    .filter(|clip| {
+                        patient_document_ids.contains(clip.document_id.as_str())
+                            && self.selected_clip_ids.contains(&clip.id)
+                    })
+                    .count();
+                if self.documents.is_empty() {
+                    lines.push(Line::from("  No file references or reviewed text yet"));
+                } else {
+                    lines.push(Line::from(format!(
+                        "  patient shelf: files {selected_count}/{patient_file_count}, text {selected_derivative_count}/{patient_derivative_count}, clips {selected_clip_count}/{patient_clip_count} included"
+                    )));
+                }
+                if practice_file_count > 0 {
+                    lines.push(Line::from(format!(
+                        "  practice library: {practice_file_count} separate practice record(s); :scope practice"
+                    )));
+                }
+                lines.push(Line::from(
+                    "  originals unchanged; :patient files inspects context",
+                ));
+                lines.push(Line::from(
+                    "  reviewed text/clips are human-entered and selected separately",
+                ));
+            } else if self.documents.is_empty() {
+                lines.push(Line::from(
+                    "  No file references yet. Focus Uploaded Documents, then drop/paste JPG/PDF.",
+                ));
+            } else if files_expanded {
+                let selected_count = self
+                    .documents
+                    .iter()
+                    .filter(|document| {
+                        patient_document_ids.contains(document.id.as_str())
+                            && self.selected_artifact_ids.contains(&document.id)
+                    })
+                    .count();
+                let excluded_count = patient_file_count.saturating_sub(selected_count);
+                let selected_derivative_count = self
+                    .derivatives
+                    .iter()
+                    .filter(|derivative| {
+                        patient_document_ids.contains(derivative.document_id.as_str())
+                            && self.selected_derivative_ids.contains(&derivative.id)
+                    })
+                    .count();
+                let excluded_derivative_count =
+                    patient_derivative_count.saturating_sub(selected_derivative_count);
+                let selected_clip_count = self
+                    .clips
+                    .iter()
+                    .filter(|clip| {
+                        patient_document_ids.contains(clip.document_id.as_str())
+                            && self.selected_clip_ids.contains(&clip.id)
+                    })
+                    .count();
+                let excluded_clip_count = patient_clip_count.saturating_sub(selected_clip_count);
+                lines.push(Line::from(format!(
+                    "  Agent context: files {selected_count} included/{excluded_count} out; text {selected_derivative_count} included/{excluded_derivative_count} out; clips {selected_clip_count} included/{excluded_clip_count} out"
+                )));
+                if let Some(document) = self
+                    .inspected_artifact()
+                    .filter(|document| artifact_scope_label(document) == "patient")
+                {
+                    lines.push(Line::from(""));
+                    lines.extend(self.patient_file_detail_lines(document));
+                } else if let Some(derivative) = self.inspected_derivative().filter(|derivative| {
+                    patient_document_ids.contains(derivative.document_id.as_str())
+                }) {
+                    lines.push(Line::from(""));
+                    lines.extend(self.derivative_inspector_lines(derivative));
+                } else if let Some(clip) = self
+                    .inspected_clip()
+                    .filter(|clip| patient_document_ids.contains(clip.document_id.as_str()))
+                {
+                    lines.push(Line::from(""));
+                    lines.extend(self.clip_inspector_lines(clip));
+                } else if let Some(document) = self
+                    .selected_artifacts()
+                    .first()
+                    .copied()
+                    .or_else(|| {
+                        self.highlighted_patient_file_document_index()
+                            .and_then(|index| self.documents.get(index))
+                    })
+                    .or_else(|| {
+                        self.documents
+                            .iter()
+                            .find(|document| artifact_scope_label(document) == "patient")
+                    })
+                {
+                    lines.push(Line::from(""));
+                    lines.extend(self.patient_file_detail_lines(document));
+                } else {
+                    lines.push(Line::from(""));
+                    lines.push(Line::from(
+                        "  Choose a file in Uploaded Documents, then press Enter for detail.",
+                    ));
+                }
+                if practice_file_count > 0 {
+                    lines.push(Line::from(""));
+                    lines.push(Line::from(format!(
+                        "  Practice Library: {practice_file_count} separate practice record(s); :scope practice"
+                    )));
+                }
+            } else {
+                let selected_count = self
+                    .documents
+                    .iter()
+                    .filter(|document| {
+                        patient_document_ids.contains(document.id.as_str())
+                            && self.selected_artifact_ids.contains(&document.id)
+                    })
+                    .count();
+                let selected_derivative_count = self
+                    .derivatives
+                    .iter()
+                    .filter(|derivative| {
+                        patient_document_ids.contains(derivative.document_id.as_str())
+                            && self.selected_derivative_ids.contains(&derivative.id)
+                    })
+                    .count();
+                let selected_clip_count = self
+                    .clips
+                    .iter()
+                    .filter(|clip| {
+                        patient_document_ids.contains(clip.document_id.as_str())
+                            && self.selected_clip_ids.contains(&clip.id)
+                    })
+                    .count();
+                lines.push(Line::from(format!(
+                    "  Uploaded documents: {patient_file_count} refs; {selected_count} included"
+                )));
+                lines.push(Line::from(format!(
+                    "  Reviewed context: {selected_derivative_count}/{patient_derivative_count} text; {selected_clip_count}/{patient_clip_count} clips"
+                )));
+                lines.push(Line::from(
+                    "  Use Uploaded Documents for context; Enter opens one file detail here.",
+                ));
+            }
+            if files_expanded {
+                lines.extend([
+                    Line::from("  :file drop/add/open/preview; Space includes for packet"),
+                    Line::from("  metadata only; no copy/upload/OCR/transcribe/parse"),
+                ]);
+            }
+        }
+        lines.extend([
+            Line::from(""),
+            workflow_section_line(
+                MedicalWorkflowSection::AgentRequest,
+                self.workflow_section,
+                MedicalWorkflowSection::AgentRequest.heading(),
+                Some("  :agent request"),
+            ),
+        ]);
+        lines.extend(self.workflow_active_action_lines(MedicalWorkflowSection::AgentRequest));
+        if self.agent_request.is_active() {
+            lines.extend(agent_request_input_lines(&self.agent_request.body, true, 4));
+            if self.agent_request.body.trim().is_empty() {
+                lines.push(Line::from("  Nothing is sent until Packet review."));
+            }
+            lines.push(Line::from("  Local only; preview packet before Ctrl-G."));
+        } else if self.agent_request.has_text()
+            && self.workflow_section != MedicalWorkflowSection::ContextPacket
+        {
+            lines.push(Line::from(format!(
+                "  draft: {}",
+                compact_preview(&self.agent_request.body, 72)
+            )));
+        } else {
+            lines.push(Line::from(
+                "  No instructions drafted. Write one before plan review.",
+            ));
+        }
+        lines.extend([
+            Line::from(""),
+            workflow_section_line(
+                MedicalWorkflowSection::ContextPacket,
+                self.workflow_section,
+                MedicalWorkflowSection::ContextPacket.heading(),
+                Some("  :agent send"),
+            ),
+        ]);
+        lines.extend(self.workflow_active_action_lines(MedicalWorkflowSection::ContextPacket));
+        if self.workflow_section == MedicalWorkflowSection::ContextPacket {
+            lines.push(Line::from(Span::styled(
+                "Plan Readiness",
+                Style::default().add_modifier(Modifier::BOLD),
+            )));
+        }
+        let packet_line_limit = if self.workflow_section == MedicalWorkflowSection::ContextPacket {
+            10
+        } else if matches!(
+            self.workflow_section,
+            MedicalWorkflowSection::Visit
+                | MedicalWorkflowSection::NoteStatus
+                | MedicalWorkflowSection::Documents
+                | MedicalWorkflowSection::AgentRequest
+        ) {
+            4
+        } else {
+            2
+        };
+        for line in self
+            .context_packet_preview_lines()
+            .into_iter()
+            .take(packet_line_limit)
+        {
+            lines.push(Line::from(format!("  {line}")));
+        }
+        lines.extend([
+            Line::from(""),
+            workflow_section_line(
+                MedicalWorkflowSection::AgentInbox,
+                self.workflow_section,
+                MedicalWorkflowSection::AgentInbox.heading(),
+                Some("  :agent inbox/result"),
+            ),
+        ]);
+        lines.extend(self.workflow_active_action_lines(MedicalWorkflowSection::AgentInbox));
+        lines.extend(self.workflow_agent_review_workbench_lines());
+        lines.extend([
+            Line::from(""),
+            workflow_section_line(
+                MedicalWorkflowSection::Proposals,
+                self.workflow_section,
+                MedicalWorkflowSection::Proposals.heading(),
+                None,
+            ),
+        ]);
+        lines.extend(self.workflow_active_action_lines(MedicalWorkflowSection::Proposals));
+        lines.push(Line::from(format!(
+            "  {proposal_label}  :proposal accept/decline/next"
+        )));
+        if let Some(proposal) = self.selected_pending_proposal() {
+            lines.extend([
+                Line::from(format!(
+                    "  selected r{} [{}] {}",
+                    proposal.base_revision,
+                    proposal_status_label(proposal.status),
+                    proposal.summary
+                )),
+                Line::from(format!(
+                    "  preview: {}",
+                    compact_preview(&proposal.proposed_body, 72)
+                )),
+            ]);
+        }
+        lines.extend([workflow_section_line(
+            MedicalWorkflowSection::Addenda,
+            self.workflow_section,
+            "Addenda",
+            Some("  :addendum start/save"),
+        )]);
+        lines.extend(self.workflow_active_action_lines(MedicalWorkflowSection::Addenda));
+        if self.addendum_draft.active {
+            lines.push(Line::from("  Addendum Draft"));
+            if self.addendum_draft.body.trim().is_empty() {
+                lines.push(Line::from("  Type addendum text in this pane."));
+            } else {
+                for line in self.addendum_draft.body.lines().take(3) {
+                    lines.push(Line::from(format!("  {line}")));
+                }
+            }
+        }
+        lines.extend([
+            Line::from(""),
+            workflow_section_line(
+                MedicalWorkflowSection::Jobs,
+                self.workflow_section,
+                "Jobs",
+                None,
+            ),
+            Line::from("  :job new/done/cancel/next"),
+        ]);
+        lines.extend(self.workflow_active_action_lines(MedicalWorkflowSection::Jobs));
+        if self.draft_task.is_active() {
+            lines.extend([
+                Line::from(""),
+                Line::from(Span::styled(
+                    "Job Draft",
+                    Style::default().add_modifier(Modifier::BOLD),
+                )),
+            ]);
+            for field in TaskField::ALL {
+                let active = self.focus == WorkspaceFocus::Workflow && field == self.task_field;
+                lines.push(field_line(
+                    field.label(),
+                    self.draft_task.value(field),
+                    active,
+                ));
+            }
+        }
+        let jobs_expanded =
+            self.workflow_section == MedicalWorkflowSection::Jobs || self.draft_task.is_active();
+        if self.tasks.is_empty() {
+            lines.push(Line::from("  No jobs yet"));
+        } else if !jobs_expanded {
+            let active_count = self
+                .tasks
+                .iter()
+                .filter(|task| workspace_task_status_is_active(task.status))
+                .count();
+            lines.push(Line::from(format!(
+                "  {} saved job(s), {active_count} active  :jobs to inspect",
+                self.tasks.len()
+            )));
+        } else {
+            if self.draft_task.is_active() {
+                lines.push(Line::from(""));
+            }
+            for (index, task) in self.tasks.iter().take(5).enumerate() {
+                let marker = if index == self.task_index { "> " } else { "  " };
+                let due = task.due_date.as_deref().unwrap_or("no due date");
+                lines.push(Line::from(vec![
+                    Span::raw(marker),
+                    Span::raw("["),
+                    Span::raw(workspace_task_status_label(task.status)),
+                    Span::raw("/"),
+                    Span::raw(workspace_task_priority_label(task.priority)),
+                    Span::raw("] "),
+                    Span::raw(due.to_string()),
+                    Span::raw("  "),
+                    Span::raw(task.title.clone()),
+                ]));
+            }
+        }
+        lines.extend([
+            Line::from(""),
+            workflow_section_line(
+                MedicalWorkflowSection::Timeline,
+                self.workflow_section,
+                "Timeline",
+                None,
+            ),
+        ]);
+        lines.extend(self.workflow_active_action_lines(MedicalWorkflowSection::Timeline));
+        if self.workflow_section == MedicalWorkflowSection::Timeline {
+            lines.extend([
+                Line::from("  Visits/encounters, notes, documents"),
+                Line::from("  Claims/referrals"),
+            ]);
+        } else {
+            lines.push(Line::from(
+                "  Visits, documents, claims/referrals  :workflow timeline",
+            ));
+        }
+        lines.extend([
+            Line::from(""),
+            workflow_section_line(
+                MedicalWorkflowSection::PracticeLibrary,
+                self.workflow_section,
+                MedicalWorkflowSection::PracticeLibrary.heading(),
+                Some("  :scope practice"),
+            ),
+        ]);
+        lines.extend(self.workflow_active_action_lines(MedicalWorkflowSection::PracticeLibrary));
+        if self.workflow_section == MedicalWorkflowSection::PracticeLibrary {
+            lines.push(Line::from(format!(
+                "  read-only records: {practice_file_count} files; {practice_derivative_count} reviewed text; {practice_clip_count} clips"
+            )));
+            lines.push(Line::from(
+                "  includes EDI/ANSI, batch communications, payer/import records",
+            ));
+            lines.push(Line::from(
+                "  :practice next/inspect/associate; no agent selection or model access",
+            ));
+            append_practice_library_item_lines(
+                &mut lines,
+                &self.practice_library_items,
+                self.practice_library_index,
+            );
+            if self.practice_library_inspect
+                && let Some(item) = self.selected_practice_library_item()
+            {
+                lines.push(Line::from(""));
+                lines.extend(practice_library_inspector_lines(item));
+            }
+        } else {
+            lines.push(Line::from(format!(
+                "  {practice_file_count} separate practice record(s); :scope practice"
+            )));
+            lines.push(Line::from(
+                "  separate from Uploaded Documents until linked by a human",
+            ));
+        }
+        lines.extend([
+            Line::from(""),
+            workflow_section_line(
+                MedicalWorkflowSection::PracticeIntelligence,
+                self.workflow_section,
+                MedicalWorkflowSection::PracticeIntelligence.heading(),
+                Some("  :scope intelligence"),
+            ),
+        ]);
+        lines.extend(
+            self.workflow_active_action_lines(MedicalWorkflowSection::PracticeIntelligence),
+        );
+        if self.workflow_section == MedicalWorkflowSection::PracticeIntelligence {
+            lines.extend([
+                Line::from("  future read-only reasoning scope over the practice database"),
+                Line::from(
+                    "  requires confirmation before any practice-wide agent query is built",
+                ),
+                Line::from(
+                    "  planned categories: patients, documents, reviewed text, EDI/ANSI, tasks, handoffs, audit",
+                ),
+                Line::from(
+                    "  disabled in QA: no model prompt submission, chart mutation, signing, claims, or payer communication",
+                ),
+            ]);
+        } else {
+            lines.push(Line::from(
+                "  Explicit future scope only; no automatic database-wide agent access",
+            ));
+        }
+        lines.extend([
+            Line::from(""),
+            workflow_section_line(
+                MedicalWorkflowSection::Audit,
+                self.workflow_section,
+                MedicalWorkflowSection::Audit.heading(),
+                None,
+            ),
+        ]);
+        lines.extend(self.workflow_active_action_lines(MedicalWorkflowSection::Audit));
+        if self.audit_events.is_empty() {
+            lines.push(Line::from("  No audit events for the active note yet"));
+        } else {
+            for event in self.audit_events.iter().take(4) {
+                lines.push(Line::from(format!(
+                    "  {} {} via {}",
+                    event.actor_kind, event.action, event.source
+                )));
+            }
+        }
+        lines.extend([
+            Line::from(""),
+            workflow_header_line("Navigation", WorkflowTone::Muted),
+            workflow_context_signal_line(
+                WorkflowTone::Muted,
+                "scope",
+                ":scope next/prev/last; direct :scope files/agent/practice",
+            ),
+            workflow_context_signal_line(
+                WorkflowTone::Muted,
+                "storage",
+                format!("{storage}; local-first workspace metadata"),
+            ),
+        ]);
+        lines
+    }
+
+    fn workflow_chart_navigation_lines(&self) -> Vec<Line<'static>> {
+        vec![
+            Line::from(""),
+            workflow_header_line("Chart Navigation", WorkflowTone::Ready),
+            Line::from("  Patient Summary"),
+            Line::from("  Contacts"),
+            Line::from("  Coverage"),
+            Line::from(
+                "  Notes: Medical Notes | Communication Notes | Administrative Notes | Addenda",
+            ),
+            Line::from(
+                "  Files: Uploaded Documents list with detail inspector and packet inclusion",
+            ),
+            Line::from("  Tasks | Ask Agent | Returned Work | Audit"),
+        ]
+    }
+
+    fn workflow_document_editor_row(&self, field: DocumentField) -> u16 {
+        self.workflow_editor_row("File Reference Draft", field.index())
+    }
+
+    fn workflow_derivative_editor_row(&self, field: DerivativeField) -> u16 {
+        self.workflow_editor_row("Reviewed Text Draft", field.index())
+    }
+
+    fn workflow_derivative_inspector_row(&self) -> u16 {
+        self.workflow_row_containing("Reviewed Text Inspector")
+    }
+
+    fn workflow_clip_editor_row(&self, field: ClipField) -> u16 {
+        self.workflow_editor_row("Context Clip Draft", field.index())
+    }
+
+    fn workflow_clip_inspector_row(&self) -> u16 {
+        self.workflow_row_containing("Clip Inspector")
+    }
+
+    fn workflow_addendum_editor_row(&self) -> u16 {
+        self.workflow_row_containing("Addendum Draft")
+    }
+
+    fn workflow_agent_request_editor_row(&self) -> u16 {
+        if self.agent_request.is_active() {
+            let storage = self
+                .store_description
+                .as_deref()
+                .unwrap_or("App-server workspace store");
+            let lines = self.medical_workflow_lines(storage);
+            if let Some((row, _)) = agent_request_cursor_row_and_label_len(&lines) {
+                return row.min(u16::MAX as usize) as u16;
+            }
+        }
+        self.workflow_section_row(MedicalWorkflowSection::AgentRequest)
+    }
+
+    fn workflow_agent_result_editor_row(&self) -> u16 {
+        self.workflow_row_containing("Returned Work Draft")
+    }
+
+    fn workflow_task_editor_row(&self, field: TaskField) -> u16 {
+        self.workflow_editor_row("Job Draft", field.index())
+    }
+
+    fn workflow_safety_editor_row(&self, field: SafetyField) -> u16 {
+        self.workflow_editor_row("Clinical Safety Draft", field.index())
+    }
+
+    fn scroll_to_active_workflow_editor(&mut self) {
+        if self.agent_result.is_active() || self.agent_request.is_active() {
+            self.agent_scroll = 0;
+        } else if self.addendum_draft.active {
+            self.workflow_scroll = self.workflow_addendum_editor_row();
+        } else if self.derivative_draft.is_active() {
+            self.workflow_scroll = self.workflow_derivative_editor_row(self.derivative_field);
+        } else if self.clip_draft.is_active() {
+            self.workflow_scroll = self.workflow_clip_editor_row(self.clip_field);
+        } else if self.draft_task.is_active() {
+            self.workflow_scroll = self.workflow_task_editor_row(self.task_field);
+        } else if self.draft_safety.is_active() {
+            self.workflow_scroll = self.workflow_safety_editor_row(self.safety_field);
+        } else if self.draft_document.is_active() {
+            self.workflow_scroll = self.workflow_document_editor_row(self.document_field);
+        }
+    }
+
+    fn workflow_editor_row(&self, section_title: &str, field_index: usize) -> u16 {
+        self.workflow_row_containing(section_title)
+            .saturating_add(1)
+            .saturating_add(field_index as u16)
+    }
+
+    fn workflow_row_containing(&self, text: &str) -> u16 {
+        let storage = self
+            .store_description
+            .as_deref()
+            .unwrap_or("App-server workspace store");
+        self.medical_workflow_lines(storage)
+            .iter()
+            .position(|line| line_plain_text(line).contains(text))
+            .map(|row| row as u16)
+            .unwrap_or(0)
+    }
+
+    fn workflow_section_row(&self, section: MedicalWorkflowSection) -> u16 {
+        let storage = self
+            .store_description
+            .as_deref()
+            .unwrap_or("App-server workspace store");
+        self.medical_workflow_lines(storage)
+            .iter()
+            .position(|line| workflow_line_matches_section(line, section))
+            .unwrap_or(0) as u16
+    }
+
+    fn capped_workflow_scroll_for_anchor(
+        &self,
+        lines: &[Line<'_>],
+        width: u16,
+        visible_height: u16,
+        anchor_row: u16,
+    ) -> u16 {
+        if width == 0 || visible_height == 0 {
+            return 0;
+        }
+        let target_scroll = workflow_visual_row_for_line(lines, anchor_row, width);
+        if self.workflow_section == MedicalWorkflowSection::Audit
+            && !self.workflow_section_has_active_editor()
+        {
+            return target_scroll;
+        }
+        let max_scroll = workflow_visual_line_count(lines, width)
+            .saturating_sub(visible_height as usize)
+            .min(u16::MAX as usize) as u16;
+        target_scroll.min(max_scroll)
+    }
+
+    fn workflow_body_scroll_anchor_row(&self) -> u16 {
+        if !self.workflow_section_has_active_editor() {
+            return self.workflow_scroll;
+        }
+        if self.draft_task.is_active() {
+            return self.workflow_scroll.saturating_sub(1);
+        }
+        if self.draft_safety.is_active() {
+            return self
+                .workflow_scroll
+                .saturating_sub(self.safety_field.index() as u16)
+                .saturating_sub(1);
+        }
+        self.workflow_scroll
+    }
+
+    fn workflow_active_editor_cursor_row(&self) -> Option<u16> {
+        if self.agent_result.is_active() {
+            Some(self.workflow_agent_result_editor_row())
+        } else if self.agent_request.is_active() {
+            Some(self.workflow_agent_request_editor_row())
+        } else if self.addendum_draft.active {
+            Some(self.workflow_addendum_editor_row())
+        } else if self.derivative_draft.is_active() {
+            Some(self.workflow_derivative_editor_row(self.derivative_field))
+        } else if self.clip_draft.is_active() {
+            Some(self.workflow_clip_editor_row(self.clip_field))
+        } else if self.draft_task.is_active() {
+            Some(self.workflow_task_editor_row(self.task_field))
+        } else if self.draft_safety.is_active() {
+            Some(self.workflow_safety_editor_row(self.safety_field))
+        } else if self.draft_document.is_active() {
+            Some(self.workflow_document_editor_row(self.document_field))
+        } else {
+            None
+        }
+    }
+
+    fn workflow_section_has_active_editor(&self) -> bool {
+        matches!(
+            self.workflow_section,
+            MedicalWorkflowSection::AgentInbox if self.agent_result.is_active()
+        ) || matches!(
+            self.workflow_section,
+            MedicalWorkflowSection::AgentRequest if self.agent_request.is_active()
+        ) || matches!(
+            self.workflow_section,
+            MedicalWorkflowSection::Addenda if self.addendum_draft.active
+        ) || matches!(
+            self.workflow_section,
+            MedicalWorkflowSection::Documents if self.draft_document.is_active()
+        ) || matches!(
+            self.workflow_section,
+            MedicalWorkflowSection::Documents if self.derivative_draft.is_active()
+        ) || matches!(
+            self.workflow_section,
+            MedicalWorkflowSection::Documents if self.clip_draft.is_active()
+        ) || matches!(
+            self.workflow_section,
+            MedicalWorkflowSection::Jobs if self.draft_task.is_active()
+        ) || matches!(
+            self.workflow_section,
+            MedicalWorkflowSection::Safety if self.draft_safety.is_active()
+        )
+    }
+
+    fn patient_file_tree_blocked_by_active_editor(&self) -> bool {
+        self.agent_result.is_active()
+            || self.addendum_draft.active
+            || self.draft_document.is_active()
+            || self.derivative_draft.is_active()
+            || self.clip_draft.is_active()
+            || self.draft_task.is_active()
+            || self.draft_safety.is_active()
+    }
+
+    fn workflow_visible_row(&self, row: u16, width: u16, visible_height: u16) -> Option<u16> {
+        if width == 0 || visible_height == 0 {
+            return None;
+        }
+        let storage = self
+            .store_description
+            .as_deref()
+            .unwrap_or("App-server workspace store");
+        let lines = self.medical_workflow_lines(storage);
+        let context_height = medical_workflow_sticky_context_height(visible_height);
+        if row < MEDICAL_WORKFLOW_CHART_CONTEXT_LINE_COUNT as u16 {
+            return (row < context_height).then_some(row);
+        }
+        let body_height = visible_height.saturating_sub(context_height);
+        if body_height == 0 {
+            if self.workflow_active_editor_cursor_row() == Some(row) && context_height > 0 {
+                return Some(0);
+            }
+            return None;
+        }
+        let body_lines = lines
+            .into_iter()
+            .skip(MEDICAL_WORKFLOW_CHART_CONTEXT_LINE_COUNT)
+            .collect::<Vec<_>>();
+        let body_row = row.saturating_sub(MEDICAL_WORKFLOW_CHART_CONTEXT_LINE_COUNT as u16);
+        let anchor_row = self
+            .workflow_body_scroll_anchor_row()
+            .saturating_sub(MEDICAL_WORKFLOW_CHART_CONTEXT_LINE_COUNT as u16);
+        let scroll =
+            self.capped_workflow_scroll_for_anchor(&body_lines, width, body_height, anchor_row);
+        let visual_row = workflow_visual_row_for_line(&body_lines, body_row, width);
+        if visual_row < scroll {
+            return None;
+        }
+        let visible_row = visual_row - scroll;
+        (visible_row < body_height).then_some(context_height.saturating_add(visible_row))
+    }
+}
+
+#[cfg(test)]
+impl WorkspaceDashboard {
+    pub(crate) fn set_note_body_for_tests(&mut self, body: &str) {
+        self.draft_note.body = body.to_string();
+        self.mark_dirty();
+    }
+
+    pub(crate) fn note_body_for_tests(&self) -> &str {
+        &self.draft_note.body
+    }
+
+    pub(crate) fn client_display_name_for_tests(&self) -> &str {
+        &self.draft_client.display_name
+    }
+
+    pub(crate) fn note_title_for_tests(&self) -> &str {
+        &self.draft_note.title
+    }
+
+    pub(crate) fn note_revision_for_tests(&self) -> i64 {
+        self.draft_note.current_revision
+    }
+
+    pub(crate) fn store_description_for_tests(&self) -> Option<&str> {
+        self.store_description.as_deref()
+    }
+
+    pub(crate) fn set_context_for_tests(
+        &mut self,
+        display_name: &str,
+        note_title: &str,
+        note_body: &str,
+    ) {
+        self.draft_client.display_name = display_name.to_string();
+        self.draft_note.title = note_title.to_string();
+        self.draft_note.body = note_body.to_string();
+    }
+
+    pub(crate) fn set_record_dates_for_tests(&mut self, start: &str, end: &str) {
+        self.draft_client.record_start_date = start.to_string();
+        self.draft_client.record_end_date = end.to_string();
+    }
+
+    pub(crate) fn set_document_draft_for_tests(
+        &mut self,
+        kind: &str,
+        title: &str,
+        local_path: &str,
+        notes: &str,
+    ) {
+        self.draft_document.scope = if kind.to_ascii_lowercase().contains("edi")
+            || kind.to_ascii_lowercase().contains("x12")
+        {
+            "practice".to_string()
+        } else {
+            "patient".to_string()
+        };
+        self.draft_document.kind = kind.to_string();
+        self.draft_document.active = true;
+        self.draft_document.title = title.to_string();
+        self.draft_document.local_path = local_path.to_string();
+        self.draft_document.notes = notes.to_string();
+        self.focus = WorkspaceFocus::Workflow;
+        self.mark_dirty();
+    }
+
+    pub(crate) fn document_title_for_tests(&self) -> Option<&str> {
+        self.documents
+            .first()
+            .map(|document| document.title.as_str())
+    }
+
+    pub(crate) fn document_titles_for_tests(&self) -> Vec<&str> {
+        self.documents
+            .iter()
+            .map(|document| document.title.as_str())
+            .collect()
+    }
+
+    pub(crate) fn inspected_document_title_for_tests(&self) -> Option<&str> {
+        self.inspected_artifact()
+            .map(|document| document.title.as_str())
+    }
+
+    pub(crate) fn focus_label_for_tests(&self) -> &'static str {
+        match self.focus {
+            WorkspaceFocus::Clients => "clients",
+            WorkspaceFocus::Notes => "notes",
+            WorkspaceFocus::Demographics => "demographics",
+            WorkspaceFocus::NoteTitle => "note title",
+            WorkspaceFocus::NoteBody => "note body",
+            WorkspaceFocus::Workflow => "workflow",
+            WorkspaceFocus::Agent => "agent",
+            WorkspaceFocus::PatientFiles => "patient files",
+        }
+    }
+
+    pub(crate) fn workflow_section_label_for_tests(&self) -> &'static str {
+        self.workflow_section.status_label()
+    }
+
+    pub(crate) fn workflow_scroll_for_tests(&self) -> u16 {
+        self.workflow_scroll
+    }
+
+    pub(crate) fn agent_scroll_for_tests(&self) -> u16 {
+        self.agent_scroll
+    }
+
+    pub(crate) fn task_titles_for_tests(&self) -> Vec<&str> {
+        self.tasks.iter().map(|task| task.title.as_str()).collect()
+    }
+
+    pub(crate) fn selected_task_status_for_tests(&self) -> Option<WorkspaceTaskStatus> {
+        self.selected_task().map(|task| task.status)
+    }
+
+    pub(crate) fn client_id_for_tests(&self) -> Option<&str> {
+        self.draft_client.id.as_deref()
+    }
+
+    pub(crate) fn note_id_for_tests(&self) -> Option<&str> {
+        self.draft_note.id.as_deref()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkspaceLayoutMode {
+    Large,
+    Medium,
+    Compact,
+    Tiny,
+}
+
+impl WorkspaceLayoutMode {
+    fn for_area(area: Rect) -> Self {
+        if area.width < 60 || area.height < 12 {
+            Self::Tiny
+        } else if area.width < 100 || area.height < 22 {
+            Self::Compact
+        } else if area.width < 140 || area.height < 30 {
+            Self::Medium
+        } else {
+            Self::Large
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct WorkspaceAreas {
+    header: Rect,
+    clients: Rect,
+    notes: Rect,
+    patient_files: Rect,
+    demographics: Rect,
+    note_title: Rect,
+    note_body: Rect,
+    workflow: Rect,
+    status: Rect,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct MedicalLargeAreas {
+    header: Rect,
+    clients: Rect,
+    notes: Rect,
+    patient_files: Rect,
+    demographics: Rect,
+    note_title: Rect,
+    note_body: Rect,
+    active_work: Rect,
+    agent: Rect,
+    status: Rect,
+}
+
+impl MedicalLargeAreas {
+    fn new(area: Rect) -> Self {
+        let vertical = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(2),
+                Constraint::Min(3),
+                Constraint::Length(1),
+            ])
+            .split(area);
+        let agent_width = if area.width >= 150 { 46 } else { 40 };
+        let columns = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Length(34),
+                Constraint::Min(42),
+                Constraint::Length(agent_width),
+            ])
+            .split(vertical[1]);
+        let left = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Percentage(34),
+                Constraint::Percentage(26),
+                Constraint::Percentage(40),
+            ])
+            .split(columns[0]);
+        let center = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(10),
+                Constraint::Length(3),
+                Constraint::Min(3),
+            ])
+            .split(columns[1]);
+        Self {
+            header: vertical[0],
+            clients: left[0],
+            notes: left[1],
+            patient_files: left[2],
+            demographics: center[0],
+            note_title: center[1],
+            note_body: center[2],
+            active_work: columns[1],
+            agent: columns[2],
+            status: vertical[2],
+        }
+    }
+}
+
+impl WorkspaceAreas {
+    fn new(area: Rect) -> Self {
+        let mode = WorkspaceLayoutMode::for_area(area);
+        let vertical = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(if mode == WorkspaceLayoutMode::Compact {
+                    1
+                } else {
+                    2
+                }),
+                Constraint::Min(3),
+                Constraint::Length(1),
+            ])
+            .split(area);
+        if mode == WorkspaceLayoutMode::Compact {
+            let rows = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(4),
+                    Constraint::Length(4),
+                    Constraint::Length(6),
+                    Constraint::Length(6),
+                    Constraint::Length(3),
+                    Constraint::Min(3),
+                ])
+                .split(vertical[1]);
+            return Self {
+                header: vertical[0],
+                clients: rows[0],
+                notes: rows[1],
+                patient_files: Rect::new(0, 0, 0, 0),
+                workflow: rows[2],
+                demographics: rows[3],
+                note_title: rows[4],
+                note_body: rows[5],
+                status: vertical[2],
+            };
+        }
+        if mode == WorkspaceLayoutMode::Medium {
+            let columns = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Length(30), Constraint::Min(40)])
+                .split(vertical[1]);
+            let left = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Percentage(36),
+                    Constraint::Percentage(28),
+                    Constraint::Percentage(36),
+                ])
+                .split(columns[0]);
+            let right = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(9),
+                    Constraint::Length(3),
+                    Constraint::Percentage(52),
+                    Constraint::Min(7),
+                ])
+                .split(columns[1]);
+            return Self {
+                header: vertical[0],
+                clients: left[0],
+                notes: left[1],
+                patient_files: left[2],
+                demographics: right[0],
+                note_title: right[1],
+                note_body: right[2],
+                workflow: right[3],
+                status: vertical[2],
+            };
+        }
+        let columns = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Length(32),
+                Constraint::Percentage(48),
+                Constraint::Min(38),
+            ])
+            .split(vertical[1]);
+        let left = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+            .split(columns[0]);
+        let middle = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(10),
+                Constraint::Length(3),
+                Constraint::Min(3),
+            ])
+            .split(columns[1]);
+        Self {
+            header: vertical[0],
+            clients: left[0],
+            notes: left[1],
+            patient_files: Rect::new(0, 0, 0, 0),
+            demographics: middle[0],
+            note_title: middle[1],
+            note_body: middle[2],
+            workflow: columns[2],
+            status: vertical[2],
+        }
+    }
+}
+
+fn normalize_workspace_key_event(mut key_event: KeyEvent) -> KeyEvent {
+    if key_event.modifiers == KeyModifiers::CONTROL && matches!(key_event.code, KeyCode::Char('i'))
+    {
+        key_event.code = KeyCode::Tab;
+        key_event.modifiers.remove(KeyModifiers::CONTROL);
+        return key_event;
+    }
+    if key_event.modifiers.contains(KeyModifiers::SHIFT) {
+        match key_event.code {
+            KeyCode::Char(';') => {
+                key_event.code = KeyCode::Char(':');
+                key_event.modifiers.remove(KeyModifiers::SHIFT);
+            }
+            KeyCode::Char('/') => {
+                key_event.code = KeyCode::Char('?');
+                key_event.modifiers.remove(KeyModifiers::SHIFT);
+            }
+            _ => {}
+        }
+    }
+    key_event
+}
+
+fn workspace_command_shortcut_key(key_event: &KeyEvent) -> bool {
+    matches!(key_event.code, KeyCode::Char(':'))
+}
+
+fn workspace_help_shortcut_key(key_event: &KeyEvent) -> bool {
+    matches!(key_event.code, KeyCode::Char('?'))
+}
+
+fn patient_search_shortcut_key(key_event: &KeyEvent) -> bool {
+    matches!(key_event.code, KeyCode::Char('/'))
+}
+
+fn text_cursor_navigation_key(key_event: &KeyEvent) -> bool {
+    matches!(
+        key_event.code,
+        KeyCode::Left | KeyCode::Right | KeyCode::Home | KeyCode::End | KeyCode::Delete
+    )
+}
+
+fn render_pane(
+    title: &'static str,
+    area: Rect,
+    active: bool,
+    paragraph: Paragraph<'_>,
+    buf: &mut Buffer,
+) {
+    Clear.render(area, buf);
+    paragraph.block(pane_block(title, active)).render(area, buf);
+}
+
+fn compose_footer_text(parts: &[String], width: u16) -> String {
+    let width = width as usize;
+    if width == 0 {
+        return String::new();
+    }
+    let mut parts = parts
+        .iter()
+        .filter(|part| !part.trim().is_empty())
+        .cloned()
+        .collect::<Vec<_>>();
+    if parts.is_empty() {
+        return String::new();
+    }
+
+    while parts.len() > 2 && joined_width(&parts) > width {
+        parts.pop();
+    }
+
+    if joined_width(&parts) > width {
+        let len = parts.len();
+        if len > 0 {
+            let prefix_width = joined_width(&parts[..len.saturating_sub(1)]);
+            let separator_width = if len > 1 { 3 } else { 0 };
+            let available = width.saturating_sub(prefix_width + separator_width).max(8);
+            let compact = compact_preview(&parts[len - 1], available);
+            parts[len - 1] = compact;
+        }
+    }
+
+    let joined = parts.join(" | ");
+    if joined.chars().count() > width {
+        compact_preview(&joined, width)
+    } else {
+        joined
+    }
+}
+
+fn joined_width(parts: &[String]) -> usize {
+    parts.iter().map(|part| part.chars().count()).sum::<usize>() + parts.len().saturating_sub(1) * 3
+}
+
+fn pane_block(title: &'static str, active: bool) -> Block<'static> {
+    let border_style = if active {
+        Style::default().fg(Color::Cyan)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_style(border_style)
+}
+
+fn selected_line(text: &str, selected: bool) -> Line<'static> {
+    let marker = if selected { "> " } else { "  " };
+    let style = if selected {
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+    };
+    Line::from(vec![
+        Span::raw(marker.to_string()),
+        Span::styled(text.to_string(), style),
+    ])
+}
+
+fn text_field_display_lines(text: &str) -> Vec<&str> {
+    if text.is_empty() {
+        vec![""]
+    } else {
+        text.split('\n').collect()
+    }
+}
+
+fn text_after_last_newline(text: &str) -> &str {
+    text.rsplit('\n').next().unwrap_or_default()
+}
+
+fn agent_request_input_lines(body: &str, selected: bool, max_lines: usize) -> Vec<Line<'static>> {
+    let body_lines = text_field_display_lines(body);
+    let max_lines = max_lines.max(1);
+    let start = body_lines.len().saturating_sub(max_lines);
+    let last_index = body_lines.len().saturating_sub(1);
+    let mut lines = Vec::new();
+    if start > 0 {
+        lines.push(Line::from(Span::styled(
+            "  ...",
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+    for (index, text) in body_lines.iter().enumerate().skip(start) {
+        let label = if index == 0 {
+            AGENT_REQUEST_INPUT_LABEL
+        } else {
+            AGENT_REQUEST_CONTINUATION_LABEL
+        };
+        lines.push(selected_line(
+            &format!("{label}{text}"),
+            selected && index == last_index,
+        ));
+    }
+    lines
+}
+
+fn agent_request_cursor_row_and_label_len(lines: &[Line<'_>]) -> Option<(usize, usize)> {
+    lines.iter().enumerate().find_map(|(row, line)| {
+        agent_request_cursor_label_len(&line_plain_text(line)).map(|label_len| (row, label_len))
+    })
+}
+
+fn agent_request_cursor_label_len(plain: &str) -> Option<usize> {
+    let request_prefix = format!("> {AGENT_REQUEST_INPUT_LABEL}");
+    if plain.starts_with(&request_prefix) {
+        return Some(request_prefix.chars().count());
+    }
+    let continuation_prefix = format!("> {AGENT_REQUEST_CONTINUATION_LABEL}");
+    if plain.starts_with(&continuation_prefix) {
+        return Some(continuation_prefix.chars().count());
+    }
+    None
+}
+
+fn field_line(label: &str, value: &str, active: bool) -> Line<'static> {
+    let style = if active {
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Gray)
+    };
+    Line::from(vec![
+        Span::styled(format!("{label}: "), style),
+        Span::raw(value.to_string()),
+    ])
+}
+
+fn patient_admin_editor_field_line(
+    label: &str,
+    value: &str,
+    active: bool,
+    placeholder: &str,
+) -> Line<'static> {
+    let label_style = if active {
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Gray)
+    };
+    let value_span = if value.trim().is_empty() {
+        Span::styled(
+            placeholder.to_string(),
+            Style::default().fg(Color::DarkGray),
+        )
+    } else {
+        Span::raw(value.to_string())
+    };
+    Line::from(vec![
+        Span::styled(format!("{label}: "), label_style),
+        value_span,
+    ])
+}
+
+fn safety_category_heading(category: &str) -> &'static str {
+    match category {
+        "allergy" => "Allergies",
+        "medication" => "Medications",
+        "condition" => "Problems / Conditions",
+        "precaution" => "Precautions",
+        _ => "Clinical Safety",
+    }
+}
+
+fn safety_category_command(category: &str) -> &'static str {
+    match category {
+        "allergy" => "allergy",
+        "medication" => "medication",
+        "condition" => "problem",
+        "precaution" => "precaution",
+        _ => "safety",
+    }
+}
+
+fn safety_item_detail_suffix(item: &WorkspacePatientSafetyItem) -> String {
+    match item.category.as_str() {
+        "allergy" => item
+            .reaction
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .map(|reaction| format!(" - {reaction}"))
+            .unwrap_or_default(),
+        "medication" => {
+            let parts = [
+                item.dose.as_deref(),
+                item.route.as_deref(),
+                item.frequency.as_deref(),
+            ]
+            .into_iter()
+            .flatten()
+            .filter(|value| !value.trim().is_empty())
+            .collect::<Vec<_>>();
+            if parts.is_empty() {
+                String::new()
+            } else {
+                format!(" - {}", parts.join(" "))
+            }
+        }
+        "condition" | "precaution" => item
+            .notes
+            .trim()
+            .split('\n')
+            .next()
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| format!(" - {}", compact_preview(value, 36)))
+            .unwrap_or_default(),
+        _ => String::new(),
+    }
+}
+
+fn safety_item_status_suffix(item: &WorkspacePatientSafetyItem) -> String {
+    item.status
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .map(|status| format!(" [{status}]"))
+        .unwrap_or_default()
+}
+
+#[derive(Clone, Copy)]
+enum WorkflowTone {
+    Ready,
+    Attention,
+    Review,
+    Caution,
+    Agent,
+    Muted,
+}
+
+fn workflow_tone_style(tone: WorkflowTone) -> Style {
+    match tone {
+        WorkflowTone::Ready => Style::default().fg(Color::LightGreen),
+        WorkflowTone::Attention => Style::default().fg(Color::LightRed),
+        WorkflowTone::Review => Style::default().fg(Color::LightYellow),
+        WorkflowTone::Caution => Style::default().fg(Color::Yellow),
+        WorkflowTone::Agent => Style::default().fg(Color::LightCyan),
+        WorkflowTone::Muted => Style::default().fg(Color::Gray),
+    }
+}
+
+fn workflow_tone_for_scope_tab(tab: MedicalScopeTab) -> WorkflowTone {
+    match tab {
+        MedicalScopeTab::Chart | MedicalScopeTab::Safety | MedicalScopeTab::Files => {
+            WorkflowTone::Ready
+        }
+        MedicalScopeTab::Packet => WorkflowTone::Agent,
+        MedicalScopeTab::Review => WorkflowTone::Review,
+        MedicalScopeTab::Library => WorkflowTone::Agent,
+        MedicalScopeTab::Intelligence => WorkflowTone::Caution,
+        MedicalScopeTab::Audit => WorkflowTone::Muted,
+    }
+}
+
+fn workflow_tone_for_agent_result_status(status: &str) -> WorkflowTone {
+    match agent_result_status_label(status) {
+        "review pending" => WorkflowTone::Review,
+        "reviewed" | "converted" => WorkflowTone::Ready,
+        "dismissed" => WorkflowTone::Attention,
+        _ => WorkflowTone::Caution,
+    }
+}
+
+fn workflow_header_line(title: &'static str, tone: WorkflowTone) -> Line<'static> {
+    Line::from(Span::styled(
+        title,
+        workflow_tone_style(tone).add_modifier(Modifier::BOLD),
+    ))
+}
+
+fn workflow_context_signal_line(
+    tone: WorkflowTone,
+    label: &'static str,
+    detail: impl Into<String>,
+) -> Line<'static> {
+    let style = workflow_tone_style(tone);
+    Line::from(vec![
+        Span::styled("  ", Style::default()),
+        Span::styled("● ", style),
+        Span::styled(format!("{label}: "), style.add_modifier(Modifier::BOLD)),
+        Span::raw(detail.into()),
+    ])
+}
+
+fn intake_checklist_tone(items: &[bool]) -> WorkflowTone {
+    if items.iter().all(|complete| *complete) {
+        WorkflowTone::Ready
+    } else {
+        WorkflowTone::Caution
+    }
+}
+
+fn checklist_line(label: &'static str, complete: bool, detail: &'static str) -> Line<'static> {
+    let tone = if complete {
+        WorkflowTone::Ready
+    } else {
+        WorkflowTone::Caution
+    };
+    let style = workflow_tone_style(tone);
+    let marker = if complete { "[x]" } else { "[ ]" };
+    Line::from(vec![
+        Span::styled(format!("  {marker} "), style),
+        Span::styled(label.to_string(), style.add_modifier(Modifier::BOLD)),
+        Span::raw(format!(" - {detail}")),
+    ])
+}
+
+fn workflow_tone_for_action_text(text: &str) -> WorkflowTone {
+    let lower = text.trim_start().to_ascii_lowercase();
+    if lower.starts_with("blocked") || lower.starts_with("alert") {
+        WorkflowTone::Attention
+    } else if lower.starts_with("review")
+        || lower.contains("review-pending")
+        || lower.contains("review pending")
+        || lower.starts_with("safety")
+    {
+        WorkflowTone::Review
+    } else if lower.starts_with("next") {
+        WorkflowTone::Ready
+    } else if lower.starts_with("boundary")
+        || lower.starts_with("read-only")
+        || lower.starts_with("files")
+    {
+        WorkflowTone::Muted
+    } else {
+        WorkflowTone::Agent
+    }
+}
+
+fn workflow_split_action_prefix(text: &str) -> Option<(&str, &str)> {
+    let index = text.find(':')?;
+    let (prefix, rest) = text.split_at(index + 1);
+    Some((prefix, rest))
+}
+
+fn workflow_section_line(
+    section: MedicalWorkflowSection,
+    active_section: MedicalWorkflowSection,
+    title: &'static str,
+    suffix: Option<&'static str>,
+) -> Line<'static> {
+    let active = section == active_section;
+    let marker = if active { "> " } else { "" };
+    let style = if active {
+        workflow_tone_style(workflow_tone_for_scope_tab(medical_scope_tab_for_section(
+            section,
+        )))
+        .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().add_modifier(Modifier::BOLD)
+    };
+    let mut spans = vec![Span::styled(format!("{marker}{title}"), style)];
+    if let Some(suffix) = suffix {
+        spans.push(Span::raw(suffix.to_string()));
+    }
+    Line::from(spans)
+}
+
+fn workflow_action_hint_line(text: impl Into<String>) -> Line<'static> {
+    let text = text.into();
+    let tone = workflow_tone_for_action_text(&text);
+    let style = workflow_tone_style(tone);
+    let (prefix, rest) = workflow_split_action_prefix(&text).unwrap_or((text.as_str(), ""));
+    Line::from(vec![
+        Span::styled("  ", Style::default()),
+        Span::styled("● ", style),
+        Span::styled(prefix.to_string(), style.add_modifier(Modifier::BOLD)),
+        Span::raw(rest.to_string()),
+    ])
+}
+
+fn workflow_action_rail_label(
+    action_id: WorkspaceActionId,
+    fallback: &'static str,
+) -> &'static str {
+    match action_id {
+        WorkspaceActionId::ScopePatientChart => "Chart",
+        WorkspaceActionId::SafetyOpen => "Safety",
+        WorkspaceActionId::AllergyAdd => "Add allergy",
+        WorkspaceActionId::MedicationAdd => "Add med",
+        WorkspaceActionId::ProblemAdd => "Add problem",
+        WorkspaceActionId::PrecautionAdd => "Add precaution",
+        WorkspaceActionId::ScopePatientFiles => "Files",
+        WorkspaceActionId::ScopeAgentPacket => "Agent",
+        WorkspaceActionId::ScopeAgentReview => "Review",
+        WorkspaceActionId::ScopePracticeLibrary => "Library",
+        WorkspaceActionId::ScopePracticeIntelligence => "Intelligence",
+        WorkspaceActionId::ScopeAuditTrail => "Audit",
+        WorkspaceActionId::ScopeLast => "Last scope",
+        WorkspaceActionId::FocusNoteBody => "Write eval note",
+        WorkspaceActionId::DocumentAttach => "Add file",
+        WorkspaceActionId::DocumentChoose => "Choose JPG/PDF",
+        WorkspaceActionId::ArtifactImport => "Import vault copy",
+        WorkspaceActionId::ArtifactThumbnail => "JPG/PDF preview",
+        WorkspaceActionId::ArtifactOpen => "Open file",
+        WorkspaceActionId::ArtifactToggle => "Include file",
+        WorkspaceActionId::DerivativeToggle => "Select reviewed text",
+        WorkspaceActionId::ClipToggle => "Select clip",
+        WorkspaceActionId::AgentRequest => "Ask Agent",
+        WorkspaceActionId::AgentPreview => "Review Packet",
+        WorkspaceActionId::AgentInbox => "Returned work review",
+        WorkspaceActionId::AgentResult => "Paste agent work",
+        WorkspaceActionId::AgentResultSave => "Save agent work",
+        WorkspaceActionId::AgentResultInspect => "Inspect agent result",
+        WorkspaceActionId::AgentResultReviewed => "Mark reviewed",
+        WorkspaceActionId::AgentResultDismiss => "Dismiss result",
+        WorkspaceActionId::AgentResultToProposal => "Make proposal",
+        WorkspaceActionId::AgentResultToAddendum => "Make addendum",
+        WorkspaceActionId::AgentResultToJob => "Make job",
+        WorkspaceActionId::PracticeLibraryNext => "Next record",
+        WorkspaceActionId::PracticeLibraryInspect => "Inspect record",
+        WorkspaceActionId::PracticeLibraryAssociate => "Associate file",
+        _ => fallback,
+    }
+}
+
+fn workflow_blocked_reason_label(action_id: WorkspaceActionId, reason: &str) -> String {
+    match action_id {
+        WorkspaceActionId::AgentRequest if reason.starts_with("Save the file reference draft") => {
+            "save file draft first".to_string()
+        }
+        WorkspaceActionId::AgentRequest if reason.starts_with("Save the current job draft") => {
+            "save job draft first".to_string()
+        }
+        WorkspaceActionId::AgentRequest if reason.starts_with("Save the addendum draft") => {
+            "save addendum first".to_string()
+        }
+        WorkspaceActionId::PracticeLibraryAssociate if reason.starts_with("Save the patient") => {
+            "save patient first".to_string()
+        }
+        WorkspaceActionId::PracticeLibraryAssociate
+            if reason.starts_with("Selected practice record") =>
+        {
+            "linked".to_string()
+        }
+        _ => compact_preview(reason, 28),
+    }
+}
+
+fn workflow_line_matches_section(line: &Line<'_>, section: MedicalWorkflowSection) -> bool {
+    let heading = section.heading();
+    let text = line_plain_text(line);
+    let text = text.trim().strip_prefix("> ").unwrap_or(text.trim());
+    text == heading || text.starts_with(&format!("{heading}  "))
+}
+
+fn workflow_visual_line_count(lines: &[Line<'_>], width: u16) -> usize {
+    lines
+        .iter()
+        .map(|line| wrapped_line_height(line, width))
+        .sum()
+}
+
+fn workflow_visual_row_for_line(lines: &[Line<'_>], row: u16, width: u16) -> u16 {
+    lines
+        .iter()
+        .take(row as usize)
+        .map(|line| wrapped_line_height(line, width))
+        .fold(0usize, usize::saturating_add)
+        .min(u16::MAX as usize) as u16
+}
+
+fn wrapped_line_height(line: &Line<'_>, width: u16) -> usize {
+    let width = usize::from(width.max(1));
+    let char_count = line_plain_text(line).chars().count().max(1);
+    char_count.saturating_add(width - 1) / width
+}
+
+fn cursor_at_text_end(inner: Rect, row: u16, label_len: usize, text: &str) -> (u16, u16) {
+    let text_len = text.chars().count();
+    let col = label_len.saturating_add(text_len) as u16;
+    let max_x = inner.right().saturating_sub(1);
+    let x = inner.x.saturating_add(col).min(max_x);
+    let y = inner
+        .y
+        .saturating_add(row)
+        .min(inner.bottom().saturating_sub(1));
+    (x, y)
+}
+
+fn cursor_at_wrapped_line_text_end(
+    inner: Rect,
+    lines: &[Line<'_>],
+    logical_row: usize,
+    scroll: usize,
+    label_len: usize,
+    text: &str,
+) -> Option<(u16, u16)> {
+    if inner.width == 0 || inner.height == 0 {
+        return None;
+    }
+    let line_start = workflow_visual_row_for_line(
+        lines,
+        logical_row.min(u16::MAX as usize) as u16,
+        inner.width,
+    ) as usize;
+    let col = label_len.saturating_add(text.chars().count());
+    let width = usize::from(inner.width.max(1));
+    let visual_row = line_start.saturating_add(col / width);
+    if visual_row < scroll || visual_row.saturating_sub(scroll) >= inner.height as usize {
+        return None;
+    }
+    let x_offset = (col % width).min(width.saturating_sub(1));
+    let x = inner
+        .x
+        .saturating_add(x_offset.min(u16::MAX as usize) as u16)
+        .min(inner.right().saturating_sub(1));
+    let y = inner
+        .y
+        .saturating_add(visual_row.saturating_sub(scroll).min(u16::MAX as usize) as u16)
+        .min(inner.bottom().saturating_sub(1));
+    Some((x, y))
+}
+
+fn medical_workflow_sticky_context_height(visible_height: u16) -> u16 {
+    let desired = if visible_height >= 13 {
+        MEDICAL_WORKFLOW_CHART_CONTEXT_LINE_COUNT as u16
+    } else if visible_height >= 12 {
+        6
+    } else if visible_height >= 7 {
+        5
+    } else if visible_height >= 5 {
+        4
+    } else {
+        3
+    };
+    desired.min(visible_height.saturating_sub(2).max(1))
+}
+
+fn inner_rect(area: Rect) -> Rect {
+    area.inner(Margin {
+        vertical: 1,
+        horizontal: 1,
+    })
+}
+
+fn rect_contains(area: Rect, point: (u16, u16)) -> bool {
+    let (column, row) = point;
+    column >= area.x && column < area.right() && row >= area.y && row < area.bottom()
+}
+
+fn centered_action_rect(area: Rect) -> Rect {
+    let width = area.width.saturating_mul(4).saturating_div(5).max(40);
+    let height = area.height.saturating_mul(4).saturating_div(5).max(10);
+    let width = width.min(area.width);
+    let height = height.min(area.height);
+    Rect::new(
+        area.x + area.width.saturating_sub(width) / 2,
+        area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    )
+}
+
+fn centered_command_palette_rect(area: Rect) -> Rect {
+    if area.width < 100 || area.height < 24 {
+        return area;
+    }
+    let width = area.width.saturating_mul(4).saturating_div(5).max(54);
+    let width = width.min(area.width);
+    let height = if area.height <= 12 {
+        area.height
+    } else {
+        area.height
+            .saturating_mul(3)
+            .saturating_div(5)
+            .clamp(10, 24)
+            .min(area.height)
+    };
+    Rect::new(
+        area.x + area.width.saturating_sub(width) / 2,
+        area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    )
+}
+
+fn apply_delta(current: usize, total: usize, delta: isize) -> usize {
+    if total == 0 {
+        return 0;
+    }
+    if delta < 0 {
+        current.saturating_sub(delta.unsigned_abs())
+    } else {
+        current
+            .saturating_add(delta as usize)
+            .min(total.saturating_sub(1))
+    }
+}
+
+fn nonempty_option(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+fn associated_practice_document_notes(document: &WorkspaceDocument) -> String {
+    let base = document.notes.trim();
+    let association_note = "Associated from Practice Library as patient reference metadata only; original file unchanged.";
+    if base.is_empty() {
+        association_note.to_string()
+    } else {
+        format!("{base}\n{association_note}")
+    }
+}
+
+fn nonempty_or(value: &str, fallback: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        fallback.to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn parse_artifact_selection_command(
+    command: &str,
+) -> Option<(ArtifactSelectionAction, Option<String>)> {
+    let mut parts = command.split_whitespace();
+    let first = parts.next()?;
+    if first != "artifact" {
+        return None;
+    }
+    let action = match parts.next()? {
+        "select" | "include" => ArtifactSelectionAction::Select,
+        "deselect" | "exclude" => ArtifactSelectionAction::Deselect,
+        "toggle" => ArtifactSelectionAction::Toggle,
+        "inspect" => ArtifactSelectionAction::Inspect,
+        _ => return None,
+    };
+    let selector = parts.collect::<Vec<_>>().join(" ");
+    Some((action, (!selector.is_empty()).then_some(selector)))
+}
+
+fn parse_derivative_selection_command(
+    command: &str,
+) -> Option<(DerivativeSelectionAction, Option<String>)> {
+    let mut parts = command.split_whitespace();
+    let first = parts.next()?;
+    if first != "derivative" {
+        return None;
+    }
+    let action = match parts.next()? {
+        "select" | "include" => DerivativeSelectionAction::Select,
+        "deselect" | "exclude" => DerivativeSelectionAction::Deselect,
+        "toggle" => DerivativeSelectionAction::Toggle,
+        "inspect" => DerivativeSelectionAction::Inspect,
+        _ => return None,
+    };
+    let selector = parts.collect::<Vec<_>>().join(" ");
+    Some((action, (!selector.is_empty()).then_some(selector)))
+}
+
+fn parse_clip_selection_command(command: &str) -> Option<(ClipSelectionAction, Option<String>)> {
+    let mut parts = command.split_whitespace();
+    let first = parts.next()?;
+    if first != "clip" {
+        return None;
+    }
+    let action = match parts.next()? {
+        "select" | "include" => ClipSelectionAction::Select,
+        "deselect" | "exclude" => ClipSelectionAction::Deselect,
+        "toggle" => ClipSelectionAction::Toggle,
+        "inspect" => ClipSelectionAction::Inspect,
+        _ => return None,
+    };
+    let selector = parts.collect::<Vec<_>>().join(" ");
+    Some((action, (!selector.is_empty()).then_some(selector)))
+}
+
+fn workspace_task_status_is_active(status: WorkspaceTaskStatus) -> bool {
+    matches!(
+        status,
+        WorkspaceTaskStatus::Open | WorkspaceTaskStatus::InProgress | WorkspaceTaskStatus::Blocked
+    )
+}
+
+fn workspace_task_status_label(status: WorkspaceTaskStatus) -> &'static str {
+    match status {
+        WorkspaceTaskStatus::Open => "open",
+        WorkspaceTaskStatus::InProgress => "in progress",
+        WorkspaceTaskStatus::Blocked => "blocked",
+        WorkspaceTaskStatus::Done => "done",
+        WorkspaceTaskStatus::Canceled => "canceled",
+    }
+}
+
+fn agent_result_status_label(status: &str) -> &str {
+    match status {
+        "review_pending" => "review pending",
+        "reviewed" => "reviewed",
+        "dismissed" => "dismissed",
+        "converted" => "converted",
+        other if other.trim().is_empty() => "review pending",
+        other => other,
+    }
+}
+
+fn workflow_agent_result_status_guidance(status: &str) -> &'static str {
+    match status {
+        "review pending" => "review-pending; human action required",
+        "reviewed" => "reviewed; no chart mutation",
+        "dismissed" => "dismissed; keep for provenance",
+        "converted" => "converted to human-reviewed draft",
+        _ => "unknown status; inspect before action",
+    }
+}
+
+fn packet_replay_available(packet: &WorkspaceContextPacket) -> bool {
+    let envelope = packet.context_envelope_json.trim();
+    !envelope.is_empty() && envelope != "{}"
+}
+
+fn workflow_packet_replay_summary(packet: &WorkspaceContextPacket) -> String {
+    if packet_replay_available(packet) {
+        format!(
+            "available ({}, sha256 {})",
+            packet_replay_verification_label(packet),
+            packet_hash_prefix(packet)
+        )
+    } else {
+        "older Medical Agent Plan trace only".to_string()
+    }
+}
+
+fn packet_replay_lines(packet: &WorkspaceContextPacket) -> Vec<Line<'static>> {
+    if !packet_replay_available(packet) {
+        return vec![Line::from(
+            "  Plan history: unavailable for older Medical Agent Plan trace",
+        )];
+    }
+    let Ok(envelope) = serde_json::from_str::<serde_json::Value>(&packet.context_envelope_json)
+    else {
+        return vec![
+            Line::from("  Plan history: stored context could not be parsed"),
+            Line::from("  historical plan remains read-only"),
+        ];
+    };
+    let version = json_str(&envelope, "/assemblyVersion", "unknown");
+    let source_mode = json_str(&envelope, "/sourceMode", "unknown");
+    let include_documents = envelope
+        .pointer("/includeDocuments")
+        .and_then(serde_json::Value::as_bool)
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "false".to_string());
+    let verification = packet_replay_verification_label(packet);
+    let hash_prefix = packet_hash_prefix(packet);
+    let human_request = json_str(&envelope, "/humanRequest", "");
+    let chart_summary = json_str(&envelope, "/summaries/chartContextSummary", "");
+    let prompt_chars = envelope
+        .pointer("/promptSnapshot")
+        .and_then(|value| value.as_str())
+        .map(|value| value.chars().count())
+        .unwrap_or(0);
+    let mut lines = vec![
+        Line::from("  Plan history: immutable historical context"),
+        Line::from("  source rows may have changed; replay uses stored snapshot only"),
+        Line::from(format!(
+            "  version: {version}; source: {source_mode}; include_documents: {include_documents}"
+        )),
+        Line::from(format!("  envelope: {verification}; sha256: {hash_prefix}")),
+        Line::from(format!("  request: {}", compact_preview(human_request, 72))),
+    ];
+    if !chart_summary.is_empty() {
+        lines.push(Line::from(format!(
+            "  chart: {}",
+            compact_preview(chart_summary, 72)
+        )));
+    }
+    for (label, pointer) in [
+        ("files", "/summaries/artifactSummary"),
+        ("reviewed text", "/summaries/derivativeSummary"),
+        ("clips", "/summaries/clipSummary"),
+    ] {
+        let summary = json_str(&envelope, pointer, "");
+        if !summary.is_empty() {
+            lines.push(Line::from(format!(
+                "  {label}: {}",
+                compact_preview(summary, 76)
+            )));
+        }
+    }
+    replay_selected_text_lines(&mut lines, &envelope, "selectedDerivatives", "derivative");
+    replay_selected_text_lines(&mut lines, &envelope, "selectedClips", "clip");
+    lines.push(Line::from(format!(
+        "  prompt snapshot: {prompt_chars} chars stored"
+    )));
+    lines.push(Line::from(
+        "  read-only replay; no chart/file/payer action taken",
+    ));
+    lines
+}
+
+fn packet_replay_verification_label(packet: &WorkspaceContextPacket) -> &'static str {
+    if !packet_replay_available(packet) {
+        return "unavailable";
+    }
+    if serde_json::from_str::<serde_json::Value>(&packet.context_envelope_json).is_err() {
+        return "invalid JSON";
+    }
+    if packet.context_envelope_sha256.trim().is_empty() {
+        return "hash unavailable";
+    }
+    let actual = format!(
+        "{:x}",
+        Sha256::digest(packet.context_envelope_json.as_bytes())
+    );
+    if actual == packet.context_envelope_sha256 {
+        "verified"
+    } else {
+        "hash mismatch"
+    }
+}
+
+fn packet_hash_prefix(packet: &WorkspaceContextPacket) -> String {
+    let hash = packet.context_envelope_sha256.trim();
+    if hash.is_empty() {
+        "none".to_string()
+    } else {
+        compact_preview(hash, 12)
+    }
+}
+
+fn agent_result_hash_prefix(result: &WorkspaceAgentResult) -> String {
+    let hash = result.context_envelope_sha256.trim();
+    if hash.is_empty() {
+        "none".to_string()
+    } else {
+        compact_preview(hash, 12)
+    }
+}
+
+fn agent_result_provenance_label(
+    result: &WorkspaceAgentResult,
+    packet: &WorkspaceContextPacket,
+) -> &'static str {
+    if packet.context_envelope_sha256.trim().is_empty()
+        || result.context_envelope_sha256.trim().is_empty()
+    {
+        "hash unavailable"
+    } else if packet.context_envelope_sha256 == result.context_envelope_sha256 {
+        "verified"
+    } else {
+        "hash mismatch"
+    }
+}
+
+fn replay_selected_text_lines(
+    lines: &mut Vec<Line<'static>>,
+    envelope: &serde_json::Value,
+    key: &str,
+    label: &str,
+) {
+    let Some(items) = envelope.get(key).and_then(|value| value.as_array()) else {
+        return;
+    };
+    for item in items.iter().take(2) {
+        let title = item
+            .get("title")
+            .and_then(|value| value.as_str())
+            .unwrap_or("untitled");
+        let range = item
+            .get("rangeLabel")
+            .and_then(|value| value.as_str())
+            .unwrap_or("selected context");
+        let body = item
+            .get("body")
+            .and_then(|value| value.as_str())
+            .unwrap_or("");
+        if body.trim().is_empty() {
+            continue;
+        }
+        lines.push(Line::from(format!(
+            "  replay {label}: {} [{}] {}",
+            compact_preview(title, 28),
+            compact_preview(range, 24),
+            compact_preview(body, 72)
+        )));
+    }
+    let extra = items.len().saturating_sub(2);
+    if extra > 0 {
+        lines.push(Line::from(format!(
+            "  replay {label}: +{extra} more stored item(s)"
+        )));
+    }
+}
+
+fn json_str<'a>(envelope: &'a serde_json::Value, pointer: &str, fallback: &'a str) -> &'a str {
+    envelope
+        .pointer(pointer)
+        .and_then(|value| value.as_str())
+        .unwrap_or(fallback)
+}
+
+fn workspace_task_priority_label(priority: WorkspaceTaskPriority) -> &'static str {
+    match priority {
+        WorkspaceTaskPriority::Low => "low",
+        WorkspaceTaskPriority::Normal => "normal",
+        WorkspaceTaskPriority::High => "high",
+        WorkspaceTaskPriority::Urgent => "urgent",
+    }
+}
+
+fn workspace_task_priority_from_text(value: &str) -> Option<WorkspaceTaskPriority> {
+    match normalize_workspace_command(value).as_str() {
+        "low" => Some(WorkspaceTaskPriority::Low),
+        "" | "normal" => Some(WorkspaceTaskPriority::Normal),
+        "high" => Some(WorkspaceTaskPriority::High),
+        "urgent" => Some(WorkspaceTaskPriority::Urgent),
+        _ => None,
+    }
+}
+
+fn proposal_status_label(status: WorkspaceNoteProposalStatus) -> &'static str {
+    match status {
+        WorkspaceNoteProposalStatus::Pending => "pending",
+        WorkspaceNoteProposalStatus::Accepted => "accepted",
+        WorkspaceNoteProposalStatus::Declined => "declined",
+    }
+}
+
+fn artifact_presence_compact_label(document: &WorkspaceDocument) -> String {
+    match artifact_presence_label(document).as_str() {
+        "missing or inaccessible" => "missing/inaccessible".to_string(),
+        "present but not a regular file" => "not a file".to_string(),
+        label => label.to_string(),
+    }
+}
+
+fn document_storage_status_label(document: &WorkspaceDocument) -> String {
+    match document.reference_kind.trim() {
+        "vault_copy" if !document.vault_path.trim().is_empty() => "vault copy".to_string(),
+        "vault_copy" => "vault copy missing path".to_string(),
+        "local_reference" | "" => "local reference".to_string(),
+        other => other.replace('_', " "),
+    }
+}
+
+fn document_thumbnail_status_label(document: &WorkspaceDocument) -> String {
+    match document.thumbnail_status.trim() {
+        "" | "none" => "preview none".to_string(),
+        "ready" if !document.thumbnail_path.trim().is_empty() => "preview ready".to_string(),
+        "ready" => "preview ready missing path".to_string(),
+        "failed" => "preview failed".to_string(),
+        "unsupported" => "preview unsupported".to_string(),
+        other => format!("preview {other}"),
+    }
+}
+
+fn document_preview_lines(document: &WorkspaceDocument) -> Vec<Line<'static>> {
+    let mut lines = vec![Line::from(Span::styled(
+        "Local Preview",
+        Style::default().add_modifier(Modifier::BOLD),
+    ))];
+    lines.push(Line::from(format!(
+        "  preview: {}",
+        document_thumbnail_status_label(document)
+    )));
+    match document.thumbnail_status.trim() {
+        "ready" if !document.thumbnail_path.trim().is_empty() => {
+            let path = Path::new(document.thumbnail_path.trim());
+            match thumbnail_block_preview_lines(path, 38, 10) {
+                Some(preview_lines) => {
+                    lines.extend(preview_lines);
+                    lines.push(Line::from(
+                        "  cached local thumbnail; not sent to agent unless metadata is included",
+                    ));
+                }
+                None => {
+                    lines.push(Line::from(
+                        "  Preview metadata exists, but the cached thumbnail is missing or unreadable.",
+                    ));
+                }
+            }
+        }
+        "failed" => lines.push(Line::from(
+            "  Preview generation failed. File reference remains metadata-only.",
+        )),
+        "unsupported" => lines.push(Line::from(
+            "  Preview generation is unsupported here. Drop/paste still saved metadata only.",
+        )),
+        _ if document_is_priority_preview_file(document) => lines.push(Line::from(
+            "  JPG/PDF preview not generated yet. Use :file preview.",
+        )),
+        _ => lines.push(Line::from(
+            "  Preview is optimized for JPG/JPEG/PDF files in this pass.",
+        )),
+    }
+    lines
+}
+
+fn thumbnail_block_preview_lines(
+    path: &Path,
+    max_cells: u16,
+    max_rows: u16,
+) -> Option<Vec<Line<'static>>> {
+    let image = image::open(path).ok()?;
+    let (source_width, source_height) = image.dimensions();
+    if source_width == 0 || source_height == 0 {
+        return None;
+    }
+    let sample_cols = (max_cells / 2).clamp(6, 24) as u32;
+    let aspect_rows =
+        ((source_height as f64 / source_width as f64) * sample_cols as f64 * 0.50).round();
+    let sample_rows = (aspect_rows as u32).clamp(3, u32::from(max_rows.max(3)));
+    let resized = image
+        .resize_exact(sample_cols, sample_rows, FilterType::Triangle)
+        .to_rgb8();
+    let mut lines = Vec::new();
+    for y in 0..sample_rows {
+        let mut spans = vec![Span::raw("  ")];
+        for x in 0..sample_cols {
+            let pixel = resized.get_pixel(x, y);
+            spans.push(Span::styled(
+                "  ",
+                Style::default().bg(ansi_preview_color(pixel[0], pixel[1], pixel[2])),
+            ));
+        }
+        lines.push(Line::from(spans));
+    }
+    Some(lines)
+}
+
+fn ansi_preview_color(red: u8, green: u8, blue: u8) -> Color {
+    let max = red.max(green).max(blue);
+    let min = red.min(green).min(blue);
+    if max < 48 {
+        return Color::Black;
+    }
+    if max.saturating_sub(min) < 24 {
+        return match max {
+            0..=95 => Color::DarkGray,
+            96..=191 => Color::Gray,
+            _ => Color::White,
+        };
+    }
+    let bright = max >= 160;
+    if red >= green && red >= blue {
+        if green > 120 {
+            return if bright {
+                Color::Yellow
+            } else {
+                Color::LightYellow
+            };
+        }
+        if blue > 120 {
+            return if bright {
+                Color::Magenta
+            } else {
+                Color::LightMagenta
+            };
+        }
+        return if bright { Color::Red } else { Color::LightRed };
+    }
+    if green >= red && green >= blue {
+        if blue > 120 {
+            return if bright {
+                Color::Cyan
+            } else {
+                Color::LightCyan
+            };
+        }
+        return if bright {
+            Color::Green
+        } else {
+            Color::LightGreen
+        };
+    }
+    if bright {
+        Color::Blue
+    } else {
+        Color::LightBlue
+    }
+}
+
+#[derive(Debug)]
+struct LocalVaultImport {
+    vault_path: PathBuf,
+    sha256: String,
+}
+
+#[derive(Debug)]
+enum ThumbnailGeneration {
+    Ready(PathBuf),
+    Unsupported(String),
+    Failed(String),
+}
+
+fn apply_thumbnail_generation_to_params(
+    params: &mut WorkspaceDocumentUpsertParams,
+    thumbnail: ThumbnailGeneration,
+) -> bool {
+    match thumbnail {
+        ThumbnailGeneration::Ready(path) => {
+            params.thumbnail_path = path.display().to_string();
+            params.thumbnail_status = "ready".to_string();
+            params.thumbnail_mime_type = Some("image/png".to_string());
+            true
+        }
+        ThumbnailGeneration::Unsupported(reason) => {
+            params.thumbnail_path.clear();
+            params.thumbnail_status = "unsupported".to_string();
+            params.thumbnail_mime_type = None;
+            params.metadata_json = metadata_json_with_preview_error(&params.metadata_json, &reason);
+            false
+        }
+        ThumbnailGeneration::Failed(reason) => {
+            params.thumbnail_path.clear();
+            params.thumbnail_status = "failed".to_string();
+            params.thumbnail_mime_type = None;
+            params.metadata_json = metadata_json_with_preview_error(&params.metadata_json, &reason);
+            false
+        }
+    }
+}
+
+fn document_thumbnail_generation_status(params: &WorkspaceDocumentUpsertParams) -> String {
+    match params.thumbnail_status.trim() {
+        "unsupported" => {
+            "Preview is not available in this terminal/platform yet; file reference was saved."
+                .to_string()
+        }
+        "failed" => "Preview generation failed; file reference was saved.".to_string(),
+        _ => "Preview not generated; file reference was saved.".to_string(),
+    }
+}
+
+fn document_upsert_params_from_document(
+    document: &WorkspaceDocument,
+) -> WorkspaceDocumentUpsertParams {
+    WorkspaceDocumentUpsertParams {
+        id: Some(document.id.clone()),
+        client_id: document.client_id.clone(),
+        encounter_id: document.encounter_id.clone(),
+        title: document.title.clone(),
+        kind: document.kind.clone(),
+        local_path: document.local_path.clone(),
+        notes: document.notes.clone(),
+        scope: document.scope.clone(),
+        detected_kind: document.detected_kind.clone(),
+        mime_type: document.mime_type.clone(),
+        file_size_bytes: document.file_size_bytes,
+        modified_at: document.modified_at,
+        sha256: document.sha256.clone(),
+        tags: document.tags.clone(),
+        source_label: document.source_label.clone(),
+        existence_status: document.existence_status.clone(),
+        metadata_json: document.metadata_json.clone(),
+        original_path: nonempty_or(&document.original_path, &document.local_path),
+        reference_kind: nonempty_or(&document.reference_kind, "local_reference"),
+        vault_path: document.vault_path.clone(),
+        content_sha256: document.content_sha256.clone(),
+        thumbnail_path: document.thumbnail_path.clone(),
+        thumbnail_status: nonempty_or(&document.thumbnail_status, "none"),
+        thumbnail_mime_type: document.thumbnail_mime_type.clone(),
+        intake_source: document.intake_source.clone(),
+        imported_at: document.imported_at,
+    }
+}
+
+fn document_original_path(document: &WorkspaceDocument) -> PathBuf {
+    PathBuf::from(nonempty_or(&document.original_path, &document.local_path))
+}
+
+fn document_preferred_file_path(document: &WorkspaceDocument) -> PathBuf {
+    let vault_path = document.vault_path.trim();
+    if !vault_path.is_empty() {
+        let path = PathBuf::from(vault_path);
+        if path.is_file() {
+            return path;
+        }
+    }
+    document_original_path(document)
+}
+
+fn copy_document_to_local_vault(
+    document: &WorkspaceDocument,
+    source_path: &Path,
+) -> std::io::Result<LocalVaultImport> {
+    let sha256 = sha256_file(&source_path.display().to_string()).unwrap_or_else(|| {
+        format!(
+            "unhashed-{}",
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        )
+    });
+    let extension = source_path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| format!(".{}", sanitize_storage_component(extension)))
+        .unwrap_or_default();
+    let target_dir = workspace_file_storage_root("vault")
+        .join(sanitize_storage_component(&document.client_id))
+        .join(sanitize_storage_component(&document.id));
+    fs::create_dir_all(&target_dir)?;
+    let vault_path = target_dir.join(format!("{sha256}{extension}"));
+    if !vault_path.exists() {
+        fs::copy(source_path, &vault_path)?;
+    }
+    Ok(LocalVaultImport { vault_path, sha256 })
+}
+
+fn generate_local_thumbnail(
+    document: &WorkspaceDocument,
+    source_path: &Path,
+) -> ThumbnailGeneration {
+    generate_macos_quicklook_thumbnail(document, source_path)
+}
+
+fn should_auto_generate_preview_after_intake() -> bool {
+    should_auto_generate_preview_after_intake_impl()
+}
+
+#[cfg(test)]
+fn should_auto_generate_preview_after_intake_impl() -> bool {
+    std::env::var_os("CODEX_WORKSPACE_AUTO_PREVIEW_IN_TESTS").is_some()
+}
+
+#[cfg(not(test))]
+fn should_auto_generate_preview_after_intake_impl() -> bool {
+    true
+}
+
+#[cfg(target_os = "macos")]
+fn generate_macos_quicklook_thumbnail(
+    document: &WorkspaceDocument,
+    source_path: &Path,
+) -> ThumbnailGeneration {
+    let output_dir = workspace_file_storage_root("thumbnails")
+        .join(sanitize_storage_component(&document.client_id))
+        .join(sanitize_storage_component(&document.id));
+    if let Err(err) = fs::create_dir_all(&output_dir) {
+        return ThumbnailGeneration::Failed(format!("Could not create thumbnail directory: {err}"));
+    }
+    if !Path::new("/usr/bin/qlmanage").is_file() {
+        return ThumbnailGeneration::Unsupported(
+            "Preview generation requires macOS Quick Look; qlmanage was not found.".to_string(),
+        );
+    }
+    let mut child = match std::process::Command::new("/usr/bin/qlmanage")
+        .args(["-t", "-s", "256", "-o"])
+        .arg(&output_dir)
+        .arg(source_path)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(err) => {
+            return ThumbnailGeneration::Failed(format!(
+                "Quick Look thumbnail generation failed: {err}"
+            ));
+        }
+    };
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let output = loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break child.wait_with_output(),
+            Ok(None) if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return ThumbnailGeneration::Failed(
+                    "Quick Look thumbnail generation timed out.".to_string(),
+                );
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(50)),
+            Err(err) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return ThumbnailGeneration::Failed(format!(
+                    "Quick Look thumbnail generation failed: {err}"
+                ));
+            }
+        }
+    };
+    match output {
+        Ok(output) if output.status.success() => {
+            if let Some(path) = newest_png_in_dir(&output_dir) {
+                ThumbnailGeneration::Ready(path)
+            } else {
+                ThumbnailGeneration::Failed(
+                    "Quick Look ran but did not produce a thumbnail PNG.".to_string(),
+                )
+            }
+        }
+        Ok(output) => ThumbnailGeneration::Failed(format!(
+            "Quick Look thumbnail generation failed with status {}.",
+            output.status
+        )),
+        Err(err) => {
+            ThumbnailGeneration::Failed(format!("Quick Look thumbnail generation failed: {err}"))
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn generate_macos_quicklook_thumbnail(
+    _document: &WorkspaceDocument,
+    _source_path: &Path,
+) -> ThumbnailGeneration {
+    ThumbnailGeneration::Unsupported(
+        "Preview generation is not available on this platform yet.".to_string(),
+    )
+}
+
+fn newest_png_in_dir(dir: &Path) -> Option<PathBuf> {
+    fs::read_dir(dir)
+        .ok()?
+        .filter_map(std::result::Result::ok)
+        .filter_map(|entry| {
+            let path = entry.path();
+            if path
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("png"))
+            {
+                let modified = entry
+                    .metadata()
+                    .and_then(|metadata| metadata.modified())
+                    .ok()?;
+                Some((modified, path))
+            } else {
+                None
+            }
+        })
+        .max_by_key(|(modified, _)| *modified)
+        .map(|(_, path)| path)
+}
+
+fn workspace_file_storage_root(kind: &str) -> PathBuf {
+    let base = std::env::var_os("CODEX_WORKSPACE_FILES_HOME")
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .map(|home| PathBuf::from(home).join(".codex").join("workspace-files"))
+        })
+        .unwrap_or_else(|| std::env::temp_dir().join("codex-workspace-files"));
+    base.join(kind)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum FileChoiceResult {
+    Selected(Vec<PathBuf>),
+    Canceled,
+    Unsupported(String),
+    Failed(String),
+}
+
+fn macos_patient_file_chooser_script() -> &'static str {
+    r#"set chosenFiles to choose file with prompt "Choose or drop JPG/PDF patient files" of type {"public.jpeg", "com.adobe.pdf", "jpg", "jpeg", "pdf"} with multiple selections allowed
+set outputPaths to {}
+repeat with chosenFile in chosenFiles
+    set end of outputPaths to POSIX path of chosenFile
+end repeat
+set AppleScript's text item delimiters to linefeed
+return outputPaths as text"#
+}
+
+#[cfg(target_os = "macos")]
+fn choose_macos_patient_file_paths() -> FileChoiceResult {
+    if !Path::new("/usr/bin/osascript").is_file() {
+        return FileChoiceResult::Unsupported(
+            "macOS file choose requires osascript; paste a local JPG/PDF path instead.".to_string(),
+        );
+    }
+    let output = std::process::Command::new("/usr/bin/osascript")
+        .arg("-e")
+        .arg(macos_patient_file_chooser_script())
+        .output();
+    match output {
+        Ok(output) if output.status.success() => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let paths = stdout
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .map(PathBuf::from)
+                .filter(|path| path.is_file())
+                .filter(|path| document_path_is_priority_preview_file(path))
+                .collect::<Vec<_>>();
+            FileChoiceResult::Selected(paths)
+        }
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if stderr.to_ascii_lowercase().contains("user canceled") {
+                FileChoiceResult::Canceled
+            } else {
+                FileChoiceResult::Failed(format!(
+                    "macOS file choose failed: {}",
+                    compact_preview(stderr.trim(), 96)
+                ))
+            }
+        }
+        Err(err) => FileChoiceResult::Failed(format!("macOS file choose failed: {err}")),
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn choose_macos_patient_file_paths() -> FileChoiceResult {
+    FileChoiceResult::Unsupported(
+        "Native file choose is macOS-only in this pass; drop or paste a local JPG/PDF path."
+            .to_string(),
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn open_local_file_with_default_app(path: &Path) -> std::result::Result<(), String> {
+    if !Path::new("/usr/bin/open").is_file() {
+        return Err("macOS open command was not found; nothing opened.".to_string());
+    }
+    match std::process::Command::new("/usr/bin/open")
+        .arg(path)
+        .status()
+    {
+        Ok(status) if status.success() => Ok(()),
+        Ok(status) => Err(format!("macOS open failed with status {status}.")),
+        Err(err) => Err(format!("macOS open failed: {err}")),
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn open_local_file_with_default_app(_path: &Path) -> std::result::Result<(), String> {
+    Err("Opening local patient files is macOS-only in this pass.".to_string())
+}
+
+fn sanitize_storage_component(value: &str) -> String {
+    let sanitized = value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    if sanitized.trim_matches('_').is_empty() {
+        "unknown".to_string()
+    } else {
+        sanitized
+    }
+}
+
+fn append_csv_tag(tags: &str, tag: &str) -> String {
+    let tag_lower = tag.to_ascii_lowercase();
+    let mut parts = tags
+        .split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    if !parts
+        .iter()
+        .any(|part| part.eq_ignore_ascii_case(&tag_lower))
+    {
+        parts.push(tag.to_string());
+    }
+    parts.join(",")
+}
+
+fn append_practice_library_item_lines(
+    lines: &mut Vec<Line<'static>>,
+    items: &[WorkspacePracticeLibraryItem],
+    selected_index: usize,
+) {
+    lines.push(Line::from("  Practice Library records"));
+    if items.is_empty() {
+        lines.push(Line::from("    none"));
+        return;
+    }
+    for (index, item) in items.iter().take(8).enumerate() {
+        let marker = if index == selected_index { ">" } else { " " };
+        let link = if item.linked_to_active_client {
+            "linked"
+        } else {
+            "unlinked"
+        };
+        lines.push(Line::from(format!(
+            "    {marker}{}. [{}] {}",
+            index + 1,
+            link,
+            document_context_label(&item.document)
+        )));
+        lines.push(Line::from(format!(
+            "         owner: {}; reason: {}; reviewed text {}; clips {}",
+            compact_preview(&item.owner_display_name, 26),
+            compact_preview(&item.scope_reason, 24),
+            item.reviewed_text_count,
+            item.clip_count
+        )));
+        lines.push(Line::from(format!(
+            "         {}; {}; local ref: {}",
+            artifact_presence_label(&item.document),
+            artifact_size_label(&item.document),
+            compact_preview(&item.document.local_path, 44)
+        )));
+    }
+    if items.len() > 8 {
+        lines.push(Line::from(format!(
+            "    ... {} more practice library record(s)",
+            items.len() - 8
+        )));
+    }
+}
+
+fn practice_library_inspector_lines(item: &WorkspacePracticeLibraryItem) -> Vec<Line<'static>> {
+    let document = &item.document;
+    let link = item
+        .linked_document_id
+        .as_deref()
+        .map(|id| format!("linked to active patient file {}", compact_preview(id, 12)))
+        .unwrap_or_else(|| "not associated with active patient".to_string());
+    let edi = edi_transaction_label(document).unwrap_or("none");
+    vec![
+        Line::from(Span::styled(
+            "Practice Record Inspector",
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Line::from(format!(
+            "  {} [{}]",
+            document_context_label(document),
+            compact_preview(&document.id, 12)
+        )),
+        Line::from(format!(
+            "  owner: {} ({})",
+            compact_preview(&item.owner_display_name, 42),
+            compact_preview(&item.owner_client_id, 12)
+        )),
+        Line::from(format!(
+            "  association: {link}; source reason: {}",
+            compact_preview(&item.scope_reason, 42)
+        )),
+        Line::from(format!(
+            "  kind: {}; detected: {}; EDI: {}; MIME: {}",
+            document.kind,
+            nonempty_or(&document.detected_kind, "unknown"),
+            edi,
+            document.mime_type.as_deref().unwrap_or("unknown")
+        )),
+        Line::from(format!(
+            "  counts: reviewed text {}; clips {}; source/batch: {}",
+            item.reviewed_text_count,
+            item.clip_count,
+            compact_preview(&document.source_label, 38)
+        )),
+        Line::from(format!(
+            "  path: {}; tags: {}",
+            compact_preview(&document.local_path, 58),
+            compact_preview(&document.tags, 30)
+        )),
+        Line::from(format!("  notes: {}", compact_preview(&document.notes, 84))),
+        Line::from(
+            "  :practice associate creates a patient metadata reference; source file is unchanged",
+        ),
+        Line::from("  no automatic copy/upload/parse/OCR/transcription or agent selection"),
+    ]
+}
+
+#[derive(Debug, Clone)]
+struct DetectedArtifactMetadata {
+    detected_kind: String,
+    mime_type: Option<String>,
+    file_size_bytes: Option<i64>,
+    modified_at: Option<i64>,
+    sha256: Option<String>,
+    existence_status: String,
+    metadata_json: String,
+}
+
+fn detected_artifact_metadata(draft: &DocumentDraft) -> DetectedArtifactMetadata {
+    let path = draft.local_path.trim();
+    let extension = Path::new(path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let mut detected_kind = detected_kind_from_extension(&extension).to_string();
+    let mut mime_type = mime_type_from_extension(&extension).map(str::to_string);
+    let mut file_size_bytes = None;
+    let mut modified_at = None;
+    let mut sha256 = None;
+    let mut existence_status = "missing".to_string();
+    let mut edi_label = edi_transaction_label_from_text(
+        format!(
+            "{} {} {} {} {} {}",
+            draft.kind, draft.title, draft.local_path, draft.notes, draft.tags, draft.source_label
+        )
+        .to_ascii_lowercase()
+        .as_str(),
+    )
+    .map(str::to_string);
+
+    match fs::metadata(path) {
+        Ok(metadata) if metadata.is_file() => {
+            existence_status = "present".to_string();
+            file_size_bytes = i64::try_from(metadata.len()).ok();
+            modified_at = metadata
+                .modified()
+                .ok()
+                .and_then(unix_seconds_from_system_time);
+            if let Some(sniffed_edi) = sniff_edi_transaction_label(path) {
+                edi_label = Some(sniffed_edi.to_string());
+            }
+            if detected_kind == "file"
+                && let Some(label) = &edi_label
+            {
+                detected_kind = format!("EDI {}", edi_code_from_label(label).unwrap_or(label));
+                mime_type = Some("application/edi-x12".to_string());
+            }
+            if metadata.len() <= 10 * 1024 * 1024 {
+                sha256 = sha256_file(path);
+            }
+        }
+        Ok(_) => {
+            existence_status = "inaccessible".to_string();
+        }
+        Err(_) => {}
+    }
+
+    let edi_hint = {
+        let hint_text = format!("{} {}", draft.kind, draft.local_path).to_ascii_lowercase();
+        detected_kind == "file"
+            || detected_kind.to_ascii_lowercase().contains("edi")
+            || matches!(
+                extension.as_str(),
+                "x12" | "edi" | "837" | "835" | "999" | "997"
+            )
+            || hint_text.contains("x12")
+            || hint_text.contains("edi")
+    };
+    if let Some(label) = &edi_label
+        && edi_hint
+    {
+        detected_kind = format!("EDI {}", edi_code_from_label(label).unwrap_or(label));
+        mime_type = Some("application/edi-x12".to_string());
+    }
+
+    let metadata_json = json!({
+        "referenceOnly": true,
+        "detectedBy": "local-metadata",
+        "extension": extension,
+        "ediTransaction": edi_label,
+        "safety": "metadata-only; no copy/upload/parse/OCR/transcribe"
+    })
+    .to_string();
+
+    DetectedArtifactMetadata {
+        detected_kind,
+        mime_type,
+        file_size_bytes,
+        modified_at,
+        sha256,
+        existence_status,
+        metadata_json,
+    }
+}
+
+fn normalize_artifact_scope(
+    requested_scope: &str,
+    draft: &DocumentDraft,
+    detected: &DetectedArtifactMetadata,
+) -> String {
+    let requested = requested_scope.trim().to_ascii_lowercase();
+    if matches!(
+        requested.as_str(),
+        "patient" | "practice" | "session" | "global" | "project"
+    ) {
+        return requested;
+    }
+    let haystack = format!(
+        "{} {} {} {} {} {}",
+        draft.kind, draft.title, draft.local_path, draft.notes, draft.tags, detected.detected_kind
+    )
+    .to_ascii_lowercase();
+    if edi_transaction_label_from_text(&haystack).is_some()
+        || haystack.contains("practice")
+        || haystack.contains("payer")
+        || haystack.contains("billing")
+        || haystack.contains("claim")
+        || haystack.contains("fee schedule")
+    {
+        "practice".to_string()
+    } else {
+        "patient".to_string()
+    }
+}
+
+fn detected_kind_from_extension(extension: &str) -> &'static str {
+    match extension {
+        "pdf" => "PDF",
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "heic" | "tif" | "tiff" => "image",
+        "mp3" | "m4a" | "wav" | "aac" | "flac" => "audio",
+        "mp4" | "mov" | "m4v" | "avi" => "video",
+        "csv" => "CSV",
+        "xls" | "xlsx" => "spreadsheet",
+        "hl7" => "HL7",
+        "json" => "FHIR/JSON",
+        "xml" => "CDA/XML",
+        "dcm" | "dicom" => "DICOM",
+        "x12" | "edi" | "837" | "835" | "999" | "997" => "EDI",
+        _ => "file",
+    }
+}
+
+fn mime_type_from_extension(extension: &str) -> Option<&'static str> {
+    match extension {
+        "pdf" => Some("application/pdf"),
+        "png" => Some("image/png"),
+        "jpg" | "jpeg" => Some("image/jpeg"),
+        "gif" => Some("image/gif"),
+        "webp" => Some("image/webp"),
+        "tif" | "tiff" => Some("image/tiff"),
+        "mp3" => Some("audio/mpeg"),
+        "m4a" => Some("audio/mp4"),
+        "wav" => Some("audio/wav"),
+        "mp4" | "m4v" => Some("video/mp4"),
+        "mov" => Some("video/quicktime"),
+        "csv" => Some("text/csv"),
+        "json" => Some("application/json"),
+        "xml" => Some("application/xml"),
+        "x12" | "edi" | "837" | "835" | "999" | "997" => Some("application/edi-x12"),
+        _ => None,
+    }
+}
+
+fn unix_seconds_from_system_time(time: std::time::SystemTime) -> Option<i64> {
+    time.duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| i64::try_from(duration.as_secs()).ok())
+}
+
+#[derive(Debug, Default)]
+struct DroppedFilePathIntake {
+    looked_like_paths: bool,
+    file_paths: Vec<PathBuf>,
+    directory_count: usize,
+    missing_count: usize,
+}
+
+fn parse_dropped_file_paths(pasted: &str) -> DroppedFilePathIntake {
+    let mut intake = DroppedFilePathIntake {
+        looked_like_paths: paste_looks_like_file_path(pasted),
+        ..Default::default()
+    };
+    let mut seen = BTreeSet::new();
+    for path in dropped_file_path_candidates(pasted) {
+        let key = path.display().to_string();
+        if !seen.insert(key) {
+            continue;
+        }
+        match fs::metadata(&path) {
+            Ok(metadata) if metadata.is_file() => intake.file_paths.push(path),
+            Ok(metadata) if metadata.is_dir() => intake.directory_count += 1,
+            Ok(_) => intake.missing_count += 1,
+            Err(_) => intake.missing_count += 1,
+        }
+    }
+    if !intake.file_paths.is_empty() || intake.directory_count > 0 || intake.missing_count > 0 {
+        intake.looked_like_paths = true;
+    }
+    intake
+}
+
+fn dropped_file_path_candidates(pasted: &str) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    for raw_line in pasted.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || !line_looks_like_file_path(line) {
+            continue;
+        }
+        if let Some(path) = normalize_pasted_path(line) {
+            paths.push(path);
+            continue;
+        }
+        if let Some(path) = existing_unquoted_path(line) {
+            paths.push(path);
+            continue;
+        }
+        for part in shlex::Shlex::new(line) {
+            if !line_looks_like_file_path(&part) {
+                continue;
+            }
+            paths
+                .push(normalize_pasted_path(&part).unwrap_or_else(|| PathBuf::from(part.as_str())));
+        }
+    }
+    paths
+}
+
+fn existing_unquoted_path(line: &str) -> Option<PathBuf> {
+    let unquoted = line
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+        .or_else(|| {
+            line.strip_prefix('\'')
+                .and_then(|value| value.strip_suffix('\''))
+        })
+        .unwrap_or(line);
+    let path = PathBuf::from(unquoted);
+    path.exists().then_some(path)
+}
+
+fn paste_looks_like_file_path(pasted: &str) -> bool {
+    pasted
+        .lines()
+        .any(|line| line_looks_like_file_path(line.trim()))
+}
+
+fn line_looks_like_file_path(line: &str) -> bool {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let unquoted = trimmed
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+        .or_else(|| {
+            trimmed
+                .strip_prefix('\'')
+                .and_then(|value| value.strip_suffix('\''))
+        })
+        .unwrap_or(trimmed);
+    if unquoted.starts_with('/')
+        || unquoted.starts_with("./")
+        || unquoted.starts_with("../")
+        || unquoted.starts_with("file://")
+        || unquoted.contains("\\ ")
+    {
+        return true;
+    }
+    Path::new(unquoted)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(is_file_intake_extension)
+}
+
+fn is_file_intake_extension(extension: &str) -> bool {
+    matches!(
+        extension.to_ascii_lowercase().as_str(),
+        "pdf"
+            | "png"
+            | "jpg"
+            | "jpeg"
+            | "gif"
+            | "webp"
+            | "heic"
+            | "tif"
+            | "tiff"
+            | "mp3"
+            | "m4a"
+            | "wav"
+            | "aac"
+            | "flac"
+            | "mp4"
+            | "mov"
+            | "m4v"
+            | "avi"
+            | "csv"
+            | "xls"
+            | "xlsx"
+            | "x12"
+            | "edi"
+            | "837"
+            | "835"
+            | "999"
+            | "997"
+    )
+}
+
+fn dropped_file_upsert_params(
+    client_id: &str,
+    encounter_id: Option<String>,
+    path: &Path,
+) -> WorkspaceDocumentUpsertParams {
+    local_file_upsert_params(
+        client_id,
+        encounter_id,
+        path,
+        "drop/paste local path",
+        "drop_or_paste_path",
+    )
+}
+
+fn local_file_upsert_params(
+    client_id: &str,
+    encounter_id: Option<String>,
+    path: &Path,
+    source_label: &str,
+    intake_source: &str,
+) -> WorkspaceDocumentUpsertParams {
+    let draft = DocumentDraft {
+        id: None,
+        active: true,
+        scope: "patient".to_string(),
+        title: dropped_file_title(path),
+        kind: dropped_file_kind(path).to_string(),
+        local_path: path.display().to_string(),
+        tags: "local-reference,metadata-only".to_string(),
+        source_label: source_label.to_string(),
+        notes: "metadata only; original file stays local; no copy/upload/OCR/transcription/parsing"
+            .to_string(),
+        original_path: path.display().to_string(),
+        reference_kind: "local_reference".to_string(),
+        intake_source: intake_source.to_string(),
+        ..Default::default()
+    };
+    draft.upsert_params(client_id.to_string(), encounter_id)
+}
+
+fn document_is_priority_preview_file(document: &WorkspaceDocument) -> bool {
+    let path = document_preferred_file_path(document);
+    document_path_is_priority_preview_file(&path)
+        || matches!(
+            document.mime_type.as_deref(),
+            Some("image/jpeg") | Some("application/pdf")
+        )
+}
+
+fn document_path_is_priority_preview_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_ascii_lowercase)
+        .is_some_and(|extension| matches!(extension.as_str(), "jpg" | "jpeg" | "pdf"))
+}
+
+fn metadata_json_with_preview_error(metadata_json: &str, reason: &str) -> String {
+    let mut value = serde_json::from_str::<serde_json::Value>(metadata_json)
+        .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new()));
+    if let Some(object) = value.as_object_mut() {
+        object.insert(
+            "previewError".to_string(),
+            serde_json::Value::String(compact_preview(reason, 220)),
+        );
+    }
+    serde_json::to_string(&value).unwrap_or_else(|_| metadata_json.to_string())
+}
+
+fn dropped_file_title(path: &Path) -> String {
+    path.file_stem()
+        .and_then(|stem| stem.to_str())
+        .or_else(|| path.file_name().and_then(|name| name.to_str()))
+        .map(|value| value.replace(['_', '-'], " "))
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "Local file reference".to_string())
+}
+
+fn dropped_file_kind(path: &Path) -> &'static str {
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let extension = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    match extension.as_str() {
+        "jpg" | "jpeg" | "png" | "heic" | "tif" | "tiff" => {
+            if name.contains("medicare")
+                || name.contains("insurance")
+                || name.contains("payer")
+                || name.contains("coverage")
+            {
+                "medicare insurance card image"
+            } else if name.contains("id")
+                || name.contains("license")
+                || name.contains("driver")
+                || name.contains("photo")
+            {
+                "id card image"
+            } else {
+                "image"
+            }
+        }
+        "pdf" => {
+            if name.contains("referral") {
+                "referral pdf"
+            } else {
+                "pdf"
+            }
+        }
+        "mp3" | "m4a" | "wav" | "aac" | "flac" => "audio dictation",
+        "mov" | "mp4" | "m4v" | "avi" => "video",
+        "csv" | "xls" | "xlsx" => "spreadsheet",
+        "x12" | "edi" | "837" | "835" | "999" | "997" => "x12 edi",
+        _ => "file",
+    }
+}
+
+fn sha256_file(path: &str) -> Option<String> {
+    let mut file = File::open(path).ok()?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 8192];
+    loop {
+        let read = file.read(&mut buffer).ok()?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Some(format!("{:x}", hasher.finalize()))
+}
+
+fn sniff_edi_transaction_label(path: &str) -> Option<&'static str> {
+    let mut file = File::open(path).ok()?;
+    let mut buffer = vec![0u8; 8192];
+    let read = file.read(&mut buffer).ok()?;
+    buffer.truncate(read);
+    let text = String::from_utf8_lossy(&buffer).to_ascii_lowercase();
+    if text.contains("bht*0019") || text.contains("st*837") {
+        if text.contains("005010x222") || text.contains("837p") {
+            return Some("837P professional claim");
+        }
+        if text.contains("005010x223") || text.contains("837i") {
+            return Some("837I institutional claim");
+        }
+        if text.contains("005010x224") || text.contains("837d") {
+            return Some("837D dental claim");
+        }
+    }
+    edi_transaction_label_from_text(&text)
+}
+
+fn edi_code_from_label(label: &str) -> Option<&str> {
+    label.split_whitespace().next()
+}
+
+fn line_plain_text(line: &Line<'_>) -> String {
+    line.spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect::<Vec<_>>()
+        .join("")
+}
+
+fn push_context_line(prompt: &mut String, label: &str, value: &str) {
+    if value.trim().is_empty() {
+        return;
+    }
+    prompt.push_str(label);
+    prompt.push_str(": ");
+    prompt.push_str(value.trim());
+    prompt.push('\n');
+}
+
+fn command_action_matches_filter(action: &WorkspaceActionDef, filter: &str) -> bool {
+    let filter = normalize_workspace_command(filter);
+    if filter.is_empty() {
+        return true;
+    }
+
+    action.command.contains(&filter)
+        || action.label.to_ascii_lowercase().contains(&filter)
+        || action.group.title().to_ascii_lowercase().contains(&filter)
+        || action
+            .shortcut
+            .is_some_and(|shortcut| shortcut.to_ascii_lowercase().contains(&filter))
+        || command_aliases(action.command)
+            .iter()
+            .any(|alias| alias.contains(&filter))
+}
+
+fn workspace_action_by_id(action_id: WorkspaceActionId) -> Option<&'static WorkspaceActionDef> {
+    WORKSPACE_ACTIONS
+        .iter()
+        .find(|action| action.id == action_id)
+}
+
+fn command_aliases(command: &str) -> &'static [&'static str] {
+    match command {
+        "actions" => &["help"],
+        "addendum save" => &["save addendum"],
+        "addendum start" => &["start addendum"],
+        "agent clear" => &["clear agent instructions", "clear agent request"],
+        "agent inbox" => &[
+            "agent results",
+            "results inbox",
+            "returned work review",
+            "result review",
+            "review codex result",
+        ],
+        "agent handoff inspect" | "agent context inspect" => &[
+            "agent packet inspect",
+            "context packet inspect",
+            "packet replay",
+            "codex packet",
+            "packet compare",
+            "compare packet and result",
+            "compare codex packet",
+        ],
+        "agent request" => &[
+            "agent instructions",
+            "agent instruction",
+            "write agent instructions",
+            "ask agent",
+            "request agent",
+            "ask codex",
+            "ask codex about eval",
+        ],
+        "patients" => &["patient list", "patient directory", "open patient list"],
+        "patient search" => &["search patients", "patient lookup", "patient switch"],
+        "demographics" => &[
+            "patient details",
+            "patient summary",
+            "focus patient details",
+            "patient demographics",
+        ],
+        "demographics edit" => &[
+            "edit demographics",
+            "patient demographics",
+            "contact edit",
+            "edit contact info",
+            "contact",
+        ],
+        "emergency contact edit" => &["edit emergency contact", "emergency contact"],
+        "coverage edit" => &["edit coverage", "coverage", "member id", "insurance"],
+        "agent result" => &[
+            "returned work",
+            "paste returned work",
+            "paste codex work",
+            "codex result",
+        ],
+        "agent result inspect" => &[
+            "inspect returned codex work",
+            "codex result inspect",
+            "review result",
+            "packet result compare",
+            "compare codex packet and result",
+        ],
+        "agent result reviewed" => &["mark reviewed", "returned work reviewed"],
+        "agent result dismiss" => &["dismiss result", "returned work dismiss"],
+        "agent result to proposal" => &[
+            "make proposal",
+            "proposal draft",
+            "returned work to proposal",
+        ],
+        "agent result to addendum" => &[
+            "make addendum",
+            "addendum draft",
+            "returned work to addendum",
+        ],
+        "agent result to job" => &["make job", "job draft", "returned work to job"],
+        "agent send" => &[
+            "submit medical agent plan",
+            "send medical agent plan",
+            "send agent request",
+            "codex handoff",
+            "agent handoff",
+            "open codex handoff",
+        ],
+        "client new" => &["client create"],
+        "agent preview" => &[
+            "medical agent plan",
+            "review medical agent plan",
+            "context packet",
+            "agent preview",
+            "packet preview",
+            "preview codex packet",
+            "preview codex",
+            "what codex will see",
+            "what the agent will see",
+        ],
+        "derivative new" => &[
+            "artifact derivative",
+            "transcript add",
+            "ocr add",
+            "video note",
+            "edi summary",
+        ],
+        "derivative select" => &["derivative include"],
+        "derivative deselect" => &["derivative exclude"],
+        "file add" => &[
+            "document add",
+            "document attach",
+            "attach document",
+            "file attach",
+            "file add",
+            "attach file",
+            "artifact attach",
+            "add patient file reference",
+            "add patient file",
+            "patient file intake",
+        ],
+        "edi files" => &["billing files", "x12 files"],
+        "encounter open" => &[
+            "encounter create",
+            "visit open",
+            "open encounter",
+            "start encounter",
+            "first eval",
+            "start eval",
+            "start first eval",
+        ],
+        "handoff" => &[
+            "submit medical agent plan",
+            "medical agent plan",
+            "context",
+            "send context",
+            "open codex handoff",
+            "agent send",
+            "send agent request",
+        ],
+        "job cancel" => &["task cancel"],
+        "job done" => &["job complete", "task complete", "task done"],
+        "job new" => &["task create", "task new"],
+        "job next" => &["task next"],
+        "note new" => &[
+            "note new eval",
+            "note new daily",
+            "note new progress",
+            "note new phone",
+            "new evaluation note",
+            "new daily note",
+            "new progress note",
+            "new phone note",
+        ],
+        "note sign" => &["sign note"],
+        "patient new" => &["patient create"],
+        "practice associate" => &["associate file", "associate practice file"],
+        "proposal accept" => &["proposal approve"],
+        "proposal decline" => &["proposal reject"],
+        "return" => &["exit", "quit", "q", "return to codex"],
+        "save" => &["save chart", "save chart workspace"],
+        "focus note body" => &["write eval note", "write first eval"],
+        "scope files" => &["patient files", "open patient files"],
+        "scope last" => &[
+            "last scope",
+            "open last scope",
+            "scope back",
+            "previous clinical scope",
+        ],
+        "scope next" => &["next scope", "open next scope"],
+        "agent handoff" => &[
+            "scope packet",
+            "agent packet",
+            "open packet",
+            "open codex packet",
+            "open agent handoff",
+        ],
+        "scope patient" => &[
+            "patient chart",
+            "open patient chart",
+            "return to patient chart",
+        ],
+        "scope practice" => &["practice library", "open practice library"],
+        "scope prev" => &["scope previous", "previous scope"],
+        "scope review" => &["agent review", "returned work review"],
+        _ => &[],
+    }
+}
+
+fn status_suffix(dirty: bool) -> &'static str {
+    if dirty { "  Unsaved" } else { "" }
+}
+
+fn prune_selected_ids(selected_ids: &mut BTreeSet<String>, active_ids: &BTreeSet<String>) -> usize {
+    let before = selected_ids.len();
+    selected_ids.retain(|id| active_ids.contains(id.as_str()));
+    before.saturating_sub(selected_ids.len())
+}
+
+fn stale_context_recovery_notice(
+    artifact_count: usize,
+    derivative_count: usize,
+    clip_count: usize,
+) -> Option<String> {
+    let mut parts = Vec::new();
+    if artifact_count > 0 {
+        parts.push(count_label(artifact_count, "file"));
+    }
+    if derivative_count > 0 {
+        parts.push(count_label(derivative_count, "text"));
+    }
+    if clip_count > 0 {
+        parts.push(count_label(clip_count, "clip"));
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "Recovery: stale packet selections removed ({}); retry is safe.",
+        parts.join(", ")
+    ))
+}
+
+fn count_label(count: usize, label: &str) -> String {
+    if count == 1 {
+        format!("1 {label}")
+    } else {
+        format!("{count} {label}s")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::workspace_context_assembly::packet_scoped_agent_handoff_prompt;
+    use crossterm::event::KeyEvent;
+    use ratatui::buffer::Buffer;
+    use std::sync::atomic::AtomicU64;
+    use std::sync::atomic::Ordering;
+
+    static TEST_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    fn alpha_test_id(mut value: u64) -> String {
+        let mut chars = Vec::new();
+        loop {
+            let offset = u8::try_from(value % 26).unwrap_or(0);
+            chars.push(char::from(b'a' + offset));
+            value /= 26;
+            if value == 0 {
+                break;
+            }
+        }
+        chars.into_iter().rev().collect()
+    }
+
+    fn unique_test_temp_path(name: &str) -> PathBuf {
+        let counter = TEST_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "codex-workspace-dashboard-{}-{}-{name}",
+            alpha_test_id(u64::from(std::process::id())),
+            alpha_test_id(counter)
+        ))
+    }
+
+    fn press_key(dashboard: &mut WorkspaceDashboard, code: KeyCode) -> WorkspaceDashboardAction {
+        dashboard.handle_key_event(KeyEvent::from(code))
+    }
+
+    fn press_key_event(
+        dashboard: &mut WorkspaceDashboard,
+        key_event: KeyEvent,
+    ) -> WorkspaceDashboardAction {
+        dashboard.handle_key_event(key_event)
+    }
+
+    fn press_consumed(dashboard: &mut WorkspaceDashboard, code: KeyCode) {
+        assert_eq!(
+            press_key(dashboard, code),
+            WorkspaceDashboardAction::Consumed
+        );
+    }
+
+    fn type_text(dashboard: &mut WorkspaceDashboard, text: &str) {
+        for c in text.chars() {
+            press_consumed(dashboard, KeyCode::Char(c));
+        }
+    }
+
+    fn patient_file_tree_plain_text(dashboard: &WorkspaceDashboard) -> String {
+        let (lines, _) = dashboard.patient_files_sidepane_content(32, false);
+        lines
+            .iter()
+            .map(line_plain_text)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn focus_first_patient_file_row(dashboard: &mut WorkspaceDashboard) -> String {
+        let rows = dashboard.patient_file_tree_rows();
+        if let Some((index, row)) = rows.iter().enumerate().next() {
+            let PatientFileTreeRow::File { document_index } = row;
+            dashboard.patient_files_tree_index = index;
+            dashboard.update_patient_file_tree_highlight_status();
+            return dashboard.documents[*document_index].id.clone();
+        }
+        panic!(
+            "expected an uploaded document row:\n{}",
+            patient_file_tree_plain_text(dashboard)
+        );
+    }
+
+    fn focus_patient_file_row(dashboard: &mut WorkspaceDashboard, expected_id: &str) {
+        if let Some(index) = dashboard.patient_file_tree_index_for_document_id(expected_id) {
+            dashboard.patient_files_tree_index = index;
+            dashboard.update_patient_file_tree_highlight_status();
+            return;
+        }
+        panic!(
+            "expected uploaded document {expected_id}:\n{}",
+            patient_file_tree_plain_text(dashboard)
+        );
+    }
+
+    fn assert_medical_render_not_duplicated(dashboard: &WorkspaceDashboard, label: &str) {
+        for (width, height) in [(80, 20), (120, 32), (160, 45)] {
+            let rendered = render_dashboard_lines_at(dashboard, width, height);
+            let count = rendered.matches("Medical Workspace").count();
+            assert!(
+                count <= 1,
+                "{label} duplicated workspace header at {width}x{height}: {count}\n{rendered}"
+            );
+            assert!(
+                !rendered.contains("┌Medical Workspace"),
+                "{label} rendered a nested workspace pane at {width}x{height}:\n{rendered}"
+            );
+        }
+    }
+
+    fn status_line_text(dashboard: &WorkspaceDashboard) -> String {
+        line_plain_text(&dashboard.status_line(160))
+    }
+
+    #[test]
+    fn editing_note_body_marks_dashboard_dirty() {
+        let mut dashboard = WorkspaceDashboard {
+            focus: WorkspaceFocus::NoteBody,
+            ..WorkspaceDashboard::default()
+        };
+
+        assert_eq!(
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Char('a'))),
+            WorkspaceDashboardAction::Consumed
+        );
+
+        assert!(dashboard.dirty);
+        assert_eq!(dashboard.draft_note.body, "a");
+    }
+
+    #[test]
+    fn colon_is_literal_inside_note_body_editor() {
+        let mut dashboard = WorkspaceDashboard {
+            focus: WorkspaceFocus::NoteBody,
+            ..WorkspaceDashboard::default()
+        };
+
+        for c in "Plan: follow up".chars() {
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Char(c)));
+        }
+
+        assert_eq!(dashboard.draft_note.body, "Plan: follow up");
+        assert!(dashboard.command_input.is_none());
+    }
+
+    #[test]
+    fn unsaved_client_edits_block_client_switch() {
+        let mut dashboard = WorkspaceDashboard {
+            clients: vec![
+                test_client("client-1", "One"),
+                test_client("client-2", "Two"),
+            ],
+            client_index: 0,
+            focus: WorkspaceFocus::Clients,
+            draft_client: ClientDraft::from_client(&test_client("client-1", "One")),
+            dirty: true,
+            ..WorkspaceDashboard::default()
+        };
+
+        assert_eq!(
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Down)),
+            WorkspaceDashboardAction::Consumed
+        );
+
+        assert_eq!(dashboard.client_index, 0);
+        assert!(dashboard.status.contains("Save before switching"));
+    }
+
+    #[test]
+    fn agent_context_prompt_asks_for_reviewable_note_edits() {
+        let mut dashboard = WorkspaceDashboard::default();
+        dashboard.set_context_for_tests(
+            "Alex Example",
+            "Progress note",
+            "Client reports improved sleep.",
+        );
+
+        let prompt = dashboard.agent_context_prompt();
+
+        assert!(prompt.contains("Alex Example"));
+        assert!(prompt.contains("Progress note"));
+        assert!(prompt.contains("clear diff or replacement draft"));
+        assert!(
+            prompt.contains("do not assume saved workspace data should be overwritten silently")
+        );
+    }
+
+    #[test]
+    fn medical_profile_renders_patient_oriented_workspace_panes() {
+        let dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+
+        let rendered = render_dashboard_lines_at(&dashboard, 160, 80);
+
+        assert!(rendered.contains("Medical Workspace"));
+        assert!(rendered.contains("No patient selected"));
+        assert!(rendered.contains("Patient Directory"));
+        assert!(rendered.contains("New patient"));
+        assert!(rendered.contains("Patient Demographics"));
+        assert!(rendered.contains("Patient Notes"));
+        assert!(!rendered.contains("Chart Sections"));
+        assert!(rendered.contains("Note Title"));
+        assert!(rendered.contains("Note Body"));
+        assert!(rendered.contains("Patient ID / MRN"));
+        assert!(rendered.contains("Chart start"));
+        assert!(rendered.contains("Chart end"));
+        assert!(rendered.contains("Agent Workpane"));
+        assert!(rendered.contains("Mode:"));
+        assert!(rendered.contains("No upload/OCR/payer action/auto-apply"));
+        assert!(rendered.contains("Uploaded Documents"));
+        assert!(rendered.contains("files"));
+        assert!(!rendered.contains("Practice Workflow"));
+    }
+
+    #[test]
+    fn medical_patient_directory_lists_active_patients_and_searches_identity_fields() {
+        let mut jordan = test_client("client-1", "Jordan Patient");
+        jordan.preferred_name = Some("JP".to_string());
+        jordan.date_of_birth = Some("1980-01-02".to_string());
+        jordan.external_id = Some("MRN-123".to_string());
+        jordan.primary_phone = Some("555-0101".to_string());
+        jordan.email = Some("jordan.fake@example.test".to_string());
+        jordan.emergency_contact_name = Some("Maya Contact".to_string());
+        jordan.emergency_contact_phone = Some("555-0199".to_string());
+        jordan.payer_name = Some("Fake Medicare".to_string());
+        jordan.member_id = Some("MED-777".to_string());
+        jordan.updated_at = 1_766_275_200_000;
+        let mut riley = test_client("client-2", "Riley Example");
+        riley.preferred_name = Some("Ry".to_string());
+        riley.date_of_birth = Some("1975-05-06".to_string());
+        riley.external_id = Some("MRN-987".to_string());
+        riley.email = Some("riley.fake@example.test".to_string());
+        let mut archived = test_client("client-archived", "Archived Patient");
+        archived.archived_at = Some(1);
+        archived.primary_phone = Some("555-ARCHIVE".to_string());
+
+        let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+        dashboard.clients = vec![jordan.clone(), riley, archived];
+        dashboard.client_index = 0;
+        dashboard.draft_client = ClientDraft::from_client(&jordan);
+        dashboard.focus = WorkspaceFocus::Clients;
+
+        let rendered = render_dashboard_lines_at(&dashboard, 220, 70);
+        let directory_rendered = dashboard
+            .patient_directory_lines()
+            .iter()
+            .map(line_plain_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(rendered.contains("Patient Directory"));
+        assert!(directory_rendered.contains("Jordan Patient"));
+        assert!(
+            directory_rendered
+                .lines()
+                .any(|line| line.contains("Jordan Patient") && line.contains("active"))
+        );
+        assert!(rendered.contains("Riley Example"));
+        assert!(!rendered.contains("Archived Patient"));
+        assert!(directory_rendered.contains("1980-01-02"));
+        assert!(directory_rendered.contains("MRN-123"));
+        assert!(!directory_rendered.contains("Patient ID / MRN:"));
+        assert!(!directory_rendered.contains("Contact on file"));
+        assert!(!directory_rendered.contains("Coverage on file"));
+        assert!(!directory_rendered.contains("Patient ID / MRN blank"));
+        assert!(!directory_rendered.contains("Fake Medicare"));
+        assert!(!directory_rendered.contains("MED-777"));
+        assert!(!directory_rendered.contains("Maya Contact"));
+
+        for query in [
+            "Jordan",
+            "JP",
+            "1980-01-02",
+            "MRN-123",
+            "5550101",
+            "jordan.fake@example.test",
+            "MED-777",
+            "Maya Contact",
+            "555-0199",
+        ] {
+            dashboard.patient_search_query = Some(query.to_string());
+            assert_eq!(
+                dashboard.patient_search_result_indices(),
+                vec![0],
+                "query {query} should find Jordan"
+            );
+        }
+
+        dashboard.patient_search_query = Some("MRN-123".to_string());
+        let exact_rendered = render_dashboard_lines_at(&dashboard, 220, 70);
+        assert!(exact_rendered.contains("exact"));
+
+        dashboard.patient_search_query = Some("Archived".to_string());
+        assert!(dashboard.patient_search_result_indices().is_empty());
+        let empty_rendered = render_dashboard_lines_at(&dashboard, 220, 70);
+        assert!(empty_rendered.contains("No matching saved patients."));
+        assert!(empty_rendered.contains("New patient: :patient new"));
+    }
+
+    #[test]
+    fn medical_patient_directory_navigation_uses_visible_rows_and_opens_chart() {
+        let mut jordan = test_client("client-1", "Jordan Patient");
+        jordan.external_id = Some("MRN-001".to_string());
+        let mut archived = test_client("client-archived", "Archived Hidden");
+        archived.archived_at = Some(1);
+        let mut riley = test_client("client-2", "Riley Example");
+        riley.external_id = Some("MRN-002".to_string());
+
+        let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+        dashboard.clients = vec![jordan.clone(), archived, riley.clone()];
+        dashboard.client_index = 0;
+        dashboard.draft_client = ClientDraft::from_client(&jordan);
+        dashboard.focus = WorkspaceFocus::Clients;
+
+        let directory_rendered = dashboard
+            .patient_directory_lines()
+            .iter()
+            .map(line_plain_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(directory_rendered.contains("Jordan Patient"));
+        assert!(
+            directory_rendered
+                .lines()
+                .any(|line| line.contains("Jordan Patient") && line.contains("active"))
+        );
+        assert!(directory_rendered.contains("Riley Example"));
+        assert!(!directory_rendered.contains("Archived Hidden"));
+
+        assert_eq!(
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Down)),
+            WorkspaceDashboardAction::SelectClient(2),
+            "Down should target the next visible patient, not the hidden archived row"
+        );
+
+        dashboard.client_index = 2;
+        dashboard.draft_client = ClientDraft::from_client(&riley);
+        dashboard.workflow_section = MedicalWorkflowSection::Documents;
+        assert_eq!(
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Enter)),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert_eq!(dashboard.focus, WorkspaceFocus::Workflow);
+        assert_eq!(dashboard.workflow_section, MedicalWorkflowSection::Visit);
+        assert!(dashboard.status.contains("Opened active patient chart"));
+    }
+
+    #[test]
+    fn medical_patient_directory_model_keeps_all_saved_patient_rows() {
+        let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+        dashboard.clients = (0..12)
+            .map(|index| {
+                let mut client = test_client(
+                    &format!("client-{index}"),
+                    &format!("Directory Patient {index:02}"),
+                );
+                client.date_of_birth = Some(format!("1980-01-{day:02}", day = index + 1));
+                client.external_id = Some(format!("MRN-{index:03}"));
+                client
+            })
+            .collect();
+        dashboard.client_index = 0;
+        dashboard.draft_client = ClientDraft::from_client(&dashboard.clients[0]);
+        dashboard.focus = WorkspaceFocus::Clients;
+
+        let directory_rendered = dashboard
+            .patient_directory_lines()
+            .iter()
+            .map(line_plain_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            directory_rendered
+                .lines()
+                .any(|line| line.contains("MRN-000") && line.contains("active"))
+        );
+        assert!(directory_rendered.contains("MRN-000"));
+        assert!(directory_rendered.contains("MRN-011"));
+        assert_eq!(dashboard.visible_patient_directory_indices().len(), 12);
+    }
+
+    #[test]
+    fn medical_patient_search_switches_safely_and_does_not_enter_packet_context() {
+        let mut jordan = test_client("client-1", "Jordan Patient");
+        jordan.primary_phone = Some("555-0101".to_string());
+        let mut riley = test_client("client-2", "Riley Search Only");
+        riley.coverage_notes = Some("SEARCH_ONLY_SENTINEL".to_string());
+        let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+        dashboard.clients = vec![jordan.clone(), riley];
+        dashboard.draft_client = ClientDraft::from_client(&jordan);
+        dashboard.draft_note.title = "Daily note".to_string();
+        dashboard.draft_note.body = "Active patient fake note.".to_string();
+
+        dashboard.open_patient_search();
+        for c in "Riley".chars() {
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Char(c)));
+        }
+        assert_eq!(
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Enter)),
+            WorkspaceDashboardAction::SelectClient(1)
+        );
+        assert!(dashboard.patient_search_query.is_none());
+        assert_eq!(dashboard.workflow_section, MedicalWorkflowSection::Visit);
+
+        dashboard.patient_search_query = Some("SEARCH_ONLY_SENTINEL".to_string());
+        let prompt = dashboard.agent_context_prompt();
+        assert!(prompt.contains("Jordan Patient"));
+        assert!(!prompt.contains("Riley Search Only"));
+        assert!(!prompt.contains("SEARCH_ONLY_SENTINEL"));
+
+        dashboard.open_patient_search();
+        dashboard.dirty = true;
+        for c in "Riley".chars() {
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Char(c)));
+        }
+        assert_eq!(
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Enter)),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert!(dashboard.status.contains("Save before switching patients"));
+    }
+
+    #[test]
+    fn medical_operator_workflows_keep_directory_simple_and_file_drop_scoped() {
+        let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+
+        assert_eq!(
+            dashboard.execute_workspace_command(":patient new"),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert_eq!(dashboard.focus, WorkspaceFocus::Demographics);
+        let directory_rendered = dashboard
+            .patient_directory_lines()
+            .iter()
+            .map(line_plain_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(directory_rendered.contains("No saved patients yet."));
+        assert!(directory_rendered.contains("New patient: :patient new"));
+        assert!(!directory_rendered.contains("Edit patient details"));
+        assert!(!directory_rendered.contains("DOB:"));
+        assert!(!directory_rendered.contains("ID/MRN:"));
+
+        dashboard.draft_client.id = Some("client-new".to_string());
+        assert_eq!(
+            dashboard.execute_workspace_command(":note new daily"),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert_eq!(dashboard.focus, WorkspaceFocus::NoteBody);
+        for c in "SOAP fake sample note: patient tolerated exercise.".chars() {
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Char(c)));
+        }
+        assert!(dashboard.draft_note.body.contains("SOAP fake sample note"));
+        assert!(dashboard.dirty);
+
+        let dropped_file = unique_test_temp_path("workflow-referral-drop.pdf");
+        std::fs::write(&dropped_file, b"%PDF fake workflow drop")
+            .expect("write fake workflow dropped file");
+        let dropped_path = dropped_file.display().to_string();
+
+        dashboard.focus = WorkspaceFocus::Demographics;
+        let before_demographics = dashboard.draft_client.display_name.clone();
+        assert_eq!(
+            dashboard.handle_paste(dropped_path.clone()),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert_eq!(dashboard.draft_client.display_name, before_demographics);
+        assert!(dashboard.status.contains("File drop ignored here"));
+
+        dashboard.dirty = false;
+        dashboard.set_workflow_section(MedicalWorkflowSection::Visit);
+        dashboard.focus_patient_files_tree();
+        match dashboard.handle_paste(dropped_path) {
+            WorkspaceDashboardAction::SaveDroppedFileReferences(params) => {
+                assert_eq!(params.len(), 1);
+                assert_eq!(params[0].client_id, "client-new");
+                assert_eq!(params[0].scope, "patient");
+                assert_eq!(params[0].kind, "referral pdf");
+                assert_eq!(params[0].reference_kind, "local_reference");
+                assert!(params[0].notes.contains("metadata only"));
+            }
+            other => panic!("expected Uploaded Documents drop save action, got {other:?}"),
+        }
+
+        let _ = std::fs::remove_file(dropped_file);
+    }
+
+    #[test]
+    fn medical_contact_edit_opens_field_surface_and_updates_searchable_markers() {
+        let client = test_client("client-1", "Jordan Patient");
+        let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+        dashboard.clients = vec![client.clone()];
+        dashboard.draft_client = ClientDraft::from_client(&client);
+
+        assert_eq!(
+            dashboard.execute_workspace_command(":contact edit"),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert_eq!(
+            dashboard.patient_admin_edit_mode,
+            Some(PatientAdminEditMode::Contact)
+        );
+        assert_eq!(
+            dashboard.patient_admin_field,
+            PatientAdminField::PrimaryPhone
+        );
+        for c in "555-0101".chars() {
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Char(c)));
+        }
+        dashboard.handle_key_event(KeyEvent::from(KeyCode::Down));
+        for c in "555-0102".chars() {
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Char(c)));
+        }
+        dashboard.handle_key_event(KeyEvent::from(KeyCode::Down));
+        for c in "jordan.fake@example.test".chars() {
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Char(c)));
+        }
+        let rendered = render_dashboard_lines_at(&dashboard, 160, 45);
+
+        assert!(rendered.contains("Patient Demographics Editor"));
+        assert!(rendered.contains("Primary phone: 555-0101"));
+        assert!(rendered.contains("Secondary phone: 555-0102"));
+        assert!(rendered.contains("Email: jordan.fake@example.test"));
+        assert!(
+            rendered
+                .contains("Emergency contact: name missing; relationship missing; phone missing")
+        );
+        assert!(dashboard.dirty);
+        assert_eq!(dashboard.draft_client.primary_phone, "555-0101");
+        assert_eq!(dashboard.draft_client.secondary_phone, "555-0102");
+        assert_eq!(dashboard.draft_client.email, "jordan.fake@example.test");
+
+        dashboard.clients[0].primary_phone = Some(dashboard.draft_client.primary_phone.clone());
+        dashboard.clients[0].secondary_phone = Some(dashboard.draft_client.secondary_phone.clone());
+        dashboard.clients[0].email = Some(dashboard.draft_client.email.clone());
+        dashboard.patient_search_query = Some("5550102".to_string());
+        assert_eq!(dashboard.patient_search_result_indices(), vec![0]);
+        dashboard.patient_search_query = Some("jordan.fake@example.test".to_string());
+        assert_eq!(dashboard.patient_search_result_indices(), vec![0]);
+    }
+
+    #[test]
+    fn medical_emergency_and_coverage_editors_keep_member_id_under_coverage() {
+        let mut client = test_client("client-1", "Jordan Patient");
+        client.external_id = Some("MRN-123".to_string());
+        let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+        dashboard.clients = vec![client.clone()];
+        dashboard.draft_client = ClientDraft::from_client(&client);
+
+        assert_eq!(
+            dashboard.execute_workspace_command(":emergency contact edit"),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert_eq!(
+            dashboard.patient_admin_edit_mode,
+            Some(PatientAdminEditMode::Contact)
+        );
+        assert_eq!(
+            dashboard.patient_admin_field,
+            PatientAdminField::EmergencyContactName
+        );
+        for c in "Maya Contact".chars() {
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Char(c)));
+        }
+        dashboard.handle_key_event(KeyEvent::from(KeyCode::Down));
+        for c in "sibling".chars() {
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Char(c)));
+        }
+        dashboard.handle_key_event(KeyEvent::from(KeyCode::Down));
+        for c in "555-0199".chars() {
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Char(c)));
+        }
+
+        assert_eq!(
+            dashboard.execute_workspace_command(":coverage edit"),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert_eq!(
+            dashboard.patient_admin_edit_mode,
+            Some(PatientAdminEditMode::Coverage)
+        );
+        for c in "Fake Medicare".chars() {
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Char(c)));
+        }
+        dashboard.handle_key_event(KeyEvent::from(KeyCode::Down));
+        for c in "Plan A".chars() {
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Char(c)));
+        }
+        dashboard.handle_key_event(KeyEvent::from(KeyCode::Down));
+        for c in "MED-777".chars() {
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Char(c)));
+        }
+        dashboard.handle_key_event(KeyEvent::from(KeyCode::Down));
+        for c in "GRP-1".chars() {
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Char(c)));
+        }
+        dashboard.handle_key_event(KeyEvent::from(KeyCode::Down));
+        for c in "Medicare".chars() {
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Char(c)));
+        }
+        dashboard.handle_key_event(KeyEvent::from(KeyCode::Down));
+        for c in "active".chars() {
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Char(c)));
+        }
+        let rendered = render_dashboard_lines_at(&dashboard, 180, 60);
+
+        assert!(rendered.contains("Coverage Editor"));
+        assert!(rendered.contains("Patient ID / MRN: MRN-123"));
+        assert!(rendered.contains("Member ID / Medicare ID: MED-777"));
+        assert!(rendered.contains("Coverage/member ID is separate from Patient ID / MRN."));
+        assert!(!rendered.contains("External ID"));
+        assert_eq!(dashboard.draft_client.payer_name, "Fake Medicare");
+        assert_eq!(dashboard.draft_client.plan_name, "Plan A");
+        assert_eq!(dashboard.draft_client.member_id, "MED-777");
+        assert_eq!(dashboard.draft_client.group_number, "GRP-1");
+        assert_eq!(dashboard.draft_client.coverage_type, "Medicare");
+        assert_eq!(dashboard.draft_client.coverage_status, "active");
+        assert_eq!(
+            dashboard.draft_client.emergency_contact_name,
+            "Maya Contact"
+        );
+        assert_eq!(
+            dashboard.draft_client.emergency_contact_relationship,
+            "sibling"
+        );
+        assert_eq!(dashboard.draft_client.emergency_contact_phone, "555-0199");
+
+        dashboard.clients[0].emergency_contact_name =
+            Some(dashboard.draft_client.emergency_contact_name.clone());
+        dashboard.clients[0].emergency_contact_relationship = Some(
+            dashboard
+                .draft_client
+                .emergency_contact_relationship
+                .clone(),
+        );
+        dashboard.clients[0].emergency_contact_phone =
+            Some(dashboard.draft_client.emergency_contact_phone.clone());
+        dashboard.clients[0].payer_name = Some(dashboard.draft_client.payer_name.clone());
+        dashboard.clients[0].plan_name = Some(dashboard.draft_client.plan_name.clone());
+        dashboard.clients[0].member_id = Some(dashboard.draft_client.member_id.clone());
+        dashboard.clients[0].group_number = Some(dashboard.draft_client.group_number.clone());
+        dashboard.clients[0].coverage_type = Some(dashboard.draft_client.coverage_type.clone());
+        dashboard.clients[0].coverage_status = Some(dashboard.draft_client.coverage_status.clone());
+        dashboard.patient_search_query = Some("Maya Contact".to_string());
+        assert_eq!(dashboard.patient_search_result_indices(), vec![0]);
+        dashboard.patient_search_query = Some("5550199".to_string());
+        assert_eq!(dashboard.patient_search_result_indices(), vec![0]);
+        dashboard.patient_search_query = Some("MED-777".to_string());
+        assert_eq!(dashboard.patient_search_result_indices(), vec![0]);
+        dashboard.patient_search_query = Some("SEARCH_UI_ONLY_SENTINEL".to_string());
+        let prompt = dashboard.agent_context_prompt();
+        assert!(prompt.contains("Jordan Patient"));
+        assert!(!prompt.contains("SEARCH_UI_ONLY_SENTINEL"));
+    }
+
+    #[test]
+    fn medical_clinical_safety_commands_render_grouped_patient_metadata() {
+        let client = test_client("client-1", "Jordan Patient");
+        let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+        dashboard.clients = vec![client.clone()];
+        dashboard.draft_client = ClientDraft::from_client(&client);
+
+        assert_eq!(
+            dashboard.execute_workspace_command(":safety"),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert_eq!(dashboard.workflow_section, MedicalWorkflowSection::Safety);
+        let empty_rendered = render_dashboard_lines_at(&dashboard, 180, 60);
+        assert!(empty_rendered.contains("Clinical Safety"));
+        assert!(empty_rendered.contains("allergies not recorded"));
+        assert!(empty_rendered.contains(":allergy add"));
+
+        assert_eq!(
+            dashboard.execute_workspace_command(":allergy add"),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert!(dashboard.draft_safety.is_active());
+        assert_eq!(dashboard.safety_field, SafetyField::Name);
+        for c in "Peanut".chars() {
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Char(c)));
+        }
+        dashboard.handle_key_event(KeyEvent::from(KeyCode::Down));
+        for c in "hives".chars() {
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Char(c)));
+        }
+        dashboard.handle_key_event(KeyEvent::from(KeyCode::Down));
+        for c in "severe".chars() {
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Char(c)));
+        }
+        let draft_rendered = render_dashboard_lines_at(&dashboard, 180, 60);
+        assert!(draft_rendered.contains("Clinical Safety Draft"));
+        assert!(draft_rendered.contains("Name: Peanut"));
+        assert!(draft_rendered.contains("Reaction: hives"));
+        assert!(draft_rendered.contains("Severity: severe"));
+
+        let params = dashboard.draft_safety.upsert_params("client-1".to_string());
+        assert_eq!(params.category, "allergy");
+        assert_eq!(params.name, "Peanut");
+        assert_eq!(params.reaction.as_deref(), Some("hives"));
+        assert_eq!(params.severity.as_deref(), Some("severe"));
+
+        dashboard.draft_safety.clear();
+        dashboard.dirty = false;
+        dashboard.patient_safety_items = vec![
+            WorkspacePatientSafetyItem {
+                id: "safety-allergy".to_string(),
+                client_id: "client-1".to_string(),
+                category: "allergy".to_string(),
+                name: "Peanut".to_string(),
+                reaction: Some("hives".to_string()),
+                severity: Some("severe".to_string()),
+                dose: None,
+                route: None,
+                frequency: None,
+                status: Some("active".to_string()),
+                recorded_date: Some("2026-06-22".to_string()),
+                notes: "fake allergy".to_string(),
+                archived_at: None,
+                created_at: 1,
+                updated_at: 1,
+            },
+            WorkspacePatientSafetyItem {
+                id: "safety-medication".to_string(),
+                client_id: "client-1".to_string(),
+                category: "medication".to_string(),
+                name: "Fakeformin".to_string(),
+                reaction: None,
+                severity: None,
+                dose: Some("500 mg".to_string()),
+                route: Some("PO".to_string()),
+                frequency: Some("daily".to_string()),
+                status: Some("active".to_string()),
+                recorded_date: None,
+                notes: "fake medication".to_string(),
+                archived_at: None,
+                created_at: 1,
+                updated_at: 1,
+            },
+        ];
+        let saved_rendered = render_dashboard_lines_at(&dashboard, 180, 70);
+        assert!(saved_rendered.contains("Allergies"));
+        assert!(saved_rendered.contains("Peanut - hives [active]"));
+        assert!(saved_rendered.contains("Medications"));
+        assert!(saved_rendered.contains("Fakeformin - 500 mg PO daily [active]"));
+        assert!(saved_rendered.contains("active-patient clinical metadata"));
+
+        let prompt = dashboard.agent_context_prompt();
+        assert!(prompt.contains("Jordan Patient"));
+        assert!(!prompt.contains("Peanut"));
+        assert!(!prompt.contains("Fakeformin"));
+    }
+
+    #[test]
+    fn medical_external_id_is_labeled_patient_id_mrn_in_medical_ui() {
+        let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+        dashboard.draft_client.external_id = "MRN-123".to_string();
+
+        let rendered = render_dashboard_lines_at(&dashboard, 180, 60);
+
+        assert!(rendered.contains("Patient ID / MRN"));
+        assert!(!rendered.contains("External ID"));
+    }
+
+    #[test]
+    fn medical_notes_render_grouped_by_type_date_and_status() {
+        let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+        dashboard.notes = vec![
+            test_note("note-eval", "Initial evaluation", "evaluation", "signed", 1),
+            test_note("note-daily", "Visit 2 daily note", "daily", "draft", 2),
+            test_note(
+                "note-progress",
+                "Progress update",
+                "progress",
+                "needs_review",
+                3,
+            ),
+            test_note("note-phone", "Front desk call", "phone", "addended", 4),
+            test_note("note-general", "General chart note", "general", "draft", 5),
+            test_note("note-addendum", "Signed addendum", "addendum", "signed", 6),
+        ];
+
+        let rendered = render_dashboard_lines_at(&dashboard, 220, 80);
+
+        for heading in ["Medical Notes", "Communication Notes", "Addenda"] {
+            assert!(
+                rendered.contains(heading),
+                "missing note group {heading} in render:\n{rendered}"
+            );
+        }
+        assert!(!rendered.contains("Chart Sections"));
+        assert!(rendered.contains("Initial evaluation [signed]"));
+        assert_eq!(
+            medical_note_group_label(&dashboard.notes[2]),
+            "Medical Notes"
+        );
+        assert_eq!(note_status_readable_label("needs_review"), "needs review");
+    }
+
+    #[test]
+    fn medical_patient_files_render_as_uploaded_document_list_metadata_only_and_selectable() {
+        let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+        dashboard.documents = vec![
+            patient_file(
+                "doc-id",
+                "Scanned patient ID JPG",
+                "id card image",
+                "/tmp/id.jpg",
+            ),
+            patient_file(
+                "doc-medicare",
+                "Scanned Medicare card JPG",
+                "medicare card image",
+                "/tmp/medicare-card.jpg",
+            ),
+            patient_file(
+                "doc-referral",
+                "Outside referral PDF",
+                "referral pdf",
+                "/tmp/referral.pdf",
+            ),
+            patient_file("doc-lab", "Lab PDF", "lab pdf", "/tmp/lab.pdf"),
+            patient_file(
+                "doc-audio",
+                "Audio dictation",
+                "audio",
+                "/tmp/dictation.m4a",
+            ),
+            patient_file("doc-video", "Video reference", "video", "/tmp/gait.mp4"),
+            patient_file(
+                "doc-sheet",
+                "Visit spreadsheet",
+                "spreadsheet",
+                "/tmp/visits.xlsx",
+            ),
+            patient_file("doc-edi", "EDI X12 reference", "x12 edi", "/tmp/ref.edi"),
+        ];
+        dashboard
+            .selected_artifact_ids
+            .insert("doc-medicare".to_string());
+        dashboard.set_workflow_section(MedicalWorkflowSection::Documents);
+
+        let rendered = render_dashboard_lines_at(&dashboard, 240, 90);
+
+        assert!(rendered.contains("Uploaded Documents"));
+        assert!(rendered.contains("• Scanned patient ID JPG"));
+        assert!(rendered.contains("• Scanned Medicare"));
+        assert!(rendered.contains("• Outside referral PDF"));
+        assert!(!rendered.contains("ID Cards (1)"));
+        assert!(!rendered.contains("Insurance (1)"));
+        assert!(!rendered.contains("Referrals (1)"));
+        assert!(rendered.contains("Scanned Medicare"));
+        assert!(
+            rendered
+                .lines()
+                .any(|line| line.contains("Scanned Medicare") && line.contains("agent"))
+        );
+        assert!(rendered.contains("title: Scanned Medicare card JPG"));
+        assert!(rendered.contains("category: Medicare / Insurance Cards"));
+        assert!(rendered.contains("metadata only"));
+        assert!(rendered.contains("no upload, OCR, transcription, EDI parsing"));
+        assert!(!rendered.contains("[in] 2. patient image"));
+        assert!(!rendered.contains("Local File References"));
+    }
+
+    #[test]
+    fn medical_patient_files_render_as_far_left_document_list_and_select_cleanly() {
+        let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+        dashboard.draft_client.display_name = "Jordan Patient".to_string();
+        dashboard.draft_client.id = Some("client-1".to_string());
+        dashboard.documents = vec![
+            patient_file(
+                "doc-id",
+                "Scanned patient ID JPG",
+                "id card image",
+                "/tmp/id.jpg",
+            ),
+            patient_file(
+                "doc-medicare",
+                "Scanned Medicare card JPG",
+                "medicare card image",
+                "/tmp/medicare-card.jpg",
+            ),
+            patient_file(
+                "doc-referral",
+                "Outside referral PDF",
+                "referral pdf",
+                "/tmp/referral.pdf",
+            ),
+        ];
+        dashboard
+            .selected_artifact_ids
+            .insert("doc-medicare".to_string());
+
+        let chart_rendered = render_dashboard_lines_at(&dashboard, 120, 32);
+
+        assert!(
+            !chart_rendered.contains("Agent Workpane"),
+            "120-column chart render should use the two-zone layout and hide the right agent pane:\n{chart_rendered}"
+        );
+        assert!(chart_rendered.contains("Uploaded Documents"));
+        assert!(
+            chart_rendered.contains("3 files, 1 included"),
+            "expected compact Uploaded Documents summary in chart render:\n{chart_rendered}"
+        );
+        assert!(
+            chart_rendered.contains("Paste/drop JPG/PDF"),
+            "expected Uploaded Documents drop guidance in chart render:\n{chart_rendered}"
+        );
+        assert!(
+            chart_rendered.contains("\n┌Uploaded Documents"),
+            "Uploaded Documents should render as the left-side chart document list:\n{chart_rendered}"
+        );
+        assert!(!chart_rendered.contains("Selected File"));
+        assert!(!chart_rendered.contains("path: /tmp"));
+        assert!(!chart_rendered.contains("Local File References"));
+
+        let full_files_rendered = render_dashboard_lines_at(&dashboard, 160, 45);
+        assert!(
+            full_files_rendered.contains("Scanned patient I"),
+            "expected scanned ID file row in Uploaded Documents:\n{full_files_rendered}"
+        );
+        assert!(
+            full_files_rendered
+                .lines()
+                .any(|line| line.contains("Scanned Medicare") && line.contains("agent")),
+            "expected Medicare card file row in Uploaded Documents:\n{full_files_rendered}"
+        );
+        assert!(
+            full_files_rendered.contains("Outside referral PDF"),
+            "expected referral PDF file row in Uploaded Documents:\n{full_files_rendered}"
+        );
+        assert!(!full_files_rendered.contains("Insurance (1)"));
+        assert!(!full_files_rendered.contains("Referrals (1)"));
+        assert!(!full_files_rendered.contains("[ ]"));
+        assert!(!full_files_rendered.contains("[x]"));
+        assert!(
+            !full_files_rendered.contains("Agent 1F/0T/0C"),
+            "Uploaded Documents should not show agent-count implementation text:\n{full_files_rendered}"
+        );
+        assert!(
+            !full_files_rendered.contains("Audio (0)")
+                && !full_files_rendered.contains("Video (0)")
+                && !full_files_rendered.contains("EDI (0)"),
+            "Uploaded Documents should hide empty roots in the side pane:\n{full_files_rendered}"
+        );
+        assert!(!full_files_rendered.contains("Local File References"));
+
+        let mut long_title_dashboard = dashboard.clone();
+        long_title_dashboard.documents.push(patient_file(
+            "doc-long-image",
+            "Screenshot 2026 06 22 at 4.48.15 PM with a very long scanned card filename",
+            "image",
+            "/tmp/long-screenshot.png",
+        ));
+        let (tree_lines, _) = long_title_dashboard.patient_files_sidepane_content(32, false);
+        let tree_plain = tree_lines.iter().map(line_plain_text).collect::<Vec<_>>();
+        assert!(
+            tree_plain.iter().all(|line| line.chars().count() <= 34),
+            "uploaded document lines should not wrap in a 32-column pane: {tree_plain:?}"
+        );
+        assert!(
+            tree_plain
+                .iter()
+                .any(|line| line.contains("Screenshot 2026") && line.contains("...")),
+            "expected truncated one-line long image filename: {tree_plain:?}"
+        );
+
+        assert_eq!(
+            dashboard.execute_workspace_command(":files"),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert_eq!(dashboard.focus, WorkspaceFocus::PatientFiles);
+        assert_eq!(dashboard.workflow_section, MedicalWorkflowSection::Visit);
+        assert_eq!(dashboard.patient_files_tree_index, 0);
+        assert_eq!(
+            dashboard.highlighted_patient_file_document_id().as_deref(),
+            Some("doc-id")
+        );
+        assert!(dashboard.status.contains("Scanned patient ID JPG"));
+
+        assert_eq!(
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Down)),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert_eq!(
+            dashboard.highlighted_patient_file_document_id().as_deref(),
+            Some("doc-medicare")
+        );
+        focus_patient_file_row(&mut dashboard, "doc-medicare");
+        assert_eq!(
+            dashboard.highlighted_patient_file_document_id().as_deref(),
+            Some("doc-medicare")
+        );
+        focus_patient_file_row(&mut dashboard, "doc-id");
+        assert_eq!(
+            dashboard.highlighted_patient_file_document_id().as_deref(),
+            Some("doc-id")
+        );
+        assert!(
+            dashboard
+                .status
+                .contains("Scanned patient ID JPG: not included"),
+            "unexpected status after selecting first file: {}",
+            dashboard.status
+        );
+        assert_eq!(
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Char(' '))),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert!(dashboard.selected_artifact_ids.contains("doc-id"));
+        assert_eq!(
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Enter)),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert_eq!(dashboard.inspected_artifact_id.as_deref(), Some("doc-id"));
+
+        let files_rendered = render_dashboard_lines_at(&dashboard, 160, 45);
+        assert!(
+            files_rendered.contains("File Detail"),
+            "expected center file detail after Enter in larger render:\n{files_rendered}"
+        );
+        assert!(files_rendered.contains("metadata only"));
+        assert!(!files_rendered.contains("Local File References"));
+        assert!(!files_rendered.contains("Patient reviewed text"));
+        assert!(!files_rendered.contains("Patient context clips"));
+    }
+
+    #[test]
+    fn medical_patient_notes_enter_opens_exact_note_and_tab_skips_note_editor() {
+        let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+        dashboard.draft_client.display_name = "Jordan Patient".to_string();
+        dashboard.draft_client.id = Some("client-1".to_string());
+        dashboard.draft_note.id = Some("note-daily".to_string());
+        dashboard.draft_note.title = "Daily note selected from Patient Notes".to_string();
+        dashboard.draft_note.body = "Objective measures: ".to_string();
+        dashboard.documents = vec![patient_file(
+            "doc-referral",
+            "Outside referral PDF",
+            "referral pdf",
+            "/tmp/referral.pdf",
+        )];
+        dashboard.focus = WorkspaceFocus::Notes;
+
+        assert_eq!(
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Tab)),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert_eq!(dashboard.focus, WorkspaceFocus::PatientFiles);
+        assert_eq!(
+            dashboard.draft_note.body, "Objective measures: ",
+            "tabbing out of Patient Notes should not edit or auto-open the note"
+        );
+
+        dashboard.focus = WorkspaceFocus::Notes;
+        assert_eq!(
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Enter)),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert_eq!(dashboard.focus, WorkspaceFocus::NoteBody);
+        assert!(
+            dashboard
+                .status
+                .contains("Opened note for editing: Daily note selected")
+        );
+        for c in "ROM 0-120".chars() {
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Char(c)));
+        }
+        assert_eq!(dashboard.draft_note.body, "Objective measures: ROM 0-120");
+
+        assert_eq!(
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Tab)),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert_eq!(dashboard.focus, WorkspaceFocus::Workflow);
+        assert!(
+            dashboard.status.contains("Focused Today's Visit"),
+            "Note Body should tab to the center chart work area before Agent Workpane: {}",
+            dashboard.status
+        );
+        assert_eq!(
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Tab)),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert_eq!(dashboard.focus, WorkspaceFocus::Agent);
+        assert_eq!(
+            dashboard.workflow_section,
+            MedicalWorkflowSection::AgentRequest
+        );
+        assert!(dashboard.agent_request.is_active());
+        for c in "Use eval template".chars() {
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Char(c)));
+        }
+        assert_eq!(dashboard.agent_request.body, "Use eval template");
+        assert_eq!(
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Tab)),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert_eq!(dashboard.focus, WorkspaceFocus::Clients);
+        assert_eq!(
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Tab)),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert_eq!(dashboard.focus, WorkspaceFocus::Notes);
+        assert_eq!(
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Tab)),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert_eq!(dashboard.focus, WorkspaceFocus::PatientFiles);
+        assert_eq!(
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Tab)),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert_eq!(
+            dashboard.focus,
+            WorkspaceFocus::Demographics,
+            "tabbing back into the center work area should expose patient demographics before the note editor"
+        );
+        assert_eq!(
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Tab)),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert_eq!(dashboard.focus, WorkspaceFocus::NoteTitle);
+        assert_eq!(
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Tab)),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert_eq!(dashboard.focus, WorkspaceFocus::NoteBody);
+        for c in "; gait steady".chars() {
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Char(c)));
+        }
+        assert_eq!(
+            dashboard.draft_note.body,
+            "Objective measures: ROM 0-120; gait steady"
+        );
+    }
+
+    #[test]
+    fn medical_recursive_patient_directory_loop_stays_selection_only() {
+        let mut dashboard = medical_recursive_directory_dashboard();
+        dashboard.focus = WorkspaceFocus::Clients;
+
+        let directory = dashboard
+            .patient_directory_lines()
+            .iter()
+            .map(line_plain_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(directory.contains("Jordan Patient"));
+        assert!(
+            directory
+                .lines()
+                .any(|line| line.contains("Jordan Patient") && line.contains("active"))
+        );
+        assert!(directory.contains("1980-01-02"));
+        assert!(directory.contains("MRN-123"));
+        assert!(!directory.contains("555-0101"));
+        assert!(!directory.contains("jordan.fake@example.test"));
+        assert!(!directory.contains("Maya Contact"));
+        assert!(!directory.contains("MED-777"));
+
+        assert_eq!(
+            press_key(&mut dashboard, KeyCode::Down),
+            WorkspaceDashboardAction::SelectClient(1)
+        );
+        assert_eq!(dashboard.focus, WorkspaceFocus::Clients);
+        assert_eq!(
+            press_key(&mut dashboard, KeyCode::Enter),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert_eq!(dashboard.focus, WorkspaceFocus::Workflow);
+        assert_eq!(dashboard.workflow_section, MedicalWorkflowSection::Visit);
+
+        dashboard.open_patient_search();
+        type_text(&mut dashboard, "MRN-987");
+        let searched = dashboard
+            .patient_directory_lines()
+            .iter()
+            .map(line_plain_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(searched.contains("Riley Example"));
+        assert!(!searched.contains("Jordan Patient"));
+        assert!(!searched.contains("riley.fake@example.test"));
+    }
+
+    #[test]
+    fn medical_recursive_patient_notes_loop_keeps_typing_in_selected_note() {
+        let mut dashboard = medical_recursive_base_dashboard();
+        dashboard.focus = WorkspaceFocus::Notes;
+        dashboard.draft_note.title = "First evaluation selected from Patient Notes".to_string();
+        dashboard.draft_note.body = "Objective: ".to_string();
+
+        press_consumed(&mut dashboard, KeyCode::Enter);
+        assert_eq!(dashboard.focus, WorkspaceFocus::NoteBody);
+        assert!(
+            dashboard
+                .status
+                .contains("Opened note for editing: First evaluation")
+        );
+
+        type_text(&mut dashboard, "ROM 0-120");
+        assert_eq!(dashboard.draft_note.body, "Objective: ROM 0-120");
+        press_consumed(&mut dashboard, KeyCode::Tab);
+        assert_eq!(dashboard.focus, WorkspaceFocus::Workflow);
+        press_consumed(&mut dashboard, KeyCode::Tab);
+        assert_eq!(dashboard.focus, WorkspaceFocus::Agent);
+        assert_eq!(
+            dashboard.workflow_section,
+            MedicalWorkflowSection::AgentRequest
+        );
+        type_text(&mut dashboard, "Use eval template");
+        assert_eq!(dashboard.agent_request.body, "Use eval template");
+
+        for expected in [
+            WorkspaceFocus::Clients,
+            WorkspaceFocus::Notes,
+            WorkspaceFocus::PatientFiles,
+            WorkspaceFocus::Demographics,
+            WorkspaceFocus::NoteTitle,
+            WorkspaceFocus::NoteBody,
+        ] {
+            press_consumed(&mut dashboard, KeyCode::Tab);
+            assert_eq!(dashboard.focus, expected);
+        }
+        type_text(&mut dashboard, "; gait steady");
+        assert_eq!(
+            dashboard.draft_note.body,
+            "Objective: ROM 0-120; gait steady"
+        );
+        assert_eq!(dashboard.agent_request.body, "Use eval template");
+    }
+
+    #[test]
+    fn medical_recursive_uploaded_documents_loop_keeps_list_and_detail_separate() {
+        let mut dashboard = WorkspaceDashboard {
+            focus: WorkspaceFocus::PatientFiles,
+            workflow_section: MedicalWorkflowSection::Visit,
+            ..medical_recursive_base_dashboard()
+        };
+        dashboard.documents = vec![
+            patient_file(
+                "doc-id-card",
+                "Scanned patient ID JPG",
+                "id card image",
+                "/tmp/scanned-patient-id.jpg",
+            ),
+            patient_file(
+                "doc-referral",
+                "Outside referral PDF",
+                "referral pdf",
+                "/tmp/outside-referral.pdf",
+            ),
+        ];
+        dashboard.focus_patient_files_tree();
+
+        let tree = patient_file_tree_plain_text(&dashboard);
+        assert!(tree.contains("2 files"));
+        assert!(tree.contains("Uploaded Documents"));
+        assert!(tree.contains("• Scanned patient I"));
+        assert!(tree.contains("Scanned patient I"));
+        assert!(!tree.contains("ID Cards (1)"));
+        assert!(!tree.contains("Referrals (1)"));
+        assert!(tree.contains("Outside referral PDF"));
+        assert!(!tree.contains("[ ]"));
+        assert!(!tree.contains("[x]"));
+        assert!(!tree.contains("Insurance (0)"));
+        assert!(!tree.contains("Audio (0)"));
+        assert!(!tree.contains("/tmp/"));
+        assert!(!tree.contains("metadata-only"));
+        assert!(!tree.contains("no upload"));
+        assert!(!tree.contains("source:"));
+
+        assert_eq!(
+            dashboard.highlighted_patient_file_document_id().as_deref(),
+            Some("doc-id-card")
+        );
+        focus_patient_file_row(&mut dashboard, "doc-id-card");
+        press_consumed(&mut dashboard, KeyCode::Down);
+        focus_patient_file_row(&mut dashboard, "doc-referral");
+        press_consumed(&mut dashboard, KeyCode::Char(' '));
+        assert!(dashboard.selected_artifact_ids.contains("doc-referral"));
+        press_consumed(&mut dashboard, KeyCode::Enter);
+
+        assert_eq!(dashboard.focus, WorkspaceFocus::Workflow);
+        assert_eq!(
+            dashboard.workflow_section,
+            MedicalWorkflowSection::Documents
+        );
+        assert_eq!(
+            dashboard.inspected_artifact_id.as_deref(),
+            Some("doc-referral")
+        );
+        let detail = render_dashboard_lines_at(&dashboard, 160, 45);
+        assert!(detail.contains("File Detail"));
+        assert!(detail.contains("/tmp/outside-referral.pdf"));
+        assert!(detail.contains("metadata only"));
+        assert!(!detail.contains("Patient reviewed text"));
+        assert!(!detail.contains("Patient context clips"));
+    }
+
+    #[test]
+    fn medical_recursive_wrong_pane_drop_loop_blocks_each_major_pane() {
+        let path = unique_test_temp_path("wrong-pane-workflow-scan.png");
+        fs::write(&path, b"fake png").expect("write fake png");
+        let pasted = path.display().to_string();
+
+        for focus in [
+            WorkspaceFocus::Clients,
+            WorkspaceFocus::Notes,
+            WorkspaceFocus::Demographics,
+            WorkspaceFocus::NoteBody,
+            WorkspaceFocus::Workflow,
+            WorkspaceFocus::Agent,
+        ] {
+            let mut dashboard = medical_recursive_base_dashboard();
+            dashboard.focus = focus;
+            dashboard.workflow_section = MedicalWorkflowSection::Visit;
+            dashboard.draft_client.display_name = "Jordan Patient".to_string();
+            dashboard.draft_note.body = "Existing note body.".to_string();
+            if focus == WorkspaceFocus::Agent {
+                dashboard.focus_medical_agent_workpane();
+                type_text(&mut dashboard, "Use eval template");
+            }
+            let before_agent = dashboard.agent_request.body.clone();
+
+            assert_eq!(
+                dashboard.handle_paste(pasted.clone()),
+                WorkspaceDashboardAction::Consumed
+            );
+            assert!(dashboard.status.contains("File drop ignored here"));
+            assert_eq!(dashboard.draft_client.display_name, "Jordan Patient");
+            assert_eq!(dashboard.draft_note.body, "Existing note body.");
+            assert_eq!(dashboard.agent_request.body, before_agent);
+            assert!(dashboard.selected_artifact_ids.is_empty());
+        }
+
+        let mut files = medical_recursive_base_dashboard();
+        files.focus_patient_files_tree();
+        let action = files.handle_paste(pasted);
+        match action {
+            WorkspaceDashboardAction::SaveDroppedFileReferences(params) => {
+                assert_eq!(params.len(), 1);
+                assert_eq!(params[0].scope, "patient");
+                assert_eq!(params[0].reference_kind, "local_reference");
+                assert_eq!(params[0].intake_source, "drop_or_paste_path");
+            }
+            other => panic!("expected Uploaded Documents drop save action, got {other:?}"),
+        }
+        assert!(files.selected_artifact_ids.is_empty());
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn medical_recursive_agent_workpane_loop_is_local_and_file_tree_safe() {
+        let mut dashboard = medical_recursive_files_dashboard();
+        dashboard.focus = WorkspaceFocus::NoteBody;
+        dashboard.draft_note.body = "Objective measures: ".to_string();
+
+        type_text(&mut dashboard, "10 reps sit-to-stand");
+        press_consumed(&mut dashboard, KeyCode::Tab);
+        assert_eq!(dashboard.focus, WorkspaceFocus::Workflow);
+        press_consumed(&mut dashboard, KeyCode::Tab);
+        assert_eq!(dashboard.focus, WorkspaceFocus::Agent);
+        assert_eq!(
+            dashboard.workflow_section,
+            MedicalWorkflowSection::AgentRequest
+        );
+        assert!(dashboard.agent_request.is_active());
+
+        type_text(
+            &mut dashboard,
+            "Use eval template\nDraft assessment from objective measures",
+        );
+        assert!(
+            dashboard
+                .agent_request
+                .body
+                .contains("Draft assessment from objective measures")
+        );
+        assert!(dashboard.context_packets.is_empty());
+
+        press_consumed(&mut dashboard, KeyCode::Tab);
+        press_consumed(&mut dashboard, KeyCode::Tab);
+        press_consumed(&mut dashboard, KeyCode::Tab);
+        assert_eq!(dashboard.focus, WorkspaceFocus::PatientFiles);
+        let request_before = dashboard.agent_request.body.clone();
+        focus_first_patient_file_row(&mut dashboard);
+        press_consumed(&mut dashboard, KeyCode::Char(' '));
+        assert_eq!(dashboard.agent_request.body, request_before);
+        assert_eq!(dashboard.selected_artifact_ids.len(), 1);
+
+        press_consumed(&mut dashboard, KeyCode::BackTab);
+        press_consumed(&mut dashboard, KeyCode::BackTab);
+        press_consumed(&mut dashboard, KeyCode::BackTab);
+        assert_eq!(dashboard.focus, WorkspaceFocus::Agent);
+        assert_eq!(dashboard.agent_request.body, request_before);
+        type_text(&mut dashboard, "\nKeep goals measurable");
+        assert!(
+            dashboard
+                .agent_request
+                .body
+                .contains("Keep goals measurable")
+        );
+        assert!(dashboard.context_packets.is_empty());
+    }
+
+    #[test]
+    fn medical_recursive_cross_pane_stress_loop_preserves_single_owner() {
+        let mut dashboard = medical_recursive_files_dashboard();
+        dashboard.documents = vec![
+            patient_file(
+                "doc-id-card",
+                "Scanned patient ID JPG",
+                "id card image",
+                "/tmp/scanned-patient-id.jpg",
+            ),
+            patient_file(
+                "doc-referral",
+                "Outside referral PDF",
+                "referral pdf",
+                "/tmp/outside-referral.pdf",
+            ),
+        ];
+        dashboard.focus = WorkspaceFocus::Clients;
+        dashboard.draft_note.title = "Eval note".to_string();
+        dashboard.draft_note.body = "Objective: ".to_string();
+
+        let sequence = [
+            WorkspaceFocus::Notes,
+            WorkspaceFocus::PatientFiles,
+            WorkspaceFocus::Demographics,
+            WorkspaceFocus::NoteTitle,
+            WorkspaceFocus::NoteBody,
+        ];
+        for expected in sequence {
+            press_consumed(&mut dashboard, KeyCode::Tab);
+            assert_eq!(dashboard.focus, expected);
+        }
+
+        type_text(&mut dashboard, "MMT 4/5");
+        press_consumed(&mut dashboard, KeyCode::Tab);
+        assert_eq!(dashboard.focus, WorkspaceFocus::Workflow);
+        press_consumed(&mut dashboard, KeyCode::Tab);
+        assert_eq!(dashboard.focus, WorkspaceFocus::Agent);
+        type_text(&mut dashboard, "Use concise plan");
+        let agent_body = dashboard.agent_request.body.clone();
+
+        press_consumed(&mut dashboard, KeyCode::Tab);
+        press_consumed(&mut dashboard, KeyCode::Tab);
+        press_consumed(&mut dashboard, KeyCode::Tab);
+        assert_eq!(dashboard.focus, WorkspaceFocus::PatientFiles);
+        let file_before = dashboard.patient_files_tree_index;
+        focus_patient_file_row(&mut dashboard, "doc-referral");
+        assert_ne!(dashboard.patient_files_tree_index, file_before);
+        press_consumed(&mut dashboard, KeyCode::Char(' '));
+        assert_eq!(dashboard.agent_request.body, agent_body);
+        assert!(dashboard.draft_note.body.contains("MMT 4/5"));
+
+        press_consumed(&mut dashboard, KeyCode::Enter);
+        assert_eq!(dashboard.focus, WorkspaceFocus::Workflow);
+        assert_eq!(
+            dashboard.workflow_section,
+            MedicalWorkflowSection::Documents
+        );
+        let rendered = render_dashboard_lines_at(&dashboard, 160, 45);
+        assert_eq!(rendered.matches("Medical Workspace").count(), 1);
+        assert!(rendered.contains("File Detail"));
+        assert!(!rendered.contains("┌Medical Workspace"));
+    }
+
+    #[test]
+    fn medical_file_detail_scroll_does_not_duplicate_workspace_render() {
+        let mut dashboard = medical_recursive_files_dashboard();
+        dashboard.focus_patient_files_tree();
+        focus_first_patient_file_row(&mut dashboard);
+        press_consumed(&mut dashboard, KeyCode::Enter);
+        assert_eq!(dashboard.focus, WorkspaceFocus::Workflow);
+        assert_eq!(
+            dashboard.workflow_section,
+            MedicalWorkflowSection::Documents
+        );
+
+        for key in [
+            KeyCode::PageDown,
+            KeyCode::PageDown,
+            KeyCode::PageUp,
+            KeyCode::PageDown,
+        ] {
+            press_consumed(&mut dashboard, key);
+            let rendered = render_dashboard_lines_at(&dashboard, 160, 45);
+            assert_eq!(
+                rendered.matches("Medical Workspace").count(),
+                1,
+                "scroll key {key:?} should not duplicate the workspace render:\n{rendered}"
+            );
+            assert!(rendered.contains("File Detail"));
+            assert!(!rendered.contains("┌Medical Workspace"));
+        }
+    }
+
+    #[test]
+    fn medical_scroll_is_scoped_to_focused_pane() {
+        let mut center = medical_recursive_files_dashboard();
+        center.focus_patient_files_tree();
+        focus_first_patient_file_row(&mut center);
+        press_consumed(&mut center, KeyCode::Enter);
+        assert_eq!(center.focus, WorkspaceFocus::Workflow);
+        assert_eq!(center.agent_scroll_for_tests(), 0);
+
+        press_consumed(&mut center, KeyCode::PageDown);
+        assert!(center.workflow_scroll_for_tests() > 0);
+        assert_eq!(
+            center.agent_scroll_for_tests(),
+            0,
+            "center scroll must not mutate Agent Workpane scroll"
+        );
+
+        let mut agent = center.clone();
+        agent.focus_medical_agent_workpane();
+        let center_scroll_before = agent.workflow_scroll_for_tests();
+        press_consumed(&mut agent, KeyCode::PageDown);
+        assert_eq!(
+            agent.workflow_scroll_for_tests(),
+            center_scroll_before,
+            "Agent Workpane scroll must not mutate center scroll"
+        );
+        assert!(agent.agent_scroll_for_tests() > 0);
+
+        let mut mouse_agent = agent.clone();
+        mouse_agent.handle_mouse_scroll(
+            MouseScrollEvent {
+                direction: MouseScrollDirection::Down,
+                column: 120,
+                row: 10,
+            },
+            Some(Rect::new(0, 0, 160, 45)),
+        );
+        assert!(mouse_agent.agent_scroll_for_tests() > agent.agent_scroll_for_tests());
+        assert_eq!(
+            mouse_agent.workflow_scroll_for_tests(),
+            center_scroll_before,
+            "mouse scroll in Agent Workpane must not mutate center scroll"
+        );
+
+        let mut note_body = medical_recursive_base_dashboard();
+        note_body.focus = WorkspaceFocus::NoteBody;
+        let note_before = note_body.draft_note.body.clone();
+        note_body.handle_mouse_scroll(
+            MouseScrollEvent {
+                direction: MouseScrollDirection::Down,
+                column: 80,
+                row: 20,
+            },
+            Some(Rect::new(0, 0, 160, 45)),
+        );
+        assert_eq!(note_body.draft_note.body, note_before);
+        assert!(note_body.status.contains("Trackpad scroll ignored"));
+    }
+
+    #[test]
+    fn medical_trackpad_scroll_targets_pointer_pane_without_text_mutation() {
+        let viewport = Rect::new(0, 0, 160, 45);
+        let areas = MedicalLargeAreas::new(viewport);
+
+        let mut dashboard = medical_recursive_files_dashboard();
+        dashboard.documents.push(patient_file(
+            "document-second-patient-file",
+            "Second patient file PDF",
+            "patient pdf",
+            "/tmp/second-patient-file.pdf",
+        ));
+        dashboard.focus_medical_agent_workpane();
+        let agent_scroll_before = dashboard.agent_scroll_for_tests();
+        let file_index_before = dashboard.patient_files_tree_index;
+
+        dashboard.handle_mouse_scroll(
+            MouseScrollEvent {
+                direction: MouseScrollDirection::Down,
+                column: areas.patient_files.x + 2,
+                row: areas.patient_files.y + 3,
+            },
+            Some(viewport),
+        );
+        assert_eq!(
+            dashboard.agent_scroll_for_tests(),
+            agent_scroll_before,
+            "trackpad scroll over Uploaded Documents must not scroll the focused Agent Workpane"
+        );
+        assert_ne!(
+            dashboard.patient_files_tree_index, file_index_before,
+            "trackpad scroll over Uploaded Documents should move file selection"
+        );
+
+        let file_index_after_tree_scroll = dashboard.patient_files_tree_index;
+        let note_before = dashboard.draft_note.body.clone();
+        dashboard.handle_mouse_scroll(
+            MouseScrollEvent {
+                direction: MouseScrollDirection::Down,
+                column: areas.note_body.x + 2,
+                row: areas.note_body.y + 2,
+            },
+            Some(viewport),
+        );
+        assert_eq!(dashboard.draft_note.body, note_before);
+        assert_eq!(
+            dashboard.patient_files_tree_index, file_index_after_tree_scroll,
+            "trackpad scroll over Note Body must not continue moving the uploaded document list"
+        );
+        assert!(dashboard.status.contains("Trackpad scroll ignored"));
+
+        for _ in 0..24 {
+            dashboard.handle_mouse_scroll(
+                MouseScrollEvent {
+                    direction: MouseScrollDirection::Down,
+                    column: areas.patient_files.x + 2,
+                    row: areas.patient_files.y + 3,
+                },
+                Some(viewport),
+            );
+            assert_medical_render_not_duplicated(&dashboard, "trackpad scroll burst");
+        }
+
+        let medium_viewport = Rect::new(0, 0, 110, 42);
+        let medium_areas = WorkspaceAreas::new(medium_viewport);
+        let mut medium = medical_recursive_files_dashboard();
+        medium.documents.push(patient_file(
+            "document-second-patient-file",
+            "Second patient file PDF",
+            "patient pdf",
+            "/tmp/second-patient-file.pdf",
+        ));
+        medium.focus_medical_agent_workpane();
+        let medium_agent_scroll_before = medium.agent_scroll_for_tests();
+        let medium_file_index_before = medium.patient_files_tree_index;
+        medium.handle_mouse_scroll(
+            MouseScrollEvent {
+                direction: MouseScrollDirection::Down,
+                column: medium_areas.patient_files.x + 2,
+                row: medium_areas.patient_files.y + 2,
+            },
+            Some(medium_viewport),
+        );
+        assert_eq!(
+            medium.agent_scroll_for_tests(),
+            medium_agent_scroll_before,
+            "medium pointer scroll over Uploaded Documents must not scroll Agent Workpane"
+        );
+        assert_ne!(
+            medium.patient_files_tree_index, medium_file_index_before,
+            "medium pointer scroll over Uploaded Documents should move file selection"
+        );
+    }
+
+    #[test]
+    fn medical_trackpad_scroll_burst_across_every_pane_stays_single_workspace() {
+        let viewport = Rect::new(0, 0, 160, 45);
+        let areas = MedicalLargeAreas::new(viewport);
+        let mut dashboard = medical_recursive_files_dashboard();
+        dashboard.focus = WorkspaceFocus::NoteBody;
+        let note_before = dashboard.draft_note.body.clone();
+        let title_before = dashboard.draft_note.title.clone();
+        let demographics_before = dashboard.draft_client.display_name.clone();
+
+        let points = [
+            ("directory", areas.clients.x + 2, areas.clients.y + 2),
+            ("patient notes", areas.notes.x + 2, areas.notes.y + 2),
+            (
+                "uploaded documents",
+                areas.patient_files.x + 2,
+                areas.patient_files.y + 2,
+            ),
+            (
+                "demographics",
+                areas.demographics.x + 2,
+                areas.demographics.y + 2,
+            ),
+            ("note title", areas.note_title.x + 2, areas.note_title.y + 1),
+            ("note body", areas.note_body.x + 2, areas.note_body.y + 2),
+            ("agent", areas.agent.x + 2, areas.agent.y + 2),
+        ];
+
+        for (label, column, row) in points {
+            for direction in [
+                MouseScrollDirection::Down,
+                MouseScrollDirection::Down,
+                MouseScrollDirection::Up,
+            ] {
+                dashboard.handle_mouse_scroll(
+                    MouseScrollEvent {
+                        direction,
+                        column,
+                        row,
+                    },
+                    Some(viewport),
+                );
+                assert_eq!(
+                    dashboard.draft_note.body, note_before,
+                    "trackpad scroll over {label} must not type into the note body"
+                );
+                assert_eq!(
+                    dashboard.draft_note.title, title_before,
+                    "trackpad scroll over {label} must not mutate note title"
+                );
+                assert_eq!(
+                    dashboard.draft_client.display_name, demographics_before,
+                    "trackpad scroll over {label} must not mutate demographics"
+                );
+                assert_medical_render_not_duplicated(&dashboard, label);
+            }
+        }
+    }
+
+    #[test]
+    fn medical_footer_separates_focus_from_active_work_scope() {
+        let mut dashboard = medical_recursive_files_dashboard();
+
+        for (focus, expected_focus, expected_target) in [
+            (
+                WorkspaceFocus::Clients,
+                "Focus: Directory",
+                "Mode: Navigate",
+            ),
+            (
+                WorkspaceFocus::Notes,
+                "Focus: Patient Notes",
+                "Mode: Navigate",
+            ),
+            (
+                WorkspaceFocus::PatientFiles,
+                "Focus: Documents",
+                "Mode: File list",
+            ),
+            (
+                WorkspaceFocus::NoteBody,
+                "Focus: Note Body",
+                "Mode: Note body",
+            ),
+            (
+                WorkspaceFocus::NoteTitle,
+                "Focus: Note Title",
+                "Mode: Note title",
+            ),
+            (
+                WorkspaceFocus::Demographics,
+                "Focus: Demographics",
+                "Mode: Patient field",
+            ),
+        ] {
+            dashboard.focus = focus;
+            let status = status_line_text(&dashboard);
+            assert!(
+                status.contains(expected_focus),
+                "expected {expected_focus:?} in status line for {focus:?}: {status}"
+            );
+            assert!(
+                status.contains(expected_target),
+                "expected {expected_target:?} in status line for {focus:?}: {status}"
+            );
+        }
+
+        dashboard.focus_medical_agent_workpane();
+        type_text(&mut dashboard, "Use eval template");
+        let agent_status = status_line_text(&dashboard);
+        assert!(agent_status.contains("Focus: Agent"));
+        assert!(agent_status.contains("Mode: Agent input"));
+        assert!(agent_status.contains("Status: Local agent instructions"));
+        assert!(!agent_status.contains("Work:"));
+
+        press_consumed(&mut dashboard, KeyCode::Tab);
+        assert_eq!(dashboard.focus, WorkspaceFocus::Clients);
+        assert_eq!(dashboard.agent_request.body, "Use eval template");
+        let directory_status = status_line_text(&dashboard);
+        assert!(directory_status.contains("Focus: Directory"));
+        assert!(
+            directory_status.contains("Next: Search/open patient"),
+            "directory footer should describe directory work, not stale agent input: {directory_status}"
+        );
+        assert!(
+            !directory_status.contains("Work: Agent"),
+            "footer should not show stale agent work after focus leaves agent pane: {directory_status}"
+        );
+
+        press_consumed(&mut dashboard, KeyCode::Tab);
+        assert_eq!(dashboard.focus, WorkspaceFocus::Notes);
+        assert!(status_line_text(&dashboard).contains("Focus: Patient Notes"));
+        press_consumed(&mut dashboard, KeyCode::Tab);
+        assert_eq!(dashboard.focus, WorkspaceFocus::PatientFiles);
+        assert!(status_line_text(&dashboard).contains("Focus: Documents"));
+    }
+
+    #[test]
+    fn medical_agent_workpane_escape_is_predictable_and_preserves_local_draft() {
+        let mut dashboard = medical_recursive_base_dashboard();
+        dashboard.focus_medical_agent_workpane();
+        type_text(&mut dashboard, "Use eval template");
+
+        assert_eq!(
+            press_key(&mut dashboard, KeyCode::Esc),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert_eq!(dashboard.focus, WorkspaceFocus::Workflow);
+        assert_eq!(dashboard.workflow_section, MedicalWorkflowSection::Visit);
+        assert_eq!(dashboard.agent_request.body, "Use eval template");
+        assert!(dashboard.context_packets.is_empty());
+    }
+
+    #[test]
+    fn medical_command_palette_finds_clinician_language_actions() {
+        for (filter, expected) in [
+            ("patient search", ":patient search"),
+            ("patient", ":patient new"),
+            ("contact", ":demographics edit"),
+            ("demographics", ":demographics"),
+            ("coverage", ":coverage edit"),
+            ("note new daily", ":note new"),
+            ("file add", ":file add"),
+            ("agent handoff", ":agent handoff"),
+            ("what the agent will see", ":agent preview"),
+            ("returned work", ":agent inbox"),
+        ] {
+            let dashboard = medical_command_palette_filter_dashboard(filter);
+            let rendered = render_dashboard_lines_at(&dashboard, 180, 70);
+            assert!(
+                rendered.contains(expected),
+                "expected {expected} for filter {filter} in render:\n{rendered}"
+            );
+        }
+    }
+
+    #[test]
+    fn action_overlay_opens_and_closes() {
+        let mut dashboard = WorkspaceDashboard::default();
+
+        assert_eq!(
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Char('?'))),
+            WorkspaceDashboardAction::Consumed
+        );
+        let rendered = render_dashboard_lines(&dashboard);
+        assert!(rendered.contains("Workspace Actions"));
+        assert!(rendered.contains(":save"));
+
+        assert_eq!(
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Char('?'))),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert!(!render_dashboard_lines(&dashboard).contains("Workspace Actions"));
+    }
+
+    #[test]
+    fn workspace_command_prompt_routes_core_commands() {
+        let mut dashboard = WorkspaceDashboard::default();
+
+        assert_eq!(
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Char(':'))),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert!(render_dashboard_lines(&dashboard).contains("Commands"));
+        assert!(render_dashboard_lines(&dashboard).contains("Search commands"));
+
+        for c in "save".chars() {
+            assert_eq!(
+                dashboard.handle_key_event(KeyEvent::from(KeyCode::Char(c))),
+                WorkspaceDashboardAction::Consumed
+            );
+        }
+        assert_eq!(
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Enter)),
+            WorkspaceDashboardAction::Save
+        );
+        assert_eq!(
+            dashboard.execute_workspace_command(":handoff"),
+            WorkspaceDashboardAction::SendContextToAgent
+        );
+        assert_eq!(
+            dashboard.execute_workspace_command(":return"),
+            WorkspaceDashboardAction::Close
+        );
+    }
+
+    #[test]
+    fn command_palette_filters_commands() {
+        let mut dashboard = WorkspaceDashboard {
+            focus: WorkspaceFocus::Clients,
+            ..WorkspaceDashboard::new(WorkspaceProfile::Medical)
+        };
+
+        dashboard.handle_key_event(KeyEvent::from(KeyCode::Char(':')));
+        for c in "proposal".chars() {
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Char(c)));
+        }
+
+        let rendered = render_dashboard_lines(&dashboard);
+        assert!(rendered.contains("Commands"));
+        assert!(rendered.contains(":proposal next"));
+        assert!(rendered.contains(":proposal accept"));
+        assert!(rendered.contains(":proposal decline"));
+        assert!(
+            !dashboard
+                .command_palette_actions()
+                .iter()
+                .any(|action| action.command == "patient new")
+        );
+    }
+
+    #[test]
+    fn medical_command_palette_is_compact_and_single_row() {
+        let mut dashboard = medical_recursive_base_dashboard();
+        dashboard.open_command_palette();
+        dashboard.command_input = Some("patient".to_string());
+
+        let lines = dashboard.command_palette_lines_for_area(88, 18);
+        let plain = lines.iter().map(line_plain_text).collect::<Vec<_>>();
+        assert!(plain.iter().any(|line| line.contains("Search commands")));
+        assert!(
+            plain.iter().any(|line| line.contains(":patient"))
+                || plain.iter().any(|line| line.contains(":demographics"))
+        );
+        assert!(
+            plain.len() <= 18,
+            "palette should fit the fixed overlay instead of growing into a report:\n{}",
+            plain.join("\n")
+        );
+        for line in &plain {
+            assert!(
+                line.chars().count() <= 88,
+                "palette rows should stay one-line and clipped: {line:?}\n{}",
+                plain.join("\n")
+            );
+        }
+        assert!(
+            !plain.iter().any(|line| line == "Quick actions now"),
+            "section headings should not dominate the compact command picker:\n{}",
+            plain.join("\n")
+        );
+    }
+
+    #[test]
+    fn medical_command_palette_quick_actions_follow_focused_pane() {
+        let mut dashboard = medical_recursive_result_dashboard(false);
+        let files = medical_recursive_files_dashboard();
+        dashboard.documents = files.documents;
+        dashboard.focus_patient_files_tree();
+        dashboard.workflow_section = MedicalWorkflowSection::AgentInbox;
+        dashboard.open_command_palette();
+
+        let actions = dashboard.command_palette_actions();
+        let first_commands = actions
+            .iter()
+            .take(4)
+            .map(|action| action.command)
+            .collect::<Vec<_>>();
+        assert!(
+            first_commands
+                .iter()
+                .any(|command| command.starts_with("artifact"))
+                || first_commands
+                    .iter()
+                    .any(|command| command.starts_with("file")),
+            "Uploaded Documents quick actions should lead with file commands, got {first_commands:?}"
+        );
+        assert!(
+            !matches!(first_commands.first(), Some(command) if command.contains("agent inbox") || command.contains("scope review")),
+            "Uploaded Documents palette should not inherit returned-work quick actions: {first_commands:?}"
+        );
+
+        dashboard.focus_medical_agent_workpane();
+        dashboard.open_command_palette();
+        let agent_first = dashboard
+            .command_palette_actions()
+            .first()
+            .map(|action| action.command);
+        assert_eq!(agent_first, Some("agent request"));
+    }
+
+    #[test]
+    fn command_palette_filters_workflow_section_commands() {
+        let mut dashboard = WorkspaceDashboard {
+            focus: WorkspaceFocus::Clients,
+            ..WorkspaceDashboard::new(WorkspaceProfile::Medical)
+        };
+
+        dashboard.handle_key_event(KeyEvent::from(KeyCode::Char(':')));
+        for c in "workflow".chars() {
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Char(c)));
+        }
+
+        let rendered = render_dashboard_lines_at(&dashboard, 160, 40);
+        assert!(rendered.contains("Commands"));
+        assert!(rendered.contains(":workflow visit"));
+        assert!(rendered.contains(":workflow documents"));
+        assert!(rendered.contains(":workflow jobs"));
+        assert!(rendered.contains(":workflow audit"));
+
+        let mut scope_dashboard = WorkspaceDashboard {
+            focus: WorkspaceFocus::Clients,
+            ..WorkspaceDashboard::new(WorkspaceProfile::Medical)
+        };
+        scope_dashboard.handle_key_event(KeyEvent::from(KeyCode::Char(':')));
+        for c in "scope".chars() {
+            scope_dashboard.handle_key_event(KeyEvent::from(KeyCode::Char(c)));
+        }
+        let rendered = render_dashboard_lines_at(&scope_dashboard, 160, 40);
+        assert!(rendered.contains(":scope patient"));
+        assert!(rendered.contains(":scope files"));
+        assert!(rendered.contains(":scope review"));
+        assert!(rendered.contains(":scope practice"));
+        assert!(rendered.contains(":scope intelligence"));
+        assert!(rendered.contains(":scope audit"));
+        assert!(!rendered.contains(":scope packet"));
+    }
+
+    #[test]
+    fn command_palette_up_down_changes_selected_command() {
+        let mut dashboard = WorkspaceDashboard {
+            focus: WorkspaceFocus::Clients,
+            ..WorkspaceDashboard::new(WorkspaceProfile::Medical)
+        };
+
+        dashboard.handle_key_event(KeyEvent::from(KeyCode::Char(':')));
+        for c in "proposal".chars() {
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Char(c)));
+        }
+        assert_eq!(dashboard.command_selection_index, 0);
+
+        dashboard.handle_key_event(KeyEvent::from(KeyCode::Down));
+        assert_eq!(dashboard.command_selection_index, 1);
+
+        dashboard.handle_key_event(KeyEvent::from(KeyCode::Up));
+        assert_eq!(dashboard.command_selection_index, 0);
+    }
+
+    #[test]
+    fn command_palette_scroll_stays_inside_palette() {
+        let viewport = Rect::new(0, 0, 160, 45);
+        let areas = MedicalLargeAreas::new(viewport);
+        let mut dashboard = medical_recursive_files_dashboard();
+        dashboard.focus_medical_agent_workpane();
+        dashboard.open_command_palette();
+        for c in "file".chars() {
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Char(c)));
+        }
+        let agent_scroll_before = dashboard.agent_scroll_for_tests();
+        let file_index_before = dashboard.patient_files_tree_index;
+        assert_eq!(dashboard.command_selection_index, 0);
+
+        dashboard.handle_mouse_scroll(
+            MouseScrollEvent {
+                direction: MouseScrollDirection::Down,
+                column: areas.patient_files.x + 2,
+                row: areas.patient_files.y + 2,
+            },
+            Some(viewport),
+        );
+
+        assert_eq!(
+            dashboard.agent_scroll_for_tests(),
+            agent_scroll_before,
+            "palette scroll must not move Agent Workpane"
+        );
+        assert_eq!(
+            dashboard.patient_files_tree_index, file_index_before,
+            "palette scroll must not move Uploaded Documents"
+        );
+        assert_eq!(dashboard.command_selection_index, 1);
+        assert_eq!(dashboard.status, "Command palette scroll.");
+    }
+
+    #[test]
+    fn command_palette_enter_executes_selected_command() {
+        let mut dashboard = WorkspaceDashboard::default();
+
+        dashboard.handle_key_event(KeyEvent::from(KeyCode::Char(':')));
+        for c in "handoff".chars() {
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Char(c)));
+        }
+
+        assert_eq!(
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Enter)),
+            WorkspaceDashboardAction::SendContextToAgent
+        );
+    }
+
+    #[test]
+    fn command_palette_enter_prefers_exact_alias_over_filtered_selection() {
+        let mut dashboard = WorkspaceDashboard {
+            focus: WorkspaceFocus::Clients,
+            ..WorkspaceDashboard::new(WorkspaceProfile::Medical)
+        };
+        dashboard.draft_client.id = Some("client-1".to_string());
+
+        dashboard.handle_key_event(KeyEvent::from(KeyCode::Char(':')));
+        for c in "jobs".chars() {
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Char(c)));
+        }
+
+        assert!(render_dashboard_lines(&dashboard).contains(":job new"));
+        assert_eq!(
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Enter)),
+            WorkspaceDashboardAction::Consumed
+        );
+
+        assert_eq!(dashboard.focus, WorkspaceFocus::Workflow);
+        assert_eq!(dashboard.workflow_section, MedicalWorkflowSection::Jobs);
+        assert!(!dashboard.draft_task.is_active());
+        assert_eq!(dashboard.status, "Focused jobs workflow.");
+    }
+
+    #[test]
+    fn command_palette_executes_artifact_selection_with_arguments() {
+        let mut dashboard = WorkspaceDashboard {
+            focus: WorkspaceFocus::Clients,
+            ..WorkspaceDashboard::new(WorkspaceProfile::Medical)
+        };
+        dashboard.documents = vec![
+            test_document("doc-1", "Referral PDF", "pdf"),
+            test_document("doc-2", "June follow-up attachment", "pdf"),
+        ];
+
+        dashboard.handle_key_event(KeyEvent::from(KeyCode::Char(':')));
+        for c in "artifact select 2".chars() {
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Char(c)));
+        }
+
+        assert_eq!(
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Enter)),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert!(!dashboard.selected_artifact_ids.contains("doc-1"));
+        assert!(dashboard.selected_artifact_ids.contains("doc-2"));
+        assert!(dashboard.status.contains("Included file reference 2"));
+    }
+
+    #[test]
+    fn workspace_focus_commands_jump_to_major_medical_panes() {
+        let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+
+        for (command, focus, status) in [
+            (":patients", WorkspaceFocus::Clients, "Patient directory."),
+            (
+                ":demographics",
+                WorkspaceFocus::Demographics,
+                "Focused patient demographics. Use :demographics edit or :coverage edit for admin fields.",
+            ),
+            (
+                ":demographics edit",
+                WorkspaceFocus::Demographics,
+                "Editing patient demographics and emergency contact fields. Ctrl-S saves.",
+            ),
+            (
+                ":coverage edit",
+                WorkspaceFocus::Demographics,
+                "Editing coverage fields. Member ID stays under coverage; Ctrl-S saves.",
+            ),
+            (
+                ":note title",
+                WorkspaceFocus::NoteTitle,
+                "Focused note title.",
+            ),
+            (":note body", WorkspaceFocus::NoteBody, "Focused note body."),
+            (
+                ":documents",
+                WorkspaceFocus::PatientFiles,
+                "Uploaded Documents focused. Paste/drop a JPG/PDF path.",
+            ),
+            (
+                ":patient files",
+                WorkspaceFocus::PatientFiles,
+                "Uploaded Documents focused. Paste/drop a JPG/PDF path.",
+            ),
+            (
+                ":agent request",
+                WorkspaceFocus::Agent,
+                "Agent input ready. Typing is local until Medical Agent Plan review.",
+            ),
+            (
+                ":agent preview",
+                WorkspaceFocus::Agent,
+                "Focused Agent Workpane.",
+            ),
+            (
+                ":agent inbox",
+                WorkspaceFocus::Agent,
+                "Focused Agent Review.",
+            ),
+            (":jobs", WorkspaceFocus::Workflow, "Focused jobs workflow."),
+            (
+                ":addenda",
+                WorkspaceFocus::Workflow,
+                "Focused addenda workflow.",
+            ),
+        ] {
+            assert_eq!(
+                dashboard.execute_workspace_command(command),
+                WorkspaceDashboardAction::Consumed
+            );
+            assert_eq!(dashboard.focus, focus);
+            assert_eq!(dashboard.status, status);
+        }
+
+        assert_eq!(dashboard.workflow_section, MedicalWorkflowSection::Addenda);
+        assert_eq!(
+            dashboard.execute_workspace_command(":workflow note status"),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert_eq!(
+            dashboard.workflow_section,
+            MedicalWorkflowSection::NoteStatus
+        );
+        assert_eq!(
+            dashboard.execute_workspace_command(":workflow audit"),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert_eq!(dashboard.workflow_section, MedicalWorkflowSection::Audit);
+    }
+
+    #[test]
+    fn workflow_section_commands_scroll_to_target_sections() {
+        let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+        dashboard.tasks = vec![
+            test_task("task-1", "Open follow-up", WorkspaceTaskStatus::Open),
+            test_task("task-2", "Completed follow-up", WorkspaceTaskStatus::Done),
+            test_task(
+                "task-3",
+                "Canceled follow-up",
+                WorkspaceTaskStatus::Canceled,
+            ),
+        ];
+
+        for (command, section, focus, marker) in [
+            (
+                ":workflow visit",
+                MedicalWorkflowSection::Visit,
+                WorkspaceFocus::Workflow,
+                "Today's Visit",
+            ),
+            (
+                ":workflow proposals",
+                MedicalWorkflowSection::Proposals,
+                WorkspaceFocus::Workflow,
+                "> Note Proposals",
+            ),
+            (
+                ":workflow documents",
+                MedicalWorkflowSection::Documents,
+                WorkspaceFocus::Workflow,
+                "> Uploaded Documents",
+            ),
+            (
+                ":agent preview",
+                MedicalWorkflowSection::ContextPacket,
+                WorkspaceFocus::Agent,
+                "Review Packet",
+            ),
+            (
+                ":agent inbox",
+                MedicalWorkflowSection::AgentInbox,
+                WorkspaceFocus::Agent,
+                "Agent Review",
+            ),
+            (
+                ":workflow jobs",
+                MedicalWorkflowSection::Jobs,
+                WorkspaceFocus::Workflow,
+                "> Jobs",
+            ),
+            (
+                ":workflow timeline",
+                MedicalWorkflowSection::Timeline,
+                WorkspaceFocus::Workflow,
+                "> Timeline",
+            ),
+            (
+                ":scope practice",
+                MedicalWorkflowSection::PracticeLibrary,
+                WorkspaceFocus::Workflow,
+                "> Practice Library",
+            ),
+            (
+                ":scope intelligence",
+                MedicalWorkflowSection::PracticeIntelligence,
+                WorkspaceFocus::Workflow,
+                "> Practice Intelligence",
+            ),
+            (
+                ":workflow audit",
+                MedicalWorkflowSection::Audit,
+                WorkspaceFocus::Workflow,
+                "> Audit Trail",
+            ),
+        ] {
+            assert_eq!(
+                dashboard.execute_workspace_command(command),
+                WorkspaceDashboardAction::Consumed
+            );
+            assert_eq!(dashboard.focus, focus);
+            assert_eq!(dashboard.workflow_section, section);
+            assert_eq!(dashboard.workflow_scroll, 0);
+
+            let rendered = render_dashboard_lines_at(&dashboard, 160, 45);
+            assert!(
+                rendered.contains(marker),
+                "expected {marker:?} after {command}:\n{rendered}"
+            );
+        }
+
+        assert!(render_dashboard_lines_at(&dashboard, 120, 32).contains("Audit Trail"));
+        assert_eq!(
+            dashboard.execute_workspace_command(":jobs"),
+            WorkspaceDashboardAction::Consumed
+        );
+        let jobs_rendered = render_dashboard_lines_at(&dashboard, 160, 45);
+        assert!(jobs_rendered.contains("Jobs"));
+        assert!(jobs_rendered.contains("[open/normal]"));
+        assert!(jobs_rendered.contains("[done/normal]"));
+        assert!(jobs_rendered.contains("[canceled/normal]"));
+    }
+
+    #[test]
+    fn workflow_arrow_keys_keep_chart_worklist_predictable_without_editors() {
+        let mut dashboard = WorkspaceDashboard {
+            focus: WorkspaceFocus::Workflow,
+            ..WorkspaceDashboard::new(WorkspaceProfile::Medical)
+        };
+
+        assert_eq!(dashboard.workflow_section, MedicalWorkflowSection::Visit);
+        assert_eq!(
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Down)),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert_eq!(dashboard.workflow_section, MedicalWorkflowSection::Visit);
+        assert_eq!(dashboard.focus, WorkspaceFocus::PatientFiles);
+        assert!(dashboard.status.contains("Paste/drop a JPG/PDF path"));
+
+        dashboard.focus = WorkspaceFocus::Workflow;
+        assert_eq!(
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Up)),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert_eq!(dashboard.workflow_section, MedicalWorkflowSection::Visit);
+        assert_eq!(
+            dashboard.status,
+            "Today's Visit is read-only. Use :demographics, :files, or :agent request."
+        );
+    }
+
+    #[test]
+    fn workflow_arrow_keys_move_between_non_chart_sections_without_editors() {
+        let mut dashboard = WorkspaceDashboard {
+            focus: WorkspaceFocus::Workflow,
+            workflow_section: MedicalWorkflowSection::NoteStatus,
+            ..WorkspaceDashboard::new(WorkspaceProfile::Medical)
+        };
+
+        assert_eq!(
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Down)),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert_eq!(
+            dashboard.workflow_section,
+            MedicalWorkflowSection::Documents
+        );
+
+        assert_eq!(
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Up)),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert_eq!(
+            dashboard.workflow_section,
+            MedicalWorkflowSection::NoteStatus
+        );
+
+        assert_eq!(
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::End)),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert_eq!(dashboard.workflow_section, MedicalWorkflowSection::Audit);
+        assert_eq!(dashboard.workflow_scroll, 0);
+
+        assert_eq!(
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Home)),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert_eq!(dashboard.workflow_section, MedicalWorkflowSection::Visit);
+        assert_eq!(dashboard.workflow_scroll, 0);
+    }
+
+    #[test]
+    fn workflow_editor_scroll_keeps_active_document_and_job_fields_visible() {
+        let mut document_dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+        assert_eq!(
+            document_dashboard.execute_workspace_command(":document attach"),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert_eq!(
+            document_dashboard.workflow_section,
+            MedicalWorkflowSection::Documents
+        );
+        let document_rendered = render_dashboard_lines_at(&document_dashboard, 80, 28);
+        assert!(
+            document_rendered.contains("File Reference Draft"),
+            "expected file reference draft in compact render:\n{document_rendered}"
+        );
+        assert!(
+            document_rendered.contains("Title:"),
+            "expected document title field in compact render:\n{document_rendered}"
+        );
+        assert!(
+            document_dashboard
+                .cursor_pos(Rect::new(0, 0, 80, 28))
+                .is_some()
+        );
+        let one_row_document_rendered = render_dashboard_lines_at(&document_dashboard, 80, 20);
+        assert!(
+            one_row_document_rendered.contains("File Reference Draft"),
+            "expected active file reference editor in one-row workflow render:\n{one_row_document_rendered}"
+        );
+
+        document_dashboard.handle_key_event(KeyEvent::from(KeyCode::Down));
+        document_dashboard.handle_key_event(KeyEvent::from(KeyCode::Down));
+        document_dashboard.handle_key_event(KeyEvent::from(KeyCode::Down));
+        document_dashboard.handle_key_event(KeyEvent::from(KeyCode::Down));
+        document_dashboard.handle_key_event(KeyEvent::from(KeyCode::Down));
+        document_dashboard.handle_key_event(KeyEvent::from(KeyCode::Down));
+        assert_eq!(document_dashboard.document_field, DocumentField::Notes);
+        assert!(
+            document_dashboard
+                .cursor_pos(Rect::new(0, 0, 80, 28))
+                .is_some()
+        );
+
+        let mut derivative_dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+        derivative_dashboard.documents = vec![test_document(
+            "document-audio",
+            "Fake audio dictation",
+            "audio",
+        )];
+        assert_eq!(
+            derivative_dashboard.execute_workspace_command(":derivative new"),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert_eq!(derivative_dashboard.derivative_field, DerivativeField::Body);
+        let derivative_rendered = render_dashboard_lines_at(&derivative_dashboard, 160, 45);
+        assert!(
+            derivative_rendered.contains("Reviewed Text Draft"),
+            "expected reviewed text draft header in render:\n{derivative_rendered}"
+        );
+        assert!(
+            derivative_rendered.contains("File reference: patient audio: Fake audio")
+                && derivative_rendered.contains("dictation (document-audio)"),
+            "expected reviewed text target file reference in render:\n{derivative_rendered}"
+        );
+        assert!(
+            derivative_rendered.contains("Body:"),
+            "expected derivative body field in render:\n{derivative_rendered}"
+        );
+        assert!(
+            derivative_dashboard
+                .cursor_pos(Rect::new(0, 0, 160, 45))
+                .is_some()
+        );
+
+        let mut job_dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+        job_dashboard.draft_client.id = Some("client-1".to_string());
+        assert_eq!(
+            job_dashboard.execute_workspace_command(":job new"),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert_eq!(job_dashboard.workflow_section, MedicalWorkflowSection::Jobs);
+        let job_rendered = render_dashboard_lines_at(&job_dashboard, 80, 28);
+        assert!(
+            job_rendered.contains("Job Draft"),
+            "expected job draft in compact render:\n{job_rendered}"
+        );
+        assert!(
+            job_rendered.contains("Title:"),
+            "expected job title field in compact render:\n{job_rendered}"
+        );
+        assert!(job_dashboard.cursor_pos(Rect::new(0, 0, 80, 20)).is_some());
+        let one_row_job_rendered = render_dashboard_lines_at(&job_dashboard, 80, 20);
+        assert!(
+            one_row_job_rendered.contains("Title:"),
+            "expected active job field in one-row workflow render:\n{one_row_job_rendered}"
+        );
+    }
+
+    #[test]
+    fn command_palette_disabled_command_shows_reason_and_does_not_execute() {
+        let mut dashboard = WorkspaceDashboard {
+            focus: WorkspaceFocus::Clients,
+            ..WorkspaceDashboard::new(WorkspaceProfile::Medical)
+        };
+
+        dashboard.handle_key_event(KeyEvent::from(KeyCode::Char(':')));
+        for c in "job new".chars() {
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Char(c)));
+        }
+
+        let rendered = render_dashboard_lines(&dashboard);
+        assert!(rendered.contains(":job new"));
+        assert!(rendered.contains(":job new off"));
+        assert!(rendered.contains("Save the patient before creating a job."));
+
+        assert_eq!(
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Enter)),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert_eq!(dashboard.status, "Save the patient before creating a job.");
+    }
+
+    #[test]
+    fn job_new_is_disabled_before_saved_patient() {
+        let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+
+        assert_eq!(
+            dashboard.execute_workspace_command(":job new"),
+            WorkspaceDashboardAction::Consumed
+        );
+
+        assert_eq!(dashboard.status, "Save the patient before creating a job.");
+        assert!(!render_dashboard_lines(&dashboard).contains("Job Draft"));
+    }
+
+    #[test]
+    fn job_new_opens_draft_after_saved_patient() {
+        let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+        dashboard.draft_client.id = Some("client-1".to_string());
+        dashboard.draft_client.display_name = "Jordan Patient".to_string();
+
+        assert_eq!(
+            dashboard.execute_workspace_command(":task new"),
+            WorkspaceDashboardAction::Consumed
+        );
+
+        assert!(dashboard.draft_task.is_active());
+        assert_eq!(dashboard.draft_task.value(TaskField::Priority), "normal");
+        let rendered = render_dashboard_lines_at(&dashboard, 160, 40);
+        assert!(rendered.contains("Job Draft"));
+        assert_eq!(
+            dashboard.status,
+            "Job draft ready. Type in workflow, then Ctrl-S or :save."
+        );
+    }
+
+    #[test]
+    fn job_draft_renders_before_saved_jobs_in_compact_wide_terminal() {
+        let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+        dashboard.draft_client.id = Some("client-1".to_string());
+        dashboard.draft_client.display_name = "Jordan Patient".to_string();
+        dashboard.tasks = vec![
+            test_task("task-1", "First saved job", WorkspaceTaskStatus::Open),
+            test_task("task-2", "Second saved job", WorkspaceTaskStatus::Done),
+            test_task("task-3", "Third saved job", WorkspaceTaskStatus::Canceled),
+            test_task("task-4", "Fourth saved job", WorkspaceTaskStatus::Open),
+        ];
+
+        assert_eq!(
+            dashboard.execute_workspace_command(":job new"),
+            WorkspaceDashboardAction::Consumed
+        );
+
+        let rendered = render_dashboard_lines_at(&dashboard, 160, 45);
+        let draft_pos = rendered.find("Job Draft").expect("draft should render");
+        let saved_job_pos = rendered
+            .find("First saved job")
+            .expect("saved jobs should render");
+        assert!(
+            draft_pos < saved_job_pos,
+            "active draft should render before saved jobs"
+        );
+        assert!(rendered.contains("Assigned to:"));
+    }
+
+    #[test]
+    fn document_attach_opens_active_workflow_editor() {
+        let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+
+        assert_eq!(
+            dashboard.execute_workspace_command(":document attach"),
+            WorkspaceDashboardAction::Consumed
+        );
+
+        assert!(dashboard.draft_document.is_active());
+        assert_eq!(dashboard.focus, WorkspaceFocus::Workflow);
+        assert_eq!(dashboard.document_field, DocumentField::Title);
+        assert_eq!(
+            dashboard.status,
+            "New file reference draft. Drop or paste a local file path; metadata only."
+        );
+    }
+
+    #[test]
+    fn document_draft_renders_before_saved_documents_in_compact_wide_terminal() {
+        let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+        dashboard.documents = vec![test_document(
+            "document-1",
+            "Saved referral packet",
+            "referral",
+        )];
+
+        assert_eq!(
+            dashboard.execute_workspace_command(":document attach"),
+            WorkspaceDashboardAction::Consumed
+        );
+
+        let rendered = render_dashboard_lines_at(&dashboard, 160, 45);
+        let draft_pos = rendered
+            .find("File Reference Draft")
+            .expect("file reference draft should render");
+        let saved_document_pos = rendered
+            .find("Saved referral packet")
+            .expect("saved document should render");
+        assert!(
+            draft_pos < saved_document_pos,
+            "active file reference draft should render before saved documents"
+        );
+        assert!(rendered.contains("Notes:"));
+    }
+
+    #[test]
+    fn saved_document_metadata_does_not_render_as_active_document_draft() {
+        let document = test_document("document-1", "Saved referral packet", "referral");
+        let mut dashboard = WorkspaceDashboard {
+            documents: vec![document.clone()],
+            draft_document: DocumentDraft::from_document(&document),
+            ..WorkspaceDashboard::new(WorkspaceProfile::Medical)
+        };
+
+        assert!(!dashboard.draft_document.is_active());
+        assert_eq!(
+            dashboard.execute_workspace_command(":documents"),
+            WorkspaceDashboardAction::Consumed
+        );
+
+        let rendered = render_dashboard_lines_at(&dashboard, 160, 45);
+        assert!(!rendered.contains("File Reference Draft"));
+        assert!(rendered.contains("Saved referral"));
+    }
+
+    #[test]
+    fn artifact_attach_detects_local_metadata_and_inspector_renders_safety() {
+        let path = unique_test_temp_path("artifact-intake-referral.pdf");
+        fs::write(&path, b"%PDF fake test artifact").expect("write fake pdf");
+        let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+        dashboard.draft_client.id = Some("client-1".to_string());
+        dashboard.draft_document = DocumentDraft::start_new();
+        dashboard.draft_document.scope = "patient".to_string();
+        dashboard.draft_document.kind = "referral pdf".to_string();
+        dashboard.draft_document.title = "Fake referral PDF".to_string();
+        dashboard.draft_document.local_path = path.display().to_string();
+        dashboard.draft_document.tags = "referral,review".to_string();
+        dashboard.draft_document.source_label = "fake outside clinic".to_string();
+        dashboard.draft_document.notes = "metadata only".to_string();
+
+        let params = dashboard
+            .draft_document
+            .upsert_params("client-1".to_string(), None);
+        assert_eq!(params.scope, "patient");
+        assert_eq!(params.detected_kind, "PDF");
+        assert_eq!(params.mime_type.as_deref(), Some("application/pdf"));
+        assert_eq!(params.file_size_bytes, Some(23));
+        assert!(params.modified_at.is_some());
+        assert!(params.sha256.is_some());
+        assert_eq!(params.existence_status, "present");
+        assert!(params.metadata_json.contains("metadata-only"));
+
+        dashboard.documents = vec![document_from_upsert_params_for_tests(
+            "doc-referral",
+            &params,
+        )];
+        dashboard.draft_document.clear();
+
+        assert_eq!(
+            dashboard.execute_workspace_command(":workflow documents"),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert_eq!(
+            dashboard.execute_workspace_command(":artifact inspect 1"),
+            WorkspaceDashboardAction::Consumed
+        );
+        let rendered = render_dashboard_lines_at(&dashboard, 180, 50);
+        assert!(rendered.contains("File Detail"));
+        assert!(rendered.contains("Fake referral PDF"));
+        assert!(rendered.contains("present"));
+        assert!(rendered.contains("metadata only"));
+        assert!(rendered.contains("no upload"));
+
+        assert_eq!(
+            dashboard.execute_workspace_command(":artifact select 1"),
+            WorkspaceDashboardAction::Consumed
+        );
+        let preview = dashboard.context_packet_preview_lines().join("\n");
+        assert!(preview.contains("include metadata-only: patient PDF: Fake referral PDF"));
+        assert!(preview.contains("present"));
+        assert!(preview.contains("no file copy/upload/parse/OCR/transcribe/analyze"));
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn artifact_attach_sniffs_edi_transaction_metadata_without_full_parse() {
+        let path = unique_test_temp_path("artifact-intake-837p.x12");
+        fs::write(
+            &path,
+            b"ISA*00*          *00*          *ZZ*SENDER         *ZZ*RECEIVER       *260101*1200*^*00501*000000001*0*T*:~GS*HC*SENDER*RECEIVER*20260101*1200*1*X*005010X222A1~ST*837*0001*005010X222A1~BHT*0019*00*0123*20260101*1200*CH~SE*4*0001~GE*1*1~IEA*1*000000001~",
+        )
+        .expect("write fake x12");
+        let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+        dashboard.draft_document = DocumentDraft::start_new();
+        dashboard.draft_document.scope = "practice".to_string();
+        dashboard.draft_document.kind = "x12 edi".to_string();
+        dashboard.draft_document.title = "Fake 837P batch".to_string();
+        dashboard.draft_document.local_path = path.display().to_string();
+        dashboard.draft_document.tags = "billing,batch".to_string();
+        dashboard.draft_document.source_label = "fake clearinghouse".to_string();
+
+        let params = dashboard
+            .draft_document
+            .upsert_params("client-1".to_string(), None);
+        assert_eq!(params.scope, "practice");
+        assert_eq!(params.detected_kind, "EDI 837P");
+        assert_eq!(params.mime_type.as_deref(), Some("application/edi-x12"));
+        assert!(params.metadata_json.contains("837P professional claim"));
+
+        let document = document_from_upsert_params_for_tests("doc-837p", &params);
+        assert_eq!(
+            document_context_label(&document),
+            "practice EDI 837P professional claim: Fake 837P batch"
+        );
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn saved_document_metadata_does_not_block_job_or_addendum_start() {
+        let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+        dashboard.draft_client.id = Some("client-1".to_string());
+        dashboard.draft_note.id = Some("note-1".to_string());
+        dashboard.draft_note.status = "signed".to_string();
+        dashboard.draft_document = DocumentDraft {
+            id: Some("document-1".to_string()),
+            active: false,
+            title: "Saved referral".to_string(),
+            kind: "referral".to_string(),
+            local_path: "/tmp/saved-referral.pdf".to_string(),
+            scope: "patient".to_string(),
+            tags: String::new(),
+            source_label: String::new(),
+            notes: String::new(),
+            original_path: "/tmp/saved-referral.pdf".to_string(),
+            reference_kind: "local_reference".to_string(),
+            thumbnail_status: "none".to_string(),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            dashboard.execute_workspace_command(":addendum start"),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert!(dashboard.addendum_draft.active);
+        assert_eq!(
+            dashboard.status,
+            "Addendum draft ready. Type in workflow, then :addendum save."
+        );
+
+        dashboard.addendum_draft.clear();
+        assert_eq!(
+            dashboard.execute_workspace_command(":job new"),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert!(dashboard.draft_task.is_active());
+    }
+
+    #[test]
+    fn new_document_draft_still_blocks_job_start_until_saved() {
+        let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+        dashboard.draft_client.id = Some("client-1".to_string());
+        dashboard.draft_document = DocumentDraft::start_new();
+
+        assert_eq!(
+            dashboard.execute_workspace_command(":job new"),
+            WorkspaceDashboardAction::Consumed
+        );
+
+        assert_eq!(
+            dashboard.status,
+            "Save the document draft before creating a job."
+        );
+        assert!(!dashboard.draft_task.is_active());
+    }
+
+    #[test]
+    fn workflow_paste_without_active_editor_does_not_dirty_document_draft() {
+        let mut dashboard = WorkspaceDashboard {
+            focus: WorkspaceFocus::Workflow,
+            ..WorkspaceDashboard::new(WorkspaceProfile::Medical)
+        };
+
+        assert_eq!(
+            dashboard.handle_paste("stray paste".to_string()),
+            WorkspaceDashboardAction::Consumed
+        );
+
+        assert!(!dashboard.dirty);
+        assert!(!dashboard.draft_document.is_active());
+        assert_eq!(dashboard.draft_document.title, "");
+        assert_eq!(dashboard.draft_document.notes, "");
+    }
+
+    #[test]
+    fn medical_file_drop_paste_builds_save_action_for_single_pdf() {
+        let path = unique_test_temp_path("medical-drop-outside-referral.pdf");
+        fs::write(&path, b"%PDF fake referral").expect("write fake referral");
+        let mut dashboard = WorkspaceDashboard {
+            focus: WorkspaceFocus::PatientFiles,
+            workflow_section: MedicalWorkflowSection::Visit,
+            ..WorkspaceDashboard::new(WorkspaceProfile::Medical)
+        };
+        dashboard.draft_client.id = Some("client-1".to_string());
+
+        let action = dashboard.handle_paste(path.display().to_string());
+        let params = match action {
+            WorkspaceDashboardAction::SaveDroppedFileReferences(params) => params,
+            other => panic!("expected dropped file save action, got {other:?}"),
+        };
+
+        assert_eq!(params.len(), 1);
+        assert_eq!(params[0].client_id, "client-1");
+        assert_eq!(params[0].scope, "patient");
+        assert_eq!(params[0].kind, "referral pdf");
+        assert_eq!(params[0].detected_kind, "PDF");
+        assert_eq!(params[0].mime_type.as_deref(), Some("application/pdf"));
+        assert_eq!(params[0].existence_status, "present");
+        assert_eq!(params[0].original_path, path.display().to_string());
+        assert_eq!(params[0].reference_kind, "local_reference");
+        assert!(params[0].vault_path.is_empty());
+        assert!(params[0].content_sha256.is_none());
+        assert_eq!(params[0].thumbnail_status, "none");
+        assert!(params[0].thumbnail_path.is_empty());
+        assert_eq!(params[0].intake_source, "drop_or_paste_path");
+        assert!(params[0].imported_at.is_none());
+        assert!(params[0].metadata_json.contains("metadata-only"));
+        assert!(
+            params[0]
+                .metadata_json
+                .contains("no copy/upload/parse/OCR/transcribe")
+        );
+        assert!(dashboard.selected_artifact_ids.is_empty());
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn medical_native_file_drop_builds_save_action_for_jpg_pdf() {
+        let dir = unique_test_temp_path("medical-native-drop-valid");
+        fs::create_dir_all(&dir).expect("create native drop dir");
+        let id_card = dir.join("scanned patient id.jpg");
+        let referral = dir.join("outside referral.pdf");
+        fs::write(&id_card, b"fake jpg").expect("write fake jpg");
+        fs::write(&referral, b"%PDF fake referral").expect("write fake pdf");
+
+        let mut dashboard = WorkspaceDashboard {
+            focus: WorkspaceFocus::PatientFiles,
+            workflow_section: MedicalWorkflowSection::Visit,
+            ..WorkspaceDashboard::new(WorkspaceProfile::Medical)
+        };
+        dashboard.draft_client.id = Some("client-1".to_string());
+
+        let action = dashboard.handle_native_medical_file_drop(NativeMedicalFileDropEvent {
+            schema_version: 1,
+            session_id: "session-1".to_string(),
+            target_pane: "patient_file_tree".to_string(),
+            paths: vec![id_card, referral],
+            screen_x: Some(412.0),
+            screen_y: Some(903.0),
+            modifiers: Vec::new(),
+            source: "macos_native_drop".to_string(),
+        });
+        let params = match action {
+            WorkspaceDashboardAction::SaveDroppedFileReferences(params) => params,
+            other => panic!("expected native dropped file save action, got {other:?}"),
+        };
+
+        assert_eq!(params.len(), 2);
+        assert_eq!(params[0].client_id, "client-1");
+        assert_eq!(params[0].source_label, "macOS native drop");
+        assert_eq!(params[0].intake_source, "macos_native_drop");
+        assert_eq!(params[0].reference_kind, "local_reference");
+        assert_eq!(params[0].thumbnail_status, "none");
+        assert!(params.iter().any(|param| param.kind == "id card image"));
+        assert!(params.iter().any(|param| param.kind == "referral pdf"));
+        assert!(dashboard.selected_artifact_ids.is_empty());
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn medical_native_file_drop_is_blocked_outside_patient_file_tree() {
+        let path = unique_test_temp_path("medical-native-wrong-pane-id.jpg");
+        fs::write(&path, b"fake jpg").expect("write fake jpg");
+        let event = NativeMedicalFileDropEvent {
+            schema_version: 1,
+            session_id: "session-1".to_string(),
+            target_pane: "patient_file_tree".to_string(),
+            paths: vec![path.clone()],
+            screen_x: None,
+            screen_y: None,
+            modifiers: Vec::new(),
+            source: "macos_native_drop".to_string(),
+        };
+
+        let mut demographics = WorkspaceDashboard {
+            focus: WorkspaceFocus::Demographics,
+            demographics_field: DemographicsField::DisplayName,
+            ..WorkspaceDashboard::new(WorkspaceProfile::Medical)
+        };
+        demographics.draft_client.id = Some("client-1".to_string());
+        demographics.draft_client.display_name = "John Doe".to_string();
+
+        assert_eq!(
+            demographics.handle_native_medical_file_drop(event),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert_eq!(demographics.draft_client.display_name, "John Doe");
+        assert!(!demographics.dirty);
+        assert!(
+            demographics
+                .status
+                .contains("Focus Uploaded Documents before adding files")
+        );
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn medical_native_file_drop_rejects_wrong_target_and_non_priority_files() {
+        let dir = unique_test_temp_path("medical-native-drop-rejections");
+        fs::create_dir_all(&dir).expect("create native drop rejection dir");
+        let png = dir.join("screenshot.png");
+        fs::write(&png, b"fake png").expect("write fake png");
+        let jpg = dir.join("insurance-card.jpg");
+        fs::write(&jpg, b"fake jpg").expect("write fake jpg");
+
+        let mut wrong_target = WorkspaceDashboard {
+            focus: WorkspaceFocus::PatientFiles,
+            workflow_section: MedicalWorkflowSection::Visit,
+            ..WorkspaceDashboard::new(WorkspaceProfile::Medical)
+        };
+        wrong_target.draft_client.id = Some("client-1".to_string());
+        assert_eq!(
+            wrong_target.handle_native_medical_file_drop(NativeMedicalFileDropEvent {
+                schema_version: 1,
+                session_id: "session-1".to_string(),
+                target_pane: "note_body".to_string(),
+                paths: vec![jpg],
+                screen_x: None,
+                screen_y: None,
+                modifiers: Vec::new(),
+                source: "macos_native_drop".to_string(),
+            }),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert!(
+            wrong_target
+                .status
+                .contains("Target Uploaded Documents before adding files")
+        );
+
+        let mut unsupported = WorkspaceDashboard {
+            focus: WorkspaceFocus::PatientFiles,
+            workflow_section: MedicalWorkflowSection::Visit,
+            ..WorkspaceDashboard::new(WorkspaceProfile::Medical)
+        };
+        unsupported.draft_client.id = Some("client-1".to_string());
+        assert_eq!(
+            unsupported.handle_native_medical_file_drop(NativeMedicalFileDropEvent {
+                schema_version: 1,
+                session_id: "session-1".to_string(),
+                target_pane: "patient_file_tree".to_string(),
+                paths: vec![png],
+                screen_x: None,
+                screen_y: None,
+                modifiers: Vec::new(),
+                source: "macos_native_drop".to_string(),
+            }),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert!(
+            unsupported
+                .status
+                .contains("native drop accepts JPG/JPEG/PDF")
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn medical_file_drop_paste_is_blocked_outside_patient_files_focus() {
+        let path = unique_test_temp_path("medical-wrong-pane-drop-scan.png");
+        fs::write(&path, b"fake png").expect("write fake png");
+        let pasted = path.display().to_string();
+
+        let mut demographics = WorkspaceDashboard {
+            focus: WorkspaceFocus::Demographics,
+            demographics_field: DemographicsField::DisplayName,
+            ..WorkspaceDashboard::new(WorkspaceProfile::Medical)
+        };
+        demographics.draft_client.id = Some("client-1".to_string());
+        demographics.draft_client.display_name = "John Doe".to_string();
+
+        assert_eq!(
+            demographics.handle_paste(pasted.clone()),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert_eq!(demographics.draft_client.display_name, "John Doe");
+        assert!(!demographics.dirty);
+        assert!(demographics.status.contains("File drop ignored here"));
+
+        let mut note_body = WorkspaceDashboard {
+            focus: WorkspaceFocus::NoteBody,
+            ..WorkspaceDashboard::new(WorkspaceProfile::Medical)
+        };
+        note_body.draft_note.body = "Existing note.".to_string();
+
+        assert_eq!(
+            note_body.handle_paste(pasted.clone()),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert_eq!(note_body.draft_note.body, "Existing note.");
+        assert!(!note_body.dirty);
+        assert!(note_body.status.contains("File drop ignored here"));
+
+        let mut chart = WorkspaceDashboard {
+            focus: WorkspaceFocus::Workflow,
+            workflow_section: MedicalWorkflowSection::Visit,
+            ..WorkspaceDashboard::new(WorkspaceProfile::Medical)
+        };
+        chart.draft_client.id = Some("client-1".to_string());
+
+        assert_eq!(
+            chart.handle_paste(pasted),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert!(chart.status.contains("File drop ignored here"));
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn medical_patient_files_sidepane_focus_accepts_file_drop() {
+        let path = unique_test_temp_path("medical-sidepane-drop-medicare-card.jpg");
+        fs::write(&path, b"fake jpg").expect("write fake jpg");
+        let mut dashboard = WorkspaceDashboard {
+            focus: WorkspaceFocus::PatientFiles,
+            workflow_section: MedicalWorkflowSection::Visit,
+            ..WorkspaceDashboard::new(WorkspaceProfile::Medical)
+        };
+        dashboard.draft_client.id = Some("client-1".to_string());
+
+        let action = dashboard.handle_paste(path.display().to_string());
+        let params = match action {
+            WorkspaceDashboardAction::SaveDroppedFileReferences(params) => params,
+            other => panic!("expected dropped file save action, got {other:?}"),
+        };
+
+        assert_eq!(params.len(), 1);
+        assert_eq!(params[0].client_id, "client-1");
+        assert_eq!(params[0].kind, "medicare insurance card image");
+        assert_eq!(params[0].reference_kind, "local_reference");
+        assert_eq!(params[0].intake_source, "drop_or_paste_path");
+        assert_eq!(params[0].source_label, "drop/paste local path");
+        assert_eq!(params[0].original_path, path.display().to_string());
+        assert!(dashboard.selected_artifact_ids.is_empty());
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn medical_focus_cycle_reaches_patient_files_sidepane_when_visible() {
+        let mut dashboard = WorkspaceDashboard {
+            focus: WorkspaceFocus::NoteBody,
+            workflow_section: MedicalWorkflowSection::Visit,
+            ..WorkspaceDashboard::new(WorkspaceProfile::Medical)
+        };
+        dashboard.documents = vec![patient_file(
+            "doc-id-card",
+            "Scanned patient ID JPG",
+            "id card image",
+            "/tmp/id.jpg",
+        )];
+
+        assert_eq!(
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Tab)),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert_eq!(dashboard.focus, WorkspaceFocus::Workflow);
+        assert_eq!(
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Tab)),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert_eq!(dashboard.focus, WorkspaceFocus::Agent);
+        assert_eq!(
+            dashboard.workflow_section,
+            MedicalWorkflowSection::AgentRequest
+        );
+        assert!(dashboard.agent_request.is_active());
+        assert!(
+            dashboard
+                .status
+                .contains("Agent input ready. Type local instructions/context")
+        );
+        for c in "Use eval template".chars() {
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Char(c)));
+        }
+        assert_eq!(dashboard.agent_request.body, "Use eval template");
+        assert_eq!(
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Tab)),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert_eq!(dashboard.focus, WorkspaceFocus::Clients);
+        assert_eq!(
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Tab)),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert_eq!(dashboard.focus, WorkspaceFocus::Notes);
+        assert_eq!(
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Tab)),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert_eq!(dashboard.focus, WorkspaceFocus::PatientFiles);
+        assert!(dashboard.status.contains("Scanned patient ID JPG"));
+        assert_eq!(
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Tab)),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert_eq!(dashboard.focus, WorkspaceFocus::Demographics);
+        assert_eq!(
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Tab)),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert_eq!(dashboard.focus, WorkspaceFocus::NoteTitle);
+        assert_eq!(
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Tab)),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert_eq!(dashboard.focus, WorkspaceFocus::NoteBody);
+        assert_eq!(
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Tab)),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert_eq!(dashboard.focus, WorkspaceFocus::Workflow);
+        assert_eq!(
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Tab)),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert_eq!(dashboard.focus, WorkspaceFocus::Agent);
+        assert_eq!(
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::BackTab)),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert_eq!(dashboard.focus, WorkspaceFocus::Workflow);
+        assert_eq!(
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::BackTab)),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert_eq!(dashboard.focus, WorkspaceFocus::NoteBody);
+        assert_eq!(
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::BackTab)),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert_eq!(dashboard.focus, WorkspaceFocus::NoteTitle);
+        assert_eq!(
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::BackTab)),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert_eq!(dashboard.focus, WorkspaceFocus::Demographics);
+        assert_eq!(
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::BackTab)),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert_eq!(dashboard.focus, WorkspaceFocus::PatientFiles);
+        assert_eq!(
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::BackTab)),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert_eq!(dashboard.focus, WorkspaceFocus::Notes);
+        let title_before = dashboard.draft_note.title.clone();
+        assert_eq!(
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Tab)),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert_eq!(dashboard.focus, WorkspaceFocus::PatientFiles);
+        assert_eq!(
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Tab)),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert_eq!(dashboard.focus, WorkspaceFocus::Demographics);
+        assert_eq!(
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Tab)),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert_eq!(dashboard.focus, WorkspaceFocus::NoteTitle);
+        type_text(&mut dashboard, " Updated");
+        assert!(dashboard.draft_note.title.starts_with(&title_before));
+        assert!(dashboard.draft_note.title.contains("Updated"));
+        assert_eq!(
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::BackTab)),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert_eq!(dashboard.focus, WorkspaceFocus::Demographics);
+        dashboard.demographics_field = DemographicsField::PreferredName;
+        type_text(&mut dashboard, "Trackpad Test");
+        assert!(
+            dashboard
+                .draft_client
+                .preferred_name
+                .contains("Trackpad Test")
+        );
+        assert_eq!(
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::BackTab)),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert_eq!(dashboard.focus, WorkspaceFocus::PatientFiles);
+
+        let rendered = render_dashboard_lines_at(&dashboard, 120, 32);
+        assert!(rendered.contains("Uploaded Documents"));
+        assert!(rendered.contains("Scanned patient I"));
+
+        focus_patient_file_row(&mut dashboard, "doc-id-card");
+        assert_eq!(
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Enter)),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert_eq!(dashboard.focus, WorkspaceFocus::Workflow);
+        assert_eq!(
+            dashboard.workflow_section,
+            MedicalWorkflowSection::Documents
+        );
+        assert_eq!(
+            dashboard.inspected_artifact_id,
+            Some("doc-id-card".to_string())
+        );
+        let detail_rendered = render_dashboard_lines_at(&dashboard, 120, 32);
+        assert!(detail_rendered.contains("Patient File Detail"));
+        assert!(detail_rendered.contains("File Detail"));
+    }
+
+    #[test]
+    fn medical_viewport_focus_order_matches_visible_layout_direction() {
+        let compact = Rect::new(0, 0, 80, 20);
+        let mut dashboard = medical_recursive_files_dashboard();
+        dashboard.focus = WorkspaceFocus::Clients;
+        let mut seen = Vec::new();
+        for _ in 0..7 {
+            seen.push(dashboard.current_medical_pane_slot());
+            assert_eq!(
+                dashboard
+                    .handle_key_event_for_viewport(KeyEvent::from(KeyCode::Tab), Some(compact),),
+                WorkspaceDashboardAction::Consumed
+            );
+        }
+        assert_eq!(
+            seen,
+            vec![
+                MedicalPaneSlot::PatientDirectory,
+                MedicalPaneSlot::ChartTree,
+                MedicalPaneSlot::CenterWorkArea,
+                MedicalPaneSlot::AgentWorkpane,
+                MedicalPaneSlot::PatientDemographics,
+                MedicalPaneSlot::NoteTitle,
+                MedicalPaneSlot::NoteBody,
+            ],
+            "compact focus should move from the top rows downward"
+        );
+
+        let medium = Rect::new(0, 0, 110, 42);
+        let mut medium_dashboard = medical_recursive_files_dashboard();
+        medium_dashboard.focus = WorkspaceFocus::Clients;
+        let mut medium_seen = Vec::new();
+        for _ in 0..8 {
+            medium_seen.push(medium_dashboard.current_medical_pane_slot());
+            assert_eq!(
+                medium_dashboard
+                    .handle_key_event_for_viewport(KeyEvent::from(KeyCode::Tab), Some(medium),),
+                WorkspaceDashboardAction::Consumed
+            );
+        }
+        assert_eq!(
+            medium_seen,
+            vec![
+                MedicalPaneSlot::PatientDirectory,
+                MedicalPaneSlot::ChartTree,
+                MedicalPaneSlot::PatientFileTree,
+                MedicalPaneSlot::PatientDemographics,
+                MedicalPaneSlot::NoteTitle,
+                MedicalPaneSlot::NoteBody,
+                MedicalPaneSlot::CenterWorkArea,
+                MedicalPaneSlot::AgentWorkpane,
+            ],
+            "medium focus should walk the left stack before the center/right work panes"
+        );
+    }
+
+    #[test]
+    fn medical_ctrl_i_is_treated_as_tab_for_terminal_compatibility() {
+        let viewport = Rect::new(0, 0, 160, 45);
+        let mut dashboard = medical_recursive_files_dashboard();
+        dashboard.focus = WorkspaceFocus::Clients;
+
+        assert_eq!(
+            dashboard.handle_key_event_for_viewport(
+                KeyEvent::new(KeyCode::Char('i'), KeyModifiers::CONTROL),
+                Some(viewport),
+            ),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert_eq!(dashboard.focus, WorkspaceFocus::Notes);
+
+        assert_eq!(
+            dashboard.handle_key_event_for_viewport(
+                KeyEvent::new(KeyCode::Char('i'), KeyModifiers::CONTROL),
+                Some(viewport),
+            ),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert_eq!(dashboard.focus, WorkspaceFocus::PatientFiles);
+    }
+
+    #[test]
+    fn medical_file_tree_keys_are_scoped_to_focused_pane() {
+        let mut dashboard = WorkspaceDashboard {
+            focus: WorkspaceFocus::PatientFiles,
+            workflow_section: MedicalWorkflowSection::Visit,
+            ..WorkspaceDashboard::new(WorkspaceProfile::Medical)
+        };
+        dashboard.documents = vec![
+            patient_file(
+                "doc-id-card",
+                "Scanned patient ID JPG",
+                "id card image",
+                "/tmp/id.jpg",
+            ),
+            patient_file(
+                "doc-referral",
+                "Outside referral PDF",
+                "referral pdf",
+                "/tmp/referral.pdf",
+            ),
+        ];
+        dashboard.select_first_patient_file_row_if_needed();
+        assert_eq!(
+            dashboard.highlighted_patient_file_document_id().as_deref(),
+            Some("doc-id-card")
+        );
+
+        assert_eq!(
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Down)),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert_eq!(
+            dashboard.highlighted_patient_file_document_id().as_deref(),
+            Some("doc-referral"),
+            "Down should move to the next uploaded document"
+        );
+        press_consumed(&mut dashboard, KeyCode::Home);
+        assert_eq!(
+            dashboard.highlighted_patient_file_document_id().as_deref(),
+            Some("doc-id-card")
+        );
+        press_consumed(&mut dashboard, KeyCode::End);
+        assert_eq!(
+            dashboard.highlighted_patient_file_document_id().as_deref(),
+            Some("doc-referral")
+        );
+        focus_patient_file_row(&mut dashboard, "doc-referral");
+        press_consumed(&mut dashboard, KeyCode::PageUp);
+        assert!(dashboard.patient_files_tree_index < dashboard.patient_file_tree_rows().len());
+        focus_patient_file_row(&mut dashboard, "doc-referral");
+        press_consumed(&mut dashboard, KeyCode::PageDown);
+        assert!(dashboard.patient_files_tree_index < dashboard.patient_file_tree_rows().len());
+        press_consumed(&mut dashboard, KeyCode::Tab);
+        assert_eq!(
+            dashboard.focus,
+            WorkspaceFocus::Demographics,
+            "Tab after document-list PageDown should leave Uploaded Documents"
+        );
+        press_consumed(&mut dashboard, KeyCode::BackTab);
+        assert_eq!(
+            dashboard.focus,
+            WorkspaceFocus::PatientFiles,
+            "Shift-Tab should return to Uploaded Documents after paging"
+        );
+        focus_patient_file_row(&mut dashboard, "doc-referral");
+        assert_eq!(
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Char(' '))),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert!(dashboard.selected_artifact_ids.contains("doc-referral"));
+
+        let selected_before = dashboard.highlighted_patient_file_document_id();
+        dashboard.focus_medical_agent_workpane();
+        for c in "template".chars() {
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Char(c)));
+        }
+        assert_eq!(dashboard.agent_request.body, "template");
+        assert_eq!(
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Down)),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert_eq!(
+            dashboard.highlighted_patient_file_document_id(),
+            selected_before
+        );
+        assert!(dashboard.selected_artifact_ids.contains("doc-referral"));
+        assert_eq!(
+            dashboard.handle_paste("/tmp/fake-dropped-scan.png".to_string()),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert!(
+            dashboard
+                .status
+                .contains("File drop ignored here. Focus Uploaded Documents")
+        );
+        dashboard.focus_patient_files_tree();
+        assert_eq!(dashboard.focus, WorkspaceFocus::PatientFiles);
+        assert_eq!(
+            dashboard.agent_request.body, "template",
+            "switching to Uploaded Documents must preserve local agent instructions"
+        );
+        assert_eq!(
+            dashboard.highlighted_patient_file_document_id(),
+            selected_before
+        );
+
+        dashboard.focus = WorkspaceFocus::Notes;
+        assert_eq!(
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Char(' '))),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert_eq!(
+            dashboard.selected_artifact_ids.len(),
+            1,
+            "space outside Uploaded Documents must not toggle file inclusion"
+        );
+    }
+
+    #[test]
+    fn medical_directory_and_file_tree_render_as_compact_selectors() {
+        let dashboard = medical_recursive_directory_dashboard();
+        let directory = dashboard
+            .patient_directory_lines()
+            .iter()
+            .map(line_plain_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert_eq!(directory.matches("Jordan Patient").count(), 1);
+        assert_eq!(directory.matches("Riley Example").count(), 1);
+        assert!(directory.contains("MRN-123"));
+        assert!(directory.contains("MRN-987"));
+        assert!(!directory.contains("555-0101"));
+        assert!(!directory.contains("Maya Contact"));
+        assert!(!directory.contains("MED-777"));
+        assert!(!directory.contains("Fake Medicare"));
+
+        let mut empty_files = medical_recursive_base_dashboard();
+        empty_files.focus_patient_files_tree();
+        let empty_tree = patient_file_tree_plain_text(&empty_files);
+        assert!(empty_tree.contains("Uploaded Documents"));
+        assert!(empty_tree.contains("No files yet"));
+        assert!(empty_tree.contains("Paste/drop JPG/PDF"));
+        assert!(!empty_tree.contains("ID Cards (0)"));
+        assert!(!empty_tree.contains("Insurance (0)"));
+        assert!(!empty_tree.contains("/tmp/"));
+        assert!(!empty_tree.contains("metadata only"));
+
+        let mut files = medical_recursive_files_dashboard();
+        files.documents.push(patient_file(
+            "document-long-title",
+            "Very long scanned Medicare insurance card front and back image name should truncate",
+            "medicare insurance card image",
+            "/tmp/very-long-med-card.jpg",
+        ));
+        files.documents.push(patient_file(
+            "document-lab-pdf",
+            "Lab report PDF",
+            "patient pdf",
+            "/tmp/lab-report.pdf",
+        ));
+        files.focus_patient_files_tree();
+        let tree = patient_file_tree_plain_text(&files);
+        assert!(tree.contains("Uploaded Documents"));
+        assert!(tree.contains("• Outside referral PDF"));
+        assert!(tree.contains("• Very long scanned"));
+        assert!(tree.contains("• Lab report PDF"));
+        assert!(tree.contains("Outside referral PDF"));
+        assert!(!tree.contains("PDFs (1)"));
+        assert!(!tree.contains("Insurance (1)"));
+        assert!(!tree.contains("[ ]"));
+        assert!(!tree.contains("[x]"));
+        assert!(!tree.contains("Audio (0)"));
+        assert!(!tree.contains("Video (0)"));
+        assert!(!tree.contains("/tmp/"));
+        assert!(!tree.contains("metadata only"));
+        for line in tree.lines() {
+            assert!(
+                line.chars().count() <= 34,
+                "Uploaded Documents row should stay one-line compact: {line:?}\n{tree}"
+            );
+        }
+    }
+
+    #[test]
+    fn medical_recursive_focus_workflows_cover_major_panes_keys_and_typing() {
+        fn record(
+            workflows: &mut Vec<&'static str>,
+            name: &'static str,
+            dashboard: &WorkspaceDashboard,
+        ) {
+            workflows.push(name);
+            assert_medical_render_not_duplicated(dashboard, name);
+        }
+
+        let mut workflows = Vec::new();
+
+        let initial = medical_recursive_base_dashboard();
+        record(&mut workflows, "initial chart render", &initial);
+
+        let mut tab_cycle = medical_recursive_files_dashboard();
+        tab_cycle.focus = WorkspaceFocus::Clients;
+        let mut tab_seen = Vec::new();
+        for _ in 0..8 {
+            tab_seen.push(tab_cycle.current_medical_pane_slot());
+            press_consumed(&mut tab_cycle, KeyCode::Tab);
+            assert_medical_render_not_duplicated(&tab_cycle, "tab cycle");
+        }
+        assert_eq!(
+            tab_seen,
+            vec![
+                MedicalPaneSlot::PatientDirectory,
+                MedicalPaneSlot::ChartTree,
+                MedicalPaneSlot::PatientFileTree,
+                MedicalPaneSlot::PatientDemographics,
+                MedicalPaneSlot::NoteTitle,
+                MedicalPaneSlot::NoteBody,
+                MedicalPaneSlot::CenterWorkArea,
+                MedicalPaneSlot::AgentWorkpane,
+            ]
+        );
+        record(&mut workflows, "tab reaches every pane", &tab_cycle);
+
+        let mut reverse_tab = medical_recursive_files_dashboard();
+        reverse_tab.focus = WorkspaceFocus::Clients;
+        let mut reverse_seen = Vec::new();
+        for _ in 0..8 {
+            reverse_seen.push(reverse_tab.current_medical_pane_slot());
+            press_consumed(&mut reverse_tab, KeyCode::BackTab);
+            assert_medical_render_not_duplicated(&reverse_tab, "shift-tab cycle");
+        }
+        assert_eq!(
+            reverse_seen,
+            vec![
+                MedicalPaneSlot::PatientDirectory,
+                MedicalPaneSlot::AgentWorkpane,
+                MedicalPaneSlot::CenterWorkArea,
+                MedicalPaneSlot::NoteBody,
+                MedicalPaneSlot::NoteTitle,
+                MedicalPaneSlot::PatientDemographics,
+                MedicalPaneSlot::PatientFileTree,
+                MedicalPaneSlot::ChartTree,
+            ]
+        );
+        record(
+            &mut workflows,
+            "shift-tab reverses every pane",
+            &reverse_tab,
+        );
+
+        let mut directory = medical_recursive_directory_dashboard();
+        directory.open_patient_directory();
+        assert_eq!(
+            press_key(&mut directory, KeyCode::Down),
+            WorkspaceDashboardAction::SelectClient(1)
+        );
+        assert_eq!(directory.focus, WorkspaceFocus::Clients);
+        record(
+            &mut workflows,
+            "patient directory arrows stay scoped",
+            &directory,
+        );
+
+        let mut search = medical_recursive_directory_dashboard();
+        search.open_patient_search();
+        type_text(&mut search, "MRN-987");
+        assert!(search.patient_search_query.as_deref() == Some("MRN-987"));
+        press_consumed(&mut search, KeyCode::Esc);
+        assert!(search.patient_search_query.is_none());
+        record(&mut workflows, "patient search type and escape", &search);
+
+        let mut search_empty = medical_recursive_directory_dashboard();
+        search_empty.open_patient_search();
+        type_text(&mut search_empty, "no matching patient");
+        assert!(render_dashboard_lines_at(&search_empty, 120, 32).contains("No matching"));
+        record(&mut workflows, "patient search no results", &search_empty);
+
+        let mut demographics = medical_recursive_base_dashboard();
+        demographics.focus = WorkspaceFocus::Demographics;
+        demographics.demographics_field = DemographicsField::PreferredName;
+        type_text(&mut demographics, "Tester");
+        assert!(demographics.dirty);
+        assert!(demographics.draft_client.preferred_name.contains("Tester"));
+        record(&mut workflows, "demographics typing", &demographics);
+
+        let mut contact = medical_recursive_base_dashboard();
+        contact.execute_workspace_command(":contact edit");
+        type_text(&mut contact, "555-1212");
+        press_consumed(&mut contact, KeyCode::Down);
+        type_text(&mut contact, "555-3434");
+        assert!(contact.draft_client.primary_phone.contains("555-1212"));
+        assert!(contact.draft_client.secondary_phone.contains("555-3434"));
+        record(&mut workflows, "contact editor typing", &contact);
+
+        let mut coverage = medical_recursive_base_dashboard();
+        coverage.execute_workspace_command(":coverage edit");
+        type_text(&mut coverage, "Fake Payer");
+        press_consumed(&mut coverage, KeyCode::Down);
+        type_text(&mut coverage, "Fake Plan");
+        assert!(coverage.draft_client.payer_name.contains("Fake Payer"));
+        assert!(coverage.draft_client.plan_name.contains("Fake Plan"));
+        record(&mut workflows, "coverage editor typing", &coverage);
+
+        let mut chart_tree = medical_recursive_base_dashboard();
+        chart_tree.notes.push(WorkspaceNote {
+            id: "note-2".to_string(),
+            client_id: "client-1".to_string(),
+            encounter_id: Some("encounter-1".to_string()),
+            title: "Second daily note".to_string(),
+            body: "Second body".to_string(),
+            kind: "daily note".to_string(),
+            status: "draft".to_string(),
+            created_at: 2,
+            updated_at: 2,
+            archived_at: None,
+            current_revision: 0,
+        });
+        chart_tree.focus = WorkspaceFocus::Notes;
+        press_consumed(&mut chart_tree, KeyCode::Down);
+        press_consumed(&mut chart_tree, KeyCode::Enter);
+        assert_eq!(chart_tree.focus, WorkspaceFocus::NoteBody);
+        record(
+            &mut workflows,
+            "patient notes opens selected note",
+            &chart_tree,
+        );
+
+        let mut note_body = medical_recursive_base_dashboard();
+        note_body.focus = WorkspaceFocus::NoteBody;
+        type_text(&mut note_body, "\nObjective: fake gait measures.");
+        assert!(note_body.draft_note.body.contains("Objective:"));
+        record(&mut workflows, "note body typing", &note_body);
+
+        let mut locked_note = medical_recursive_base_dashboard();
+        locked_note.focus = WorkspaceFocus::NoteBody;
+        locked_note.draft_note.status = "signed".to_string();
+        let locked_before = locked_note.draft_note.body.clone();
+        press_consumed(&mut locked_note, KeyCode::Char('x'));
+        assert_eq!(locked_note.draft_note.body, locked_before);
+        assert!(locked_note.status.contains("read-only"));
+        record(&mut workflows, "locked note blocks typing", &locked_note);
+
+        let mut safety = medical_recursive_base_dashboard();
+        safety.execute_workspace_command(":allergy add");
+        type_text(&mut safety, "Fake latex allergy");
+        press_consumed(&mut safety, KeyCode::Down);
+        type_text(&mut safety, "rash");
+        assert!(safety.draft_safety.name.contains("Fake latex"));
+        assert!(safety.draft_safety.reaction.contains("rash"));
+        record(&mut workflows, "clinical safety editor typing", &safety);
+
+        let mut empty_files = medical_recursive_base_dashboard();
+        empty_files.focus_patient_files_tree();
+        let empty_file_tree = patient_file_tree_plain_text(&empty_files);
+        assert!(empty_file_tree.contains("No files yet"));
+        assert!(empty_file_tree.contains("Paste/drop JPG/PDF"));
+        assert!(!empty_file_tree.contains("ID Cards (0)"));
+        record(
+            &mut workflows,
+            "empty uploaded documents state",
+            &empty_files,
+        );
+
+        let mut files = medical_recursive_files_dashboard();
+        files.documents.push(patient_file(
+            "document-id-card",
+            "Scanned patient ID JPG",
+            "id card image",
+            "/tmp/id-card.jpg",
+        ));
+        files.focus_patient_files_tree();
+        press_consumed(&mut files, KeyCode::End);
+        let selected_last = files.patient_files_tree_index;
+        press_consumed(&mut files, KeyCode::Home);
+        assert_ne!(files.patient_files_tree_index, selected_last);
+        press_consumed(&mut files, KeyCode::PageDown);
+        assert!(files.patient_files_tree_index > 0);
+        assert!(files.patient_files_tree_index < files.patient_file_tree_rows().len());
+        record(&mut workflows, "uploaded document navigation keys", &files);
+
+        let mut include_file = medical_recursive_files_dashboard();
+        include_file.focus_patient_files_tree();
+        let selected_file = focus_first_patient_file_row(&mut include_file);
+        press_consumed(&mut include_file, KeyCode::Char(' '));
+        assert!(include_file.selected_artifact_ids.contains(&selected_file));
+        press_consumed(&mut include_file, KeyCode::Char(' '));
+        assert!(!include_file.selected_artifact_ids.contains(&selected_file));
+        record(
+            &mut workflows,
+            "uploaded documents space toggles only file",
+            &include_file,
+        );
+
+        let mut file_detail = medical_recursive_files_dashboard();
+        file_detail.focus_patient_files_tree();
+        focus_first_patient_file_row(&mut file_detail);
+        press_consumed(&mut file_detail, KeyCode::Enter);
+        assert_eq!(
+            file_detail.workflow_section,
+            MedicalWorkflowSection::Documents
+        );
+        for key in [KeyCode::PageDown, KeyCode::PageDown, KeyCode::PageUp] {
+            press_consumed(&mut file_detail, key);
+            assert_medical_render_not_duplicated(&file_detail, "file detail scroll");
+        }
+        record(&mut workflows, "file detail scroll", &file_detail);
+
+        let mut wrong_drop = medical_recursive_base_dashboard();
+        wrong_drop.focus = WorkspaceFocus::NoteBody;
+        let note_before = wrong_drop.draft_note.body.clone();
+        assert_eq!(
+            wrong_drop.handle_paste("/tmp/fake-scan.png".to_string()),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert_eq!(wrong_drop.draft_note.body, note_before);
+        assert!(wrong_drop.status.contains("File drop ignored here"));
+        record(&mut workflows, "wrong-pane file drop blocked", &wrong_drop);
+
+        let mut agent = medical_recursive_base_dashboard();
+        agent.focus_medical_agent_workpane();
+        type_text(&mut agent, "Use eval template.");
+        assert_eq!(agent.agent_request.body, "Use eval template.");
+        press_consumed(&mut agent, KeyCode::Tab);
+        assert_eq!(agent.focus, WorkspaceFocus::Clients);
+        assert_eq!(agent.agent_request.body, "Use eval template.");
+        record(&mut workflows, "agent instructions local typing", &agent);
+
+        let mut returned = medical_recursive_base_dashboard();
+        returned.push_context_packet_for_tests(test_context_packet(
+            "packet-1",
+            "client-1",
+            Some("note-1"),
+            "Draft fake plan",
+            "0 selected artifacts",
+        ));
+        returned.execute_workspace_command(":agent result");
+        type_text(&mut returned, "Returned fake plan text.");
+        assert!(returned.agent_result.body.contains("Returned fake plan"));
+        record(&mut workflows, "returned work draft typing", &returned);
+
+        let mut palette = medical_recursive_base_dashboard();
+        palette.open_command_palette();
+        type_text(&mut palette, "file");
+        press_consumed(&mut palette, KeyCode::Down);
+        press_consumed(&mut palette, KeyCode::Up);
+        assert!(render_dashboard_lines_at(&palette, 120, 32).contains("Commands"));
+        record(
+            &mut workflows,
+            "command palette filter and arrows",
+            &palette,
+        );
+
+        assert!(
+            workflows.len() >= 20,
+            "expected at least 20 recursive workflows, got {workflows:?}"
+        );
+    }
+
+    #[test]
+    fn medical_every_visible_colon_command_routes_without_render_loops() {
+        let mut commands = WORKSPACE_ACTIONS
+            .iter()
+            .copied()
+            .filter(|action| action.applies_to(WorkspaceProfile::Medical))
+            .map(|action| (action.command, action.id))
+            .collect::<Vec<_>>();
+        commands.sort_by_key(|(command, _)| *command);
+        commands.dedup_by_key(|(command, _)| *command);
+
+        assert!(
+            commands.len() >= 70,
+            "medical command coverage should include the full visible command surface"
+        );
+
+        for (command, expected_id) in commands {
+            assert_eq!(
+                action_for_command(WorkspaceProfile::Medical, command),
+                Some(expected_id),
+                "visible medical command should route through action_for_command: :{command}"
+            );
+
+            let mut dashboard = medical_command_coverage_dashboard();
+            let result = dashboard.execute_workspace_command(&format!(":{command}"));
+            assert!(
+                !matches!(result, WorkspaceDashboardAction::Close)
+                    || matches!(expected_id, WorkspaceActionId::Return),
+                "only :return should close during command coverage, :{command} returned {result:?}"
+            );
+            assert!(
+                dashboard.command_input.is_none(),
+                "command input should close after executing :{command}"
+            );
+            assert_medical_render_not_duplicated(&dashboard, command);
+        }
+    }
+
+    #[test]
+    fn medical_file_drop_paste_categorizes_multimodal_patient_files() {
+        let dir = unique_test_temp_path("medical-drop-categories");
+        fs::create_dir_all(&dir).expect("create fake drop dir");
+        let cases = [
+            ("scanned patient id.jpg", "ID Cards"),
+            ("scanned medicare card.jpg", "Medicare / Insurance Cards"),
+            ("outside-referral.pdf", "Referrals"),
+            ("audio-dictation.m4a", "Audio / Dictation"),
+            ("gait-video.mp4", "Video"),
+            ("intake-spreadsheet.xlsx", "Spreadsheets"),
+            ("claim-reference.edi", "EDI / X12 References"),
+        ];
+        let mut pasted = String::new();
+        for (filename, _) in cases {
+            let path = dir.join(filename);
+            fs::write(&path, b"fake local file").expect("write fake file");
+            pasted.push_str(path.to_str().expect("utf-8 test path"));
+            pasted.push('\n');
+        }
+        let mut dashboard = WorkspaceDashboard {
+            focus: WorkspaceFocus::PatientFiles,
+            workflow_section: MedicalWorkflowSection::Visit,
+            ..WorkspaceDashboard::new(WorkspaceProfile::Medical)
+        };
+        dashboard.draft_client.id = Some("client-1".to_string());
+
+        let action = dashboard.handle_paste(pasted);
+        let params = match action {
+            WorkspaceDashboardAction::SaveDroppedFileReferences(params) => params,
+            other => panic!("expected dropped file save action, got {other:?}"),
+        };
+
+        assert_eq!(params.len(), cases.len());
+        let groups = params
+            .iter()
+            .map(|params| {
+                let document = document_from_upsert_params_for_tests("drop-doc", params);
+                patient_file_group_label(&document)
+            })
+            .collect::<BTreeSet<_>>();
+        for (_, expected_group) in cases {
+            assert!(
+                groups.contains(expected_group),
+                "expected dropped file groups to include {expected_group}; got {groups:?}"
+            );
+        }
+        for params in &params {
+            let document = document_from_upsert_params_for_tests("drop-doc", params);
+            assert!(groups.contains(patient_file_group_label(&document)));
+            assert_eq!(params.scope, "patient");
+            assert_eq!(params.reference_kind, "local_reference");
+            assert!(params.vault_path.is_empty());
+            assert_eq!(params.thumbnail_status, "none");
+            assert_eq!(params.intake_source, "drop_or_paste_path");
+            assert_eq!(params.source_label, "drop/paste local path");
+            assert!(params.notes.contains("metadata only"));
+            assert!(params.notes.contains("no copy/upload"));
+        }
+        assert!(dashboard.selected_artifact_ids.is_empty());
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn medical_file_drop_paste_accepts_file_url_and_escaped_spaces() {
+        let dir = unique_test_temp_path("medical drop spaces");
+        fs::create_dir_all(&dir).expect("create fake drop dir");
+        let path = dir.join("patient id card.jpg");
+        fs::write(&path, b"fake image").expect("write fake image");
+
+        let escaped = path.display().to_string().replace(' ', "\\ ");
+        let escaped_intake = parse_dropped_file_paths(&escaped);
+        assert_eq!(escaped_intake.file_paths, vec![path.clone()]);
+
+        let file_url = format!("file://{}", path.display().to_string().replace(' ', "%20"));
+        let url_intake = parse_dropped_file_paths(&file_url);
+        assert_eq!(url_intake.file_paths, vec![path]);
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn medical_file_drop_paste_rejects_missing_path_and_directory() {
+        let dir = unique_test_temp_path("medical-drop-directory");
+        fs::create_dir_all(&dir).expect("create fake directory");
+        let missing = dir.join("missing-referral.pdf");
+        let mut dashboard = WorkspaceDashboard {
+            focus: WorkspaceFocus::PatientFiles,
+            workflow_section: MedicalWorkflowSection::Visit,
+            ..WorkspaceDashboard::new(WorkspaceProfile::Medical)
+        };
+        dashboard.draft_client.id = Some("client-1".to_string());
+
+        assert_eq!(
+            dashboard.handle_paste(missing.display().to_string()),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert!(dashboard.status.contains("not found"));
+        assert!(dashboard.selected_artifact_ids.is_empty());
+
+        assert_eq!(
+            dashboard.handle_paste(dir.display().to_string()),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert!(dashboard.status.contains("directory"));
+        assert!(dashboard.selected_artifact_ids.is_empty());
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn medical_file_drop_paste_blocks_without_saved_patient() {
+        let path = unique_test_temp_path("medical-drop-saved-patient-required.pdf");
+        fs::write(&path, b"%PDF fake referral").expect("write fake referral");
+        let mut dashboard = WorkspaceDashboard {
+            focus: WorkspaceFocus::PatientFiles,
+            workflow_section: MedicalWorkflowSection::Visit,
+            ..WorkspaceDashboard::new(WorkspaceProfile::Medical)
+        };
+
+        assert_eq!(
+            dashboard.handle_paste(path.display().to_string()),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert_eq!(
+            dashboard.status,
+            "Select or save a patient before adding files."
+        );
+        assert!(dashboard.selected_artifact_ids.is_empty());
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn medical_file_import_and_thumbnail_commands_target_patient_file() {
+        let mut dashboard = WorkspaceDashboard {
+            focus: WorkspaceFocus::PatientFiles,
+            workflow_section: MedicalWorkflowSection::Visit,
+            ..WorkspaceDashboard::new(WorkspaceProfile::Medical)
+        };
+        dashboard.draft_client.id = Some("client-1".to_string());
+        dashboard.documents = vec![patient_file(
+            "doc-id-card",
+            "Scanned patient ID",
+            "id card image",
+            "/tmp/scanned-patient-id.jpg",
+        )];
+
+        assert_eq!(
+            dashboard.execute_workspace_command(":artifact inspect 1"),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert_eq!(
+            dashboard.execute_workspace_command(":file import"),
+            WorkspaceDashboardAction::ImportDocumentToVault {
+                document_id: "doc-id-card".to_string()
+            }
+        );
+        assert_eq!(
+            dashboard.execute_workspace_command(":file thumbnail"),
+            WorkspaceDashboardAction::GenerateDocumentThumbnail {
+                document_id: "doc-id-card".to_string()
+            }
+        );
+
+        dashboard.documents[0].reference_kind = "vault_copy".to_string();
+        dashboard.documents[0].vault_path = "/tmp/local-vault/doc-id-card.jpg".to_string();
+        dashboard.documents[0].thumbnail_status = "ready".to_string();
+        dashboard.documents[0].thumbnail_path = "/tmp/thumbs/doc-id-card.png".to_string();
+        let rendered = render_dashboard_lines_at(&dashboard, 180, 50);
+        assert!(rendered.contains("reference: vault copy"));
+        assert!(rendered.contains("preview ready"));
+    }
+
+    #[test]
+    fn medical_file_drop_preview_and_open_commands_route_to_patient_file_actions() {
+        let mut dashboard = WorkspaceDashboard {
+            focus: WorkspaceFocus::PatientFiles,
+            workflow_section: MedicalWorkflowSection::Visit,
+            ..WorkspaceDashboard::new(WorkspaceProfile::Medical)
+        };
+        dashboard.draft_client.id = Some("client-1".to_string());
+        dashboard.documents = vec![patient_file(
+            "doc-referral",
+            "Outside referral",
+            "referral pdf",
+            "/tmp/outside-referral.pdf",
+        )];
+
+        assert_eq!(
+            dashboard.execute_workspace_command(":file drop"),
+            WorkspaceDashboardAction::ChoosePatientFiles
+        );
+        assert_eq!(
+            dashboard.execute_workspace_command(":file choose"),
+            WorkspaceDashboardAction::ChoosePatientFiles
+        );
+        assert_eq!(
+            dashboard.execute_workspace_command(":file preview"),
+            WorkspaceDashboardAction::GenerateDocumentThumbnail {
+                document_id: "doc-referral".to_string()
+            }
+        );
+        assert_eq!(
+            dashboard.execute_workspace_command(":file open"),
+            WorkspaceDashboardAction::OpenDocumentFile {
+                document_id: "doc-referral".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn macos_file_chooser_script_is_jpg_pdf_scoped() {
+        let script = macos_patient_file_chooser_script();
+        assert!(script.contains("choose file"));
+        assert!(script.contains("public.jpeg"));
+        assert!(script.contains("com.adobe.pdf"));
+        assert!(script.contains("POSIX path"));
+        assert!(!script.contains("OCR"));
+        assert!(!script.contains("upload"));
+    }
+
+    #[test]
+    fn macos_file_choice_params_record_local_metadata_only_reference() {
+        let dir = unique_test_temp_path("medical-macos-choice");
+        fs::create_dir_all(&dir).expect("create fake choice dir");
+        let path = dir.join("scanned medicare card.jpg");
+        fs::write(&path, b"fake jpg").expect("write fake jpg");
+
+        let params = local_file_upsert_params(
+            "client-1",
+            Some("encounter-1".to_string()),
+            &path,
+            "macOS file chooser",
+            "macos_file_chooser",
+        );
+
+        assert_eq!(params.client_id, "client-1");
+        assert_eq!(params.encounter_id.as_deref(), Some("encounter-1"));
+        assert_eq!(params.scope, "patient");
+        assert_eq!(params.kind, "medicare insurance card image");
+        assert_eq!(params.detected_kind, "image");
+        assert_eq!(params.mime_type.as_deref(), Some("image/jpeg"));
+        assert_eq!(params.source_label, "macOS file chooser");
+        assert_eq!(params.intake_source, "macos_file_chooser");
+        assert_eq!(params.reference_kind, "local_reference");
+        assert!(params.vault_path.is_empty());
+        assert_eq!(params.thumbnail_status, "none");
+        assert!(params.notes.contains("metadata only"));
+        assert!(params.notes.contains("no copy/upload"));
+        assert!(document_path_is_priority_preview_file(&path));
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn patient_file_preview_renders_cached_thumbnail_block() {
+        let dir = unique_test_temp_path("medical-preview-render");
+        fs::create_dir_all(&dir).expect("create fake preview dir");
+        let thumbnail = dir.join("referral-thumb.png");
+        let image = image::RgbImage::from_fn(4, 4, |x, y| {
+            if (x + y) % 2 == 0 {
+                image::Rgb([240, 240, 240])
+            } else {
+                image::Rgb([20, 120, 220])
+            }
+        });
+        image.save(&thumbnail).expect("write fake thumbnail");
+
+        let mut document = patient_file(
+            "doc-referral",
+            "Outside referral",
+            "referral pdf",
+            "/tmp/outside-referral.pdf",
+        );
+        document.thumbnail_status = "ready".to_string();
+        document.thumbnail_path = thumbnail.display().to_string();
+        let preview_lines = document_preview_lines(&document);
+        assert!(
+            preview_lines
+                .iter()
+                .any(|line| line_plain_text(line).contains("Local Preview"))
+        );
+        assert!(
+            preview_lines.iter().any(|line| {
+                line.spans
+                    .iter()
+                    .any(|span| span.style.bg.is_some() && span.content.as_ref() == "  ")
+            }),
+            "expected preview block to include styled background spans"
+        );
+
+        let mut dashboard = WorkspaceDashboard {
+            focus: WorkspaceFocus::Workflow,
+            workflow_section: MedicalWorkflowSection::Documents,
+            inspected_artifact_id: Some("doc-referral".to_string()),
+            documents: vec![document],
+            ..WorkspaceDashboard::new(WorkspaceProfile::Medical)
+        };
+        dashboard.draft_client.id = Some("client-1".to_string());
+        dashboard.workflow_scroll = 0;
+        let primary_render = render_dashboard_lines_at(&dashboard, 120, 32);
+        assert!(primary_render.contains("Local Preview"));
+        assert!(primary_render.contains("preview: preview ready"));
+
+        let rendered = render_dashboard_lines_at(&dashboard, 220, 70);
+        assert!(rendered.contains("Local Preview"));
+        assert!(rendered.contains("cached local thumbnail"));
+        assert!(rendered.contains("preview: preview ready"));
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn selected_file_handoff_excludes_preview_cache_path() {
+        let mut document = patient_file(
+            "doc-id-card",
+            "Scanned patient ID",
+            "id card image",
+            "/tmp/scanned-patient-id.jpg",
+        );
+        document.thumbnail_status = "ready".to_string();
+        document.thumbnail_path =
+            "/tmp/codex-workspace-files/thumbnails/doc-id-card.png".to_string();
+        let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+        dashboard.draft_client.id = Some("client-1".to_string());
+        dashboard.documents = vec![document];
+        dashboard
+            .selected_artifact_ids
+            .insert("doc-id-card".to_string());
+
+        let prompt = dashboard.agent_context_prompt();
+        assert!(prompt.contains("Scanned patient ID"));
+        assert!(prompt.contains("/tmp/scanned-patient-id.jpg"));
+        assert!(!prompt.contains("doc-id-card.png"));
+        assert!(!prompt.contains("codex-workspace-files/thumbnails"));
+
+        let params = dashboard.context_packet_create_params().unwrap();
+        assert!(params.context_envelope_json.contains("Scanned patient ID"));
+        assert!(!params.context_envelope_json.contains("doc-id-card.png"));
+        assert!(
+            !params
+                .context_envelope_json
+                .contains("codex-workspace-files/thumbnails")
+        );
+    }
+
+    #[test]
+    fn command_palette_esc_closes_without_side_effects() {
+        let mut dashboard = WorkspaceDashboard {
+            status: "Before".to_string(),
+            ..WorkspaceDashboard::default()
+        };
+
+        dashboard.handle_key_event(KeyEvent::from(KeyCode::Char(':')));
+        dashboard.handle_key_event(KeyEvent::from(KeyCode::Char('s')));
+        assert_eq!(
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Esc)),
+            WorkspaceDashboardAction::Consumed
+        );
+
+        assert!(dashboard.command_input.is_none());
+        assert_eq!(dashboard.status, "Workspace command canceled.");
+        assert!(!render_dashboard_lines(&dashboard).contains("Commands"));
+    }
+
+    #[test]
+    fn medical_actions_are_not_rendered_in_generic_workspace() {
+        let mut generic = WorkspaceDashboard::default();
+        generic.handle_key_event(KeyEvent::from(KeyCode::Char('?')));
+        let generic_rendered = render_dashboard_lines(&generic);
+        assert!(generic_rendered.contains(":client new"));
+        assert!(!generic_rendered.contains(":patient new"));
+        assert!(!generic_rendered.contains(":encounter open"));
+
+        let mut medical = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+        medical.focus = WorkspaceFocus::Clients;
+        medical.handle_key_event(KeyEvent::from(KeyCode::Char('?')));
+        let medical_rendered = render_dashboard_lines_at(&medical, 160, 80);
+        assert!(medical_rendered.contains(":patient new"));
+        assert!(medical_rendered.contains(":encounter open"));
+        assert!(medical_rendered.contains(":artifact toggle"));
+        assert!(medical_rendered.contains("No file references for the active patient."));
+        assert!(WORKSPACE_ACTIONS.iter().any(|action| {
+            action.id == WorkspaceActionId::ProposalAccept
+                && action.applies_to(WorkspaceProfile::Medical)
+                && !action.applies_to(WorkspaceProfile::Generic)
+        }));
+        assert_eq!(
+            medical.action_disabled_reason(WorkspaceActionId::JobNew),
+            Some("Save the patient before creating a job.")
+        );
+    }
+
+    #[test]
+    fn medical_command_palette_commands_are_not_rendered_in_generic_workspace() {
+        let mut generic = WorkspaceDashboard::default();
+        generic.handle_key_event(KeyEvent::from(KeyCode::Char(':')));
+        let generic_rendered = render_dashboard_lines(&generic);
+        assert!(generic_rendered.contains(":client new"));
+        assert!(!generic_rendered.contains(":patient new"));
+        assert!(!generic_rendered.contains(":encounter open"));
+
+        let mut medical_patient = WorkspaceDashboard {
+            focus: WorkspaceFocus::Clients,
+            ..WorkspaceDashboard::new(WorkspaceProfile::Medical)
+        };
+        medical_patient.handle_key_event(KeyEvent::from(KeyCode::Char(':')));
+        for c in "patient".chars() {
+            medical_patient.handle_key_event(KeyEvent::from(KeyCode::Char(c)));
+        }
+        let medical_patient_rendered = render_dashboard_lines_at(&medical_patient, 160, 60);
+        assert!(medical_patient_rendered.contains(":patient new"));
+
+        let mut medical_proposal = WorkspaceDashboard {
+            focus: WorkspaceFocus::Clients,
+            ..WorkspaceDashboard::new(WorkspaceProfile::Medical)
+        };
+        medical_proposal.handle_key_event(KeyEvent::from(KeyCode::Char(':')));
+        for c in "proposal".chars() {
+            medical_proposal.handle_key_event(KeyEvent::from(KeyCode::Char(c)));
+        }
+        let medical_proposal_rendered = render_dashboard_lines_at(&medical_proposal, 160, 60);
+        assert!(medical_proposal_rendered.contains(":proposal accept"));
+        assert!(medical_proposal_rendered.contains(":agent result to proposal"));
+    }
+
+    #[test]
+    fn medical_shifted_punctuation_shortcuts_stay_out_of_text_editors() {
+        let mut files = medical_recursive_files_dashboard();
+        files.focus_patient_files_tree();
+        assert_eq!(
+            press_key_event(
+                &mut files,
+                KeyEvent::new(KeyCode::Char(';'), KeyModifiers::SHIFT)
+            ),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert!(files.command_input.is_some());
+
+        let mut help = medical_recursive_files_dashboard();
+        help.focus_patient_files_tree();
+        assert_eq!(
+            press_key_event(
+                &mut help,
+                KeyEvent::new(KeyCode::Char('/'), KeyModifiers::SHIFT)
+            ),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert!(help.action_overlay_visible);
+
+        let mut note_body = WorkspaceDashboard {
+            focus: WorkspaceFocus::NoteBody,
+            ..WorkspaceDashboard::new(WorkspaceProfile::Medical)
+        };
+        assert_eq!(
+            press_key_event(
+                &mut note_body,
+                KeyEvent::new(KeyCode::Char(';'), KeyModifiers::SHIFT)
+            ),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert_eq!(note_body.draft_note.body, ":");
+        assert!(note_body.command_input.is_none());
+        assert!(!note_body.action_overlay_visible);
+        assert_eq!(
+            press_key_event(
+                &mut note_body,
+                KeyEvent::new(KeyCode::Char('/'), KeyModifiers::SHIFT)
+            ),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert_eq!(note_body.draft_note.body, ":?");
+        assert!(!note_body.action_overlay_visible);
+
+        let mut locked = WorkspaceDashboard {
+            focus: WorkspaceFocus::NoteBody,
+            draft_note: NoteDraft {
+                id: Some("note-1".to_string()),
+                title: "Signed note".to_string(),
+                body: "Signed body.".to_string(),
+                status: "signed".to_string(),
+                current_revision: 2,
+                ..NoteDraft::default()
+            },
+            ..WorkspaceDashboard::new(WorkspaceProfile::Medical)
+        };
+        assert_eq!(
+            press_key_event(
+                &mut locked,
+                KeyEvent::new(KeyCode::Char(';'), KeyModifiers::SHIFT)
+            ),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert_eq!(locked.draft_note.body, "Signed body.");
+        assert!(locked.command_input.is_none());
+        assert!(locked.status.contains("read-only"));
+    }
+
+    #[test]
+    fn unknown_workspace_command_has_no_side_effect() {
+        let mut dashboard = WorkspaceDashboard::default();
+
+        assert_eq!(
+            dashboard.execute_workspace_command(":not a command"),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert!(dashboard.status.contains("Unknown workspace command"));
+    }
+
+    #[test]
+    fn note_title_placeholder_disappears_when_typing_title() {
+        let mut dashboard = WorkspaceDashboard {
+            focus: WorkspaceFocus::NoteTitle,
+            ..WorkspaceDashboard::default()
+        };
+
+        let before = render_dashboard_lines(&dashboard);
+        assert!(before.contains(UNTITLED_NOTE_TITLE));
+
+        dashboard.handle_key_event(KeyEvent::from(KeyCode::Char('A')));
+
+        let after = render_dashboard_lines(&dashboard);
+        assert!(!after.contains(UNTITLED_NOTE_TITLE));
+        assert!(after.contains("A"));
+    }
+
+    #[test]
+    fn note_title_same_buffer_rerender_clears_placeholder_cells() {
+        let mut dashboard = WorkspaceDashboard {
+            focus: WorkspaceFocus::NoteTitle,
+            ..WorkspaceDashboard::default()
+        };
+        let area = Rect::new(0, 0, 100, 28);
+        let mut buf = Buffer::empty(area);
+
+        dashboard.render(area, &mut buf);
+        assert!(buffer_text(&buf, area).contains(UNTITLED_NOTE_TITLE));
+
+        dashboard.handle_key_event(KeyEvent::from(KeyCode::Char('A')));
+        dashboard.render(area, &mut buf);
+
+        let rendered = buffer_text(&buf, area);
+        assert!(!rendered.contains(UNTITLED_NOTE_TITLE));
+        assert!(rendered.contains("A"));
+    }
+
+    #[test]
+    fn medical_dashboard_renders_resize_safe_layouts() {
+        let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+        dashboard.set_context_for_tests("Jordan Patient", "Visit note", "Human-entered note body.");
+        dashboard.set_record_dates_for_tests("2026-01-01", "2026-06-09");
+
+        for (width, height, expected) in [
+            (160, 40, "Agent Workpane"),
+            (120, 32, "Uploaded Documents"),
+            (110, 42, "Uploaded Documents"),
+            (105, 55, "Today's Visit"),
+            (100, 28, "Today's Visit"),
+            (80, 20, "Patient Directory"),
+            (50, 10, "Terminal too small"),
+        ] {
+            let area = Rect::new(0, 0, width, height);
+            let mut buf = Buffer::empty(area);
+            dashboard.render(area, &mut buf);
+            let rendered = buffer_text(&buf, area);
+            assert!(
+                rendered.contains(expected),
+                "expected {expected:?} in {width}x{height} render:\n{rendered}"
+            );
+            assert_eq!(
+                rendered.matches("Medical Workspace").count(),
+                1,
+                "expected a single workspace shell in {width}x{height} render:\n{rendered}"
+            );
+            if width == 105 || width == 120 {
+                assert!(
+                    !rendered.contains("Agent Workpane"),
+                    "{width}-column fallback should hide the right agent pane:\n{rendered}"
+                );
+            }
+            if width == 110 {
+                assert!(
+                    rendered.contains("\n┌Uploaded Documents"),
+                    "110-column medium fallback should keep Uploaded Documents in the left navigation stack:\n{rendered}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn medical_workflow_surfaces_chart_context_and_agent_boundary() {
+        let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+        dashboard.set_context_for_tests("Jordan Patient", "Visit note", "Draft plan.");
+        dashboard.draft_client.id = Some("client-1".to_string());
+        dashboard.draft_note.id = Some("note-1".to_string());
+        dashboard.push_context_packet_for_tests(test_context_packet(
+            "packet-1",
+            "client-1",
+            Some("note-1"),
+            "Draft a follow-up plan.",
+            "1 selected artifact(s): patient PDF: Outside referral",
+        ));
+        dashboard.push_agent_result_for_tests(test_agent_result(
+            "result-1",
+            "packet-1",
+            "client-1",
+            Some("note-1"),
+            "Returned plan.",
+            "Returned plan.",
+        ));
+
+        let narrow_rendered = render_dashboard_lines_at(&dashboard, 100, 28);
+        assert!(narrow_rendered.contains("Today's Visit"));
+        assert!(narrow_rendered.contains("Jordan Patient"));
+        assert!(narrow_rendered.contains("Visit note"));
+        assert!(narrow_rendered.contains("Next:"));
+
+        let rendered = render_dashboard_lines_at(&dashboard, 160, 40);
+        assert!(rendered.contains("Agent Workpane"));
+        assert!(rendered.contains("Mode:"));
+        assert!(rendered.contains("No upload/OCR/payer action/auto-apply"));
+        assert!(rendered.contains("Uploaded Documents"));
+        assert!(!rendered.contains("Communication History"));
+        assert!(
+            rendered.contains("\n┌Uploaded Documents"),
+            "Uploaded Documents should sit in the left chart navigation:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn compact_workflow_context_names_active_step_not_stale_editor() {
+        let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+        dashboard.set_context_for_tests("Jordan Patient", "Visit note", "Draft plan.");
+        dashboard.draft_client.id = Some("client-1".to_string());
+        dashboard.draft_note.id = Some("note-1".to_string());
+
+        assert_eq!(
+            dashboard.execute_workspace_command(":agent request"),
+            WorkspaceDashboardAction::Consumed
+        );
+        for c in "Draft a follow-up plan.".chars() {
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Char(c)));
+        }
+        let ask_agent_render = render_dashboard_lines_at(&dashboard, 80, 20);
+        assert!(
+            ask_agent_render.contains("Agent: Jordan...; preview"),
+            "compact chart context should keep agent scope, patient, and action visible:\n{ask_agent_render}"
+        );
+        assert!(
+            ask_agent_render.contains("preview"),
+            "compact chart context should expose the next bridge action:\n{ask_agent_render}"
+        );
+
+        assert_eq!(
+            dashboard.execute_workspace_command(":context packet"),
+            WorkspaceDashboardAction::Consumed
+        );
+        let packet_render = render_dashboard_lines_at(&dashboard, 80, 20);
+        assert!(
+            packet_render.contains("Agent: Jordan...; Ctrl-G opens agent"),
+            "packet preview should keep chart origin visible in compact chart context:\n{packet_render}"
+        );
+        assert!(
+            packet_render.contains("Ctrl-G opens"),
+            "packet preview should expose compact handoff action:\n{packet_render}"
+        );
+        assert!(
+            !packet_render.contains("Local Instruction Draft"),
+            "inactive agent instruction draft should not mask compact chart context:\n{packet_render}"
+        );
+
+        dashboard.push_context_packet_for_tests(test_context_packet(
+            "packet-1",
+            "client-1",
+            Some("note-1"),
+            "Draft a follow-up plan.",
+            "0 selected artifacts",
+        ));
+        assert_eq!(
+            dashboard.execute_workspace_command(":agent result"),
+            WorkspaceDashboardAction::Consumed
+        );
+        let returned_work_render = render_dashboard_lines_at(&dashboard, 80, 20);
+        assert!(
+            returned_work_render.contains("Agent: Jordan...; save result"),
+            "returned work view should keep chart origin visible in compact chart context:\n{returned_work_render}"
+        );
+        assert!(
+            returned_work_render.contains("save result"),
+            "returned work view should expose compact review action:\n{returned_work_render}"
+        );
+    }
+
+    #[test]
+    fn compact_workflow_context_names_scrolled_editor_state() {
+        let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+        dashboard.set_context_for_tests("Jordan Patient", "Visit note", "Draft plan.");
+        dashboard.draft_client.id = Some("client-1".to_string());
+        dashboard.draft_note.id = Some("note-1".to_string());
+        dashboard.documents.push(test_document(
+            "document-1",
+            "Outside referral PDF",
+            "patient pdf",
+        ));
+        dashboard.derivative_draft = DerivativeDraft::start_new(
+            "document-1".to_string(),
+            "human pasted summary".to_string(),
+            "Reviewed outside referral text".to_string(),
+        );
+        dashboard.derivative_draft.body =
+            "Fake reviewed referral text typed by the provider.".to_string();
+        dashboard.derivative_field = DerivativeField::Body;
+        dashboard.focus = WorkspaceFocus::Workflow;
+        dashboard.set_workflow_section(MedicalWorkflowSection::Documents);
+
+        let rendered = render_dashboard_lines_at(&dashboard, 100, 28);
+        assert!(
+            rendered.contains("Uploaded Documents"),
+            "compact sticky context should name the scrolled editor state:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("next:"),
+            "compact sticky context should keep a next action visible:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("Body: Fake reviewed referral text"),
+            "active field should still be visible after adding sticky editor context:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn medical_wayfinding_keeps_primary_context_visible() {
+        let mut dashboard = medical_recursive_base_dashboard();
+        for (command, scope, visible_scope, expected_action) in [
+            (":scope patient", "Today's Visit", "Today's Visit", "Next:"),
+            (":scope files", "Uploaded Documents", "Documents", "Next:"),
+            (
+                ":scope packet",
+                "Agent Workpane",
+                "Agent Workpane",
+                "Blocked:",
+            ),
+            (":scope review", "Agent Review", "Returned", "Blocked:"),
+            (
+                ":scope practice",
+                "Practice Library",
+                "Practice Lib",
+                "Next:",
+            ),
+            (
+                ":scope intelligence",
+                "Practice Intelligence",
+                "Practice Int",
+                "Read-only",
+            ),
+            (":scope audit", "Audit Trail", "Audit Trail", "Read-only"),
+        ] {
+            assert_eq!(
+                dashboard.execute_workspace_command(command),
+                WorkspaceDashboardAction::Consumed,
+                "{command} should route to a scope"
+            );
+            let compact = render_dashboard_lines_at(&dashboard, 80, 20);
+            assert!(
+                compact.contains(visible_scope),
+                "{scope} should be visible in compact wayfinding:\n{compact}"
+            );
+            assert!(
+                compact.contains("Patient: Jordan")
+                    || compact.contains("Display: Jordan")
+                    || compact.contains("patient: Jordan")
+                    || compact.contains("Agent: Jordan")
+                    || compact.contains("pt Jordan")
+                    || compact.contains("pt: Jordan"),
+                "{scope} should keep patient context visible:\n{compact}"
+            );
+            assert!(
+                compact.contains("note")
+                    || matches!(
+                        scope,
+                        "Uploaded Documents"
+                            | "Agent Workpane"
+                            | "Agent Review"
+                            | "Practice Intelligence"
+                            | "Audit Trail"
+                    ),
+                "{scope} should keep note context visible when clinically scoped:\n{compact}"
+            );
+            assert!(
+                compact.contains(expected_action),
+                "{scope} should expose the primary action state `{expected_action}`:\n{compact}"
+            );
+        }
+    }
+
+    #[test]
+    fn medical_command_palette_finds_clinician_language_aliases() {
+        for (filter, expected) in [
+            ("save chart", "Save chart workspace"),
+            ("first eval", "Open encounter"),
+            ("write eval note", "Focus note body"),
+            ("add patient file", "Add file reference"),
+            ("ask codex about eval", "Write agent instructions"),
+            ("review codex result", "Open returned work review"),
+            ("preview codex packet", "Review Packet"),
+            ("compare packet", "Compare medical plan and result"),
+            ("returned work", "Open returned work review"),
+            ("open last scope", "Open last scope"),
+            ("return to patient chart", "Open Patient Chart"),
+        ] {
+            let mut dashboard = medical_recursive_base_dashboard();
+            dashboard.open_command_palette();
+            for c in filter.chars() {
+                dashboard.handle_key_event(KeyEvent::from(KeyCode::Char(c)));
+            }
+            let rendered = render_dashboard_lines_at(&dashboard, 160, 45);
+            assert!(
+                rendered.contains(expected),
+                "`{filter}` should find `{expected}`:\n{rendered}"
+            );
+        }
+    }
+
+    #[test]
+    fn medical_first_eval_guided_rail_surfaces_safe_sequence() {
+        let mut unsaved = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+        unsaved.set_context_for_tests("Jordan Patient", "First eval", "");
+        assert!(
+            unsaved
+                .workflow_primary_next_action_text()
+                .contains("Save first eval")
+        );
+        let unsaved_render = render_dashboard_lines_at(&unsaved, 160, 45);
+        assert!(unsaved_render.contains("Patient Demographics"));
+        assert!(unsaved_render.contains("Agent Workpane"));
+        assert!(unsaved_render.contains("HPI:"));
+        assert!(unsaved_render.contains("Assessment:"));
+
+        let mut no_encounter = medical_recursive_base_dashboard();
+        assert!(
+            no_encounter
+                .workflow_primary_next_action_text()
+                .contains("Open encounter")
+        );
+        let no_encounter_render = render_dashboard_lines_at(&no_encounter, 120, 32);
+        assert!(!no_encounter_render.contains("Agent Workpane"));
+        assert!(no_encounter_render.contains("Uploaded Documents"));
+        assert_eq!(
+            no_encounter.execute_workspace_command(":first eval"),
+            WorkspaceDashboardAction::EnsureEncounter
+        );
+
+        let mut empty_note = medical_recursive_base_dashboard();
+        empty_note.draft_note.body.clear();
+        empty_note.encounters = vec![test_encounter(
+            "encounter-1",
+            "client-1",
+            "First evaluation",
+        )];
+        empty_note.draft_note.encounter_id = Some("encounter-1".to_string());
+        assert!(
+            empty_note
+                .workflow_primary_next_action_text()
+                .contains("Write eval note")
+        );
+        let empty_note_render = render_dashboard_lines_at(&empty_note, 160, 45);
+        assert!(empty_note_render.contains("Agent Workpane"));
+        assert!(empty_note_render.contains("HPI:"));
+        assert!(empty_note_render.contains("Plan:"));
+
+        let mut selected_file = medical_recursive_files_dashboard();
+        selected_file.encounters = vec![test_encounter(
+            "encounter-1",
+            "client-1",
+            "First evaluation",
+        )];
+        selected_file.draft_note.encounter_id = Some("encounter-1".to_string());
+        selected_file
+            .selected_artifact_ids
+            .insert("document-1".to_string());
+        let selected_file_render = render_dashboard_lines_at(&selected_file, 160, 45);
+        assert!(selected_file_render.contains("Agent Workpane"));
+        assert!(selected_file_render.contains("context: 1 files"));
+        assert!(selected_file_render.contains("Uploaded Documents"));
+
+        let mut packet_ready = selected_file.clone();
+        packet_ready.agent_request.body =
+            "Review this first eval and selected referral metadata.".to_string();
+        let packet_ready_render = render_dashboard_lines_at(&packet_ready, 160, 45);
+        assert!(packet_ready_render.contains("Agent Workpane"));
+        assert!(packet_ready_render.contains("draft: Review this first eval"));
+
+        let mut packet_sent = selected_file;
+        packet_sent.push_context_packet_for_tests(test_context_packet(
+            "packet-1",
+            "client-1",
+            Some("note-1"),
+            "Review this first eval and selected referral metadata.",
+            "1 selected artifact",
+        ));
+        let packet_sent_render = render_dashboard_lines_at(&packet_sent, 160, 45);
+        assert!(packet_sent_render.contains("Agent Workpane"));
+        assert!(packet_sent_render.contains("Mode:"));
+        assert!(!packet_sent_render.contains("Communication History"));
+    }
+
+    #[test]
+    fn medical_review_loop_renders_next_actions_and_blockers() {
+        let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+        dashboard.set_context_for_tests("Jordan Patient", "Visit note", "Draft plan.");
+        dashboard.draft_client.id = Some("client-1".to_string());
+        dashboard.draft_note.id = Some("note-1".to_string());
+
+        assert_eq!(
+            dashboard.execute_workspace_command(":agent request"),
+            WorkspaceDashboardAction::Consumed
+        );
+        let request_empty = render_dashboard_lines_at(&dashboard, 160, 45);
+        assert!(request_empty.contains("> Request:"));
+        assert!(request_empty.contains("request: type local instructions"));
+        let cursor = dashboard
+            .cursor_pos(Rect::new(0, 0, 160, 45))
+            .expect("Request row should expose a cursor when it is the active typing target");
+        let request_row = request_empty
+            .lines()
+            .position(|line| line.contains("> Request:"))
+            .expect("request input row should render");
+        assert_eq!(
+            usize::from(cursor.1),
+            request_row,
+            "cursor should land on the rendered Request row:\n{request_empty}"
+        );
+
+        for c in "Draft a follow-up plan.".chars() {
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Char(c)));
+        }
+        let request_ready = render_dashboard_lines_at(&dashboard, 160, 45);
+        assert!(
+            request_ready.contains("review: :agent preview"),
+            "expected agent request next action:\n{request_ready}"
+        );
+
+        assert_eq!(
+            dashboard.execute_workspace_command(":context packet"),
+            WorkspaceDashboardAction::Consumed
+        );
+        let packet_ready = render_dashboard_lines_at(&dashboard, 160, 45);
+        assert!(packet_ready.contains("Agent Workpane"));
+        assert!(packet_ready.contains("Review Packet"));
+        assert!(packet_ready.contains("Next: Ctrl-G opens agent"));
+        assert!(packet_ready.contains("Agent sees"));
+        assert!(packet_ready.contains("Agent cannot"));
+        assert!(packet_ready.contains("return: /workspacemedical"));
+        assert!(packet_ready.contains("boundary: selected-only"));
+
+        let mut missing_request = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+        missing_request.set_context_for_tests("Jordan Patient", "Visit note", "Draft plan.");
+        missing_request.draft_client.id = Some("client-1".to_string());
+        missing_request.execute_workspace_command(":context packet");
+        let missing_request_render = render_dashboard_lines_at(&missing_request, 160, 45);
+        assert!(missing_request_render.contains("blocked: Type agent instructions first"));
+
+        let mut unsaved_patient = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+        unsaved_patient.set_context_for_tests("Jordan Patient", "Visit note", "Draft plan.");
+        unsaved_patient.execute_workspace_command(":agent request");
+        for c in "Draft a follow-up plan.".chars() {
+            unsaved_patient.handle_key_event(KeyEvent::from(KeyCode::Char(c)));
+        }
+        unsaved_patient.execute_workspace_command(":context packet");
+        let unsaved_patient_render = render_dashboard_lines_at(&unsaved_patient, 160, 45);
+        assert!(unsaved_patient_render.contains("blocked: Save workspace"));
+    }
+
+    #[test]
+    fn medical_agent_instructions_are_local_until_plan_review() {
+        let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+        dashboard.set_context_for_tests("Jordan Patient", "Visit note", "Objective measures only.");
+        dashboard.draft_client.id = Some("client-1".to_string());
+        dashboard.draft_note.id = Some("note-1".to_string());
+
+        assert_eq!(
+            dashboard.execute_workspace_command(":agent instructions"),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert_eq!(dashboard.focus, WorkspaceFocus::Agent);
+        assert_eq!(
+            dashboard.workflow_section,
+            MedicalWorkflowSection::AgentRequest
+        );
+        for c in "Use my eval template for this note.".chars() {
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Char(c)));
+        }
+        assert_eq!(
+            dashboard.agent_request.body,
+            "Use my eval template for this note."
+        );
+        assert_eq!(
+            dashboard.context_packet_count_for_tests(),
+            0,
+            "typing agent instructions should not create or send a Medical Agent Plan"
+        );
+
+        let request_render = render_dashboard_lines_at(&dashboard, 160, 45);
+        assert!(request_render.contains("Mode:"));
+        assert!(request_render.contains("> Request: Use my eval template"));
+        assert!(request_render.contains("Local only; preview packet before Ctrl-G"));
+
+        assert_eq!(
+            dashboard.execute_workspace_command(":agent preview"),
+            WorkspaceDashboardAction::Consumed
+        );
+        let preview_render = render_dashboard_lines_at(&dashboard, 160, 45);
+        assert!(preview_render.contains("Review Packet"));
+        assert!(preview_render.contains("Search state is not included."));
+        assert!(preview_render.contains("Use my eval template"));
+        assert_eq!(
+            dashboard.context_packet_count_for_tests(),
+            0,
+            "previewing the Medical Agent Plan should not persist/send by itself"
+        );
+    }
+
+    #[test]
+    fn stale_selected_context_is_pruned_and_explained_in_packet_preview() {
+        let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+        dashboard.set_context_for_tests("Jordan Patient", "Visit note", "Draft plan.");
+        dashboard.draft_client.id = Some("client-1".to_string());
+        dashboard.draft_note.id = Some("note-1".to_string());
+        dashboard.documents = vec![test_document("doc-1", "Outside referral PDF", "PDF")];
+        dashboard.derivatives = vec![test_derivative(
+            "derivative-1",
+            "doc-1",
+            "transcript",
+            "Reviewed referral text",
+            "Human-reviewed text for packet.",
+            "human_reviewed",
+        )];
+        dashboard.clips = vec![test_clip(
+            "clip-1",
+            "derivative-1",
+            "doc-1",
+            "excerpt",
+            "Key excerpt",
+            "Safe selected excerpt.",
+            "human_reviewed",
+        )];
+        dashboard
+            .selected_artifact_ids
+            .extend(["doc-1".to_string(), "STALE_DOC_SENTINEL".to_string()]);
+        dashboard.selected_derivative_ids.extend([
+            "derivative-1".to_string(),
+            "STALE_DERIVATIVE_SENTINEL".to_string(),
+        ]);
+        dashboard
+            .selected_clip_ids
+            .extend(["clip-1".to_string(), "STALE_CLIP_SENTINEL".to_string()]);
+
+        dashboard.prune_stale_selected_context_for_tests();
+
+        assert!(
+            dashboard
+                .status
+                .contains("Recovery: stale packet selections removed")
+        );
+        assert!(dashboard.status.contains("1 file"));
+        assert!(dashboard.status.contains("1 text"));
+        assert!(dashboard.status.contains("1 clip"));
+        assert!(dashboard.selected_artifact_ids.contains("doc-1"));
+        assert!(
+            !dashboard
+                .selected_artifact_ids
+                .contains("STALE_DOC_SENTINEL")
+        );
+        assert!(dashboard.selected_derivative_ids.contains("derivative-1"));
+        assert!(
+            !dashboard
+                .selected_derivative_ids
+                .contains("STALE_DERIVATIVE_SENTINEL")
+        );
+        assert!(dashboard.selected_clip_ids.contains("clip-1"));
+        assert!(!dashboard.selected_clip_ids.contains("STALE_CLIP_SENTINEL"));
+
+        assert_eq!(
+            dashboard.execute_workspace_command(":agent request"),
+            WorkspaceDashboardAction::Consumed
+        );
+        for c in "Draft a follow-up plan.".chars() {
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Char(c)));
+        }
+        assert_eq!(
+            dashboard.execute_workspace_command(":context packet"),
+            WorkspaceDashboardAction::Consumed
+        );
+        let preview = dashboard.context_packet_preview_lines().join("\n");
+        assert!(preview.contains("retry is safe"));
+        assert!(!preview.contains("STALE_DOC_SENTINEL"));
+        assert!(!preview.contains("STALE_DERIVATIVE_SENTINEL"));
+        assert!(!preview.contains("STALE_CLIP_SENTINEL"));
+
+        let params = dashboard
+            .context_packet_create_params()
+            .expect("packet params");
+        assert!(params.selected_artifact_ids_json.contains("doc-1"));
+        assert!(
+            !params
+                .selected_artifact_ids_json
+                .contains("STALE_DOC_SENTINEL")
+        );
+        assert!(params.selected_derivative_ids_json.contains("derivative-1"));
+        assert!(
+            !params
+                .selected_derivative_ids_json
+                .contains("STALE_DERIVATIVE_SENTINEL")
+        );
+        assert!(params.selected_clip_ids_json.contains("clip-1"));
+        assert!(
+            !params
+                .selected_clip_ids_json
+                .contains("STALE_CLIP_SENTINEL")
+        );
+
+        let prompt = dashboard.agent_context_prompt();
+        assert!(prompt.contains("patient PDF: Outside referral PDF"));
+        assert!(prompt.contains("Human-reviewed text for packet."));
+        assert!(prompt.contains("Safe selected excerpt."));
+        assert!(!prompt.contains("STALE_DOC_SENTINEL"));
+        assert!(!prompt.contains("STALE_DERIVATIVE_SENTINEL"));
+        assert!(!prompt.contains("STALE_CLIP_SENTINEL"));
+    }
+
+    #[test]
+    fn medical_agent_inbox_renders_review_loop_actions() {
+        let mut empty = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+        empty.set_context_for_tests("Jordan Patient", "Visit note", "Draft plan.");
+        empty.execute_workspace_command(":agent inbox");
+        let empty_render = render_dashboard_lines_at(&empty, 160, 45);
+        assert!(empty_render.contains("Agent Workpane"));
+        assert!(empty_render.contains("Agent Review"));
+        assert!(empty_render.contains("no Medical Agent Plan history"));
+        assert!(empty_render.contains("Submit Medical Agent Plan first"));
+
+        let mut packet_only = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+        packet_only.set_context_for_tests("Jordan Patient", "Visit note", "Draft plan.");
+        packet_only.draft_client.id = Some("client-1".to_string());
+        packet_only.draft_note.id = Some("note-1".to_string());
+        packet_only.push_context_packet_for_tests(test_context_packet(
+            "packet-1",
+            "client-1",
+            Some("note-1"),
+            "Draft a follow-up plan.",
+            "0 selected artifacts",
+        ));
+        packet_only.execute_workspace_command(":agent inbox");
+        let packet_only_render = render_dashboard_lines_at(&packet_only, 160, 45);
+        assert!(packet_only_render.contains("next: Paste result"));
+
+        packet_only.push_agent_result_for_tests(test_agent_result(
+            "result-1",
+            "packet-1",
+            "client-1",
+            Some("note-1"),
+            "Returned proposal body.",
+            "Returned proposal body.",
+        ));
+        let result_render = render_dashboard_lines_at(&packet_only, 160, 45);
+        assert!(result_render.contains("next: Inspect result (review pending)"));
+        assert!(result_render.contains("Returned Work"));
+        assert!(result_render.contains("Medical Plan History"));
+        assert!(result_render.contains("What Agent Saw"));
+        assert!(result_render.contains("Safe Actions"));
+        assert!(result_render.contains("Review Status"));
+        assert!(result_render.contains("Make note proposal"));
+        assert!(result_render.contains("Make job"));
+        assert!(result_render.contains("Make addendum"));
+
+        let mut signed = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+        signed.set_context_for_tests("Jordan Patient", "Signed note", "Signed plan.");
+        signed.draft_client.id = Some("client-1".to_string());
+        signed.draft_note.id = Some("note-1".to_string());
+        signed.draft_note.status = "signed".to_string();
+        signed.push_context_packet_for_tests(test_context_packet(
+            "packet-2",
+            "client-1",
+            Some("note-1"),
+            "Draft an addendum.",
+            "0 selected artifacts",
+        ));
+        signed.push_agent_result_for_tests(test_agent_result(
+            "result-2",
+            "packet-2",
+            "client-1",
+            Some("note-1"),
+            "Addendum candidate.",
+            "Addendum candidate.",
+        ));
+        signed.execute_workspace_command(":agent inbox");
+        let signed_render = render_dashboard_lines_at(&signed, 160, 45);
+        assert!(signed_render.contains("Make addendum"));
+        assert!(signed_render.contains("Make job"));
+        assert!(signed_render.contains("Make note proposal"));
+        assert!(signed_render.contains("requires addendum"));
+    }
+
+    #[test]
+    fn medical_workflow_semantic_status_colors_are_significant() {
+        let mut chart = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+        chart.set_context_for_tests("Jordan Patient", "Visit note", "Human-entered note body.");
+        chart.set_record_dates_for_tests("2026-01-01", "2026-06-09");
+        chart.set_document_draft_for_tests(
+            "referral",
+            "Outside referral PDF",
+            "/tmp/outside-referral.pdf",
+            "metadata only",
+        );
+
+        let area = Rect::new(0, 0, 160, 45);
+        let mut chart_buf = Buffer::empty(area);
+        chart.render(area, &mut chart_buf);
+        assert_eq!(
+            cell_fg_for_text(&chart_buf, area, "ID card"),
+            Some(Color::Yellow),
+            "missing intake checklist item should render as caution"
+        );
+        assert_eq!(
+            cell_fg_for_text(&chart_buf, area, "Next:"),
+            Some(Color::LightGreen),
+            "safe primary action should render as ready"
+        );
+        let mut blocked = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+        blocked.set_context_for_tests("Jordan Patient", "Visit note", "Draft plan.");
+        blocked.draft_client.id = Some("client-1".to_string());
+        blocked.draft_note.id = Some("note-1".to_string());
+        blocked.execute_workspace_command(":context packet");
+        let mut blocked_buf = Buffer::empty(area);
+        blocked.render(area, &mut blocked_buf);
+        assert_eq!(
+            cell_fg_for_text(&blocked_buf, area, "blocked:"),
+            Some(Color::LightRed),
+            "blocked action should render as attention"
+        );
+
+        let mut review = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+        review.set_context_for_tests("Jordan Patient", "Visit note", "Draft plan.");
+        review.draft_client.id = Some("client-1".to_string());
+        review.draft_note.id = Some("note-1".to_string());
+        review.push_context_packet_for_tests(test_context_packet(
+            "packet-1",
+            "client-1",
+            Some("note-1"),
+            "Draft a follow-up plan.",
+            "0 selected artifacts",
+        ));
+        review.execute_workspace_command(":agent inbox");
+
+        let mut review_buf = Buffer::empty(area);
+        review.render(area, &mut review_buf);
+        assert_eq!(
+            cell_fg_for_text(&review_buf, area, "safety:"),
+            Some(Color::LightYellow),
+            "review safety boundary should render as review/caution"
+        );
+
+        for (status, expected) in [
+            ("review_pending", Color::LightYellow),
+            ("reviewed", Color::LightGreen),
+            ("converted", Color::LightGreen),
+            ("dismissed", Color::LightRed),
+        ] {
+            let mut status_dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+            status_dashboard.set_context_for_tests("Jordan Patient", "Visit note", "Draft plan.");
+            status_dashboard.draft_client.id = Some("client-1".to_string());
+            status_dashboard.draft_note.id = Some("note-1".to_string());
+            status_dashboard.push_context_packet_for_tests(test_context_packet(
+                "packet-1",
+                "client-1",
+                Some("note-1"),
+                "Draft a follow-up plan.",
+                "0 selected artifacts",
+            ));
+            let mut result = test_agent_result(
+                "result-1",
+                "packet-1",
+                "client-1",
+                Some("note-1"),
+                "Returned proposal body.",
+                "Returned proposal body.",
+            );
+            result.status = status.to_string();
+            status_dashboard.push_agent_result_for_tests(result);
+            status_dashboard.execute_workspace_command(":agent inbox");
+            let mut status_buf = Buffer::empty(area);
+            status_dashboard.render(area, &mut status_buf);
+            assert_eq!(
+                cell_fg_for_text(&status_buf, area, "status:"),
+                Some(expected),
+                "{status} should render with its semantic result color"
+            );
+        }
+    }
+
+    const MEDICAL_RECURSIVE_RENDER_SIZES: [(u16, u16); 4] =
+        [(80, 20), (100, 28), (120, 32), (160, 45)];
+
+    #[test]
+    fn medical_workspace_dump_recursive_evidence_when_requested() {
+        let Some(output_dir) = std::env::var_os("WORKSPACEMEDICAL_RENDER_DUMP_DIR") else {
+            return;
+        };
+        let output_dir = std::path::PathBuf::from(output_dir);
+        write_medical_render_dump(&output_dir);
+    }
+
+    fn write_medical_render_dump(output_dir: &std::path::Path) {
+        std::fs::create_dir_all(output_dir).expect("create render dump dir");
+
+        let scenarios = medical_recursive_render_scenarios();
+        let mut manifest = String::from(
+            "# /workspacemedical deterministic readability harness\n\n\
+             This harness is repo-native and does not drive Terminal.app. It writes exact text renders \
+             for fixed terminal sizes plus review metadata for the main clinical loop.\n\n",
+        );
+        let mut html = String::from(
+            "<!doctype html><meta charset=\"utf-8\"><title>/workspacemedical readability harness</title>\
+             <style>body{font-family:-apple-system,BlinkMacSystemFont,\"Segoe UI\",sans-serif;margin:24px;background:#f7f7f4;color:#1f2933}\
+             h1{margin-bottom:4px}h2{margin-top:28px;border-top:1px solid #d8d6ce;padding-top:16px}\
+             details{margin:12px 0;padding:12px;background:white;border:1px solid #d8d6ce;border-radius:6px}\
+             summary{font-weight:700;cursor:pointer}pre{overflow:auto;background:#111827;color:#e5e7eb;padding:12px;border-radius:4px;font:12px/1.25 Menlo,Consolas,monospace}\
+             a{color:#075985}.purpose{color:#4b5563}.files{font-size:13px}</style>\
+             <h1>/workspacemedical readability harness</h1>\
+             <p>Deterministic render review for Patient Chart, Uploaded Documents, Medical Agent Plan, returned work, practice scopes, audit, and command search.</p>",
+        );
+        let mut scenario_json = Vec::new();
+        let mut current_group = "";
+
+        for (name, dashboard) in &scenarios {
+            let group = medical_render_scenario_group(name);
+            let purpose = medical_render_scenario_purpose(name);
+            if group != current_group {
+                current_group = group;
+                manifest.push_str(&format!("## {group}\n\n"));
+                html.push_str(&format!("<h2>{}</h2>", html_escape_text(group)));
+            }
+
+            manifest.push_str(&format!("### {name}\n\n{purpose}\n\n"));
+            let mut files = Vec::new();
+            for (width, height) in MEDICAL_RECURSIVE_RENDER_SIZES {
+                let rendered = render_dashboard_lines_at(dashboard, width, height);
+                let path = output_dir.join(format!("{name}-{width}x{height}.txt"));
+                std::fs::write(&path, rendered).expect("write render dump");
+                let file_name = path
+                    .file_name()
+                    .and_then(|file_name| file_name.to_str())
+                    .unwrap_or("render.txt")
+                    .to_string();
+                manifest.push_str(&format!("- [{file_name}]({file_name}): {width}x{height}\n"));
+                files.push(json!({
+                    "file": file_name,
+                    "width": width,
+                    "height": height,
+                }));
+            }
+            manifest.push('\n');
+            let preview_120 = render_dashboard_lines_at(dashboard, 120, 32);
+            let preview_100 = render_dashboard_lines_at(dashboard, 100, 28);
+            html.push_str(&format!(
+                "<details><summary>{}</summary><p class=\"purpose\">{}</p>\
+                 <p class=\"files\"><a href=\"{}-80x20.txt\">80x20</a> | \
+                 <a href=\"{}-100x28.txt\">100x28</a> | \
+                 <a href=\"{}-120x32.txt\">120x32</a> | \
+                 <a href=\"{}-160x45.txt\">160x45</a></p>\
+                 <h3>120x32 primary review</h3><pre>{}</pre>\
+                 <h3>100x28 compact review</h3><pre>{}</pre></details>",
+                html_escape_text(name),
+                html_escape_text(purpose),
+                html_escape_attr(name),
+                html_escape_attr(name),
+                html_escape_attr(name),
+                html_escape_attr(name),
+                html_escape_text(&preview_120),
+                html_escape_text(&preview_100),
+            ));
+            scenario_json.push(json!({
+                "name": name,
+                "group": group,
+                "purpose": purpose,
+                "files": files,
+            }));
+        }
+
+        std::fs::write(output_dir.join("manifest.md"), manifest).expect("write render manifest");
+        std::fs::write(
+            output_dir.join("manifest.json"),
+            serde_json::to_string_pretty(&json!({
+                "harness": "workspacemedical deterministic readability harness",
+                "sizes": MEDICAL_RECURSIVE_RENDER_SIZES
+                    .iter()
+                    .map(|(width, height)| json!({"width": width, "height": height}))
+                    .collect::<Vec<_>>(),
+                "scenarios": scenario_json,
+            }))
+            .expect("serialize render manifest"),
+        )
+        .expect("write render manifest json");
+        std::fs::write(output_dir.join("index.html"), html).expect("write render review index");
+    }
+
+    #[test]
+    fn medical_readability_harness_writes_review_metadata() {
+        let output_dir = unique_test_temp_path("medical-readability-harness");
+        let _ = std::fs::remove_dir_all(&output_dir);
+        write_medical_render_dump(&output_dir);
+
+        let manifest =
+            std::fs::read_to_string(output_dir.join("manifest.md")).expect("read manifest");
+        let json_manifest =
+            std::fs::read_to_string(output_dir.join("manifest.json")).expect("read manifest json");
+        let index = std::fs::read_to_string(output_dir.join("index.html")).expect("read index");
+
+        assert!(manifest.contains("Command Search"));
+        assert!(manifest.contains("first-eval-new"));
+        assert!(manifest.contains("first-eval-packet-ready"));
+        assert!(manifest.contains("command-palette-codex"));
+        assert!(manifest.contains("command-palette-returned-work"));
+        assert!(manifest.contains("command-palette-patient-files"));
+        assert!(manifest.contains("contact-edit-complete"));
+        assert!(manifest.contains("patient-search-coverage"));
+        assert!(manifest.contains("new-patient-draft"));
+        assert!(manifest.contains("sample-daily-note-draft"));
+        assert!(manifest.contains("wrong-pane-file-drop-blocked"));
+        assert!(manifest.contains("patient-files-drop-target"));
+        assert!(manifest.contains("dropped-jpg-file-tree"));
+        assert!(manifest.contains("scanned-card-referral-files"));
+        assert!(json_manifest.contains("\"group\": \"Patient Chart\""));
+        assert!(json_manifest.contains("\"group\": \"Medical Agent Plan\""));
+        assert!(index.contains("120x32 primary review"));
+        assert!(index.contains("100x28 compact review"));
+
+        let _ = std::fs::remove_dir_all(&output_dir);
+    }
+
+    fn medical_render_scenario_group(name: &str) -> &'static str {
+        match name {
+            "initial-dashboard"
+            | "visit-note-typing"
+            | "first-eval-new"
+            | "first-eval-empty-note"
+            | "first-eval-encounter-open"
+            | "first-eval-file-selected"
+            | "first-eval-packet-ready"
+            | "first-eval-packet-sent" => "Patient Chart",
+            "patient-directory"
+            | "patient-search-phone"
+            | "patient-search-emergency"
+            | "patient-search-coverage"
+            | "patient-search-no-results" => "Patient Directory",
+            "new-patient-draft" | "sample-daily-note-draft" | "wrong-pane-file-drop-blocked" => {
+                "Workflow QA"
+            }
+            "contact-edit-missing" | "contact-edit-complete" | "coverage-edit-complete" => {
+                "Patient Admin"
+            }
+            "file-reference-draft"
+            | "scanned-card-referral-files"
+            | "patient-files-drop-target"
+            | "dropped-jpg-file-tree"
+            | "saved-patient-file-reference"
+            | "saved-practice-file-reference"
+            | "associated-patient-file-reference"
+            | "reviewed-text-draft"
+            | "saved-reviewed-text-selection"
+            | "context-clip-draft"
+            | "saved-context-clip-selection" => "Uploaded Documents",
+            "agent-request"
+            | "context-packet-preview"
+            | "packet-preview-file-reference"
+            | "packet-preview-reviewed-text"
+            | "packet-preview-clip"
+            | "stale-packet-selection" => "Medical Agent Plan",
+            "agent-inbox-empty"
+            | "returned-work-draft"
+            | "agent-inbox-result"
+            | "result-inspect"
+            | "conversion-blocked"
+            | "signed-note-addendum-guidance"
+            | "note-proposal-draft"
+            | "addendum-draft"
+            | "job-draft" => "Returned Work Review",
+            "practice-library-scope" | "practice-library-linked-scope" => "Practice Library",
+            "practice-intelligence-scope" => "Practice Intelligence",
+            "audit-trail-scope" => "Audit Trail",
+            name if name.starts_with("command-palette") => "Command Search",
+            _ => "Other",
+        }
+    }
+
+    fn medical_render_scenario_purpose(name: &str) -> &'static str {
+        match name {
+            "initial-dashboard" => {
+                "Default Patient Chart: scope, patient/note, state, next action, and patient shelf summary should be readable quickly."
+            }
+            "visit-note-typing" => {
+                "Active note editor state: compact context must name the editor and preserve the next action."
+            }
+            "first-eval-new" => {
+                "First eval start: unsaved fake patient/note should show the scaffold and ask for a safe save before encounter work."
+            }
+            "first-eval-empty-note" => {
+                "First eval empty note: HPI, Exam, Assessment, and Plan placeholders should make the writing surface obvious."
+            }
+            "first-eval-encounter-open" => {
+                "First eval encounter open: saved chart should move from encounter setup to files or agent handoff preparation."
+            }
+            "first-eval-file-selected" => {
+                "First eval file selected: patient file context should lead to a clinician-authored agent question."
+            }
+            "first-eval-packet-ready" => {
+                "First eval handoff ready: selected context and request should lead to agent handoff preview before Ctrl-G."
+            }
+            "first-eval-packet-sent" => {
+                "First eval handoff sent: chart should point back to returned-work review without implying automatic mutation."
+            }
+            "patient-directory" => {
+                "Patient Directory: saved fake patients should be scannable without becoming agent context."
+            }
+            "patient-search-phone" => {
+                "Patient search by phone: exact contact matches should be visible and local."
+            }
+            "patient-search-emergency" => {
+                "Patient search by emergency contact: emergency identity should help avoid wrong-patient selection."
+            }
+            "patient-search-coverage" => {
+                "Patient search by coverage/member ID: coverage identity should be searchable but separate from Patient ID / MRN."
+            }
+            "patient-search-no-results" => {
+                "Patient search empty state: no-result search should offer New patient without agent context."
+            }
+            "new-patient-draft" => {
+                "New patient workflow: the draft opens in Patient Demographics instead of cluttering the directory."
+            }
+            "sample-daily-note-draft" => {
+                "Sample note workflow: creating a daily note should keep the note editor active and preserve chart context."
+            }
+            "wrong-pane-file-drop-blocked" => {
+                "Wrong-pane file drop: pasted local file paths should be blocked outside Uploaded Documents and should not edit demographics or notes."
+            }
+            "contact-edit-missing" => {
+                "Contact editor missing state: contact and emergency fields should be explicit, not buried in freeform summary."
+            }
+            "contact-edit-complete" => {
+                "Contact editor complete state: contact and emergency fields should be readable in the chart admin surface."
+            }
+            "coverage-edit-complete" => {
+                "Coverage editor complete state: member ID / Medicare ID should remain under coverage, not Patient ID / MRN."
+            }
+            "command-palette" => {
+                "Unfiltered command palette: quick actions should appear before grouped commands."
+            }
+            "command-palette-files" => {
+                "Command search for file workflow: clinician should find Uploaded Documents and packet context actions."
+            }
+            "command-palette-reviewed" => {
+                "Command search for reviewed text workflow: human-reviewed text actions should be discoverable."
+            }
+            "command-palette-clip" => {
+                "Command search for clip workflow: excerpt actions should be discoverable."
+            }
+            "command-palette-packet" => {
+                "Command search for agent workflow: handoff preview and compare actions should be discoverable."
+            }
+            "command-palette-codex" => {
+                "Command search for agent: handoff preview and returned work actions should surface."
+            }
+            "command-palette-returned-work" => {
+                "Command search for returned work: paste, inspect, mark reviewed, convert, and dismiss actions should surface."
+            }
+            "command-palette-patient-files" => {
+                "Command search for Uploaded Documents: document-list navigation should surface."
+            }
+            "file-reference-draft" => {
+                "File draft: original file is metadata-only and cannot be copied, parsed, or uploaded implicitly."
+            }
+            "scanned-card-referral-files" => {
+                "Uploaded Documents pane: scanned patient ID JPG, Medicare card JPG, and referral PDF should be visible as local metadata-only references."
+            }
+            "patient-files-drop-target" => {
+                "Uploaded Documents drop target: empty list should invite local JPG/PDF path drop or paste without upload/OCR/parse."
+            }
+            "dropped-jpg-file-tree" => {
+                "Dropped JPG file: a saved local image reference should appear as a selectable uploaded document row."
+            }
+            "saved-patient-file-reference" => {
+                "Uploaded Documents: patient records, selected packet state, reviewed text, and clips stay distinct."
+            }
+            "saved-practice-file-reference" => {
+                "Uploaded Documents with practice record present: practice records must not mix into patient shelf by accident."
+            }
+            "practice-library-scope" => {
+                "Practice Library: practice records are read-only until a human associates one to a patient."
+            }
+            "practice-library-linked-scope" => {
+                "Practice Library linked record: association status should be obvious without agent access."
+            }
+            "associated-patient-file-reference" => {
+                "Associated practice file: human-linked practice metadata appears in Uploaded Documents as patient context."
+            }
+            "practice-intelligence-scope" => {
+                "Practice Intelligence: future read-only mode with no model submit or chart mutation."
+            }
+            "reviewed-text-draft" => {
+                "Reviewed text draft: human-entered text must remain separate from file metadata."
+            }
+            "saved-reviewed-text-selection" => {
+                "Saved reviewed text: agent inclusion state should be readable."
+            }
+            "context-clip-draft" => {
+                "Clip draft: selected excerpt should be human-selected and separate from full reviewed text."
+            }
+            "saved-context-clip-selection" => {
+                "Saved clip selection: agent inclusion state should be readable."
+            }
+            "packet-preview-file-reference" => {
+                "Medical Agent Plan preview from file metadata: selected-only boundary should be clear."
+            }
+            "packet-preview-reviewed-text" => {
+                "Medical Agent Plan preview from reviewed text: selected-only text boundary should be clear."
+            }
+            "packet-preview-clip" => {
+                "Medical Agent Plan preview from a clip: excerpt-only boundary should be clear."
+            }
+            "stale-packet-selection" => {
+                "Recovered agent selection: stale selections are pruned and retry is safe."
+            }
+            "agent-request" => "Ask Agent draft: request entry should not imply prompt submission.",
+            "context-packet-preview" => {
+                "Medical Agent Plan checklist: what the agent sees and cannot do should be obvious."
+            }
+            "agent-inbox-empty" => {
+                "Agent Review with no handoff: blocked next action should say how to unlock it."
+            }
+            "returned-work-draft" => {
+                "Returned work draft: saving result should not mutate the chart."
+            }
+            "agent-inbox-result" => {
+                "Agent Review with result: review-pending state and provenance should be obvious."
+            }
+            "result-inspect" => {
+                "Result inspect: compare handoff/result and choose human-triggered conversion."
+            }
+            "conversion-blocked" => {
+                "Conversion blocker: provenance or note-state blockers should be explicit."
+            }
+            "signed-note-addendum-guidance" => {
+                "Signed note: addendum/job path should be emphasized over direct note proposal."
+            }
+            "note-proposal-draft" => {
+                "Unsigned note proposal: pending proposal review should be separate from chart mutation."
+            }
+            "addendum-draft" => "Addendum draft: signed-note workflow stays human-triggered.",
+            "job-draft" => "Job draft: returned work can become a job without changing the chart.",
+            "audit-trail-scope" => "Audit Trail: read-only provenance should be clear.",
+            _ => "Review scope, patient/note context, next action, safety boundary, and wrapping.",
+        }
+    }
+
+    fn html_escape_text(value: &str) -> String {
+        value
+            .replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('"', "&quot;")
+            .replace('\'', "&#39;")
+    }
+
+    fn html_escape_attr(value: &str) -> String {
+        html_escape_text(value)
+    }
+
+    #[test]
+    fn medical_dashboard_render_snapshots() {
+        let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+        dashboard.set_context_for_tests("Jordan Patient", "Visit note", "Human-entered note body.");
+        dashboard.set_record_dates_for_tests("2026-01-01", "2026-06-09");
+        dashboard.set_document_draft_for_tests(
+            "referral",
+            "Outside referral PDF",
+            "/tmp/outside-referral.pdf",
+            "metadata only",
+        );
+
+        for (width, height) in [(160, 40), (120, 32), (100, 28), (80, 20), (50, 10)] {
+            insta::assert_snapshot!(
+                format!("medical_workspace_dashboard_{width}x{height}"),
+                render_dashboard_lines_at(&dashboard, width, height)
+            );
+        }
+    }
+
+    #[test]
+    fn medical_command_palette_render_snapshots() {
+        let mut dashboard = WorkspaceDashboard {
+            focus: WorkspaceFocus::Clients,
+            ..WorkspaceDashboard::new(WorkspaceProfile::Medical)
+        };
+        dashboard.set_context_for_tests("Jordan Patient", "Visit note", "Human-entered note body.");
+        dashboard.set_record_dates_for_tests("2026-01-01", "2026-06-09");
+        dashboard.handle_key_event(KeyEvent::from(KeyCode::Char(':')));
+        for c in "proposal".chars() {
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Char(c)));
+        }
+
+        for (width, height) in [(160, 40), (120, 32), (100, 28), (80, 20), (50, 10)] {
+            insta::assert_snapshot!(
+                format!("medical_workspace_command_palette_{width}x{height}"),
+                render_dashboard_lines_at(&dashboard, width, height)
+            );
+        }
+    }
+
+    #[test]
+    fn same_buffer_resize_render_does_not_leave_old_title_text() {
+        let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+        dashboard.set_context_for_tests(
+            "Jordan Patient",
+            "Long old title that should disappear after resize",
+            "Body",
+        );
+        let backing = Rect::new(0, 0, 160, 40);
+        let mut buf = Buffer::empty(backing);
+        dashboard.render(backing, &mut buf);
+        assert!(buffer_text(&buf, backing).contains("Long old title"));
+
+        dashboard.draft_note.title = "A".to_string();
+        dashboard.focus = WorkspaceFocus::NoteTitle;
+        dashboard.render(Rect::new(0, 0, 80, 20), &mut buf);
+
+        let rendered = buffer_text(&buf, Rect::new(0, 0, 80, 20));
+        assert!(!rendered.contains("Long old title"));
+        assert!(rendered.contains("A"));
+    }
+
+    #[test]
+    fn command_palette_same_buffer_rerender_clears_stale_cells() {
+        let mut dashboard = WorkspaceDashboard {
+            focus: WorkspaceFocus::Clients,
+            ..WorkspaceDashboard::new(WorkspaceProfile::Medical)
+        };
+        let area = Rect::new(0, 0, 120, 32);
+        let mut buf = Buffer::empty(area);
+
+        dashboard.handle_key_event(KeyEvent::from(KeyCode::Char(':')));
+        for c in "proposal".chars() {
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Char(c)));
+        }
+        dashboard.render(area, &mut buf);
+        assert!(buffer_text(&buf, area).contains("Commands"));
+        assert!(buffer_text(&buf, area).contains(":proposal accept"));
+
+        dashboard.handle_key_event(KeyEvent::from(KeyCode::Esc));
+        dashboard.render(area, &mut buf);
+        let rendered = buffer_text(&buf, area);
+        assert!(!rendered.contains("Commands"));
+        assert!(!rendered.contains(":proposal accept"));
+    }
+
+    #[test]
+    fn cursor_positions_are_bounded_for_tiny_and_compact_sizes() {
+        let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+        for focus in [
+            WorkspaceFocus::Demographics,
+            WorkspaceFocus::NoteTitle,
+            WorkspaceFocus::NoteBody,
+            WorkspaceFocus::Workflow,
+            WorkspaceFocus::Agent,
+        ] {
+            dashboard.focus = focus;
+            for area in [Rect::new(0, 0, 50, 10), Rect::new(0, 0, 80, 20)] {
+                if let Some((x, y)) = dashboard.cursor_pos(area) {
+                    assert!(x < area.width, "x={x} should fit in {area:?}");
+                    assert!(y < area.height, "y={y} should fit in {area:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn medical_agent_context_prompt_marks_unsaved_drafts() {
+        let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+        dashboard.set_context_for_tests("Alex Example", "Visit note", "Draft plan.");
+
+        let prompt = dashboard.agent_context_prompt();
+
+        assert!(prompt.contains("Medical workspace context selected."));
+        assert!(prompt.contains("Active patient: unsaved draft"));
+        assert!(prompt.contains("Active note: unsaved draft"));
+        assert!(prompt.contains("Patient snapshot"));
+        assert!(prompt.contains("Selected artifact metadata"));
+        assert!(prompt.contains("include_documents: false"));
+        assert!(prompt.contains("Saved workspace IDs"));
+        assert!(prompt.contains("workspace/context/packet/replay"));
+        assert!(prompt.contains("workspace/context/get is broad human dashboard context"));
+        assert!(!prompt.contains("workspace_context_read"));
+        assert!(prompt.contains("Unsaved draft content is included below"));
+        assert!(prompt.contains("Do not overwrite saved workspace data"));
+    }
+
+    #[test]
+    fn medical_agent_context_prompt_includes_chart_dates_and_unsaved_document_draft() {
+        let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+        dashboard.set_context_for_tests("Alex Example", "Visit note", "Draft plan.");
+        dashboard.set_record_dates_for_tests("2026-01-01", "2026-06-09");
+        dashboard.set_document_draft_for_tests(
+            "referral",
+            "Outside referral",
+            "/tmp/referral.pdf",
+            "needs review",
+        );
+
+        let prompt = dashboard.agent_context_prompt();
+
+        assert!(prompt.contains("Chart start: 2026-01-01"));
+        assert!(prompt.contains("Chart end: 2026-06-09"));
+        assert!(prompt.contains("unsaved draft: referral / Outside referral / /tmp/referral.pdf"));
+        assert!(prompt.contains("needs review"));
+    }
+
+    #[test]
+    fn medical_agent_context_prompt_includes_saved_ids() {
+        let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+        dashboard.set_context_for_tests("Alex Example", "Visit note", "Saved context.");
+        dashboard.draft_client.id = Some("client-123".to_string());
+        dashboard.draft_note.id = Some("note-456".to_string());
+
+        let prompt = dashboard.agent_context_prompt();
+
+        assert!(prompt.contains("client_id: client-123"));
+        assert!(prompt.contains("note_id: note-456"));
+        assert!(prompt.contains("workspace/context/packet/replay"));
+        assert!(prompt.contains("do not list or read unrelated workspace records"));
+        assert!(!prompt.contains("workspace_context_read"));
+        assert!(!prompt.contains("Unsaved draft content is included below"));
+    }
+
+    #[test]
+    fn medical_agent_context_prompt_marks_dirty_saved_context_as_inline_draft() {
+        let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+        dashboard.set_context_for_tests("Alex Example", "Visit note", "Saved context.");
+        dashboard.draft_client.id = Some("client-123".to_string());
+        dashboard.draft_note.id = Some("note-456".to_string());
+        dashboard.set_note_body_for_tests("Edited draft not persisted yet.");
+
+        let prompt = dashboard.agent_context_prompt();
+
+        assert!(prompt.contains("client_id: client-123"));
+        assert!(prompt.contains("note_id: note-456"));
+        assert!(prompt.contains("Unsaved draft content is included below"));
+        assert!(prompt.contains("Edited draft not persisted yet."));
+    }
+
+    #[test]
+    fn workspace_dashboard_source_does_not_embed_chat_widget() {
+        let forbidden = ["Chat", "Widget"].concat();
+        assert!(!include_str!("workspace_dashboard.rs").contains(&forbidden));
+    }
+
+    #[test]
+    fn signed_note_blocks_direct_editor_changes() {
+        let mut dashboard = WorkspaceDashboard {
+            focus: WorkspaceFocus::NoteBody,
+            draft_note: NoteDraft {
+                id: Some("note-1".to_string()),
+                title: "Signed note".to_string(),
+                body: "Signed body.".to_string(),
+                status: "signed".to_string(),
+                current_revision: 2,
+                ..NoteDraft::default()
+            },
+            ..WorkspaceDashboard::new(WorkspaceProfile::Medical)
+        };
+
+        dashboard.handle_key_event(KeyEvent::from(KeyCode::Char('x')));
+
+        assert_eq!(dashboard.draft_note.body, "Signed body.");
+        assert!(dashboard.status.contains("read-only"));
+        assert!(dashboard.command_input.is_none());
+
+        dashboard.handle_key_event(KeyEvent::from(KeyCode::Char(':')));
+        for c in "plan".chars() {
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Char(c)));
+        }
+        assert_eq!(dashboard.draft_note.body, "Signed body.");
+        assert!(dashboard.command_input.is_none());
+        assert!(dashboard.status.contains("read-only"));
+
+        assert_eq!(
+            dashboard.handle_paste("Pasted signed-note edit".to_string()),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert_eq!(dashboard.draft_note.body, "Signed body.");
+
+        let rendered = render_dashboard_lines_at(&dashboard, 160, 45);
+        assert!(rendered.contains("READ ONLY"));
+        assert!(rendered.contains("Use addenda/proposals"));
+    }
+
+    #[test]
+    fn pending_proposals_render_and_route_accept_decline() {
+        let mut dashboard = WorkspaceDashboard {
+            draft_note: NoteDraft {
+                id: Some("note-1".to_string()),
+                title: "Draft note".to_string(),
+                body: "Human body".to_string(),
+                current_revision: 3,
+                ..NoteDraft::default()
+            },
+            proposals: vec![test_proposal("proposal-1", "note-1", 3, "Proposed body")],
+            ..WorkspaceDashboard::new(WorkspaceProfile::Medical)
+        };
+        dashboard.execute_workspace_command(":workflow proposals");
+
+        let rendered = render_dashboard_lines_at(&dashboard, 160, 45);
+        assert!(rendered.contains("Note Proposals"));
+        assert!(rendered.contains("1 pending proposals"));
+        assert!(rendered.contains("tighten wording"));
+        assert!(rendered.contains("Proposed body"));
+
+        assert_eq!(
+            dashboard.execute_workspace_command(":proposal accept"),
+            WorkspaceDashboardAction::ResolveProposal {
+                proposal_id: "proposal-1".to_string(),
+                accept: true,
+            }
+        );
+        assert_eq!(
+            dashboard.execute_workspace_command(":proposal decline"),
+            WorkspaceDashboardAction::ResolveProposal {
+                proposal_id: "proposal-1".to_string(),
+                accept: false,
+            }
+        );
+    }
+
+    #[test]
+    fn stale_and_signed_proposals_are_not_accepted_from_dashboard() {
+        let mut stale = WorkspaceDashboard {
+            draft_note: NoteDraft {
+                id: Some("note-1".to_string()),
+                current_revision: 3,
+                ..NoteDraft::default()
+            },
+            proposals: vec![test_proposal("proposal-1", "note-1", 2, "Stale body")],
+            ..WorkspaceDashboard::new(WorkspaceProfile::Medical)
+        };
+        assert_eq!(
+            stale.execute_workspace_command(":proposal accept"),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert!(stale.status.contains("stale"));
+
+        let mut signed = WorkspaceDashboard {
+            draft_note: NoteDraft {
+                id: Some("note-1".to_string()),
+                status: "signed".to_string(),
+                current_revision: 3,
+                ..NoteDraft::default()
+            },
+            proposals: vec![test_proposal("proposal-1", "note-1", 3, "Signed body")],
+            ..WorkspaceDashboard::new(WorkspaceProfile::Medical)
+        };
+        assert_eq!(
+            signed.execute_workspace_command(":proposal accept"),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert!(signed.status.contains("Signed notes require addenda"));
+    }
+
+    #[test]
+    fn signed_note_addendum_draft_routes_save_action() {
+        let mut dashboard = WorkspaceDashboard {
+            focus: WorkspaceFocus::Workflow,
+            draft_note: NoteDraft {
+                id: Some("note-1".to_string()),
+                status: "signed".to_string(),
+                current_revision: 4,
+                ..NoteDraft::default()
+            },
+            ..WorkspaceDashboard::new(WorkspaceProfile::Medical)
+        };
+
+        assert_eq!(
+            dashboard.execute_workspace_command(":addendum start"),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert!(render_dashboard_lines_at(&dashboard, 160, 45).contains("Addendum Draft"));
+        for c in "Clarifying addendum.".chars() {
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Char(c)));
+        }
+
+        assert_eq!(
+            dashboard.execute_workspace_command(":addendum save"),
+            WorkspaceDashboardAction::CreateAddendum {
+                note_id: "note-1".to_string(),
+                base_revision: 4,
+                body: "Clarifying addendum.".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn signed_addended_note_status_explains_locked_workflow() {
+        let mut dashboard = WorkspaceDashboard {
+            draft_note: NoteDraft {
+                id: Some("note-1".to_string()),
+                status: "addended".to_string(),
+                current_revision: 5,
+                ..NoteDraft::default()
+            },
+            signatures: vec![WorkspaceNoteSignature {
+                id: "signature-1".to_string(),
+                note_id: "note-1".to_string(),
+                revision: 4,
+                signer: "Clinician Example".to_string(),
+                body_sha256: "abc123".to_string(),
+                signed_at: 1,
+            }],
+            addenda: vec![WorkspaceNoteAddendum {
+                id: "addendum-1".to_string(),
+                note_id: "note-1".to_string(),
+                base_revision: 4,
+                body: "Clarification.".to_string(),
+                author: "Clinician Example".to_string(),
+                source_thread_id: None,
+                source_turn_id: None,
+                created_at: 2,
+            }],
+            ..WorkspaceDashboard::new(WorkspaceProfile::Medical)
+        };
+        dashboard.set_workflow_section(MedicalWorkflowSection::NoteStatus);
+
+        let rendered = render_dashboard_lines_at(&dashboard, 160, 40);
+        assert!(rendered.contains("locked: addended r5"));
+        assert!(rendered.contains("signed r4"));
+        assert!(rendered.contains("signed by Clinician Example"));
+        assert!(rendered.contains("1 addendum"));
+        assert!(rendered.contains("locked; addenda/proposals only"));
+        assert!(!rendered.contains("l: sign and lock saved draft note"));
+    }
+
+    #[test]
+    fn workflow_keys_request_encounter_and_sign_actions() {
+        let mut dashboard = WorkspaceDashboard {
+            focus: WorkspaceFocus::Workflow,
+            ..WorkspaceDashboard::new(WorkspaceProfile::Medical)
+        };
+
+        assert_eq!(
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Char('e'))),
+            WorkspaceDashboardAction::EnsureEncounter
+        );
+        assert_eq!(
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Char('l'))),
+            WorkspaceDashboardAction::SignNote
+        );
+    }
+
+    #[test]
+    fn focus_cycle_uses_workflow_pane_instead_of_embedded_agent() {
+        let mut dashboard = WorkspaceDashboard::default();
+        let mut seen = Vec::new();
+
+        for _ in 0..6 {
+            seen.push(dashboard.focus);
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Tab));
+        }
+
+        assert_eq!(
+            seen,
+            vec![
+                WorkspaceFocus::Demographics,
+                WorkspaceFocus::Notes,
+                WorkspaceFocus::NoteTitle,
+                WorkspaceFocus::NoteBody,
+                WorkspaceFocus::Workflow,
+                WorkspaceFocus::Clients,
+            ]
+        );
+    }
+
+    #[test]
+    fn agent_request_builds_read_only_packet_and_durable_history_entry() {
+        let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+        dashboard.set_context_for_tests("Jordan Patient", "Visit note", "Draft plan.");
+        dashboard.draft_client.id = Some("client-1".to_string());
+        dashboard.draft_note.id = Some("note-1".to_string());
+
+        assert_eq!(
+            dashboard.execute_workspace_command(":agent request"),
+            WorkspaceDashboardAction::Consumed
+        );
+        for c in "Review the gait clip and draft follow-up tasks".chars() {
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Char(c)));
+        }
+
+        let prompt = dashboard.agent_context_prompt();
+        assert!(prompt.contains("Human agent request"));
+        assert!(prompt.contains("Review the gait clip"));
+        assert!(prompt.contains("read-only context packet"));
+        assert!(prompt.contains("do not mutate workspace records"));
+        assert!(!dashboard.dirty);
+
+        let preview = dashboard.context_packet_preview_lines().join("\n");
+        assert!(preview.contains("plan: Ctrl-G opens agent"));
+        assert!(preview.contains("Agent sees: this patient/note"));
+        assert!(preview.contains("Agent cannot: read unselected records"));
+        assert!(preview.contains("return: /workspacemedical"));
+
+        let params = dashboard.context_packet_create_params().unwrap();
+        assert_eq!(params.client_id, "client-1");
+        assert_eq!(params.note_id.as_deref(), Some("note-1"));
+        assert!(params.human_request.contains("Review the gait clip"));
+        assert_eq!(params.selected_artifact_ids_json, "[]");
+        assert_eq!(params.artifact_summary, "0 selected artifacts");
+        assert!(params.chart_context_summary.contains("Jordan Patient"));
+        assert!(
+            params
+                .context_envelope_json
+                .contains("medical-context-packet-v1")
+        );
+        assert!(
+            params
+                .context_envelope_json
+                .contains("\"includeDocuments\":false")
+        );
+        assert!(
+            params
+                .context_envelope_json
+                .contains("Review the gait clip")
+        );
+        assert!(params.context_envelope_json.contains("\"promptSnapshot\""));
+
+        let packet = test_context_packet_from_params("packet-1", &params);
+        let handoff_prompt = packet_scoped_agent_handoff_prompt(&packet);
+        assert!(handoff_prompt.contains("Round-trip origin"));
+        assert!(handoff_prompt.contains("- patient: Jordan Patient"));
+        assert!(handoff_prompt.contains("- note: Visit note [draft r0]"));
+        assert!(handoff_prompt.contains("- request: Review the gait clip"));
+        assert!(handoff_prompt.contains("- return: reopen /workspacemedical"));
+        assert!(handoff_prompt.contains("requires explicit human save/review"));
+
+        dashboard.mark_agent_context_sent(packet);
+        assert!(!dashboard.agent_request.is_active());
+        assert_eq!(
+            dashboard.workflow_section,
+            MedicalWorkflowSection::AgentInbox
+        );
+        assert!(dashboard.status.contains("return with /workspacemedical"));
+        assert_eq!(dashboard.context_packet_count_for_tests(), 1);
+        assert_eq!(
+            dashboard.first_context_packet_for_tests().unwrap().status,
+            "sent"
+        );
+        let rendered = render_dashboard_lines_at(&dashboard, 180, 50);
+        assert!(rendered.contains("Medical Agent Plan submitted"));
+        assert!(rendered.contains("Review the gait clip"));
+        assert!(rendered.contains("0 selected file references"));
+    }
+
+    #[test]
+    fn multimodal_and_edi_artifacts_render_as_metadata_only_context() {
+        let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+        dashboard.draft_client.id = Some("client-1".to_string());
+        dashboard.documents = vec![
+            WorkspaceDocument {
+                id: "doc-1".to_string(),
+                client_id: "client-1".to_string(),
+                encounter_id: None,
+                title: "Outside MRI PDF".to_string(),
+                kind: "pdf".to_string(),
+                local_path: "/tmp/outside-mri.pdf".to_string(),
+                notes: "patient outside record".to_string(),
+                scope: "patient".to_string(),
+                detected_kind: "PDF".to_string(),
+                mime_type: Some("application/pdf".to_string()),
+                file_size_bytes: Some(1024),
+                modified_at: None,
+                sha256: None,
+                tags: "outside-record".to_string(),
+                source_label: "outside facility".to_string(),
+                existence_status: "missing".to_string(),
+                metadata_json: "{}".to_string(),
+                original_path: "/tmp/outside-mri.pdf".to_string(),
+                reference_kind: "local_reference".to_string(),
+                vault_path: String::new(),
+                content_sha256: None,
+                thumbnail_path: String::new(),
+                thumbnail_status: "none".to_string(),
+                thumbnail_mime_type: None,
+                intake_source: "test_fixture".to_string(),
+                imported_at: None,
+                archived_at: None,
+                created_at: 1,
+                updated_at: 1,
+            },
+            WorkspaceDocument {
+                id: "doc-2".to_string(),
+                client_id: "client-1".to_string(),
+                encounter_id: None,
+                title: "Gait analysis clip".to_string(),
+                kind: "video".to_string(),
+                local_path: "/tmp/gait-analysis.mp4".to_string(),
+                notes: "patient gait video".to_string(),
+                scope: "patient".to_string(),
+                detected_kind: "video".to_string(),
+                mime_type: Some("video/mp4".to_string()),
+                file_size_bytes: Some(2048),
+                modified_at: None,
+                sha256: None,
+                tags: "gait".to_string(),
+                source_label: "PT lab".to_string(),
+                existence_status: "missing".to_string(),
+                metadata_json: "{}".to_string(),
+                original_path: "/tmp/gait-analysis.mp4".to_string(),
+                reference_kind: "local_reference".to_string(),
+                vault_path: String::new(),
+                content_sha256: None,
+                thumbnail_path: String::new(),
+                thumbnail_status: "none".to_string(),
+                thumbnail_mime_type: None,
+                intake_source: "test_fixture".to_string(),
+                imported_at: None,
+                archived_at: None,
+                created_at: 1,
+                updated_at: 1,
+            },
+            WorkspaceDocument {
+                id: "doc-3".to_string(),
+                client_id: "client-1".to_string(),
+                encounter_id: None,
+                title: "June 837P claim batch".to_string(),
+                kind: "x12 edi".to_string(),
+                local_path: "/tmp/june-837p.x12".to_string(),
+                notes: "practice billing batch".to_string(),
+                scope: "practice".to_string(),
+                detected_kind: "EDI 837P".to_string(),
+                mime_type: Some("application/edi-x12".to_string()),
+                file_size_bytes: Some(3072),
+                modified_at: None,
+                sha256: None,
+                tags: "billing,batch".to_string(),
+                source_label: "June billing batch".to_string(),
+                existence_status: "missing".to_string(),
+                metadata_json: r#"{"ediTransaction":"837P professional claim"}"#.to_string(),
+                original_path: "/tmp/june-837p.x12".to_string(),
+                reference_kind: "local_reference".to_string(),
+                vault_path: String::new(),
+                content_sha256: None,
+                thumbnail_path: String::new(),
+                thumbnail_status: "none".to_string(),
+                thumbnail_mime_type: None,
+                intake_source: "test_fixture".to_string(),
+                imported_at: None,
+                archived_at: None,
+                created_at: 1,
+                updated_at: 1,
+            },
+            WorkspaceDocument {
+                id: "doc-4".to_string(),
+                client_id: "client-1".to_string(),
+                encounter_id: None,
+                title: "June 999 acknowledgment".to_string(),
+                kind: "x12 edi".to_string(),
+                local_path: "/tmp/june-999.x12".to_string(),
+                notes: "practice clearinghouse ack".to_string(),
+                scope: "practice".to_string(),
+                detected_kind: "EDI 999".to_string(),
+                mime_type: Some("application/edi-x12".to_string()),
+                file_size_bytes: Some(4096),
+                modified_at: None,
+                sha256: None,
+                tags: "billing,ack".to_string(),
+                source_label: "Clearinghouse".to_string(),
+                existence_status: "missing".to_string(),
+                metadata_json: r#"{"ediTransaction":"999 implementation ack"}"#.to_string(),
+                original_path: "/tmp/june-999.x12".to_string(),
+                reference_kind: "local_reference".to_string(),
+                vault_path: String::new(),
+                content_sha256: None,
+                thumbnail_path: String::new(),
+                thumbnail_status: "none".to_string(),
+                thumbnail_mime_type: None,
+                intake_source: "test_fixture".to_string(),
+                imported_at: None,
+                archived_at: None,
+                created_at: 1,
+                updated_at: 1,
+            },
+        ];
+        dashboard.practice_library_items = vec![
+            test_practice_library_item(dashboard.documents[2].clone(), "Billing Owner", None, 0, 0),
+            test_practice_library_item(
+                dashboard.documents[3].clone(),
+                "Billing Owner",
+                Some("doc-4-linked"),
+                0,
+                0,
+            ),
+        ];
+
+        assert_eq!(
+            dashboard.execute_workspace_command(":patient files"),
+            WorkspaceDashboardAction::Consumed
+        );
+        let rendered = render_dashboard_lines_at(&dashboard, 220, 60);
+        assert!(rendered.contains("Uploaded Documents"));
+        assert_eq!(dashboard.focus, WorkspaceFocus::PatientFiles);
+        assert!(rendered.contains("2 files"));
+        assert!(rendered.contains("• Outside MRI PDF"));
+        assert!(rendered.contains("Outside MRI PDF"));
+        assert!(rendered.contains("• Gait analysis clip"));
+        assert!(rendered.contains("Gait analysis clip"));
+        assert!(!rendered.contains("PDFs (1)"));
+        assert!(!rendered.contains("Video (1)"));
+        assert!(!rendered.contains("[ ]"));
+        assert!(!rendered.contains("[x]"));
+        assert!(!rendered.contains("Local File References"));
+        assert!(!rendered.contains("June 837P claim batch"));
+        assert!(!rendered.contains("June 999 acknowledgment"));
+        assert_eq!(
+            document_context_label(&dashboard.documents[0]),
+            "patient PDF: Outside MRI PDF"
+        );
+        assert_eq!(
+            document_context_label(&dashboard.documents[1]),
+            "patient video: Gait analysis clip"
+        );
+        assert_eq!(
+            document_context_label(&dashboard.documents[2]),
+            "practice EDI 837P professional claim: June 837P claim batch"
+        );
+        assert_eq!(
+            document_context_label(&dashboard.documents[3]),
+            "practice EDI 999 implementation ack: June 999 acknowledgment"
+        );
+
+        assert_eq!(
+            dashboard.execute_workspace_command(":artifact select 1"),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert_eq!(
+            dashboard.execute_workspace_command(":artifact toggle doc-3"),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert_eq!(
+            dashboard.execute_workspace_command(":artifact select 4"),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert!(dashboard.selected_artifact_ids.contains("doc-1"));
+        assert!(!dashboard.selected_artifact_ids.contains("doc-3"));
+        assert!(!dashboard.selected_artifact_ids.contains("doc-4"));
+        assert!(!dashboard.selected_artifact_ids.contains("doc-2"));
+
+        let selected_rendered = render_dashboard_lines_at(&dashboard, 220, 60);
+        assert!(selected_rendered.contains("2 files, 1 included"));
+        assert!(
+            selected_rendered
+                .lines()
+                .any(|line| line.contains("Outside MRI PDF") && line.contains("agent"))
+        );
+        assert!(selected_rendered.contains("Gait analysis clip"));
+        assert!(!selected_rendered.contains("[ ]"));
+        assert!(!selected_rendered.contains("[x]"));
+        assert!(!selected_rendered.contains("June 837P claim batch"));
+        assert!(!selected_rendered.contains("June 999 acknowledgment"));
+
+        assert_eq!(
+            dashboard.execute_workspace_command(":scope practice"),
+            WorkspaceDashboardAction::Consumed
+        );
+        let practice_rendered = render_dashboard_lines_at(&dashboard, 220, 60);
+        assert!(practice_rendered.contains("> Practice Library"));
+        assert!(practice_rendered.contains("Practice Library records"));
+        assert!(practice_rendered.contains("[unlinked] practice EDI 837P professional claim"));
+        assert!(practice_rendered.contains("[linked] practice EDI 999 implementation ack"));
+        assert!(practice_rendered.contains("no agent selection or model access"));
+        assert_eq!(
+            dashboard.execute_workspace_command(":practice inspect"),
+            WorkspaceDashboardAction::Consumed
+        );
+        let inspect_rendered = render_dashboard_lines_at(&dashboard, 220, 60);
+        assert!(inspect_rendered.contains("Practice Record Inspector"));
+        assert!(inspect_rendered.contains("not associated with active patient"));
+
+        let associate = dashboard.execute_workspace_command(":practice associate");
+        match associate {
+            WorkspaceDashboardAction::AssociatePracticeLibraryDocument(params) => {
+                assert_eq!(params.client_id, "client-1");
+                assert_eq!(params.scope, "patient");
+                assert_eq!(params.title, "June 837P claim batch");
+                assert!(params.metadata_json.contains("associatedFromDocumentId"));
+                assert!(params.metadata_json.contains("doc-3"));
+                assert!(params.metadata_json.contains("referenceOnly"));
+                assert!(!dashboard.selected_artifact_ids.contains("doc-3"));
+            }
+            other => panic!("expected practice association action, got {other:?}"),
+        }
+        assert_eq!(
+            dashboard.execute_workspace_command(":practice next"),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert_eq!(
+            dashboard.execute_workspace_command(":practice associate"),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert!(
+            dashboard
+                .status
+                .contains("already associated with this patient")
+        );
+
+        let prompt = dashboard.agent_context_prompt();
+        assert!(prompt.contains("include_documents: false"));
+        assert!(prompt.contains("original local files are not uploaded"));
+        assert!(prompt.contains("Selected artifact metadata"));
+        assert!(prompt.contains("patient PDF: Outside MRI PDF"));
+        assert!(!prompt.contains("practice EDI 837P professional claim"));
+        assert!(!prompt.contains("practice EDI 999 implementation ack"));
+        assert!(prompt.contains("excluded saved artifact metadata count: 1"));
+        assert!(!prompt.contains("Gait analysis clip (/"));
+
+        let preview = dashboard.context_packet_preview_lines().join("\n");
+        assert!(preview.contains("agent context: files 1 in"));
+        assert!(preview.contains("include metadata-only: patient PDF: Outside MRI PDF"));
+        assert!(!preview.contains("EDI detected: 837P professional claim"));
+
+        let params = dashboard.context_packet_create_params().unwrap();
+        assert!(
+            preview.contains("1 selected file reference(s)"),
+            "preview should expose provider-facing file reference summary"
+        );
+        assert_eq!(params.derivative_summary, "0 selected derivatives");
+        assert_eq!(params.clip_summary, "0 selected clips");
+        assert!(params.selected_artifact_ids_json.contains("doc-1"));
+        assert!(!params.selected_artifact_ids_json.contains("doc-2"));
+        assert!(!params.selected_artifact_ids_json.contains("doc-3"));
+        assert!(!params.selected_artifact_ids_json.contains("doc-4"));
+        assert!(params.artifact_summary.contains("1 selected artifact(s)"));
+        assert!(!params.artifact_summary.contains("837P professional claim"));
+        assert!(
+            params
+                .context_envelope_json
+                .contains("medical-context-packet-v1")
+        );
+        assert!(params.context_envelope_json.contains("Outside MRI PDF"));
+        assert!(
+            !params
+                .context_envelope_json
+                .contains("June 837P claim batch")
+        );
+        assert!(!params.context_envelope_json.contains("Gait analysis clip"));
+
+        let packet = test_context_packet(
+            "packet-edi",
+            "client-1",
+            None,
+            &params.human_request,
+            &params.artifact_summary,
+        );
+        dashboard.mark_agent_context_sent(packet);
+        assert_eq!(dashboard.context_packet_count_for_tests(), 1);
+        assert!(
+            dashboard
+                .first_context_packet_for_tests()
+                .unwrap()
+                .artifact_summary
+                .contains("1 selected artifact(s)")
+        );
+        assert!(
+            !dashboard
+                .first_context_packet_for_tests()
+                .unwrap()
+                .artifact_summary
+                .contains("837P professional claim")
+        );
+    }
+
+    #[test]
+    fn human_reviewed_derivatives_are_selected_separately_from_artifact_metadata() {
+        let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+        dashboard.set_context_for_tests("Jordan Patient", "Visit note", "Human note.");
+        dashboard.draft_client.id = Some("client-1".to_string());
+        dashboard.draft_note.id = Some("note-1".to_string());
+        dashboard.documents = vec![
+            WorkspaceDocument {
+                id: "doc-audio".to_string(),
+                client_id: "client-1".to_string(),
+                encounter_id: None,
+                title: "Dictation audio".to_string(),
+                kind: "audio".to_string(),
+                local_path: "/tmp/dictation.m4a".to_string(),
+                notes: "patient dictation recording".to_string(),
+                scope: "patient".to_string(),
+                detected_kind: "audio".to_string(),
+                mime_type: Some("audio/mp4".to_string()),
+                file_size_bytes: Some(8192),
+                modified_at: None,
+                sha256: None,
+                tags: "dictation".to_string(),
+                source_label: "test recorder".to_string(),
+                existence_status: "missing".to_string(),
+                metadata_json: "{}".to_string(),
+                original_path: "/tmp/dictation.m4a".to_string(),
+                reference_kind: "local_reference".to_string(),
+                vault_path: String::new(),
+                content_sha256: None,
+                thumbnail_path: String::new(),
+                thumbnail_status: "none".to_string(),
+                thumbnail_mime_type: None,
+                intake_source: "test_fixture".to_string(),
+                imported_at: None,
+                archived_at: None,
+                created_at: 1,
+                updated_at: 1,
+            },
+            WorkspaceDocument {
+                id: "doc-999".to_string(),
+                client_id: "client-1".to_string(),
+                encounter_id: None,
+                title: "June 999 acknowledgment".to_string(),
+                kind: "x12 edi".to_string(),
+                local_path: "/tmp/june-999.x12".to_string(),
+                notes: "practice clearinghouse ack".to_string(),
+                scope: "practice".to_string(),
+                detected_kind: "EDI 999".to_string(),
+                mime_type: Some("application/edi-x12".to_string()),
+                file_size_bytes: Some(4096),
+                modified_at: None,
+                sha256: None,
+                tags: "billing,ack".to_string(),
+                source_label: "Clearinghouse".to_string(),
+                existence_status: "missing".to_string(),
+                metadata_json: r#"{"ediTransaction":"999 implementation ack"}"#.to_string(),
+                original_path: "/tmp/june-999.x12".to_string(),
+                reference_kind: "local_reference".to_string(),
+                vault_path: String::new(),
+                content_sha256: None,
+                thumbnail_path: String::new(),
+                thumbnail_status: "none".to_string(),
+                thumbnail_mime_type: None,
+                intake_source: "test_fixture".to_string(),
+                imported_at: None,
+                archived_at: None,
+                created_at: 1,
+                updated_at: 1,
+            },
+        ];
+        dashboard.practice_library_items = vec![test_practice_library_item(
+            dashboard.documents[1].clone(),
+            "Billing Owner",
+            None,
+            1,
+            0,
+        )];
+        dashboard.derivatives = vec![
+            test_derivative(
+                "der-transcript",
+                "doc-audio",
+                "transcript",
+                "Dictation transcript excerpt",
+                "Human pasted transcript: patient reports heel pain after running.",
+                "human_reviewed",
+            ),
+            test_derivative(
+                "der-edi",
+                "doc-999",
+                "EDI summary",
+                "999 acknowledgment summary",
+                "Billing team note: the fake claim batch was accepted.",
+                "draft",
+            ),
+        ];
+
+        assert_eq!(
+            dashboard.execute_workspace_command(":workflow documents"),
+            WorkspaceDashboardAction::Consumed
+        );
+        let rendered = render_dashboard_lines_at(&dashboard, 220, 62);
+        assert!(rendered.contains("title: Dictation audio"));
+        assert!(rendered.contains("reviewed text/clips: 1 text; 0 clips"));
+        assert!(!rendered.contains("Patient reviewed text"));
+        assert!(!rendered.contains("Transcript: Dictation transcript excerpt"));
+        assert!(!rendered.contains("[out] 2. EDI summary: 999 acknowledgment summary"));
+
+        assert_eq!(
+            dashboard.execute_workspace_command(":scope practice"),
+            WorkspaceDashboardAction::Consumed
+        );
+        let practice_rendered = render_dashboard_lines_at(&dashboard, 220, 62);
+        assert!(practice_rendered.contains("read-only practice records: 1"));
+        assert!(practice_rendered.contains("Practice Library records"));
+        assert!(practice_rendered.contains("[unlinked] practice EDI 999 implementation ack"));
+        assert!(!practice_rendered.contains("[out] 1. EDI summary: 999 acknowledgment summary"));
+
+        let preview = dashboard.context_packet_preview_lines().join("\n");
+        assert!(preview.contains("text 0 in/1 out"));
+        assert!(preview.contains("included reviewed text: none"));
+        assert!(!preview.contains("patient reports heel pain"));
+        let prompt = dashboard.agent_context_prompt();
+        assert!(prompt.contains("No derivative text selected"));
+        assert!(!prompt.contains("Billing team note: the fake claim batch was accepted."));
+
+        assert_eq!(
+            dashboard.execute_workspace_command(":derivative select 1"),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert_eq!(
+            dashboard.execute_workspace_command(":derivative inspect 1"),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert!(dashboard.selected_derivative_ids.contains("der-transcript"));
+        assert!(!dashboard.selected_derivative_ids.contains("der-edi"));
+
+        let selected_preview = dashboard.context_packet_preview_lines().join("\n");
+        assert!(selected_preview.contains("text 1 in/0 out"));
+        assert!(
+            selected_preview.contains("include reviewed text: Transcript: Dictation transcript")
+        );
+        assert!(selected_preview.contains("patient reports heel pain"));
+        assert!(!selected_preview.contains("fake claim batch was accepted"));
+
+        let inspected_rendered = render_dashboard_lines_at(&dashboard, 220, 62);
+        assert!(
+            inspected_rendered.contains("Reviewed Text Inspector"),
+            "expected reviewed text inspector in render:\n{inspected_rendered}"
+        );
+
+        let inspected = dashboard
+            .derivative_inspector_lines(dashboard.inspected_derivative().unwrap())
+            .into_iter()
+            .map(|line| line_plain_text(&line))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(inspected.contains("Reviewed Text Inspector"));
+        assert!(inspected.contains("human-provided reviewed text; original file unchanged"));
+        assert!(inspected.contains("no automatic analysis"));
+
+        let selected_prompt = dashboard.agent_context_prompt();
+        assert!(selected_prompt.contains("Selected human-provided artifact derivatives"));
+        assert!(selected_prompt.contains("Dictation transcript excerpt"));
+        assert!(selected_prompt.contains("human reviewed"));
+        assert!(selected_prompt.contains("source: human_pasted"));
+        assert!(selected_prompt.contains("patient reports heel pain"));
+        assert!(!selected_prompt.contains("excluded saved derivative text count"));
+        assert!(!selected_prompt.contains("fake claim batch was accepted"));
+
+        let params = dashboard.context_packet_create_params().unwrap();
+        assert!(
+            params
+                .selected_derivative_ids_json
+                .contains("der-transcript")
+        );
+        assert!(!params.selected_derivative_ids_json.contains("der-edi"));
+        assert!(
+            params
+                .derivative_summary
+                .contains("1 selected derivative(s)")
+        );
+        assert!(
+            params
+                .derivative_summary
+                .contains("Dictation transcript excerpt")
+        );
+        assert!(
+            params
+                .context_envelope_json
+                .contains("patient reports heel pain")
+        );
+        assert!(
+            !params
+                .context_envelope_json
+                .contains("fake claim batch was accepted")
+        );
+
+        dashboard.push_context_packet_for_tests(WorkspaceContextPacket {
+            id: "packet-derivatives".to_string(),
+            client_id: "client-1".to_string(),
+            encounter_id: None,
+            note_id: Some("note-1".to_string()),
+            human_request: params.human_request,
+            selected_artifact_ids_json: params.selected_artifact_ids_json,
+            selected_derivative_ids_json: params.selected_derivative_ids_json,
+            selected_clip_ids_json: params.selected_clip_ids_json,
+            artifact_summary: params.artifact_summary,
+            derivative_summary: params.derivative_summary,
+            clip_summary: params.clip_summary,
+            chart_context_summary: params.chart_context_summary,
+            context_envelope_sha256: context_envelope_hash(&params.context_envelope_json),
+            context_envelope_json: params.context_envelope_json,
+            status: "sent".to_string(),
+            created_at: 1,
+            sent_at: 1,
+            updated_at: 1,
+        });
+        assert_eq!(
+            dashboard.execute_workspace_command(":agent inbox"),
+            WorkspaceDashboardAction::Consumed
+        );
+        let history = render_dashboard_lines_at(&dashboard, 220, 62);
+        assert!(history.contains("reviewed text: 1 selected"));
+        assert!(history.contains("Transcript"));
+    }
+
+    #[test]
+    fn context_clips_are_selected_separately_from_whole_derivative_text() {
+        let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+        dashboard.set_context_for_tests("Jordan Patient", "Visit note", "Human note.");
+        dashboard.draft_client.id = Some("client-1".to_string());
+        dashboard.draft_note.id = Some("note-1".to_string());
+        dashboard.documents = vec![WorkspaceDocument {
+            id: "doc-audio".to_string(),
+            client_id: "client-1".to_string(),
+            encounter_id: None,
+            title: "Dictation audio".to_string(),
+            kind: "audio".to_string(),
+            local_path: "/tmp/dictation.m4a".to_string(),
+            notes: "patient dictation recording".to_string(),
+            scope: "patient".to_string(),
+            detected_kind: "audio".to_string(),
+            mime_type: Some("audio/mp4".to_string()),
+            file_size_bytes: Some(8192),
+            modified_at: None,
+            sha256: None,
+            tags: "dictation".to_string(),
+            source_label: "test recorder".to_string(),
+            existence_status: "missing".to_string(),
+            metadata_json: "{}".to_string(),
+            original_path: "/tmp/dictation.m4a".to_string(),
+            reference_kind: "local_reference".to_string(),
+            vault_path: String::new(),
+            content_sha256: None,
+            thumbnail_path: String::new(),
+            thumbnail_status: "none".to_string(),
+            thumbnail_mime_type: None,
+            intake_source: "test_fixture".to_string(),
+            imported_at: None,
+            archived_at: None,
+            created_at: 1,
+            updated_at: 1,
+        }];
+        dashboard.derivatives = vec![test_derivative(
+            "der-transcript",
+            "doc-audio",
+            "transcript",
+            "Dictation transcript",
+            "Full transcript includes heel pain, gait tolerance, and extra unrelated text.",
+            "human_reviewed",
+        )];
+        dashboard.clips = vec![
+            test_clip(
+                "clip-gait",
+                "der-transcript",
+                "doc-audio",
+                "transcript excerpt",
+                "Gait tolerance excerpt",
+                "Patient reports improved gait tolerance after home exercises.",
+                "human_reviewed",
+            ),
+            test_clip(
+                "clip-extra",
+                "der-transcript",
+                "doc-audio",
+                "transcript excerpt",
+                "Unselected dictation excerpt",
+                "Unselected extra fake detail should stay out of the packet.",
+                "draft",
+            ),
+        ];
+
+        let preview = dashboard.context_packet_preview_lines().join("\n");
+        assert!(preview.contains("text 0 in/1 out; clips 0 in/2 out"));
+        assert!(preview.contains("included reviewed text: none"));
+        assert!(preview.contains("included clips: none"));
+        assert!(!preview.contains("improved gait tolerance"));
+        assert!(!preview.contains("Full transcript includes"));
+
+        assert_eq!(
+            dashboard.execute_workspace_command(":clip select 1"),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert!(dashboard.selected_clip_ids.contains("clip-gait"));
+        assert!(!dashboard.selected_clip_ids.contains("clip-extra"));
+        assert!(dashboard.selected_derivative_ids.is_empty());
+
+        let selected_preview = dashboard.context_packet_preview_lines().join("\n");
+        assert!(selected_preview.contains("text 0 in/1 out; clips 1 in/1 out"));
+        assert!(
+            selected_preview.contains("include clip excerpt: Transcript excerpt: Gait tolerance")
+        );
+        assert!(selected_preview.contains("improved gait tolerance"));
+        assert!(!selected_preview.contains("Unselected extra fake detail"));
+        assert!(!selected_preview.contains("Full transcript includes"));
+
+        let prompt = dashboard.agent_context_prompt();
+        assert!(prompt.contains("No derivative text selected"));
+        assert!(prompt.contains("Selected human-reviewed context clips"));
+        assert!(prompt.contains("Gait tolerance excerpt"));
+        assert!(prompt.contains("derivative_id: der-transcript"));
+        assert!(prompt.contains("artifact_id: doc-audio"));
+        assert!(prompt.contains("source: human_selected"));
+        assert!(prompt.contains("Patient reports improved gait tolerance"));
+        assert!(prompt.contains("excluded saved clip count: 1"));
+        assert!(!prompt.contains("Unselected extra fake detail"));
+        assert!(!prompt.contains("Full transcript includes"));
+
+        let params = dashboard.context_packet_create_params().unwrap();
+        assert_eq!(params.selected_derivative_ids_json, "[]");
+        assert!(params.selected_clip_ids_json.contains("clip-gait"));
+        assert!(!params.selected_clip_ids_json.contains("clip-extra"));
+        assert!(params.clip_summary.contains("1 selected clip(s)"));
+        assert!(params.clip_summary.contains("Gait tolerance excerpt"));
+        assert!(params.clip_summary.contains("improved gait tolerance"));
+        assert!(
+            params
+                .context_envelope_json
+                .contains("Patient reports improved gait tolerance")
+        );
+        assert!(
+            !params
+                .context_envelope_json
+                .contains("Unselected extra fake detail")
+        );
+        assert!(
+            !params
+                .context_envelope_json
+                .contains("Full transcript includes")
+        );
+        assert!(
+            selected_preview.contains(&params.clip_summary),
+            "preview should expose the same clip summary persisted in packet trace"
+        );
+        assert_eq!(params.derivative_summary, "0 selected derivatives");
+        assert!(prompt.contains("include_documents: false"));
+        assert!(prompt.contains("do not fetch unselected documents"));
+
+        dashboard.push_context_packet_for_tests(WorkspaceContextPacket {
+            id: "packet-clips".to_string(),
+            client_id: "client-1".to_string(),
+            encounter_id: Some("encounter-1".to_string()),
+            note_id: Some("note-1".to_string()),
+            human_request: params.human_request.clone(),
+            selected_artifact_ids_json: params.selected_artifact_ids_json.clone(),
+            selected_derivative_ids_json: params.selected_derivative_ids_json.clone(),
+            selected_clip_ids_json: params.selected_clip_ids_json.clone(),
+            artifact_summary: params.artifact_summary.clone(),
+            derivative_summary: params.derivative_summary.clone(),
+            clip_summary: params.clip_summary.clone(),
+            chart_context_summary: params.chart_context_summary.clone(),
+            context_envelope_sha256: context_envelope_hash(&params.context_envelope_json),
+            context_envelope_json: params.context_envelope_json,
+            status: "sent".to_string(),
+            created_at: 1,
+            sent_at: 1,
+            updated_at: 1,
+        });
+        dashboard.clips[0].body = "Source row changed after packet send.".to_string();
+        assert_eq!(
+            dashboard.execute_workspace_command(":agent packet inspect"),
+            WorkspaceDashboardAction::Consumed
+        );
+        let replay_lines = packet_replay_lines(dashboard.first_context_packet_for_tests().unwrap())
+            .into_iter()
+            .map(|line| line_plain_text(&line))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(replay_lines.contains("Plan history: immutable historical context"));
+        assert!(replay_lines.contains("source rows may have changed"));
+        assert!(replay_lines.contains("Patient reports improved gait tolerance"));
+        assert!(!replay_lines.contains("Source row changed after packet send"));
+        let replay_render = render_dashboard_lines_at(&dashboard, 220, 70);
+        assert!(replay_render.contains("Plan history"));
+    }
+
+    #[test]
+    fn agent_result_draft_saves_review_pending_without_mutating_note() {
+        let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+        dashboard.set_context_for_tests("Jordan Patient", "Visit note", "Draft plan.");
+        dashboard.draft_client.id = Some("client-1".to_string());
+        dashboard.draft_note.id = Some("note-1".to_string());
+        dashboard.push_context_packet_for_tests(test_context_packet(
+            "packet-1",
+            "client-1",
+            Some("note-1"),
+            "Draft a follow-up plan.",
+            "1 selected artifact(s): patient PDF: Outside referral",
+        ));
+
+        assert_eq!(
+            dashboard.execute_workspace_command(":agent result"),
+            WorkspaceDashboardAction::Consumed
+        );
+        for c in "Returned work: human review only.".chars() {
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Char(c)));
+        }
+        assert_eq!(dashboard.note_body_for_tests(), "Draft plan.");
+
+        assert_eq!(
+            dashboard.execute_workspace_command(":agent result save"),
+            WorkspaceDashboardAction::SaveAgentResult {
+                packet_id: "packet-1".to_string(),
+                body: "Returned work: human review only.".to_string(),
+            }
+        );
+
+        dashboard.agent_result.clear();
+        dashboard.push_agent_result_for_tests(test_agent_result(
+            "result-1",
+            "packet-1",
+            "client-1",
+            Some("note-1"),
+            "Returned work: human review only.",
+            "Returned work: human review only.",
+        ));
+        assert_eq!(dashboard.agent_result_count_for_tests(), 1);
+        assert_eq!(
+            dashboard.agent_result_body_for_tests(),
+            Some("Returned work: human review only.")
+        );
+        assert_eq!(dashboard.note_body_for_tests(), "Draft plan.");
+
+        assert_eq!(
+            dashboard.execute_workspace_command(":scope review"),
+            WorkspaceDashboardAction::Consumed
+        );
+        let rendered = render_dashboard_lines_at(&dashboard, 180, 50);
+        assert!(rendered.contains("Returned Work"));
+        assert!(rendered.contains("Medical Plan History"));
+        assert!(rendered.contains("What Agent Saw"));
+        assert!(rendered.contains("Safe Actions"));
+        assert!(rendered.contains("result-1 [review pending]"));
+        assert!(rendered.contains("plan: packet-1"));
+        assert!(rendered.contains("verified"));
+        assert!(rendered.contains("Make note proposal"));
+        assert!(rendered.contains("review-pending"));
+    }
+
+    #[test]
+    fn agent_result_review_commands_route_to_status_and_proposal_actions() {
+        let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+        dashboard.set_context_for_tests("Jordan Patient", "Visit note", "Draft plan.");
+        dashboard.draft_client.id = Some("client-1".to_string());
+        dashboard.draft_note.id = Some("note-1".to_string());
+        dashboard.push_context_packet_for_tests(test_context_packet(
+            "packet-1",
+            "client-1",
+            Some("note-1"),
+            "Draft a follow-up plan.",
+            "0 selected artifacts",
+        ));
+        dashboard.push_agent_result_for_tests(test_agent_result(
+            "result-1",
+            "packet-1",
+            "client-1",
+            Some("note-1"),
+            "Returned proposal body.",
+            "Returned proposal body.",
+        ));
+
+        assert_eq!(
+            dashboard.execute_workspace_command(":agent result inspect"),
+            WorkspaceDashboardAction::Consumed
+        );
+        let rendered = render_dashboard_lines_at(&dashboard, 180, 50);
+        assert!(rendered.contains("Result Inspect"));
+        assert!(rendered.contains("Medical Plan History"));
+        assert!(rendered.contains("What Agent Saw"));
+        assert!(rendered.contains("Returned Body"));
+        assert!(rendered.contains("Safe Actions"));
+        assert!(rendered.contains("> Returned proposal body."));
+
+        assert_eq!(
+            dashboard.execute_workspace_command(":agent result reviewed"),
+            WorkspaceDashboardAction::UpdateAgentResultStatus {
+                result_id: "result-1".to_string(),
+                status: "reviewed".to_string(),
+            }
+        );
+        assert_eq!(
+            dashboard.execute_workspace_command(":agent result dismiss"),
+            WorkspaceDashboardAction::UpdateAgentResultStatus {
+                result_id: "result-1".to_string(),
+                status: "dismissed".to_string(),
+            }
+        );
+        assert_eq!(
+            dashboard.execute_workspace_command(":agent result to proposal"),
+            WorkspaceDashboardAction::ConvertAgentResultToProposal {
+                result_id: "result-1".to_string(),
+            }
+        );
+        assert_eq!(dashboard.note_body_for_tests(), "Draft plan.");
+    }
+
+    #[test]
+    fn agent_result_converts_to_addendum_and_job_drafts_without_saving() {
+        let mut signed = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+        signed.set_context_for_tests("Jordan Patient", "Signed note", "Signed plan.");
+        signed.draft_client.id = Some("client-1".to_string());
+        signed.draft_note.id = Some("note-1".to_string());
+        signed.draft_note.status = "signed".to_string();
+        signed.push_context_packet_for_tests(test_context_packet(
+            "packet-1",
+            "client-1",
+            Some("note-1"),
+            "Draft addendum.",
+            "0 selected artifacts",
+        ));
+        signed.push_agent_result_for_tests(test_agent_result(
+            "result-1",
+            "packet-1",
+            "client-1",
+            Some("note-1"),
+            "Addendum candidate.",
+            "Clarify signed note.",
+        ));
+
+        assert_eq!(
+            signed.execute_workspace_command(":agent result to addendum"),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert!(signed.addendum_draft.active);
+        assert_eq!(signed.addendum_draft.body, "Addendum candidate.");
+        assert_eq!(signed.note_body_for_tests(), "Signed plan.");
+        assert!(signed.status.contains("review and :addendum save"));
+
+        let mut job = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+        job.set_context_for_tests("Jordan Patient", "Visit note", "Draft plan.");
+        job.draft_client.id = Some("client-1".to_string());
+        job.draft_note.id = Some("note-1".to_string());
+        job.push_context_packet_for_tests(test_context_packet(
+            "packet-2",
+            "client-1",
+            Some("note-1"),
+            "Draft job.",
+            "0 selected artifacts",
+        ));
+        job.push_agent_result_for_tests(test_agent_result(
+            "result-2",
+            "packet-2",
+            "client-1",
+            Some("note-1"),
+            "Call patient about brace fit.",
+            "Brace follow-up",
+        ));
+
+        assert_eq!(
+            job.execute_workspace_command(":agent result to job"),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert!(job.draft_task.active);
+        assert_eq!(job.draft_task.title, "Brace follow-up");
+        assert!(
+            job.draft_task
+                .details
+                .contains("Call patient about brace fit.")
+        );
+        assert_eq!(job.task_titles_for_tests(), Vec::<&str>::new());
+        assert_eq!(job.note_body_for_tests(), "Draft plan.");
+    }
+
+    #[test]
+    fn agent_result_conversion_blocks_mismatched_packet_provenance() {
+        let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+        dashboard.set_context_for_tests("Jordan Patient", "Visit note", "Draft plan.");
+        dashboard.draft_client.id = Some("client-1".to_string());
+        dashboard.draft_note.id = Some("note-1".to_string());
+        dashboard.push_context_packet_for_tests(test_context_packet(
+            "packet-1",
+            "client-1",
+            Some("note-1"),
+            "Draft a follow-up plan.",
+            "0 selected artifacts",
+        ));
+        dashboard.push_agent_result_for_tests(test_agent_result(
+            "result-1",
+            "packet-1",
+            "client-other",
+            Some("note-1"),
+            "OTHER_CLIENT_RESULT_SENTINEL",
+            "Other client result",
+        ));
+
+        assert_eq!(
+            dashboard.execute_workspace_command(":agent result to job"),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert!(!dashboard.draft_task.active);
+        assert!(
+            dashboard
+                .status
+                .contains("does not match the active patient"),
+            "status: {}",
+            dashboard.status
+        );
+        let rendered = render_dashboard_lines_at(&dashboard, 180, 50);
+        assert!(rendered.contains("blocked: Convert returned work"));
+        assert!(rendered.contains("does not match"));
+
+        let mut wrong_note = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+        wrong_note.set_context_for_tests("Jordan Patient", "Signed note", "Signed plan.");
+        wrong_note.draft_client.id = Some("client-1".to_string());
+        wrong_note.draft_note.id = Some("note-1".to_string());
+        wrong_note.draft_note.status = "signed".to_string();
+        wrong_note.push_context_packet_for_tests(test_context_packet(
+            "packet-2",
+            "client-1",
+            Some("note-1"),
+            "Draft addendum.",
+            "0 selected artifacts",
+        ));
+        wrong_note.push_agent_result_for_tests(test_agent_result(
+            "result-2",
+            "packet-2",
+            "client-1",
+            Some("note-other"),
+            "WRONG_NOTE_RESULT_SENTINEL",
+            "Wrong note result",
+        ));
+        assert_eq!(
+            wrong_note.execute_workspace_command(":agent result to addendum"),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert!(!wrong_note.addendum_draft.active);
+        assert!(
+            wrong_note.status.contains("does not match the active note"),
+            "status: {}",
+            wrong_note.status
+        );
+
+        let mut wrong_hash = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+        wrong_hash.set_context_for_tests("Jordan Patient", "Visit note", "Draft plan.");
+        wrong_hash.draft_client.id = Some("client-1".to_string());
+        wrong_hash.draft_note.id = Some("note-1".to_string());
+        wrong_hash.push_context_packet_for_tests(test_context_packet(
+            "packet-3",
+            "client-1",
+            Some("note-1"),
+            "Draft job.",
+            "0 selected artifacts",
+        ));
+        let mut result = test_agent_result(
+            "result-3",
+            "packet-3",
+            "client-1",
+            Some("note-1"),
+            "HASH_MISMATCH_RESULT_SENTINEL",
+            "Wrong hash result",
+        );
+        result.context_envelope_sha256 = "different-packet-hash".to_string();
+        wrong_hash.push_agent_result_for_tests(result);
+        assert_eq!(
+            wrong_hash.execute_workspace_command(":agent result to job"),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert!(!wrong_hash.draft_task.active);
+        assert!(
+            wrong_hash.status.contains("hash does not match"),
+            "status: {}",
+            wrong_hash.status
+        );
+        assert_eq!(
+            agent_result_provenance_label(
+                wrong_hash.agent_results.first().unwrap(),
+                wrong_hash.context_packets.first().unwrap()
+            ),
+            "hash mismatch"
+        );
+    }
+
+    #[test]
+    fn ctrl_g_requests_context_bridge_to_agent_mode() {
+        let mut dashboard = WorkspaceDashboard::default();
+
+        assert_eq!(
+            dashboard.handle_key_event(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL)),
+            WorkspaceDashboardAction::SendContextToAgent
+        );
+    }
+
+    #[test]
+    fn medical_profile_escape_and_ctrl_w_request_return_to_agent_mode() {
+        let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+
+        assert_eq!(
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Esc)),
+            WorkspaceDashboardAction::Close
+        );
+        assert_eq!(
+            dashboard.handle_key_event(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL)),
+            WorkspaceDashboardAction::Close
+        );
+    }
+
+    fn test_client(id: &str, display_name: &str) -> WorkspaceClient {
+        WorkspaceClient {
+            id: id.to_string(),
+            display_name: display_name.to_string(),
+            preferred_name: None,
+            date_of_birth: None,
+            sex_or_gender: None,
+            external_id: None,
+            record_start_date: None,
+            record_end_date: None,
+            summary: String::new(),
+            primary_phone: None,
+            secondary_phone: None,
+            email: None,
+            preferred_contact_method: None,
+            emergency_contact_name: None,
+            emergency_contact_relationship: None,
+            emergency_contact_phone: None,
+            emergency_contact_email: None,
+            contact_notes: None,
+            payer_name: None,
+            plan_name: None,
+            member_id: None,
+            group_number: None,
+            coverage_type: None,
+            coverage_status: None,
+            coverage_notes: None,
+            archived_at: None,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    fn test_note(
+        id: &str,
+        title: &str,
+        kind: &str,
+        status: &str,
+        created_at: i64,
+    ) -> WorkspaceNote {
+        WorkspaceNote {
+            id: id.to_string(),
+            client_id: "client-1".to_string(),
+            encounter_id: Some("encounter-1".to_string()),
+            title: title.to_string(),
+            kind: kind.to_string(),
+            body: "Fake note body.".to_string(),
+            status: status.to_string(),
+            current_revision: 1,
+            archived_at: None,
+            created_at,
+            updated_at: created_at,
+        }
+    }
+
+    fn test_task(id: &str, title: &str, status: WorkspaceTaskStatus) -> WorkspaceTask {
+        WorkspaceTask {
+            id: id.to_string(),
+            client_id: "client-1".to_string(),
+            encounter_id: Some("encounter-1".to_string()),
+            note_id: Some("note-1".to_string()),
+            document_id: None,
+            title: title.to_string(),
+            details: "Follow-up details".to_string(),
+            kind: "follow-up".to_string(),
+            status,
+            priority: WorkspaceTaskPriority::Normal,
+            due_date: None,
+            assigned_to: None,
+            completed_at: None,
+            archived_at: None,
+            created_at: 1,
+            updated_at: 1,
+        }
+    }
+
+    fn patient_file(id: &str, title: &str, kind: &str, local_path: &str) -> WorkspaceDocument {
+        let mut document = test_document(id, title, kind);
+        document.scope = "patient".to_string();
+        document.local_path = local_path.to_string();
+        document.original_path = local_path.to_string();
+        document.detected_kind = detected_kind_from_extension(
+            Path::new(local_path)
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .unwrap_or_default(),
+        )
+        .to_string();
+        document.source_label = "fake local chart".to_string();
+        document.notes = "metadata only".to_string();
+        document
+    }
+
+    fn document_from_upsert_params_for_tests(
+        id: &str,
+        params: &WorkspaceDocumentUpsertParams,
+    ) -> WorkspaceDocument {
+        WorkspaceDocument {
+            id: id.to_string(),
+            client_id: params.client_id.clone(),
+            encounter_id: params.encounter_id.clone(),
+            title: params.title.clone(),
+            kind: params.kind.clone(),
+            local_path: params.local_path.clone(),
+            notes: params.notes.clone(),
+            scope: params.scope.clone(),
+            detected_kind: params.detected_kind.clone(),
+            mime_type: params.mime_type.clone(),
+            file_size_bytes: params.file_size_bytes,
+            modified_at: params.modified_at,
+            sha256: params.sha256.clone(),
+            tags: params.tags.clone(),
+            source_label: params.source_label.clone(),
+            existence_status: params.existence_status.clone(),
+            metadata_json: params.metadata_json.clone(),
+            original_path: params.original_path.clone(),
+            reference_kind: params.reference_kind.clone(),
+            vault_path: params.vault_path.clone(),
+            content_sha256: params.content_sha256.clone(),
+            thumbnail_path: params.thumbnail_path.clone(),
+            thumbnail_status: params.thumbnail_status.clone(),
+            thumbnail_mime_type: params.thumbnail_mime_type.clone(),
+            intake_source: params.intake_source.clone(),
+            imported_at: params.imported_at,
+            archived_at: None,
+            created_at: 1,
+            updated_at: 1,
+        }
+    }
+
+    fn test_document(id: &str, title: &str, kind: &str) -> WorkspaceDocument {
+        WorkspaceDocument {
+            id: id.to_string(),
+            client_id: "client-1".to_string(),
+            encounter_id: Some("encounter-1".to_string()),
+            title: title.to_string(),
+            kind: kind.to_string(),
+            local_path: format!("/tmp/{id}.pdf"),
+            notes: "metadata only".to_string(),
+            scope: if kind.to_ascii_lowercase().contains("edi")
+                || kind.to_ascii_lowercase().contains("x12")
+            {
+                "practice".to_string()
+            } else {
+                "patient".to_string()
+            },
+            detected_kind: kind.to_string(),
+            mime_type: None,
+            file_size_bytes: None,
+            modified_at: None,
+            sha256: None,
+            tags: String::new(),
+            source_label: String::new(),
+            existence_status: "unknown".to_string(),
+            metadata_json: "{}".to_string(),
+            original_path: format!("/tmp/{id}.pdf"),
+            reference_kind: "local_reference".to_string(),
+            vault_path: String::new(),
+            content_sha256: None,
+            thumbnail_path: String::new(),
+            thumbnail_status: "none".to_string(),
+            thumbnail_mime_type: None,
+            intake_source: String::new(),
+            imported_at: None,
+            archived_at: None,
+            created_at: 1,
+            updated_at: 1,
+        }
+    }
+
+    fn test_patient_file_document(
+        id: &str,
+        title: &str,
+        kind: &str,
+        local_path: &str,
+        source_label: &str,
+    ) -> WorkspaceDocument {
+        let mut document = test_document(id, title, kind);
+        document.local_path = local_path.to_string();
+        document.original_path = local_path.to_string();
+        document.scope = "patient".to_string();
+        document.detected_kind = kind.to_string();
+        document.source_label = source_label.to_string();
+        document
+    }
+
+    fn test_practice_library_item(
+        document: WorkspaceDocument,
+        owner_display_name: &str,
+        linked_document_id: Option<&str>,
+        reviewed_text_count: i64,
+        clip_count: i64,
+    ) -> WorkspacePracticeLibraryItem {
+        WorkspacePracticeLibraryItem {
+            owner_client_id: document.client_id.clone(),
+            owner_display_name: owner_display_name.to_string(),
+            linked_to_active_client: linked_document_id.is_some(),
+            linked_document_id: linked_document_id.map(str::to_string),
+            scope_reason: "explicit practice scope".to_string(),
+            reviewed_text_count,
+            clip_count,
+            document,
+        }
+    }
+
+    fn test_encounter(id: &str, client_id: &str, title: &str) -> WorkspaceEncounter {
+        WorkspaceEncounter {
+            id: id.to_string(),
+            client_id: client_id.to_string(),
+            kind: "visit".to_string(),
+            title: title.to_string(),
+            status: "open".to_string(),
+            started_at: Some(1),
+            ended_at: None,
+            archived_at: None,
+            created_at: 1,
+            updated_at: 1,
+        }
+    }
+
+    fn test_context_packet(
+        id: &str,
+        client_id: &str,
+        note_id: Option<&str>,
+        human_request: &str,
+        artifact_summary: &str,
+    ) -> WorkspaceContextPacket {
+        let context_envelope_json = "{}".to_string();
+        let context_envelope_sha256 = context_envelope_hash(&context_envelope_json);
+        WorkspaceContextPacket {
+            id: id.to_string(),
+            client_id: client_id.to_string(),
+            encounter_id: Some("encounter-1".to_string()),
+            note_id: note_id.map(str::to_string),
+            human_request: human_request.to_string(),
+            selected_artifact_ids_json: "[]".to_string(),
+            selected_derivative_ids_json: "[]".to_string(),
+            selected_clip_ids_json: "[]".to_string(),
+            artifact_summary: artifact_summary.to_string(),
+            derivative_summary: "0 selected derivatives".to_string(),
+            clip_summary: "0 selected clips".to_string(),
+            chart_context_summary:
+                "patient Jordan Patient; note Visit note [unsigned r0]; jobs 0; proposals 0"
+                    .to_string(),
+            context_envelope_json,
+            context_envelope_sha256,
+            status: "sent".to_string(),
+            created_at: 1,
+            sent_at: 1,
+            updated_at: 1,
+        }
+    }
+
+    fn test_context_packet_from_params(
+        id: &str,
+        params: &WorkspaceContextPacketCreateParams,
+    ) -> WorkspaceContextPacket {
+        WorkspaceContextPacket {
+            id: id.to_string(),
+            client_id: params.client_id.clone(),
+            encounter_id: params.encounter_id.clone(),
+            note_id: params.note_id.clone(),
+            human_request: params.human_request.clone(),
+            selected_artifact_ids_json: params.selected_artifact_ids_json.clone(),
+            selected_derivative_ids_json: params.selected_derivative_ids_json.clone(),
+            selected_clip_ids_json: params.selected_clip_ids_json.clone(),
+            artifact_summary: params.artifact_summary.clone(),
+            derivative_summary: params.derivative_summary.clone(),
+            clip_summary: params.clip_summary.clone(),
+            chart_context_summary: params.chart_context_summary.clone(),
+            context_envelope_json: params.context_envelope_json.clone(),
+            context_envelope_sha256: context_envelope_hash(&params.context_envelope_json),
+            status: "sent".to_string(),
+            created_at: 1,
+            sent_at: 1,
+            updated_at: 1,
+        }
+    }
+
+    fn context_envelope_hash(context_envelope_json: &str) -> String {
+        format!("{:x}", Sha256::digest(context_envelope_json.as_bytes()))
+    }
+
+    fn test_derivative(
+        id: &str,
+        document_id: &str,
+        kind: &str,
+        title: &str,
+        body: &str,
+        review_status: &str,
+    ) -> WorkspaceArtifactDerivative {
+        WorkspaceArtifactDerivative {
+            id: id.to_string(),
+            document_id: document_id.to_string(),
+            client_id: "client-1".to_string(),
+            encounter_id: Some("encounter-1".to_string()),
+            note_id: Some("note-1".to_string()),
+            kind: kind.to_string(),
+            title: title.to_string(),
+            body: body.to_string(),
+            review_status: review_status.to_string(),
+            source_method: "human_pasted".to_string(),
+            page_range: String::new(),
+            timestamp_range: "00:10-00:42".to_string(),
+            segment_label: String::new(),
+            tags: "reviewed".to_string(),
+            metadata_json: r#"{"humanProvided":true}"#.to_string(),
+            archived_at: None,
+            created_at: 1,
+            updated_at: 1,
+        }
+    }
+
+    fn test_clip(
+        id: &str,
+        derivative_id: &str,
+        document_id: &str,
+        kind: &str,
+        title: &str,
+        body: &str,
+        review_status: &str,
+    ) -> WorkspaceContextClip {
+        WorkspaceContextClip {
+            id: id.to_string(),
+            derivative_id: derivative_id.to_string(),
+            document_id: document_id.to_string(),
+            client_id: "client-1".to_string(),
+            encounter_id: Some("encounter-1".to_string()),
+            note_id: Some("note-1".to_string()),
+            kind: kind.to_string(),
+            title: title.to_string(),
+            body: body.to_string(),
+            review_status: review_status.to_string(),
+            source_method: "human_selected".to_string(),
+            page_range: String::new(),
+            timestamp_range: "00:10-00:20".to_string(),
+            line_range: "2-3".to_string(),
+            segment_label: String::new(),
+            tags: "clip".to_string(),
+            metadata_json: r#"{"humanSelected":true}"#.to_string(),
+            archived_at: None,
+            created_at: 1,
+            updated_at: 1,
+        }
+    }
+
+    fn test_agent_result(
+        id: &str,
+        packet_id: &str,
+        client_id: &str,
+        note_id: Option<&str>,
+        body: &str,
+        summary: &str,
+    ) -> WorkspaceAgentResult {
+        WorkspaceAgentResult {
+            id: id.to_string(),
+            packet_id: packet_id.to_string(),
+            client_id: client_id.to_string(),
+            note_id: note_id.map(str::to_string),
+            context_envelope_sha256: context_envelope_hash("{}"),
+            body: body.to_string(),
+            summary: summary.to_string(),
+            status: "review_pending".to_string(),
+            created_at: 1,
+            updated_at: 1,
+        }
+    }
+
+    fn test_proposal(
+        id: &str,
+        note_id: &str,
+        base_revision: i64,
+        proposed_body: &str,
+    ) -> WorkspaceNoteProposal {
+        WorkspaceNoteProposal {
+            id: id.to_string(),
+            note_id: note_id.to_string(),
+            base_revision,
+            proposed_body: proposed_body.to_string(),
+            summary: "tighten wording".to_string(),
+            status: WorkspaceNoteProposalStatus::Pending,
+            source_thread_id: Some("thread-1".to_string()),
+            source_turn_id: Some("turn-1".to_string()),
+            created_at: 1,
+            resolved_at: None,
+        }
+    }
+
+    fn medical_recursive_render_scenarios() -> Vec<(&'static str, WorkspaceDashboard)> {
+        let mut initial = medical_recursive_base_dashboard();
+
+        let mut note_typing = medical_recursive_base_dashboard();
+        note_typing.focus = WorkspaceFocus::NoteBody;
+        note_typing
+            .draft_note
+            .body
+            .push_str("\nNew fake interval history.");
+        note_typing.mark_dirty();
+
+        let mut first_eval_new = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+        first_eval_new.set_context_for_tests("Jordan Patient", "First eval", "");
+        first_eval_new.set_workflow_section(MedicalWorkflowSection::Visit);
+
+        let mut first_eval_empty_note = medical_recursive_base_dashboard();
+        first_eval_empty_note.draft_note.body.clear();
+        first_eval_empty_note.encounters = vec![test_encounter(
+            "encounter-1",
+            "client-1",
+            "First evaluation",
+        )];
+        first_eval_empty_note.draft_note.encounter_id = Some("encounter-1".to_string());
+        first_eval_empty_note.set_workflow_section(MedicalWorkflowSection::Visit);
+
+        let mut first_eval_encounter_open = medical_recursive_base_dashboard();
+        first_eval_encounter_open.encounters = vec![test_encounter(
+            "encounter-1",
+            "client-1",
+            "First evaluation",
+        )];
+        first_eval_encounter_open.draft_note.encounter_id = Some("encounter-1".to_string());
+        first_eval_encounter_open.set_workflow_section(MedicalWorkflowSection::Visit);
+
+        let mut first_eval_file_selected = medical_recursive_files_dashboard();
+        first_eval_file_selected.encounters = vec![test_encounter(
+            "encounter-1",
+            "client-1",
+            "First evaluation",
+        )];
+        first_eval_file_selected.draft_note.encounter_id = Some("encounter-1".to_string());
+        first_eval_file_selected
+            .selected_artifact_ids
+            .insert("document-1".to_string());
+        first_eval_file_selected.set_workflow_section(MedicalWorkflowSection::Visit);
+
+        let mut first_eval_packet_ready = first_eval_file_selected.clone();
+        first_eval_packet_ready.agent_request.body =
+            "Review this first eval and selected referral metadata.".to_string();
+        first_eval_packet_ready.set_workflow_section(MedicalWorkflowSection::Visit);
+
+        let mut first_eval_packet_sent = first_eval_file_selected.clone();
+        first_eval_packet_sent.push_context_packet_for_tests(test_context_packet(
+            "packet-1",
+            "client-1",
+            Some("note-1"),
+            "Review this first eval and selected referral metadata.",
+            "1 selected artifact",
+        ));
+        first_eval_packet_sent.set_workflow_section(MedicalWorkflowSection::Visit);
+
+        let mut patient_directory = medical_recursive_directory_dashboard();
+        patient_directory.open_patient_directory();
+
+        let mut patient_search_phone = medical_recursive_directory_dashboard();
+        patient_search_phone.open_patient_search();
+        for c in "555-0101".chars() {
+            patient_search_phone.handle_key_event(KeyEvent::from(KeyCode::Char(c)));
+        }
+
+        let mut patient_search_emergency = medical_recursive_directory_dashboard();
+        patient_search_emergency.open_patient_search();
+        for c in "Maya Contact".chars() {
+            patient_search_emergency.handle_key_event(KeyEvent::from(KeyCode::Char(c)));
+        }
+
+        let mut patient_search_coverage = medical_recursive_directory_dashboard();
+        patient_search_coverage.open_patient_search();
+        for c in "MED-777".chars() {
+            patient_search_coverage.handle_key_event(KeyEvent::from(KeyCode::Char(c)));
+        }
+
+        let mut patient_search_no_results = medical_recursive_directory_dashboard();
+        patient_search_no_results.open_patient_search();
+        for c in "No Match".chars() {
+            patient_search_no_results.handle_key_event(KeyEvent::from(KeyCode::Char(c)));
+        }
+
+        let mut new_patient_draft = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+        new_patient_draft.execute_workspace_command(":patient new");
+
+        let mut sample_daily_note_draft = medical_recursive_base_dashboard();
+        sample_daily_note_draft.execute_workspace_command(":note new daily");
+        for c in "SOAP fake sample note: patient tolerated exercise.".chars() {
+            sample_daily_note_draft.handle_key_event(KeyEvent::from(KeyCode::Char(c)));
+        }
+
+        let mut wrong_pane_file_drop_blocked = medical_recursive_base_dashboard();
+        wrong_pane_file_drop_blocked.focus = WorkspaceFocus::Demographics;
+        wrong_pane_file_drop_blocked.demographics_field = DemographicsField::DisplayName;
+        wrong_pane_file_drop_blocked.handle_paste("/tmp/fake-dropped-scan.png".to_string());
+
+        let mut contact_edit_missing = medical_recursive_base_dashboard();
+        contact_edit_missing.draft_client.primary_phone.clear();
+        contact_edit_missing.draft_client.email.clear();
+        contact_edit_missing.execute_workspace_command(":contact edit");
+
+        let mut contact_edit_complete = medical_recursive_base_dashboard();
+        contact_edit_complete.draft_client.primary_phone = "555-0101".to_string();
+        contact_edit_complete.draft_client.secondary_phone = "555-0102".to_string();
+        contact_edit_complete.draft_client.email = "jordan.fake@example.test".to_string();
+        contact_edit_complete.draft_client.preferred_contact_method = "phone".to_string();
+        contact_edit_complete.draft_client.emergency_contact_name = "Maya Contact".to_string();
+        contact_edit_complete
+            .draft_client
+            .emergency_contact_relationship = "sibling".to_string();
+        contact_edit_complete.draft_client.emergency_contact_phone = "555-0199".to_string();
+        contact_edit_complete.draft_client.emergency_contact_email =
+            "maya.fake@example.test".to_string();
+        contact_edit_complete.execute_workspace_command(":emergency contact edit");
+
+        let mut coverage_edit_complete = medical_recursive_base_dashboard();
+        coverage_edit_complete.draft_client.payer_name = "Fake Medicare".to_string();
+        coverage_edit_complete.draft_client.plan_name = "Fake Plan A".to_string();
+        coverage_edit_complete.draft_client.member_id = "MED-777".to_string();
+        coverage_edit_complete.draft_client.group_number = "GRP-1".to_string();
+        coverage_edit_complete.draft_client.coverage_type = "Medicare".to_string();
+        coverage_edit_complete.draft_client.coverage_status = "active".to_string();
+        coverage_edit_complete.execute_workspace_command(":coverage edit");
+
+        let mut command_palette = medical_recursive_base_dashboard();
+        command_palette.open_command_palette();
+
+        let mut command_palette_files = medical_recursive_base_dashboard();
+        command_palette_files.open_command_palette();
+        for c in "file".chars() {
+            command_palette_files.handle_key_event(KeyEvent::from(KeyCode::Char(c)));
+        }
+
+        let mut command_palette_reviewed = medical_recursive_base_dashboard();
+        command_palette_reviewed.open_command_palette();
+        for c in "reviewed".chars() {
+            command_palette_reviewed.handle_key_event(KeyEvent::from(KeyCode::Char(c)));
+        }
+
+        let mut command_palette_clip = medical_recursive_base_dashboard();
+        command_palette_clip.open_command_palette();
+        for c in "clip".chars() {
+            command_palette_clip.handle_key_event(KeyEvent::from(KeyCode::Char(c)));
+        }
+
+        let mut command_palette_packet = medical_recursive_base_dashboard();
+        command_palette_packet.open_command_palette();
+        for c in "packet".chars() {
+            command_palette_packet.handle_key_event(KeyEvent::from(KeyCode::Char(c)));
+        }
+
+        let command_palette_codex = medical_command_palette_filter_dashboard("codex");
+        let command_palette_returned_work =
+            medical_command_palette_filter_dashboard("returned work");
+        let command_palette_patient_files =
+            medical_command_palette_filter_dashboard("patient files");
+
+        let mut file_reference = medical_recursive_base_dashboard();
+        file_reference.set_document_draft_for_tests(
+            "patient pdf",
+            "Outside referral PDF",
+            "/tmp/fake-outside-referral.pdf",
+            "File reference only; no automatic parsing.",
+        );
+        file_reference.set_workflow_section(MedicalWorkflowSection::Documents);
+
+        let mut scanned_card_referral_files = medical_recursive_base_dashboard();
+        scanned_card_referral_files.documents = vec![
+            test_patient_file_document(
+                "document-patient-id",
+                "Scanned patient ID JPG",
+                "patient image",
+                "/tmp/scanned-patient-id.jpg",
+                "fake local chart",
+            ),
+            test_patient_file_document(
+                "document-medicare-card",
+                "Scanned Medicare card JPG",
+                "patient image",
+                "/tmp/scanned-medicare-card.jpg",
+                "fake local chart",
+            ),
+            test_patient_file_document(
+                "document-referral-pdf",
+                "Outside referral PDF",
+                "patient pdf",
+                "/tmp/outside-referral.pdf",
+                "fake referral inbox",
+            ),
+        ];
+        scanned_card_referral_files
+            .selected_artifact_ids
+            .insert("document-medicare-card".to_string());
+        scanned_card_referral_files.set_workflow_section(MedicalWorkflowSection::Documents);
+
+        let mut patient_files_drop_target = medical_recursive_base_dashboard();
+        patient_files_drop_target.focus_patient_files_tree();
+
+        let mut dropped_jpg_file_tree = medical_recursive_files_dashboard();
+        dropped_jpg_file_tree
+            .documents
+            .push(test_patient_file_document(
+                "document-dropped-png",
+                "Dropped screenshot PNG",
+                "patient image",
+                "/tmp/dropped-screenshot.png",
+                "drop/paste local path",
+            ));
+        dropped_jpg_file_tree.set_workflow_section(MedicalWorkflowSection::Visit);
+        dropped_jpg_file_tree.focus_patient_files_tree();
+        dropped_jpg_file_tree.set_patient_file_tree_index_for_document_id("document-dropped-png");
+
+        let mut saved_patient_file = medical_recursive_files_dashboard();
+        saved_patient_file
+            .selected_artifact_ids
+            .insert("document-1".to_string());
+        saved_patient_file.set_workflow_section(MedicalWorkflowSection::Documents);
+
+        let mut saved_practice_file = medical_recursive_files_dashboard();
+        saved_practice_file
+            .selected_artifact_ids
+            .insert("document-edi".to_string());
+        saved_practice_file.set_workflow_section(MedicalWorkflowSection::Documents);
+
+        let mut practice_library_scope = medical_recursive_files_dashboard();
+        practice_library_scope
+            .selected_artifact_ids
+            .insert("document-edi".to_string());
+        practice_library_scope.set_workflow_section(MedicalWorkflowSection::PracticeLibrary);
+
+        let mut practice_library_linked_scope = medical_recursive_files_dashboard();
+        practice_library_linked_scope.practice_library_items[0].linked_to_active_client = true;
+        practice_library_linked_scope.practice_library_items[0].linked_document_id =
+            Some("document-associated-edi".to_string());
+        practice_library_linked_scope.practice_library_inspect = true;
+        practice_library_linked_scope.set_workflow_section(MedicalWorkflowSection::PracticeLibrary);
+
+        let mut associated_patient_file = medical_recursive_files_dashboard();
+        let mut associated_document = test_document(
+            "document-associated-edi",
+            "Associated Practice 837P claim batch",
+            "EDI 837P",
+        );
+        associated_document.scope = "patient".to_string();
+        associated_document.notes =
+            "Associated from Practice Library as patient reference metadata only.".to_string();
+        associated_document.metadata_json = serde_json::json!({
+            "referenceOnly": true,
+            "associatedFromDocumentId": "document-edi",
+            "associationReviewedBy": "human"
+        })
+        .to_string();
+        associated_patient_file
+            .documents
+            .push(associated_document.clone());
+        associated_patient_file.practice_library_items[0].linked_to_active_client = true;
+        associated_patient_file.practice_library_items[0].linked_document_id =
+            Some(associated_document.id);
+        associated_patient_file.set_workflow_section(MedicalWorkflowSection::Documents);
+
+        let mut practice_intelligence_scope = medical_recursive_files_dashboard();
+        practice_intelligence_scope
+            .selected_artifact_ids
+            .insert("document-edi".to_string());
+        practice_intelligence_scope
+            .set_workflow_section(MedicalWorkflowSection::PracticeIntelligence);
+
+        let mut reviewed_text = medical_recursive_base_dashboard();
+        reviewed_text.documents.push(test_document(
+            "document-1",
+            "Outside referral PDF",
+            "patient pdf",
+        ));
+        reviewed_text
+            .selected_artifact_ids
+            .insert("document-1".to_string());
+        reviewed_text.derivative_draft = DerivativeDraft::start_new(
+            "document-1".to_string(),
+            "human pasted summary".to_string(),
+            "Reviewed outside referral text".to_string(),
+        );
+        reviewed_text.derivative_draft.body =
+            "Fake reviewed referral text typed by the provider.".to_string();
+        reviewed_text.derivative_field = DerivativeField::Body;
+        reviewed_text.focus = WorkspaceFocus::Workflow;
+        reviewed_text.mark_dirty();
+        reviewed_text.set_workflow_section(MedicalWorkflowSection::Documents);
+
+        let mut context_clip = medical_recursive_base_dashboard();
+        context_clip.documents.push(test_document(
+            "document-1",
+            "Outside referral PDF",
+            "patient pdf",
+        ));
+        context_clip.derivatives.push(test_derivative(
+            "derivative-1",
+            "document-1",
+            "human pasted summary",
+            "Reviewed outside referral text",
+            "Fake reviewed referral text typed by the provider.",
+            "reviewed",
+        ));
+        context_clip
+            .selected_derivative_ids
+            .insert("derivative-1".to_string());
+        let derivative = context_clip.derivatives[0].clone();
+        context_clip.clip_draft = ClipDraft::start_new(&derivative);
+        context_clip.clip_draft.body = "Selected fake excerpt for the packet.".to_string();
+        context_clip.clip_field = ClipField::Body;
+        context_clip.focus = WorkspaceFocus::Workflow;
+        context_clip.mark_dirty();
+        context_clip.set_workflow_section(MedicalWorkflowSection::Documents);
+
+        let mut saved_reviewed_text = medical_recursive_files_dashboard();
+        saved_reviewed_text
+            .selected_derivative_ids
+            .insert("derivative-1".to_string());
+        saved_reviewed_text.set_workflow_section(MedicalWorkflowSection::Documents);
+
+        let mut saved_context_clip = medical_recursive_files_dashboard();
+        saved_context_clip
+            .selected_clip_ids
+            .insert("clip-1".to_string());
+        saved_context_clip.set_workflow_section(MedicalWorkflowSection::Documents);
+
+        let mut packet_file_reference = medical_recursive_files_dashboard();
+        packet_file_reference
+            .selected_artifact_ids
+            .insert("document-1".to_string());
+        packet_file_reference.agent_request.body =
+            "Review selected file reference metadata.".to_string();
+        packet_file_reference.set_workflow_section(MedicalWorkflowSection::ContextPacket);
+
+        let mut packet_reviewed_text = medical_recursive_files_dashboard();
+        packet_reviewed_text
+            .selected_derivative_ids
+            .insert("derivative-1".to_string());
+        packet_reviewed_text.agent_request.body = "Review selected human-entered text.".to_string();
+        packet_reviewed_text.set_workflow_section(MedicalWorkflowSection::ContextPacket);
+
+        let mut packet_clip = medical_recursive_files_dashboard();
+        packet_clip.selected_clip_ids.insert("clip-1".to_string());
+        packet_clip.agent_request.body = "Review selected excerpt only.".to_string();
+        packet_clip.set_workflow_section(MedicalWorkflowSection::ContextPacket);
+
+        let mut stale_packet_selection = medical_recursive_files_dashboard();
+        stale_packet_selection
+            .selected_artifact_ids
+            .extend(["document-1".to_string(), "STALE_DOCUMENT".to_string()]);
+        stale_packet_selection
+            .selected_derivative_ids
+            .extend(["derivative-1".to_string(), "STALE_DERIVATIVE".to_string()]);
+        stale_packet_selection
+            .selected_clip_ids
+            .extend(["clip-1".to_string(), "STALE_CLIP".to_string()]);
+        stale_packet_selection.prune_stale_selected_context_for_tests();
+        stale_packet_selection.agent_request.body =
+            "Review recovered current packet context.".to_string();
+        stale_packet_selection.set_workflow_section(MedicalWorkflowSection::ContextPacket);
+
+        let mut agent_request = medical_recursive_base_dashboard();
+        agent_request.execute_workspace_command(":agent request");
+
+        let mut context_packet = medical_recursive_base_dashboard();
+        context_packet.execute_workspace_command(":agent request");
+        for c in "Draft a fake follow-up risk summary.".chars() {
+            context_packet.handle_key_event(KeyEvent::from(KeyCode::Char(c)));
+        }
+        context_packet.execute_workspace_command(":context packet");
+
+        let mut inbox_empty = medical_recursive_base_dashboard();
+        inbox_empty.execute_workspace_command(":agent inbox");
+
+        let mut returned_work_draft = medical_recursive_base_dashboard();
+        returned_work_draft.push_context_packet_for_tests(test_context_packet(
+            "packet-1",
+            "client-1",
+            Some("note-1"),
+            "Draft a fake follow-up risk summary.",
+            "0 selected artifacts",
+        ));
+        returned_work_draft.execute_workspace_command(":agent result");
+
+        let mut inbox_with_result = medical_recursive_result_dashboard(false);
+        inbox_with_result.execute_workspace_command(":agent inbox");
+
+        let mut result_inspect = medical_recursive_result_dashboard(false);
+        result_inspect.execute_workspace_command(":agent inbox");
+        result_inspect.execute_workspace_command(":agent result inspect");
+
+        let mut conversion_blocked = medical_recursive_result_dashboard(true);
+        conversion_blocked.execute_workspace_command(":agent inbox");
+        conversion_blocked.execute_workspace_command(":agent result to proposal");
+
+        let mut signed_addendum = medical_recursive_result_dashboard(true);
+        signed_addendum.execute_workspace_command(":agent inbox");
+
+        let mut proposal_draft = medical_recursive_result_dashboard(false);
+        proposal_draft.proposals.push(test_proposal(
+            "proposal-1",
+            "note-1",
+            0,
+            "Fake proposed replacement note body.",
+        ));
+        proposal_draft.execute_workspace_command(":workflow proposals");
+
+        let mut addendum_draft = medical_recursive_result_dashboard(true);
+        addendum_draft.addendum_draft.start();
+        addendum_draft.addendum_draft.body =
+            "Fake addendum draft copied from returned work.".to_string();
+        addendum_draft.focus = WorkspaceFocus::Workflow;
+        addendum_draft.set_workflow_section(MedicalWorkflowSection::Addenda);
+
+        let mut job_draft = medical_recursive_result_dashboard(false);
+        job_draft.draft_task = TaskDraft::start_new();
+        job_draft.draft_task.title = "Review outside referral".to_string();
+        job_draft.draft_task.details = "Fake follow-up job drafted from returned work.".to_string();
+        job_draft.task_field = TaskField::Details;
+        job_draft.focus = WorkspaceFocus::Workflow;
+        job_draft.set_workflow_section(MedicalWorkflowSection::Jobs);
+
+        let mut audit_trail = medical_recursive_base_dashboard();
+        audit_trail.set_workflow_section(MedicalWorkflowSection::Audit);
+
+        initial.execute_workspace_command(":workflow visit");
+
+        vec![
+            ("initial-dashboard", initial),
+            ("visit-note-typing", note_typing),
+            ("first-eval-new", first_eval_new),
+            ("first-eval-empty-note", first_eval_empty_note),
+            ("first-eval-encounter-open", first_eval_encounter_open),
+            ("first-eval-file-selected", first_eval_file_selected),
+            ("first-eval-packet-ready", first_eval_packet_ready),
+            ("first-eval-packet-sent", first_eval_packet_sent),
+            ("patient-directory", patient_directory),
+            ("patient-search-phone", patient_search_phone),
+            ("patient-search-emergency", patient_search_emergency),
+            ("patient-search-coverage", patient_search_coverage),
+            ("patient-search-no-results", patient_search_no_results),
+            ("new-patient-draft", new_patient_draft),
+            ("sample-daily-note-draft", sample_daily_note_draft),
+            ("wrong-pane-file-drop-blocked", wrong_pane_file_drop_blocked),
+            ("contact-edit-missing", contact_edit_missing),
+            ("contact-edit-complete", contact_edit_complete),
+            ("coverage-edit-complete", coverage_edit_complete),
+            ("command-palette", command_palette),
+            ("command-palette-files", command_palette_files),
+            ("command-palette-reviewed", command_palette_reviewed),
+            ("command-palette-clip", command_palette_clip),
+            ("command-palette-packet", command_palette_packet),
+            ("command-palette-codex", command_palette_codex),
+            (
+                "command-palette-returned-work",
+                command_palette_returned_work,
+            ),
+            (
+                "command-palette-patient-files",
+                command_palette_patient_files,
+            ),
+            ("file-reference-draft", file_reference),
+            ("scanned-card-referral-files", scanned_card_referral_files),
+            ("patient-files-drop-target", patient_files_drop_target),
+            ("dropped-jpg-file-tree", dropped_jpg_file_tree),
+            ("saved-patient-file-reference", saved_patient_file),
+            ("saved-practice-file-reference", saved_practice_file),
+            ("practice-library-scope", practice_library_scope),
+            (
+                "practice-library-linked-scope",
+                practice_library_linked_scope,
+            ),
+            ("associated-patient-file-reference", associated_patient_file),
+            ("practice-intelligence-scope", practice_intelligence_scope),
+            ("reviewed-text-draft", reviewed_text),
+            ("saved-reviewed-text-selection", saved_reviewed_text),
+            ("context-clip-draft", context_clip),
+            ("saved-context-clip-selection", saved_context_clip),
+            ("packet-preview-file-reference", packet_file_reference),
+            ("packet-preview-reviewed-text", packet_reviewed_text),
+            ("packet-preview-clip", packet_clip),
+            ("stale-packet-selection", stale_packet_selection),
+            ("agent-request", agent_request),
+            ("context-packet-preview", context_packet),
+            ("agent-inbox-empty", inbox_empty),
+            ("returned-work-draft", returned_work_draft),
+            ("agent-inbox-result", inbox_with_result),
+            ("result-inspect", result_inspect),
+            ("conversion-blocked", conversion_blocked),
+            ("signed-note-addendum-guidance", signed_addendum),
+            ("note-proposal-draft", proposal_draft),
+            ("addendum-draft", addendum_draft),
+            ("job-draft", job_draft),
+            ("audit-trail-scope", audit_trail),
+        ]
+    }
+
+    fn medical_command_palette_filter_dashboard(filter: &str) -> WorkspaceDashboard {
+        let mut dashboard = medical_recursive_base_dashboard();
+        dashboard.open_command_palette();
+        for c in filter.chars() {
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Char(c)));
+        }
+        dashboard
+    }
+
+    fn medical_recursive_base_dashboard() -> WorkspaceDashboard {
+        let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+        dashboard.set_context_for_tests(
+            "Jordan Patient",
+            "Visit note",
+            "Fake human-entered visit note body.",
+        );
+        dashboard.set_record_dates_for_tests("2026-01-01", "2026-06-09");
+        dashboard.draft_client.id = Some("client-1".to_string());
+        dashboard.draft_note.id = Some("note-1".to_string());
+        dashboard
+    }
+
+    fn medical_recursive_directory_dashboard() -> WorkspaceDashboard {
+        let mut dashboard = medical_recursive_base_dashboard();
+        let mut jordan = test_client("client-1", "Jordan Patient");
+        jordan.preferred_name = Some("JP".to_string());
+        jordan.date_of_birth = Some("1980-01-02".to_string());
+        jordan.external_id = Some("MRN-123".to_string());
+        jordan.primary_phone = Some("555-0101".to_string());
+        jordan.email = Some("jordan.fake@example.test".to_string());
+        jordan.emergency_contact_name = Some("Maya Contact".to_string());
+        jordan.emergency_contact_phone = Some("555-0199".to_string());
+        jordan.payer_name = Some("Fake Medicare".to_string());
+        jordan.member_id = Some("MED-777".to_string());
+        jordan.coverage_status = Some("active".to_string());
+        jordan.updated_at = 1_766_275_200_000;
+        let mut riley = test_client("client-2", "Riley Example");
+        riley.preferred_name = Some("Ry".to_string());
+        riley.date_of_birth = Some("1975-05-06".to_string());
+        riley.external_id = Some("MRN-987".to_string());
+        riley.email = Some("riley.fake@example.test".to_string());
+        dashboard.clients = vec![jordan.clone(), riley];
+        dashboard.client_index = 0;
+        dashboard.draft_client = ClientDraft::from_client(&jordan);
+        dashboard
+    }
+
+    fn medical_recursive_files_dashboard() -> WorkspaceDashboard {
+        let mut dashboard = medical_recursive_base_dashboard();
+        dashboard.documents = vec![
+            test_document("document-1", "Outside referral PDF", "patient pdf"),
+            test_document("document-edi", "Practice 837P claim batch", "EDI 837P"),
+        ];
+        dashboard.practice_library_items = vec![test_practice_library_item(
+            dashboard.documents[1].clone(),
+            "Jordan Patient",
+            None,
+            1,
+            0,
+        )];
+        dashboard.derivatives = vec![
+            test_derivative(
+                "derivative-1",
+                "document-1",
+                "human pasted summary",
+                "Reviewed outside referral text",
+                "Fake reviewed referral text typed by the provider.",
+                "human_reviewed",
+            ),
+            test_derivative(
+                "derivative-edi",
+                "document-edi",
+                "human billing note",
+                "Reviewed EDI acknowledgment",
+                "Fake billing staff reviewed text from the EDI response.",
+                "draft",
+            ),
+        ];
+        dashboard.clips = vec![
+            test_clip(
+                "clip-1",
+                "derivative-1",
+                "document-1",
+                "summary excerpt",
+                "Follow-up excerpt",
+                "Selected fake excerpt for the packet.",
+                "human_reviewed",
+            ),
+            test_clip(
+                "clip-extra",
+                "derivative-1",
+                "document-1",
+                "summary excerpt",
+                "Unselected excerpt",
+                "Unselected fake excerpt should stay out of the packet.",
+                "draft",
+            ),
+        ];
+        dashboard
+    }
+
+    fn medical_command_coverage_dashboard() -> WorkspaceDashboard {
+        let mut dashboard = medical_recursive_result_dashboard(false);
+        let files = medical_recursive_files_dashboard();
+        dashboard.documents = files.documents;
+        dashboard.practice_library_items = files.practice_library_items;
+        dashboard.derivatives = files.derivatives;
+        dashboard.clips = files.clips;
+        dashboard.tasks = vec![test_task(
+            "task-1",
+            "Review fake referral",
+            WorkspaceTaskStatus::Open,
+        )];
+        dashboard.proposals = vec![test_proposal(
+            "proposal-1",
+            "note-1",
+            0,
+            "Fake proposed replacement note body.",
+        )];
+        dashboard.patient_safety_items = vec![WorkspacePatientSafetyItem {
+            id: "safety-1".to_string(),
+            client_id: "client-1".to_string(),
+            category: "allergy".to_string(),
+            name: "Fake latex allergy".to_string(),
+            reaction: Some("rash".to_string()),
+            severity: Some("mild".to_string()),
+            dose: None,
+            route: None,
+            frequency: None,
+            status: Some("active".to_string()),
+            recorded_date: Some("2026-06-25".to_string()),
+            notes: "test fixture".to_string(),
+            archived_at: None,
+            created_at: 1,
+            updated_at: 1,
+        }];
+        dashboard
+    }
+
+    fn medical_recursive_result_dashboard(signed: bool) -> WorkspaceDashboard {
+        let mut dashboard = medical_recursive_base_dashboard();
+        if signed {
+            dashboard.draft_note.status = "signed".to_string();
+            dashboard.draft_note.current_revision = 2;
+        }
+        dashboard.push_context_packet_for_tests(test_context_packet(
+            "packet-1",
+            "client-1",
+            Some("note-1"),
+            "Draft a fake follow-up risk summary.",
+            "0 selected artifacts",
+        ));
+        dashboard.push_agent_result_for_tests(test_agent_result(
+            "result-1",
+            "packet-1",
+            "client-1",
+            Some("note-1"),
+            "Returned fake follow-up proposal body.",
+            "Returned fake follow-up proposal body.",
+        ));
+        dashboard
+    }
+
+    fn render_dashboard_lines(dashboard: &WorkspaceDashboard) -> String {
+        render_dashboard_lines_at(dashboard, 160, 32)
+    }
+
+    fn render_dashboard_lines_at(
+        dashboard: &WorkspaceDashboard,
+        width: u16,
+        height: u16,
+    ) -> String {
+        let area = Rect::new(0, 0, width, height);
+        let mut buf = Buffer::empty(area);
+        dashboard.render(area, &mut buf);
+        buffer_text(&buf, area)
+    }
+
+    fn buffer_text(buf: &Buffer, area: Rect) -> String {
+        let lines: Vec<String> = (0..area.height)
+            .map(|row| {
+                let mut line = String::new();
+                for col in 0..area.width {
+                    let symbol = buf[(area.x + col, area.y + row)].symbol();
+                    if symbol.is_empty() {
+                        line.push(' ');
+                    } else {
+                        line.push_str(symbol);
+                    }
+                }
+                line.trim_end().to_string()
+            })
+            .collect();
+        lines.join("\n")
+    }
+
+    fn cell_fg_for_text(buf: &Buffer, area: Rect, needle: &str) -> Option<Color> {
+        let needle_cells = needle.chars().map(|ch| ch.to_string()).collect::<Vec<_>>();
+        if needle_cells.is_empty() || needle_cells.len() > area.width as usize {
+            return None;
+        }
+
+        let max_col = area.width - needle_cells.len() as u16;
+        for row in 0..area.height {
+            for col in 0..=max_col {
+                let matches = needle_cells.iter().enumerate().all(|(offset, cell)| {
+                    buf[(area.x + col + offset as u16, area.y + row)].symbol() == cell
+                });
+                if matches {
+                    return buf[(area.x + col, area.y + row)].style().fg;
+                }
+            }
+        }
+        None
+    }
+}

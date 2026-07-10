@@ -1,0 +1,26 @@
+name: Privacy or agent-boundary design review
+description: Discuss non-sensitive architecture concerns. Report exploitable vulnerabilities privately.
+title: "[Privacy design]: "
+labels: ["area:privacy", "needs-design"]
+body:
+  - type: markdown
+    attributes:
+      value: "Do not disclose vulnerabilities, secrets, PHI, or real patient scenarios here; use the private process in SECURITY.md."
+  - type: textarea
+    id: boundary
+    attributes:
+      label: Boundary being reviewed
+    validations:
+      required: true
+  - type: textarea
+    id: risk
+    attributes:
+      label: Risk or failure mode
+    validations:
+      required: true
+  - type: textarea
+    id: mitigation
+    attributes:
+      label: Proposed mitigation and tests
+    validations:
+      required: true

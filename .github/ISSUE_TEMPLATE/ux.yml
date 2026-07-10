@@ -1,0 +1,29 @@
+name: TUI or accessibility review
+description: Report navigation, layout, readability, keyboard, mouse, or accessibility issues.
+title: "[UX]: "
+labels: ["area:tui", "accessibility", "needs-triage"]
+body:
+  - type: textarea
+    id: workflow
+    attributes:
+      label: Workflow and synthetic state
+    validations:
+      required: true
+  - type: input
+    id: terminal
+    attributes:
+      label: Terminal size and application
+      placeholder: "120x32, Terminal.app"
+    validations:
+      required: true
+  - type: textarea
+    id: issue
+    attributes:
+      label: What was confusing or inaccessible?
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Synthetic evidence
+      description: Redacted text frame or synthetic screenshot only.

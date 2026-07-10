@@ -1,0 +1,8 @@
+---
+source: tui/src/workspace_dashboard.rs
+expression: "render_dashboard_lines_at(&dashboard, width, height)"
+---
+Medical Workspace
+Terminal too small for the workspace dashboard.
+Increase the terminal size, or press Ctrl-W/Esc to
+return.

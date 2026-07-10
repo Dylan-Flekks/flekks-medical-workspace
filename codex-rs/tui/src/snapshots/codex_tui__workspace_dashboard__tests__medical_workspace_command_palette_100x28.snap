@@ -1,0 +1,32 @@
+---
+source: tui/src/workspace_dashboard.rs
+expression: "render_dashboard_lines_at(&dashboard, width, height)"
+---
+Medical Workspace
+Patient: Jordan Patient  DOB: blank  MRN: blank  Contact: Missing contact  Coverage: Missing
+┌Patient Directory───────────┐┌Patient Demographics────────────────────────────────────────────────┐
+│Local search: /             ││Display: Jordan Patient                                             │
+│0 active patients; local    ││Preferred:                                                          │
+│only                        ││DOB:                                                                │
+│No saved ┌Commands──────────────────────────────────────────────────────────────────────┐         │
+│New patie│Search commands  :proposal                                                    │         │
+│         │Enter run   Esc close   ↑/↓ move                                              │         │
+│         │                                                                              │         │
+└─────────│> Select next proposal                                    :proposal next off  │─────────┘
+┌Patient N│Accept proposal                                       :proposal accept off    │─────────┐
+│Patient N│Decline proposal                                     :proposal decline off    │         │
+│  New not│Make note proposal from returned work        :agent result to proposal off    │─────────┘
+│  No pati│Jump to proposals                                      :workflow proposals    │─────────┐
+│:note new│                                                                              │         │
+│  Medical│Disabled: No pending proposals for the active note.                           │         │
+└─────────│                                                                              │         │
+┌Uploaded │                                                                              │         │
+│Uploaded │                                                                              │─────────┘
+│No files │                                                                              │─────────┐
+│Paste/dro└──────────────────────────────────────────────────────────────────────────────┘         │
+│                            ││Next                                                                │
+│                            ││  ● Next: Save first eval                                           │
+│                            ││                                                                    │
+│                            ││Intake Checklist                                                    │
+└────────────────────────────┘└────────────────────────────────────────────────────────────────────┘
+Mode: Commands | :proposal | Enter run | Esc close | Up/Down move

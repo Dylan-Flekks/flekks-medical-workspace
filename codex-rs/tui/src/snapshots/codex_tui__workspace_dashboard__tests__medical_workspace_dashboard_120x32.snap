@@ -1,0 +1,36 @@
+---
+source: tui/src/workspace_dashboard.rs
+expression: "render_dashboard_lines_at(&dashboard, width, height)"
+---
+Medical Workspace  Unsaved
+Patient: Jordan Patient  DOB: blank  MRN: blank  Contact: Missing contact  Coverage: Missing coverage  Encounter: No
+┌Patient Directory───────────┐┌Patient Demographics────────────────────────────────────────────────────────────────────┐
+│Local search: /             ││Display: Jordan Patient                                                                 │
+│0 active patients; local    ││Preferred:                                                                              │
+│only                        ││DOB:                                                                                    │
+│No saved patients yet.      ││Sex/Gender:                                                                             │
+│New patient: :patient new   ││Patient ID / MRN:                                                                       │
+│                            ││Chart start: 2026-01-01                                                                 │
+│                            ││Chart end: 2026-06-09                                                                   │
+│                            │└────────────────────────────────────────────────────────────────────────────────────────┘
+└────────────────────────────┘┌Note Title──────────────────────────────────────────────────────────────────────────────┐
+┌Patient Notes───────────────┐│Visit note                                                                              │
+│Patient Notes               │└────────────────────────────────────────────────────────────────────────────────────────┘
+│  New note                  │┌Note Body───────────────────────────────────────────────────────────────────────────────┐
+│  No patient notes yet. Use ││Human-entered note body.                                                                │
+│:note new.                  ││                                                                                        │
+│  Medical, communication,   ││                                                                                        │
+│and admin notes appear here.││                                                                                        │
+│                            ││                                                                                        │
+└────────────────────────────┘│                                                                                        │
+┌Uploaded Documents──────────┐│                                                                                        │
+│Uploaded Documents          ││                                                                                        │
+│No files yet                │└────────────────────────────────────────────────────────────────────────────────────────┘
+│Paste/drop JPG/PDF. S...    │┌Today's Visit───────────────────────────────────────────────────────────────────────────┐
+│                            ││Patient: Jordan Patient; note: Visit note                                               │
+│                            ││Next                                                                                    │
+│                            ││  ● Next: Save first eval                                                               │
+│                            ││                                                                                        │
+│                            ││Intake Checklist                                                                        │
+└────────────────────────────┘└────────────────────────────────────────────────────────────────────────────────────────┘
+Focus: Center | Mode: Read-only chart | Next: Save first eval | Status: Unsaved changes.

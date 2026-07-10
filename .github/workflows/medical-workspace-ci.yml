@@ -1,0 +1,44 @@
+name: Medical workspace CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: codex-rs
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.95.0
+          components: clippy,rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: codex-rs -> target
+      - name: Build CLI
+        run: cargo build -p codex-cli
+      - name: Test medical dashboard
+        run: cargo test -p codex-tui workspace_dashboard --lib
+      - name: Test medical app flows
+        run: cargo test -p codex-tui medical_workspace --lib
+      - name: Test workspace state
+        run: cargo test -p codex-state runtime::workspace::tests --lib
+
+  secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
