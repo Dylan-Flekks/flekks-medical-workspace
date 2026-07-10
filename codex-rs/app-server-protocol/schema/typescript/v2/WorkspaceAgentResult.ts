@@ -7,4 +7,4 @@
  * packet id/hash are provenance; clients must not treat result payloads as
  * write, signing, submission, payer-contact, or workspace-wide read authority.
  */
-export type WorkspaceAgentResult = { id: string, packetId: string, clientId: string, noteId: string | null, contextEnvelopeSha256: string, body: string, summary: string, status: string, createdAt: number, updatedAt: number, };
+export type WorkspaceAgentResult = { id: string, runId: string | null, packetId: string, clientId: string, noteId: string | null, contextEnvelopeSha256: string, baseNoteRevision: number | null, packetContextSha256: string, resultKind: string, structuredChangesJson: string, rationaleSummary: string, body: string, summary: string, status: string, createdAt: number, updatedAt: number, };

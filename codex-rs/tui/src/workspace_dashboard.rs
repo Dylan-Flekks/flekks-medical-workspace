@@ -40,7 +40,6 @@ use codex_app_server_protocol::WorkspaceAgentResult;
 use codex_app_server_protocol::WorkspaceAgentResultCreateParams;
 use codex_app_server_protocol::WorkspaceAgentResultListParams;
 use codex_app_server_protocol::WorkspaceAgentResultStatusUpdateParams;
-use codex_app_server_protocol::WorkspaceAgentRunStartParams;
 use codex_app_server_protocol::WorkspaceArtifactDerivative;
 use codex_app_server_protocol::WorkspaceArtifactDerivativeListParams;
 use codex_app_server_protocol::WorkspaceArtifactDerivativeStatusUpdateParams;
@@ -2851,6 +2850,7 @@ impl WorkspaceDashboard {
         self.draft_note = NoteDraft::from_note(&self.notes[self.note_index]);
         self.select_encounter_for_active_note();
         self.addendum_draft.clear();
+        self.reload_packet_history(app_server).await?;
         self.load_active_note_details(app_server).await?;
         Ok(())
     }
@@ -4855,6 +4855,8 @@ impl WorkspaceDashboard {
         let assembly = self.medical_context_assembly();
         let authorized_scope_json = json!({
             "schema": "medical-agent-authorized-scope-v1",
+            "categories": ["visit_history", "progress_notes"],
+            "maxRecords": 25,
             "read": {
                 "patientId": client_id,
                 "encounterId": self.active_encounter_id(),
@@ -4897,7 +4899,7 @@ impl WorkspaceDashboard {
         self.set_workflow_section(MedicalWorkflowSection::AgentInbox);
         self.agent_scroll = 0;
         self.status =
-            "Medical Agent Plan opened; return with /workspacemedical, then :agent result."
+            "Medical Agent Plan opened; the matching completed response will return to Agent Work."
                 .to_string();
     }
 
@@ -4912,29 +4914,12 @@ impl WorkspaceDashboard {
             .iter()
             .find(|packet| packet.id == packet_id)
             .map(|packet| packet.context_envelope_sha256.clone());
-        let packet_client_id = self
-            .context_packets
-            .iter()
-            .find(|packet| packet.id == packet_id)
-            .map(|packet| packet.client_id.clone())
-            .or_else(|| self.draft_client.id.clone());
-        let run = app_server
-            .workspace_agent_run_start(WorkspaceAgentRunStartParams {
-                packet_id: packet_id.clone(),
-                idempotency_key: "tui-context-handoff-v1".to_string(),
-                client_id: packet_client_id,
-                context_envelope_sha256: packet_hash.clone(),
-                provider: None,
-                model: None,
-                source_thread_id: None,
-                source_turn_id: None,
-            })
-            .await?
-            .run;
         let result = app_server
             .workspace_agent_result_create(WorkspaceAgentResultCreateParams {
                 packet_id: packet_id.clone(),
-                run_id: Some(run.id),
+                run_id: None,
+                source_thread_id: None,
+                source_turn_id: None,
                 body,
                 summary: None,
                 client_id: self.draft_client.id.clone(),
@@ -4954,6 +4939,22 @@ impl WorkspaceDashboard {
         self.agent_results.insert(0, result);
         self.focus_workflow_section(MedicalWorkflowSection::AgentInbox);
         self.status = "Agent result saved for human review.".to_string();
+        Ok(())
+    }
+
+    pub(crate) async fn refresh_after_agent_capture(
+        &mut self,
+        app_server: &mut AppServerSession,
+        result_id: String,
+    ) -> Result<()> {
+        self.reload_packet_history(app_server).await?;
+        self.selected_agent_result_id = Some(result_id);
+        self.agent_result_inspect = true;
+        self.agent_rail_tab = AgentRailTab::Pending;
+        self.focus = WorkspaceFocus::Agent;
+        self.set_workflow_section(MedicalWorkflowSection::AgentInbox);
+        self.status =
+            "Completed agent response captured for compare, edit, accept, or reject.".to_string();
         Ok(())
     }
 
@@ -5552,12 +5553,6 @@ impl WorkspaceDashboard {
                 source_thread_id: None,
                 source_turn_id: Some(result.id.clone()),
                 agent_result_id: Some(result.id.clone()),
-            })
-            .await?;
-        app_server
-            .workspace_agent_result_status_update(WorkspaceAgentResultStatusUpdateParams {
-                result_id: result.id.clone(),
-                status: "converted".to_string(),
             })
             .await?;
         self.selected_agent_result_id = Some(result.id);
@@ -22548,7 +22543,7 @@ mod tests {
         assert!(prompt.contains("Saved workspace IDs"));
         assert!(prompt.contains("workspace/context/packet/replay"));
         assert!(prompt.contains("workspace/context/get is broad human dashboard context"));
-        assert!(!prompt.contains("workspace_context_read"));
+        assert!(prompt.contains("workspace_context_read"));
         assert!(prompt.contains("Unsaved draft content is included below"));
         assert!(prompt.contains("Do not overwrite saved workspace data"));
     }
@@ -22589,7 +22584,7 @@ mod tests {
         assert!(prompt.contains("note_id: note-456"));
         assert!(prompt.contains("workspace/context/packet/replay"));
         assert!(prompt.contains("do not list or read unrelated workspace records"));
-        assert!(!prompt.contains("workspace_context_read"));
+        assert!(prompt.contains("workspace_context_read"));
         assert!(!prompt.contains("Unsaved draft content is included below"));
     }
 
@@ -23083,7 +23078,12 @@ mod tests {
         assert!(handoff_prompt.contains("- note: Visit note [draft r0]"));
         assert!(handoff_prompt.contains("- request: Review the gait clip"));
         assert!(handoff_prompt.contains("- return: reopen /workspacemedical"));
-        assert!(handoff_prompt.contains("requires explicit human save/review"));
+        assert!(handoff_prompt.contains("cannot change the chart without explicit human review"));
+        assert!(handoff_prompt.contains("workspace_context_read"));
+        assert!(handoff_prompt.contains("visit_history or progress_notes"));
+        assert!(
+            !handoff_prompt.contains("Do not fetch unselected artifact, derivative, clip, patient")
+        );
 
         dashboard.mark_agent_context_sent(packet);
         assert!(!dashboard.agent_request.is_active());
@@ -23091,7 +23091,7 @@ mod tests {
             dashboard.workflow_section,
             MedicalWorkflowSection::AgentInbox
         );
-        assert!(dashboard.status.contains("return with /workspacemedical"));
+        assert!(dashboard.status.contains("matching completed response"));
         assert_eq!(dashboard.context_packet_count_for_tests(), 1);
         assert_eq!(
             dashboard.first_context_packet_for_tests().unwrap().status,

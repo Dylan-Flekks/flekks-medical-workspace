@@ -2904,6 +2904,7 @@ ORDER BY created_at_ms DESC
             if !value.is_object() {
                 anyhow::bail!("workspace context packet authorized scope must be a JSON object");
             }
+            validate_agent_visible_json("authorized scope", &value)?;
             input.authorized_scope_json.trim().to_string()
         };
         let expected_output_kind = if input.expected_output_kind.trim().is_empty() {
@@ -3209,6 +3210,16 @@ WHERE r.id = ?
         if existing_result.status == status {
             tx.rollback().await?;
             return Ok(Some(existing_result));
+        }
+        let transition_allowed = matches!(
+            (existing_result.status.as_str(), status.as_str()),
+            ("review_pending", "reviewed" | "dismissed") | ("reviewed", "dismissed")
+        );
+        if !transition_allowed {
+            anyhow::bail!(
+                "workspace agent result cannot transition from `{}` to `{status}`",
+                existing_result.status
+            );
         }
         sqlx::query(
             r#"
@@ -3813,6 +3824,7 @@ fn validate_packet_context_envelope(
             "workspace context packet envelope must not contain path-bearing key `{path_key}`"
         );
     }
+    validate_agent_visible_json("envelope", &envelope)?;
     let assembly_version = envelope
         .get("assemblyVersion")
         .and_then(serde_json::Value::as_str)
@@ -3888,14 +3900,19 @@ fn forbidden_packet_path_key(value: &serde_json::Value) -> Option<&str> {
     match value {
         serde_json::Value::Object(object) => {
             for (key, value) in object {
+                let normalized_key = key
+                    .chars()
+                    .filter(char::is_ascii_alphanumeric)
+                    .map(|character| character.to_ascii_lowercase())
+                    .collect::<String>();
                 if matches!(
-                    key.as_str(),
-                    "localPath"
-                        | "originalPath"
-                        | "sourcePath"
-                        | "vaultPath"
-                        | "thumbnailPath"
-                        | "previewCachePath"
+                    normalized_key.as_str(),
+                    "localpath"
+                        | "originalpath"
+                        | "sourcepath"
+                        | "vaultpath"
+                        | "thumbnailpath"
+                        | "previewcachepath"
                 ) {
                     return Some(key.as_str());
                 }
@@ -3911,6 +3928,57 @@ fn forbidden_packet_path_key(value: &serde_json::Value) -> Option<&str> {
         | serde_json::Value::Number(_)
         | serde_json::Value::String(_) => None,
     }
+}
+
+fn validate_agent_visible_json(label: &str, value: &serde_json::Value) -> anyhow::Result<()> {
+    if let Some(path_key) = forbidden_packet_path_key(value) {
+        anyhow::bail!(
+            "workspace context packet {label} must not contain path-bearing key `{path_key}`"
+        );
+    }
+    if contains_absolute_path_value(value) {
+        anyhow::bail!(
+            "workspace context packet {label} must not contain absolute filesystem path values"
+        );
+    }
+    Ok(())
+}
+
+fn contains_absolute_path_value(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Object(object) => object.values().any(contains_absolute_path_value),
+        serde_json::Value::Array(values) => values.iter().any(contains_absolute_path_value),
+        serde_json::Value::String(value) => string_contains_absolute_path(value),
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {
+            false
+        }
+    }
+}
+
+fn string_contains_absolute_path(value: &str) -> bool {
+    if value.contains("file://") {
+        return true;
+    }
+    if value.as_bytes().windows(3).any(|window| {
+        window[0].is_ascii_alphabetic() && window[1] == b':' && matches!(window[2], b'/' | b'\\')
+    }) {
+        return true;
+    }
+    value.split_whitespace().any(|token| {
+        let token = token
+            .rsplit_once('=')
+            .map_or(token, |(_, candidate)| candidate)
+            .trim_matches(|character: char| {
+                matches!(
+                    character,
+                    '\'' | '"' | '(' | ')' | '[' | ']' | '{' | '}' | ',' | ';'
+                )
+            });
+        token.starts_with("~/")
+            || token.starts_with("\\\\")
+            || token.starts_with("//")
+            || (token.starts_with('/') && token != "/workspacemedical")
+    })
 }
 
 async fn resolve_packet_base_note_revision(
@@ -4872,6 +4940,17 @@ Coverage notes: fake coverage note";
             .expect("result exists");
         assert_eq!(reviewed.status, "reviewed");
         assert_eq!(reviewed.body, "Returned work.");
+        let invalid_conversion = runtime
+            .workspace()
+            .update_agent_result_status(crate::WorkspaceAgentResultStatusUpdate {
+                result_id: result.id.clone(),
+                status: "converted".to_string(),
+                actor: "human".to_string(),
+            })
+            .await
+            .expect_err("only proposal creation may mark a result converted")
+            .to_string();
+        assert!(invalid_conversion.contains("cannot transition"));
         let listed = runtime
             .workspace()
             .list_agent_results(crate::WorkspaceAgentResultFilter {

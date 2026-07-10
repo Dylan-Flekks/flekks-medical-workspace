@@ -111,6 +111,16 @@ use codex_app_server_protocol::WorkspaceAgentResultListParams;
 use codex_app_server_protocol::WorkspaceAgentResultListResponse;
 use codex_app_server_protocol::WorkspaceAgentResultStatusUpdateParams;
 use codex_app_server_protocol::WorkspaceAgentResultStatusUpdateResponse;
+use codex_app_server_protocol::WorkspaceAgentRunContextReadParams;
+use codex_app_server_protocol::WorkspaceAgentRunContextReadResponse;
+use codex_app_server_protocol::WorkspaceAgentRunListParams;
+use codex_app_server_protocol::WorkspaceAgentRunListResponse;
+use codex_app_server_protocol::WorkspaceAgentRunSourceListParams;
+use codex_app_server_protocol::WorkspaceAgentRunSourceListResponse;
+use codex_app_server_protocol::WorkspaceAgentRunStartParams;
+use codex_app_server_protocol::WorkspaceAgentRunStartResponse;
+use codex_app_server_protocol::WorkspaceAgentRunStatusUpdateParams;
+use codex_app_server_protocol::WorkspaceAgentRunStatusUpdateResponse;
 use codex_app_server_protocol::WorkspaceArtifactDerivativeListParams;
 use codex_app_server_protocol::WorkspaceArtifactDerivativeListResponse;
 use codex_app_server_protocol::WorkspaceArtifactDerivativeStatusUpdateParams;
@@ -157,6 +167,8 @@ use codex_app_server_protocol::WorkspaceNoteListParams;
 use codex_app_server_protocol::WorkspaceNoteListResponse;
 use codex_app_server_protocol::WorkspaceNoteProposalCreateParams;
 use codex_app_server_protocol::WorkspaceNoteProposalCreateResponse;
+use codex_app_server_protocol::WorkspaceNoteProposalDecisionListParams;
+use codex_app_server_protocol::WorkspaceNoteProposalDecisionListResponse;
 use codex_app_server_protocol::WorkspaceNoteProposalListParams;
 use codex_app_server_protocol::WorkspaceNoteProposalListResponse;
 use codex_app_server_protocol::WorkspaceNoteProposalResolveParams;
@@ -849,6 +861,18 @@ impl AppServerSession {
             .wrap_err("workspace/note/proposal/resolve failed in TUI")
     }
 
+    #[allow(dead_code)]
+    pub(crate) async fn workspace_note_proposal_decision_list(
+        &mut self,
+        params: WorkspaceNoteProposalDecisionListParams,
+    ) -> Result<WorkspaceNoteProposalDecisionListResponse> {
+        let request_id = self.next_request_id();
+        self.client
+            .request_typed(ClientRequest::WorkspaceNoteProposalDecisionList { request_id, params })
+            .await
+            .wrap_err("workspace/note/proposal/decision/list failed in TUI")
+    }
+
     pub(crate) async fn workspace_encounter_list(
         &mut self,
         client_id: String,
@@ -1083,6 +1107,66 @@ impl AppServerSession {
             .request_typed(ClientRequest::WorkspaceContextPacketReplay { request_id, params })
             .await
             .wrap_err("workspace/context/packet/replay failed in TUI")
+    }
+
+    #[allow(dead_code)]
+    pub(crate) async fn workspace_agent_run_start(
+        &mut self,
+        params: WorkspaceAgentRunStartParams,
+    ) -> Result<WorkspaceAgentRunStartResponse> {
+        let request_id = self.next_request_id();
+        self.client
+            .request_typed(ClientRequest::WorkspaceAgentRunStart { request_id, params })
+            .await
+            .wrap_err("workspace/agent/run/start failed in TUI")
+    }
+
+    #[allow(dead_code)]
+    pub(crate) async fn workspace_agent_run_list(
+        &mut self,
+        params: WorkspaceAgentRunListParams,
+    ) -> Result<WorkspaceAgentRunListResponse> {
+        let request_id = self.next_request_id();
+        self.client
+            .request_typed(ClientRequest::WorkspaceAgentRunList { request_id, params })
+            .await
+            .wrap_err("workspace/agent/run/list failed in TUI")
+    }
+
+    #[allow(dead_code)]
+    pub(crate) async fn workspace_agent_run_status_update(
+        &mut self,
+        params: WorkspaceAgentRunStatusUpdateParams,
+    ) -> Result<WorkspaceAgentRunStatusUpdateResponse> {
+        let request_id = self.next_request_id();
+        self.client
+            .request_typed(ClientRequest::WorkspaceAgentRunStatusUpdate { request_id, params })
+            .await
+            .wrap_err("workspace/agent/run/status/update failed in TUI")
+    }
+
+    #[allow(dead_code)]
+    pub(crate) async fn workspace_agent_run_source_list(
+        &mut self,
+        params: WorkspaceAgentRunSourceListParams,
+    ) -> Result<WorkspaceAgentRunSourceListResponse> {
+        let request_id = self.next_request_id();
+        self.client
+            .request_typed(ClientRequest::WorkspaceAgentRunSourceList { request_id, params })
+            .await
+            .wrap_err("workspace/agent/run/source/list failed in TUI")
+    }
+
+    #[allow(dead_code)]
+    pub(crate) async fn workspace_agent_run_context_read(
+        &mut self,
+        params: WorkspaceAgentRunContextReadParams,
+    ) -> Result<WorkspaceAgentRunContextReadResponse> {
+        let request_id = self.next_request_id();
+        self.client
+            .request_typed(ClientRequest::WorkspaceAgentRunContextRead { request_id, params })
+            .await
+            .wrap_err("workspace/agent/run/context/read failed in TUI")
     }
 
     pub(crate) async fn workspace_agent_result_list(

@@ -92,6 +92,33 @@ pub struct WorkspaceAgentRunSourceCreate {
     pub access_purpose: String,
 }
 
+/// A run-scoped request for additional chart context.
+///
+/// Patient and note identity are deliberately absent: the store derives both
+/// from `run_id` so callers cannot widen an already-authorized packet.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WorkspaceAgentContextReadRequest {
+    pub run_id: String,
+    pub category: String,
+    pub max_records: Option<u32>,
+}
+
+/// Exact state snapshots read for an authorized agent run.
+///
+/// Each source is an immutable access row containing the exact serialized
+/// record and its SHA-256 digest. The identity fields are derived from the run,
+/// never supplied by the reader.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceAgentContextRead {
+    pub run_id: String,
+    pub packet_id: String,
+    pub client_id: String,
+    pub note_id: Option<String>,
+    pub category: String,
+    pub max_records: u32,
+    pub sources: Vec<WorkspaceAgentRunSource>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkspaceNoteProposalDecisionKind {
     AcceptedAll,

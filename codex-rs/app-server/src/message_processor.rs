@@ -1141,6 +1141,25 @@ impl MessageProcessor {
             ClientRequest::WorkspaceContextPacketReplay { params, .. } => {
                 self.workspace_processor.context_packet_replay(params).await
             }
+            ClientRequest::WorkspaceAgentRunStart { params, .. } => {
+                self.workspace_processor.agent_run_start(params).await
+            }
+            ClientRequest::WorkspaceAgentRunList { params, .. } => {
+                self.workspace_processor.agent_run_list(params).await
+            }
+            ClientRequest::WorkspaceAgentRunStatusUpdate { params, .. } => {
+                self.workspace_processor
+                    .agent_run_status_update(params)
+                    .await
+            }
+            ClientRequest::WorkspaceAgentRunSourceList { params, .. } => {
+                self.workspace_processor.agent_run_source_list(params).await
+            }
+            ClientRequest::WorkspaceAgentRunContextRead { params, .. } => {
+                self.workspace_processor
+                    .agent_run_context_read(params)
+                    .await
+            }
             ClientRequest::WorkspaceAgentResultList { params, .. } => {
                 self.workspace_processor.agent_result_list(params).await
             }
@@ -1184,6 +1203,11 @@ impl MessageProcessor {
             }
             ClientRequest::WorkspaceNoteProposalResolve { params, .. } => {
                 self.workspace_processor.proposal_resolve(params).await
+            }
+            ClientRequest::WorkspaceNoteProposalDecisionList { params, .. } => {
+                self.workspace_processor
+                    .proposal_decision_list(params)
+                    .await
             }
             ClientRequest::WorkspaceAuditList { params, .. } => {
                 self.workspace_processor.audit_list(params).await

@@ -107,7 +107,7 @@ fn run_start(packet: &crate::WorkspaceContextPacket) -> crate::WorkspaceAgentRun
         provider: "test-provider".to_string(),
         model: "test-model".to_string(),
         source_thread_id: Some("thread-synthetic".to_string()),
-        source_turn_id: Some("turn-synthetic".to_string()),
+        source_turn_id: None,
         actor: "Clinician Example".to_string(),
     }
 }
@@ -119,6 +119,8 @@ fn result_create(
     crate::WorkspaceAgentResultCreate {
         packet_id: packet.id.clone(),
         run_id: Some(run.id.clone()),
+        source_thread_id: run.source_thread_id.clone(),
+        source_turn_id: Some("turn-synthetic".to_string()),
         body: "Subjective\n\nObjective\n\nAssessment\n\nPlan".to_string(),
         summary: "Daily-note template recommendation".to_string(),
         result_kind: "template_proposal".to_string(),
@@ -170,26 +172,43 @@ async fn workspace_agent_run_preserves_packet_revision_and_source_manifest() {
     assert_eq!(retried, run);
     assert_eq!(run.base_note_revision, packet.base_note_revision);
     assert_eq!(run.context_envelope_sha256, packet.context_envelope_sha256);
+    let run_audit = runtime
+        .workspace()
+        .list_audit_events("agent_run", &run.id)
+        .await
+        .expect("run audit should list");
+    assert!(run_audit.iter().any(|event| {
+        event.action == "started"
+            && event.actor == "Clinician Example"
+            && event.actor_kind == "clinician"
+    }));
 
     let initial_sources = runtime
         .workspace()
         .list_agent_run_sources(&run.id)
         .await
         .expect("initial source should list");
-    assert_eq!(initial_sources.len(), 1);
-    assert_eq!(initial_sources[0].source_entity_type, "context_packet");
-    assert_eq!(initial_sources[0].source_entity_id, packet.id);
+    assert_eq!(initial_sources.len(), 2);
+    let packet_source = initial_sources
+        .iter()
+        .find(|source| source.source_entity_type == "context_packet")
+        .expect("packet envelope source");
+    assert_eq!(packet_source.source_entity_id, packet.id);
+    assert_eq!(packet_source.source_revision, packet.base_note_revision);
+    assert_eq!(packet_source.snapshot_json, packet.context_envelope_json);
+    assert_eq!(packet_source.content_sha256, packet.context_envelope_sha256);
+    let contract_source = initial_sources
+        .iter()
+        .find(|source| source.source_entity_type == "packet_contract")
+        .expect("packet authorization contract source");
+    assert!(contract_source.snapshot_json.contains("authorizedScope"));
+    assert!(contract_source.snapshot_json.contains("expectedOutputKind"));
     assert_eq!(
-        initial_sources[0].source_revision,
-        packet.base_note_revision
-    );
-    assert_eq!(
-        initial_sources[0].snapshot_json,
-        packet.context_envelope_json
-    );
-    assert_eq!(
-        initial_sources[0].content_sha256,
-        packet.context_envelope_sha256
+        contract_source.content_sha256,
+        format!(
+            "{:x}",
+            Sha256::digest(contract_source.snapshot_json.as_bytes())
+        )
     );
 
     let note_snapshot = serde_json::json!({
@@ -217,6 +236,16 @@ async fn workspace_agent_run_preserves_packet_revision_and_source_manifest() {
         format!("{:x}", Sha256::digest(note_snapshot.as_bytes()))
     );
 
+    let mut mismatched_result = result_create(&packet, &run);
+    mismatched_result.result_kind = "unrelated_recommendation".to_string();
+    let mismatch_error = runtime
+        .workspace()
+        .complete_agent_run_with_result(mismatched_result)
+        .await
+        .expect_err("result kind must match the packet contract")
+        .to_string();
+    assert!(mismatch_error.contains("does not match packet expected output kind"));
+
     let result = runtime
         .workspace()
         .complete_agent_run_with_result(result_create(&packet, &run))
@@ -225,6 +254,24 @@ async fn workspace_agent_run_preserves_packet_revision_and_source_manifest() {
     assert_eq!(result.run_id.as_deref(), Some(run.id.as_str()));
     assert_eq!(result.base_note_revision, packet.base_note_revision);
     assert_eq!(result.packet_context_sha256, packet.context_envelope_sha256);
+    let completed_runs = runtime
+        .workspace()
+        .list_agent_runs(crate::WorkspaceAgentRunFilter {
+            client_id: client.id.clone(),
+            note_id: Some(note.id.clone()),
+            packet_id: Some(packet.id.clone()),
+            limit: Some(10),
+        })
+        .await
+        .expect("completed run should list");
+    assert_eq!(
+        completed_runs[0].source_thread_id.as_deref(),
+        Some("thread-synthetic")
+    );
+    assert_eq!(
+        completed_runs[0].source_turn_id.as_deref(),
+        Some("turn-synthetic")
+    );
 
     let packets = runtime
         .workspace()
@@ -247,6 +294,60 @@ async fn workspace_agent_run_preserves_packet_revision_and_source_manifest() {
         .await
         .expect("submitted replay lookup should succeed");
     assert!(replay.is_some());
+}
+
+#[tokio::test]
+async fn workspace_manual_result_import_is_audited_as_clinician_work() {
+    let runtime = test_runtime().await;
+    let (client, note) = seed_client_note(&runtime).await;
+    let packet = runtime
+        .workspace()
+        .prepare_context_packet(packet_create(&client, &note))
+        .await
+        .expect("packet should prepare");
+    let result = runtime
+        .workspace()
+        .create_agent_result(crate::WorkspaceAgentResultCreate {
+            packet_id: packet.id.clone(),
+            run_id: None,
+            body: "Clinician-pasted external recommendation.".to_string(),
+            summary: "Manual recovery import".to_string(),
+            result_kind: packet.expected_output_kind.clone(),
+            structured_changes_json: "[]".to_string(),
+            status: "review_pending".to_string(),
+            actor: "Clinician Example".to_string(),
+            expected_client_id: Some(client.id.clone()),
+            expected_note_id: Some(note.id.clone()),
+            expected_context_envelope_sha256: packet.context_envelope_sha256.clone(),
+            ..Default::default()
+        })
+        .await
+        .expect("manual result import should save");
+    let run_id = result.run_id.as_deref().expect("manual import run id");
+    let runs = runtime
+        .workspace()
+        .list_agent_runs(crate::WorkspaceAgentRunFilter {
+            client_id: client.id,
+            note_id: Some(note.id),
+            packet_id: Some(packet.id),
+            limit: Some(10),
+        })
+        .await
+        .expect("manual run should list");
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].id, run_id);
+    assert_eq!(runs[0].run_kind, "manual_import");
+    let audit = runtime
+        .workspace()
+        .list_audit_events("agent_result", &result.id)
+        .await
+        .expect("manual result audit should list");
+    assert!(audit.iter().any(|event| {
+        event.action == "saved"
+            && event.actor == "Clinician Example"
+            && event.actor_kind == "clinician"
+            && event.source == "manual_import"
+    }));
 }
 
 #[tokio::test]
@@ -442,25 +543,409 @@ async fn workspace_edited_acceptance_records_exact_resulting_revision() {
 }
 
 #[tokio::test]
-async fn workspace_packet_rejects_path_bearing_envelope_keys() {
+async fn workspace_packet_rejects_path_bearing_keys_and_values() {
     let runtime = test_runtime().await;
     let (client, note) = seed_client_note(&runtime).await;
+    for forbidden_key in ["localPath", "LOCAL_path", "preview-cache-path"] {
+        let mut packet = packet_create(&client, &note);
+        let mut envelope: serde_json::Value =
+            serde_json::from_str(&packet.context_envelope_json).expect("valid test envelope");
+        let mut artifact = serde_json::json!({
+            "id": "document-1",
+            "fileReference": "referral.pdf",
+        });
+        artifact[forbidden_key] = serde_json::json!("/Users/example/private/referral.pdf");
+        envelope["selectedArtifacts"] = serde_json::json!([artifact]);
+        packet.context_envelope_json = envelope.to_string();
+        let error = runtime
+            .workspace()
+            .prepare_context_packet(packet)
+            .await
+            .expect_err("path-bearing packet should fail")
+            .to_string();
+        assert!(error.contains(forbidden_key));
+    }
+
+    for forbidden_value in [
+        "/Users/example/private/referral.pdf",
+        r"C:\Users\example\private\referral.pdf",
+        r"\\server\share\referral.pdf",
+    ] {
+        let mut packet = packet_create(&client, &note);
+        let mut envelope: serde_json::Value =
+            serde_json::from_str(&packet.context_envelope_json).expect("valid test envelope");
+        envelope["selectedArtifacts"] = serde_json::json!([{
+            "id": "document-1",
+            "fileReference": "referral.pdf",
+            "notes": forbidden_value,
+        }]);
+        packet.context_envelope_json = envelope.to_string();
+        let error = runtime
+            .workspace()
+            .prepare_context_packet(packet)
+            .await
+            .expect_err("absolute path value should fail")
+            .to_string();
+        assert!(error.contains("absolute filesystem path values"));
+    }
+
     let mut packet = packet_create(&client, &note);
-    let mut envelope: serde_json::Value =
-        serde_json::from_str(&packet.context_envelope_json).expect("valid test envelope");
-    envelope["selectedArtifacts"] = serde_json::json!([{
-        "id": "document-1",
-        "fileReference": "referral.pdf",
-        "localPath": "/Users/example/private/referral.pdf",
-    }]);
-    packet.context_envelope_json = envelope.to_string();
+    packet.authorized_scope_json = serde_json::json!({
+        "categories": ["visit_history"],
+        "maxRecords": 5,
+        "innocentLabel": "/tmp/private-patient-export.json",
+    })
+    .to_string();
     let error = runtime
         .workspace()
         .prepare_context_packet(packet)
         .await
-        .expect_err("path-bearing packet should fail")
+        .expect_err("path-bearing authorized scope should fail")
         .to_string();
-    assert!(error.contains("localPath"));
+    assert!(error.contains("authorized scope"));
+    assert!(error.contains("absolute filesystem path values"));
+}
+
+#[tokio::test]
+async fn workspace_authorized_context_reader_returns_hashed_patient_owned_records() {
+    let runtime = test_runtime().await;
+    let (client, note) = seed_client_note(&runtime).await;
+    let encounter = runtime
+        .workspace()
+        .upsert_encounter(crate::WorkspaceEncounterUpsert {
+            client_id: client.id.clone(),
+            kind: "therapy".to_string(),
+            title: "Synthetic visit one".to_string(),
+            status: "completed".to_string(),
+            ..Default::default()
+        })
+        .await
+        .expect("encounter should save");
+    let prior_note = runtime
+        .workspace()
+        .upsert_note(crate::WorkspaceNoteUpsert {
+            client_id: client.id.clone(),
+            encounter_id: Some(encounter.id.clone()),
+            title: "Progress note".to_string(),
+            kind: "progress".to_string(),
+            body: "Exact synthetic progress-note body.".to_string(),
+            status: "draft".to_string(),
+            actor: "Clinician Example".to_string(),
+            ..Default::default()
+        })
+        .await
+        .expect("prior note should save");
+
+    let (other_client, _other_note) = seed_client_note(&runtime).await;
+    runtime
+        .workspace()
+        .upsert_encounter(crate::WorkspaceEncounterUpsert {
+            client_id: other_client.id.clone(),
+            kind: "therapy".to_string(),
+            title: "Other patient's visit".to_string(),
+            status: "completed".to_string(),
+            ..Default::default()
+        })
+        .await
+        .expect("cross-client encounter should save");
+
+    let mut create = packet_create(&client, &note);
+    create.authorized_scope_json = serde_json::json!({
+        "categories": ["visit_history", "progress_notes"],
+        "maxRecords": 10,
+    })
+    .to_string();
+    let packet = runtime
+        .workspace()
+        .prepare_context_packet(create)
+        .await
+        .expect("packet should prepare");
+    let run = runtime
+        .workspace()
+        .start_agent_run(run_start(&packet))
+        .await
+        .expect("run should start");
+
+    let visits = runtime
+        .workspace()
+        .read_authorized_agent_context(crate::WorkspaceAgentContextReadRequest {
+            run_id: run.id.clone(),
+            category: "visit_history".to_string(),
+            max_records: Some(10),
+        })
+        .await
+        .expect("visit history should be authorized");
+    assert_eq!(visits.run_id, run.id);
+    assert_eq!(visits.packet_id, packet.id);
+    assert_eq!(visits.client_id, client.id);
+    assert_eq!(visits.note_id.as_deref(), Some(note.id.as_str()));
+    assert_eq!(visits.max_records, 10);
+    assert_eq!(visits.sources.len(), 1);
+    assert_eq!(visits.sources[0].source_entity_type, "encounter");
+    assert_eq!(visits.sources[0].source_entity_id, encounter.id);
+    let visit_snapshot: serde_json::Value =
+        serde_json::from_str(&visits.sources[0].snapshot_json).expect("visit snapshot is JSON");
+    assert_eq!(visit_snapshot["client_id"], client.id);
+    assert_eq!(visit_snapshot["title"], "Synthetic visit one");
+    assert_eq!(
+        visits.sources[0].content_sha256,
+        format!(
+            "{:x}",
+            Sha256::digest(visits.sources[0].snapshot_json.as_bytes())
+        )
+    );
+
+    let notes = runtime
+        .workspace()
+        .read_authorized_agent_context(crate::WorkspaceAgentContextReadRequest {
+            run_id: run.id.clone(),
+            category: "progress_notes".to_string(),
+            max_records: Some(10),
+        })
+        .await
+        .expect("progress notes should be authorized");
+    assert_eq!(notes.sources.len(), 2);
+    assert!(notes.sources.iter().all(|source| {
+        let snapshot: serde_json::Value =
+            serde_json::from_str(&source.snapshot_json).expect("note snapshot is JSON");
+        snapshot["client_id"] == client.id
+            && source.source_entity_type == "note_revision"
+            && source.source_revision.is_some()
+    }));
+    assert!(notes.sources.iter().any(|source| {
+        source.source_entity_id == prior_note.id
+            && source
+                .snapshot_json
+                .contains("Exact synthetic progress-note body.")
+    }));
+    assert!(
+        !visits
+            .sources
+            .iter()
+            .chain(notes.sources.iter())
+            .any(|source| source.snapshot_json.contains(&other_client.id))
+    );
+
+    let manifest = runtime
+        .workspace()
+        .list_agent_run_sources(&run.id)
+        .await
+        .expect("source manifest should list");
+    assert_eq!(
+        manifest.len(),
+        5,
+        "packet envelope + packet contract + visit + two note snapshots"
+    );
+}
+
+#[tokio::test]
+async fn workspace_authorized_context_reader_enforces_default_and_max_limits() {
+    let runtime = test_runtime().await;
+    let (client, note) = seed_client_note(&runtime).await;
+    for index in 0..25 {
+        runtime
+            .workspace()
+            .upsert_encounter(crate::WorkspaceEncounterUpsert {
+                client_id: client.id.clone(),
+                kind: "therapy".to_string(),
+                title: format!("Synthetic visit {index:02}"),
+                status: "completed".to_string(),
+                ..Default::default()
+            })
+            .await
+            .expect("encounter should save");
+    }
+    let mut create = packet_create(&client, &note);
+    create.authorized_scope_json = serde_json::json!({
+        "read": {
+            "categories": ["visit_history"],
+            "maxRecords": 500,
+        },
+    })
+    .to_string();
+    let packet = runtime
+        .workspace()
+        .prepare_context_packet(create)
+        .await
+        .expect("packet should prepare");
+    let run = runtime
+        .workspace()
+        .start_agent_run(run_start(&packet))
+        .await
+        .expect("run should start");
+
+    let defaulted = runtime
+        .workspace()
+        .read_authorized_agent_context(crate::WorkspaceAgentContextReadRequest {
+            run_id: run.id.clone(),
+            category: "visit_history".to_string(),
+            max_records: None,
+        })
+        .await
+        .expect("default limit read should succeed");
+    assert_eq!(defaulted.max_records, 20);
+    assert_eq!(defaulted.sources.len(), 20);
+
+    let clamped = runtime
+        .workspace()
+        .read_authorized_agent_context(crate::WorkspaceAgentContextReadRequest {
+            run_id: run.id,
+            category: "visit_history".to_string(),
+            max_records: Some(u32::MAX),
+        })
+        .await
+        .expect("maximum limit read should succeed");
+    assert_eq!(clamped.max_records, 100);
+    assert_eq!(clamped.sources.len(), 25);
+}
+
+#[tokio::test]
+async fn workspace_authorized_context_reader_bounds_and_redacts_note_content() {
+    let runtime = test_runtime().await;
+    let (client, note) = seed_client_note(&runtime).await;
+    let large_body = format!(
+        "Synthetic note with /Users/example/private/patient.txt {}",
+        "x".repeat(40 * 1024)
+    );
+    for index in 0..20 {
+        runtime
+            .workspace()
+            .upsert_note(crate::WorkspaceNoteUpsert {
+                client_id: client.id.clone(),
+                title: format!("Large progress note {index:02}"),
+                kind: "progress_note".to_string(),
+                body: large_body.clone(),
+                status: "draft".to_string(),
+                actor: "Clinician Example".to_string(),
+                ..Default::default()
+            })
+            .await
+            .expect("large progress note should save");
+    }
+    let mut create = packet_create(&client, &note);
+    create.authorized_scope_json = serde_json::json!({
+        "categories": ["progress_notes"],
+        "maxRecords": 100,
+    })
+    .to_string();
+    let packet = runtime
+        .workspace()
+        .prepare_context_packet(create)
+        .await
+        .expect("packet should prepare");
+    let run = runtime
+        .workspace()
+        .start_agent_run(run_start(&packet))
+        .await
+        .expect("run should start");
+
+    let notes = runtime
+        .workspace()
+        .read_authorized_agent_context(crate::WorkspaceAgentContextReadRequest {
+            run_id: run.id,
+            category: "progress_notes".to_string(),
+            max_records: Some(100),
+        })
+        .await
+        .expect("bounded progress notes should read");
+    assert!(!notes.sources.is_empty());
+    assert!(
+        notes
+            .sources
+            .iter()
+            .map(|source| source.snapshot_json.len())
+            .sum::<usize>()
+            <= super::MAX_AGENT_CONTEXT_SNAPSHOT_BYTES
+    );
+    let large_snapshot = notes
+        .sources
+        .iter()
+        .map(|source| {
+            serde_json::from_str::<serde_json::Value>(&source.snapshot_json)
+                .expect("note source snapshot should be JSON")
+        })
+        .find(|snapshot| snapshot["body_original_bytes"].as_u64().unwrap_or_default() > 40_000)
+        .expect("large source snapshot");
+    assert_eq!(large_snapshot["body_truncated"], true);
+    assert_eq!(large_snapshot["body_local_paths_redacted"], true);
+    assert!(
+        large_snapshot["body"]
+            .as_str()
+            .expect("returned body")
+            .len()
+            <= super::MAX_AGENT_NOTE_BODY_BYTES
+    );
+    assert!(
+        !large_snapshot["body"]
+            .as_str()
+            .expect("returned body")
+            .contains("/Users/example")
+    );
+    assert_eq!(
+        large_snapshot["body_original_sha256"],
+        format!("{:x}", Sha256::digest(large_body.as_bytes()))
+    );
+}
+
+#[tokio::test]
+async fn workspace_authorized_context_reader_denies_scope_and_lifecycle_expansion() {
+    let runtime = test_runtime().await;
+    let (client, note) = seed_client_note(&runtime).await;
+    let mut create = packet_create(&client, &note);
+    create.authorized_scope_json = serde_json::json!({
+        "categories": ["visit_history"],
+        "maxRecords": 3,
+    })
+    .to_string();
+    let packet = runtime
+        .workspace()
+        .prepare_context_packet(create)
+        .await
+        .expect("packet should prepare");
+    let run = runtime
+        .workspace()
+        .start_agent_run(run_start(&packet))
+        .await
+        .expect("run should start");
+
+    let scope_error = runtime
+        .workspace()
+        .read_authorized_agent_context(crate::WorkspaceAgentContextReadRequest {
+            run_id: run.id.clone(),
+            category: "progress_notes".to_string(),
+            max_records: Some(100),
+        })
+        .await
+        .expect_err("an omitted category must be denied")
+        .to_string();
+    assert!(scope_error.contains("does not explicitly authorize"));
+    let manifest = runtime
+        .workspace()
+        .list_agent_run_sources(&run.id)
+        .await
+        .expect("source manifest should list");
+    assert_eq!(
+        manifest.len(),
+        2,
+        "denied read must not add to the packet envelope and contract sources"
+    );
+
+    sqlx::query("UPDATE workspace_context_packets SET status = 'sent' WHERE id = ?")
+        .bind(&packet.id)
+        .execute(runtime.workspace().pool.as_ref())
+        .await
+        .expect("test should change packet lifecycle");
+    let lifecycle_error = runtime
+        .workspace()
+        .read_authorized_agent_context(crate::WorkspaceAgentContextReadRequest {
+            run_id: run.id,
+            category: "visit_history".to_string(),
+            max_records: Some(100),
+        })
+        .await
+        .expect_err("only a submitted packet may authorize reads")
+        .to_string();
+    assert!(lifecycle_error.contains("does not authorize agent context reads"));
 }
 
 #[tokio::test]

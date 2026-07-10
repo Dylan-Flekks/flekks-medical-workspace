@@ -691,6 +691,8 @@ pub struct WorkspaceAgentResult {
 pub struct WorkspaceAgentResultCreate {
     pub packet_id: String,
     pub run_id: Option<String>,
+    pub source_thread_id: Option<String>,
+    pub source_turn_id: Option<String>,
     pub body: String,
     pub summary: String,
     pub result_kind: String,

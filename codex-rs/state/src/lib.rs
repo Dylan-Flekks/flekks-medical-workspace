@@ -51,6 +51,8 @@ pub use model::ThreadGoalStatus;
 pub use model::ThreadMetadata;
 pub use model::ThreadMetadataBuilder;
 pub use model::ThreadsPage;
+pub use model::WorkspaceAgentContextRead;
+pub use model::WorkspaceAgentContextReadRequest;
 pub use model::WorkspaceAgentResult;
 pub use model::WorkspaceAgentResultCreate;
 pub use model::WorkspaceAgentResultFilter;

@@ -79,6 +79,8 @@ pub use workspace::WorkspaceTaskPriority;
 pub use workspace::WorkspaceTaskStatus;
 pub use workspace::WorkspaceTaskStatusUpdate;
 pub use workspace::WorkspaceTaskUpsert;
+pub use workspace_agent::WorkspaceAgentContextRead;
+pub use workspace_agent::WorkspaceAgentContextReadRequest;
 pub use workspace_agent::WorkspaceAgentRun;
 pub use workspace_agent::WorkspaceAgentRunFilter;
 pub use workspace_agent::WorkspaceAgentRunSource;

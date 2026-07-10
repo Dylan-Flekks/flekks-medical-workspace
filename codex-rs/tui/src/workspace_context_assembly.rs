@@ -183,7 +183,7 @@ fn context_packet_preview_lines(
         "Agent sees: this patient/note, request, selected files/text/clips/jobs".to_string(),
         "Agent cannot: read unselected records, fetch files, mutate/sign/submit/contact"
             .to_string(),
-        "return: /workspacemedical; paste reviewed answer with :agent result".to_string(),
+        "return: /workspacemedical; completed response appears in Agent Work".to_string(),
         format!(
             "agent context: files {} in/{excluded_files} out ({patient_files} patient/{practice_files} practice); text {} in/{excluded_derivatives} out; clips {} in/{excluded_clips} out; jobs {}; proposals {}",
             input.selected_artifacts.len(),
@@ -320,6 +320,7 @@ fn medical_agent_context_prompt(input: &MedicalContextAssemblyInput<'_>) -> Stri
     prompt.push_str(
         "- workspace/context/get is broad human dashboard context and is not agent-visible\n",
     );
+    prompt.push_str("- after submission, the workspace_context_read model tool may return only explicitly authorized visit_history or progress_notes rows for the linked run and records every returned snapshot\n");
     prompt.push_str("- do not list or read unrelated workspace records to expand this packet\n\n");
     if input.unsaved_draft_included {
         prompt.push_str("Unsaved draft content is included below because it may not be persisted in the workspace database yet.\n\n");
@@ -364,11 +365,19 @@ fn medical_agent_context_prompt(input: &MedicalContextAssemblyInput<'_>) -> Stri
     push_selected_clips(&mut prompt, input);
     push_active_jobs(&mut prompt, input);
     push_note_context(&mut prompt, input);
-    prompt.push_str("\n\nUse only this selected packet context. Do not infer access to the rest of the workspace, and do not fetch unselected artifact, derivative, clip, patient, practice, or task records. If more context is needed, ask the human to build and send another packet. Review the selected patient, active note, chart dates, encounter, signature state, selected artifact metadata, selected derivative text, selected clip excerpts, human request, and active jobs above. If content above is marked unsaved draft, rely on the inline draft text. Return reviewable proposals only: note edits or replacement drafts for unsigned notes, addenda for signed notes, task/document follow-ups, billing/file findings, or questions for the human. Do not overwrite saved workspace data, sign notes, submit claims, contact payers, or mutate records.");
+    prompt.push_str("\n\nUse this selected packet context plus only visit_history or progress_notes rows returned by workspace_context_read for the linked run. Do not infer access to the rest of the workspace, and do not fetch unselected artifact, derivative, clip, patient, practice, or task records. If more context is needed, ask the human to build and send another packet. Review the selected patient, active note, chart dates, encounter, signature state, selected artifact metadata, selected derivative text, selected clip excerpts, human request, active jobs, and any explicitly authorized run-scoped rows above. If content above is marked unsaved draft, rely on the inline draft text. Return reviewable proposals only: note edits or replacement drafts for unsigned notes, addenda for signed notes, task/document follow-ups, billing/file findings, or questions for the human. Do not overwrite saved workspace data, sign notes, submit claims, contact payers, or mutate records.");
     prompt
 }
 
+#[cfg(test)]
 pub(crate) fn packet_scoped_agent_handoff_prompt(packet: &WorkspaceContextPacket) -> String {
+    packet_scoped_agent_handoff_prompt_for_run(packet, None)
+}
+
+pub(crate) fn packet_scoped_agent_handoff_prompt_for_run(
+    packet: &WorkspaceContextPacket,
+    run_id: Option<&str>,
+) -> String {
     let envelope = serde_json::from_str::<serde_json::Value>(&packet.context_envelope_json).ok();
     let prompt_snapshot = envelope
         .as_ref()
@@ -402,6 +411,13 @@ pub(crate) fn packet_scoped_agent_handoff_prompt(packet: &WorkspaceContextPacket
     prompt.push_str("- context_envelope_sha256: ");
     prompt.push_str(&packet.context_envelope_sha256);
     prompt.push('\n');
+    if let Some(run_id) = run_id {
+        prompt.push_str("- run_id: ");
+        prompt.push_str(run_id);
+        prompt.push('\n');
+        prompt.push_str("- authorized context endpoint: workspace/agent/run/context/read\n");
+        prompt.push_str("- model tool: workspace_context_read (pass this run_id plus visit_history or progress_notes)\n");
+    }
     if let Some(encounter_id) = packet.encounter_id.as_deref() {
         prompt.push_str("- encounter_id: ");
         prompt.push_str(encounter_id);
@@ -413,6 +429,16 @@ pub(crate) fn packet_scoped_agent_handoff_prompt(packet: &WorkspaceContextPacket
         prompt.push('\n');
     }
     prompt.push_str("- include_documents: false\n\n");
+    prompt.push_str("Authorized run scope JSON:\n");
+    prompt.push_str(&packet.authorized_scope_json);
+    prompt.push_str("\n\n");
+    if let Some(run_id) = run_id {
+        prompt.push_str("Execution audit:\n");
+        prompt.push_str("- this packet handoff is recorded as run ");
+        prompt.push_str(run_id);
+        prompt.push('\n');
+        prompt.push_str("- bind returned work to this run so the result, sources, proposal, and clinician decision remain traceable\n\n");
+    }
     prompt.push_str("Round-trip origin:\n");
     prompt.push_str("- patient: ");
     prompt.push_str(&patient_label);
@@ -428,19 +454,20 @@ pub(crate) fn packet_scoped_agent_handoff_prompt(packet: &WorkspaceContextPacket
         prompt.push_str(&compact_preview(chart_summary, 140));
         prompt.push('\n');
     }
-    prompt.push_str("- return: reopen /workspacemedical, review saved returned work with :agent result, and keep chart changes human-approved\n");
+    prompt.push_str("- return: reopen /workspacemedical; the matching completed response is saved automatically as review-pending Agent Work\n");
     prompt.push_str("- do not submit this composer prompt until the packet id/hash and scope match the intended chart\n\n");
     prompt.push_str("Packet access boundary:\n");
-    prompt.push_str("- use only this packet context and the stored envelope below\n");
+    prompt.push_str("- use this packet envelope plus only categories returned by workspace_context_read for this run id\n");
     prompt.push_str("- do not infer access to the rest of the workspace\n");
-    prompt.push_str("- do not call workspace/context/get, list documents, or read unselected artifacts, derivatives, clips, patient records, practice records, or tasks to expand this packet\n");
+    prompt.push_str("- do not call workspace/context/get, list documents, or use any other workspace read to expand this packet\n");
+    prompt.push_str("- each authorized context read returns and records immutable source snapshots; if a category is denied, ask the clinician for a new packet\n");
     prompt.push_str("- current source rows may have changed; the stored envelope is the authoritative sent snapshot\n");
     prompt.push_str("- original local files are not uploaded, parsed, transcribed, OCRed, or analyzed automatically\n");
     prompt.push_str(
         "- do not write to chart, sign notes, submit claims, contact payers, or mutate records\n",
     );
     prompt.push_str(
-        "- returning work to the chart requires explicit human save/review in /workspacemedical\n",
+        "- captured Agent Work cannot change the chart without explicit human review in /workspacemedical\n",
     );
     prompt.push_str(
         "- if more context is needed, ask the human to build and send another packet\n\n",
@@ -521,8 +548,12 @@ fn push_selected_artifacts(prompt: &mut String, input: &MedicalContextAssemblyIn
                 prompt.push_str("; source/batch: ");
                 prompt.push_str(document.source_label.trim());
             }
-            prompt.push_str("; local_ref: ");
-            prompt.push_str(&document.local_path);
+            prompt.push_str("; file_ref: ");
+            prompt.push_str(&document.id);
+            if let Some(file_name) = local_file_name(&document.local_path) {
+                prompt.push_str("; file_name: ");
+                prompt.push_str(&file_name);
+            }
             if !document.notes.trim().is_empty() {
                 prompt.push_str(" -- ");
                 prompt.push_str(document.notes.trim());
@@ -542,8 +573,10 @@ fn push_selected_artifacts(prompt: &mut String, input: &MedicalContextAssemblyIn
             prompt.push_str(draft.kind.trim());
             prompt.push_str(" / ");
             prompt.push_str(draft.title.trim());
-            prompt.push_str(" / ");
-            prompt.push_str(draft.local_path.trim());
+            if let Some(file_name) = local_file_name(draft.local_path) {
+                prompt.push_str(" / file_name: ");
+                prompt.push_str(&file_name);
+            }
             if !draft.notes.trim().is_empty() {
                 prompt.push_str(" -- ");
                 prompt.push_str(draft.notes.trim());
@@ -721,7 +754,8 @@ fn selected_artifact_trace_summary(selected_artifacts: &[&WorkspaceDocument]) ->
                 document_context_label(document),
                 artifact_presence_label(document),
                 artifact_size_label(document),
-                compact_preview(&document.local_path, 40)
+                local_file_name(&document.local_path)
+                    .unwrap_or_else(|| "file name unavailable".to_string())
             )
         })
         .collect::<Vec<_>>();
@@ -848,7 +882,8 @@ fn context_envelope_json(
                 "detectedKind": document.detected_kind,
                 "mediaLabel": artifact_media_label(document),
                 "mimeType": document.mime_type.as_deref(),
-                "localPath": document.local_path,
+                "fileReference": document.id,
+                "fileName": local_file_name(&document.local_path),
                 "notes": document.notes,
                 "tags": document.tags,
                 "sourceLabel": document.source_label,
@@ -1003,6 +1038,16 @@ fn json_string_escape(value: &str) -> String {
         .replace('"', "\\\"")
         .replace('\n', "\\n")
         .replace('\r', "\\r")
+}
+
+fn local_file_name(value: &str) -> Option<String> {
+    value
+        .trim()
+        .rsplit(['/', '\\'])
+        .next()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(ToString::to_string)
 }
 
 pub(crate) fn compact_preview(value: &str, max_chars: usize) -> String {
@@ -1341,5 +1386,27 @@ fn workspace_task_priority_label(priority: WorkspaceTaskPriority) -> &'static st
         WorkspaceTaskPriority::Normal => "normal",
         WorkspaceTaskPriority::High => "high",
         WorkspaceTaskPriority::Urgent => "urgent",
+    }
+}
+
+#[cfg(test)]
+mod local_file_name_tests {
+    use super::local_file_name;
+    use pretty_assertions::assert_eq;
+
+    #[test]
+    fn strips_unix_and_windows_directories_from_agent_visible_file_names() {
+        assert_eq!(
+            local_file_name("/Users/clinician/private/referral.pdf").as_deref(),
+            Some("referral.pdf")
+        );
+        assert_eq!(
+            local_file_name(r"C:\Users\Clinician\private\referral.pdf").as_deref(),
+            Some("referral.pdf")
+        );
+        assert_eq!(
+            local_file_name(r"\\server\share\coverage-card.png").as_deref(),
+            Some("coverage-card.png")
+        );
     }
 }

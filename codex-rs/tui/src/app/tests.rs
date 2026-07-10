@@ -41,6 +41,7 @@ use codex_app_server_protocol::CommandExecutionRequestApprovalParams;
 use codex_app_server_protocol::ConfigWarningNotification;
 use codex_app_server_protocol::FileChangeRequestApprovalParams;
 use codex_app_server_protocol::FileUpdateChange;
+use codex_app_server_protocol::ItemCompletedNotification;
 use codex_app_server_protocol::ItemStartedNotification;
 use codex_app_server_protocol::JSONRPCErrorError;
 use codex_app_server_protocol::McpServerElicitationRequest;
@@ -76,13 +77,21 @@ use codex_app_server_protocol::TurnStatus;
 use codex_app_server_protocol::UserInput;
 use codex_app_server_protocol::UserInput as AppServerUserInput;
 use codex_app_server_protocol::WarningNotification;
+use codex_app_server_protocol::WorkspaceAgentContextCategory;
+use codex_app_server_protocol::WorkspaceAgentRunContextReadParams;
+use codex_app_server_protocol::WorkspaceAgentRunListParams;
+use codex_app_server_protocol::WorkspaceAgentRunSourceListParams;
+use codex_app_server_protocol::WorkspaceAgentRunStartParams;
 use codex_app_server_protocol::WorkspaceAuditListParams;
 use codex_app_server_protocol::WorkspaceClientUpsertParams;
 use codex_app_server_protocol::WorkspaceContextGetParams;
 use codex_app_server_protocol::WorkspaceContextPacketCreateParams;
 use codex_app_server_protocol::WorkspaceContextPacketReplayParams;
 use codex_app_server_protocol::WorkspaceDocumentUpsertParams;
+use codex_app_server_protocol::WorkspaceEncounterUpsertParams;
 use codex_app_server_protocol::WorkspaceNoteProposalCreateParams;
+use codex_app_server_protocol::WorkspaceNoteProposalDecisionKind;
+use codex_app_server_protocol::WorkspaceNoteProposalDecisionListParams;
 use codex_app_server_protocol::WorkspaceNoteUpsertParams;
 use codex_app_server_protocol::WorkspaceTaskPriority;
 use codex_app_server_protocol::WorkspaceTaskStatus;
@@ -99,6 +108,7 @@ use codex_protocol::config_types::ServiceTier;
 use codex_protocol::config_types::Settings;
 use codex_protocol::models::ActivePermissionProfile;
 use codex_protocol::models::FileSystemPermissions;
+use codex_protocol::models::MessagePhase;
 use codex_protocol::models::NetworkPermissions;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::request_permissions::RequestPermissionProfile;
@@ -3778,6 +3788,7 @@ async fn make_test_app() -> App {
         workspace_command_runner: None,
         workspace_dashboard: None,
         workspace_dashboard_visible: false,
+        pending_workspace_agent_capture: None,
         config,
         state_db: None,
         cli_kv_overrides: Vec::new(),
@@ -3843,6 +3854,7 @@ async fn make_test_app_with_channels() -> (
             workspace_command_runner: None,
             workspace_dashboard: None,
             workspace_dashboard_visible: false,
+            pending_workspace_agent_capture: None,
             config,
             state_db: None,
             cli_kv_overrides: Vec::new(),
@@ -5710,6 +5722,8 @@ fn medical_workspace_context_bridge_inserts_structured_prompt_and_returns_to_age
         assert!(composer.contains("Medical workspace context packet selected."));
         assert!(composer.contains("Agent-visible packet handle"));
         assert!(composer.contains("workspace/context/packet/replay"));
+        assert!(composer.contains("run_id:"));
+        assert!(composer.contains("Execution audit:"));
         assert!(composer.contains("packet_id:"));
         assert!(composer.contains("context_envelope_sha256:"));
         assert!(composer.contains("Stored packet envelope JSON"));
@@ -5717,7 +5731,7 @@ fn medical_workspace_context_bridge_inserts_structured_prompt_and_returns_to_age
         assert!(composer.contains("Medical workspace context selected."));
         assert!(composer.contains(&format!("Active patient: {client_id}")));
         assert!(composer.contains(&format!("Active note: {note_id}")));
-        assert!(!composer.contains("workspace_context_read"));
+        assert!(composer.contains("model tool: workspace_context_read"));
         assert!(!composer.contains("- backend endpoint: workspace/context/get"));
         assert!(composer.contains("include_documents: false"));
         assert!(composer.contains(
@@ -5752,6 +5766,35 @@ fn medical_workspace_first_eval_round_trip_stays_packet_scoped_and_review_pendin
             "HPI: Fake patient reports two weeks of mild cough.\nExam: Alert, breathing comfortably.\nAssessment: Viral URI likely.\nPlan:",
         );
         dashboard.save(&mut app_server).await?;
+        let seeded_client_id = dashboard
+            .client_id_for_tests()
+            .expect("saved client id")
+            .to_string();
+        let prior_encounter = app_server
+            .workspace_encounter_upsert(WorkspaceEncounterUpsertParams {
+                id: None,
+                client_id: seeded_client_id.clone(),
+                kind: "office_visit".to_string(),
+                title: "Prior synthetic follow-up".to_string(),
+                status: "completed".to_string(),
+                started_at: Some(1_782_864_000),
+                ended_at: Some(1_782_867_600),
+            })
+            .await?
+            .encounter;
+        let prior_progress_note = app_server
+            .workspace_note_upsert(WorkspaceNoteUpsertParams {
+                id: None,
+                client_id: seeded_client_id,
+                encounter_id: Some(prior_encounter.id.clone()),
+                title: "Prior progress note".to_string(),
+                kind: "progress_note".to_string(),
+                body: "AUTHORIZED_PRIOR_PROGRESS_NOTE_SENTINEL".to_string(),
+                status: "draft".to_string(),
+                summary: Some("synthetic prior progress".to_string()),
+            })
+            .await?
+            .note;
 
         assert!(workspace_db_path.exists());
         assert_eq!(
@@ -5774,6 +5817,13 @@ fn medical_workspace_first_eval_round_trip_stays_packet_scoped_and_review_pendin
         }
         app.workspace_dashboard = Some(dashboard);
         app.workspace_dashboard_visible = true;
+        let expected_run_provider = app.chat_widget.config_ref().model_provider_id.clone();
+        let expected_run_model = app.chat_widget.current_model().to_string();
+        let expected_run_source_thread_id = app
+            .active_thread_id
+            .as_ref()
+            .map(ToString::to_string)
+            .or_else(|| app.chat_widget.thread_id().map(|id| id.to_string()));
 
         app.send_workspace_context_to_agent(&mut app_server).await?;
 
@@ -5788,36 +5838,163 @@ fn medical_workspace_first_eval_round_trip_stays_packet_scoped_and_review_pendin
         assert!(composer.contains("Finish the plan for this fake first eval."));
         assert!(composer.contains("include_documents: false"));
         assert!(composer.contains("Do not overwrite saved workspace data"));
-        assert!(!composer.contains("workspace_context_read"));
+        assert!(composer.contains("workspace_context_read"));
+
+        let packet = app
+            .workspace_dashboard
+            .as_ref()
+            .and_then(WorkspaceDashboard::first_context_packet_for_tests)
+            .expect("sent packet");
+        let packet_id = packet.id.clone();
+        let packet_hash = packet.context_envelope_sha256.clone();
+        assert_eq!(packet.status, "submitted");
+        assert!(packet.submitted_at.is_some());
+        let handoff_run = app_server
+            .workspace_agent_run_list(WorkspaceAgentRunListParams {
+                client_id: packet.client_id.clone(),
+                note_id: packet.note_id.clone(),
+                packet_id: Some(packet_id.clone()),
+                limit: Some(10),
+            })
+            .await?
+            .runs
+            .into_iter()
+            .next()
+            .expect("handoff run");
+        let progress_sources = app_server
+            .workspace_agent_run_context_read(WorkspaceAgentRunContextReadParams {
+                run_id: handoff_run.id.clone(),
+                category: WorkspaceAgentContextCategory::ProgressNotes,
+                limit: Some(10),
+            })
+            .await?
+            .sources;
+        assert!(progress_sources.iter().any(|source| {
+            source.source_entity_id == prior_progress_note.id
+                && source
+                    .snapshot_json
+                    .contains("AUTHORIZED_PRIOR_PROGRESS_NOTE_SENTINEL")
+        }));
+        let visit_sources = app_server
+            .workspace_agent_run_context_read(WorkspaceAgentRunContextReadParams {
+                run_id: handoff_run.id,
+                category: WorkspaceAgentContextCategory::VisitHistory,
+                limit: Some(10),
+            })
+            .await?
+            .sources;
+        assert!(
+            visit_sources
+                .iter()
+                .any(|source| source.source_entity_id == prior_encounter.id)
+        );
+        let capture_thread_id = expected_run_source_thread_id
+            .clone()
+            .unwrap_or_else(|| "synthetic-medical-thread".to_string());
+        let capture_turn_id = "synthetic-medical-turn";
+        let user_item = ThreadItem::UserMessage {
+            id: "synthetic-medical-user-message".to_string(),
+            client_id: None,
+            content: vec![UserInput::Text {
+                text: composer.clone(),
+                text_elements: Vec::new(),
+            }],
+        };
+        app.handle_workspace_agent_capture_event(
+            &mut app_server,
+            &ThreadBufferedEvent::Notification(ServerNotification::ItemCompleted(
+                ItemCompletedNotification {
+                    item: user_item,
+                    thread_id: capture_thread_id.clone(),
+                    turn_id: capture_turn_id.to_string(),
+                    completed_at_ms: 1,
+                },
+            )),
+        )
+        .await;
+        let returned_work = "Plan: Fluids, rest, return precautions, and follow up if symptoms worsen. This is returned Codex work for human review.";
+        app.handle_workspace_agent_capture_event(
+            &mut app_server,
+            &ThreadBufferedEvent::Notification(ServerNotification::ItemCompleted(
+                ItemCompletedNotification {
+                    item: ThreadItem::AgentMessage {
+                        id: "synthetic-medical-commentary".to_string(),
+                        text: "I am checking the authorized visit history.".to_string(),
+                        phase: Some(MessagePhase::Commentary),
+                        memory_citation: None,
+                    },
+                    thread_id: capture_thread_id.clone(),
+                    turn_id: capture_turn_id.to_string(),
+                    completed_at_ms: 2,
+                },
+            )),
+        )
+        .await;
+        app.handle_workspace_agent_capture_event(
+            &mut app_server,
+            &ThreadBufferedEvent::Notification(ServerNotification::ItemCompleted(
+                ItemCompletedNotification {
+                    item: ThreadItem::AgentMessage {
+                        id: "synthetic-medical-agent-message".to_string(),
+                        text: returned_work.to_string(),
+                        phase: Some(MessagePhase::FinalAnswer),
+                        memory_citation: None,
+                    },
+                    thread_id: capture_thread_id.clone(),
+                    turn_id: capture_turn_id.to_string(),
+                    completed_at_ms: 2,
+                },
+            )),
+        )
+        .await;
+        app.handle_workspace_agent_capture_event(
+            &mut app_server,
+            &ThreadBufferedEvent::Notification(ServerNotification::TurnCompleted(
+                TurnCompletedNotification {
+                    thread_id: capture_thread_id.clone(),
+                    turn: Turn {
+                        completed_at: Some(0),
+                        duration_ms: Some(1),
+                        ..test_turn(capture_turn_id, TurnStatus::Completed, Vec::new())
+                    },
+                },
+            )),
+        )
+        .await;
+        assert!(app.pending_workspace_agent_capture.is_none());
 
         let dashboard_after_handoff = app
             .workspace_dashboard
             .take()
             .expect("dashboard remains in memory after handoff");
         assert_eq!(dashboard_after_handoff.context_packet_count_for_tests(), 1);
-        let packet_id = dashboard_after_handoff
-            .first_context_packet_for_tests()
-            .expect("sent packet")
-            .id
-            .clone();
-        let packet_hash = dashboard_after_handoff
-            .first_context_packet_for_tests()
-            .expect("sent packet")
-            .context_envelope_sha256
-            .clone();
+        assert_eq!(dashboard_after_handoff.agent_result_count_for_tests(), 1);
         app_server.shutdown().await?;
 
         let mut reloaded_app_server =
             Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
         let mut review_dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
         review_dashboard.load(&mut reloaded_app_server).await?;
+        if review_dashboard.note_title_for_tests() != "First eval" {
+            review_dashboard
+                .select_note(&mut reloaded_app_server, 1)
+                .await?;
+        }
         assert_eq!(
             review_dashboard.client_display_name_for_tests(),
             "Riley Testpatient"
         );
         assert_eq!(review_dashboard.note_title_for_tests(), "First eval");
         assert_eq!(review_dashboard.context_packet_count_for_tests(), 1);
-        assert_eq!(review_dashboard.agent_result_count_for_tests(), 0);
+        assert_eq!(review_dashboard.agent_result_count_for_tests(), 1);
+        assert_eq!(
+            review_dashboard.agent_result_body_for_tests(),
+            Some(returned_work)
+        );
+        assert_eq!(
+            review_dashboard.agent_result_status_for_tests(),
+            Some("review_pending")
+        );
         assert_eq!(
             review_dashboard
                 .first_context_packet_for_tests()
@@ -5832,6 +6009,58 @@ fn medical_workspace_first_eval_round_trip_stays_packet_scoped_and_review_pendin
                 .context_envelope_sha256,
             packet_hash
         );
+
+        let client_id = review_dashboard
+            .client_id_for_tests()
+            .expect("saved client id")
+            .to_string();
+        let note_id = review_dashboard
+            .note_id_for_tests()
+            .expect("saved note id")
+            .to_string();
+        let runs = reloaded_app_server
+            .workspace_agent_run_list(WorkspaceAgentRunListParams {
+                client_id: client_id.clone(),
+                note_id: Some(note_id.clone()),
+                packet_id: Some(packet_id.clone()),
+                limit: Some(10),
+            })
+            .await?
+            .runs;
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].status, "completed");
+        assert_eq!(runs[0].base_note_revision, Some(1));
+        assert_eq!(
+            runs[0].provider.as_deref(),
+            Some(expected_run_provider.as_str())
+        );
+        assert_eq!(runs[0].model.as_deref(), Some(expected_run_model.as_str()));
+        assert_eq!(
+            runs[0].source_thread_id.as_deref(),
+            Some(capture_thread_id.as_str())
+        );
+        assert_eq!(runs[0].source_turn_id.as_deref(), Some(capture_turn_id));
+        let run_id = runs[0].id.clone();
+        let sources = reloaded_app_server
+            .workspace_agent_run_source_list(WorkspaceAgentRunSourceListParams {
+                run_id: run_id.clone(),
+                limit: Some(10),
+            })
+            .await?
+            .sources;
+        assert!(sources.len() >= 4);
+        let packet_source = sources
+            .iter()
+            .find(|source| source.source_entity_type == "context_packet")
+            .expect("authoritative packet source");
+        assert_eq!(packet_source.source_entity_id, packet_id);
+        assert_eq!(packet_source.content_sha256, packet_hash);
+        let contract_source = sources
+            .iter()
+            .find(|source| source.source_entity_type == "packet_contract")
+            .expect("hashed packet authorization contract");
+        assert!(contract_source.snapshot_json.contains("authorizedScope"));
+        assert!(contract_source.snapshot_json.contains("expectedOutputKind"));
 
         let replay = reloaded_app_server
             .workspace_context_packet_replay(WorkspaceContextPacketReplayParams {
@@ -5855,26 +6084,18 @@ fn medical_workspace_first_eval_round_trip_stays_packet_scoped_and_review_pendin
                 .any(|line| line.contains("use only the stored context packet envelope"))
         );
 
-        assert_eq!(
-            review_dashboard.execute_workspace_command(":agent result"),
-            WorkspaceDashboardAction::Consumed
-        );
-        for c in "Plan: Fluids, rest, return precautions, and follow up if symptoms worsen. This is returned Codex work for human review.".chars() {
-            review_dashboard.handle_key_event(KeyEvent::from(KeyCode::Char(c)));
-        }
-        let action = review_dashboard.execute_workspace_command(":agent result save");
-        let WorkspaceDashboardAction::SaveAgentResult { packet_id, body } = action else {
-            panic!("expected SaveAgentResult action");
-        };
-        review_dashboard
-            .save_agent_result(&mut reloaded_app_server, packet_id, body)
-            .await?;
-
-        assert_eq!(review_dashboard.agent_result_count_for_tests(), 1);
-        assert_eq!(
-            review_dashboard.agent_result_status_for_tests(),
-            Some("review_pending")
-        );
+        let runs = reloaded_app_server
+            .workspace_agent_run_list(WorkspaceAgentRunListParams {
+                client_id,
+                note_id: Some(note_id),
+                packet_id: Some(packet_source.source_entity_id.clone()),
+                limit: Some(10),
+            })
+            .await?
+            .runs;
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].id, run_id);
+        assert_eq!(runs[0].status, "completed");
         assert_eq!(
             review_dashboard.note_body_for_tests(),
             "HPI: Fake patient reports two weeks of mild cough.\nExam: Alert, breathing comfortably.\nAssessment: Viral URI likely.\nPlan:"
@@ -5898,6 +6119,125 @@ fn medical_workspace_first_eval_round_trip_stays_packet_scoped_and_review_pendin
         );
 
         reloaded_app_server.shutdown().await?;
+        Ok(())
+    }))
+}
+
+#[test]
+fn medical_workspace_second_handoff_cancels_and_replaces_pending_run() -> Result<()> {
+    run_workspace_dashboard_runtime_test(Box::pin(async {
+        let mut app = make_test_app().await;
+        let codex_home = tempdir()?;
+        app.config.codex_home = codex_home.path().to_path_buf().abs();
+        app.config.sqlite_home = codex_home.path().to_path_buf();
+        let mut app_server =
+            Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
+        let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+        dashboard.load(&mut app_server).await?;
+        dashboard.set_context_for_tests(
+            "Replacement Testpatient",
+            "Daily note",
+            "Synthetic draft for duplicate handoff coverage.",
+        );
+        dashboard.save(&mut app_server).await?;
+        app.workspace_dashboard = Some(dashboard);
+        app.workspace_dashboard_visible = true;
+
+        app.send_workspace_context_to_agent(&mut app_server).await?;
+        let first_packet = app
+            .workspace_dashboard
+            .as_ref()
+            .and_then(WorkspaceDashboard::first_context_packet_for_tests)
+            .expect("first submitted packet")
+            .clone();
+        let first_run_id = app
+            .pending_workspace_agent_capture
+            .as_ref()
+            .expect("first pending capture")
+            .run_id()
+            .to_string();
+
+        app.workspace_dashboard_visible = true;
+        app.send_workspace_context_to_agent(&mut app_server).await?;
+        let second_packet = app
+            .workspace_dashboard
+            .as_ref()
+            .and_then(WorkspaceDashboard::first_context_packet_for_tests)
+            .expect("replacement submitted packet")
+            .clone();
+        let second_run_id = app
+            .pending_workspace_agent_capture
+            .as_ref()
+            .expect("replacement pending capture")
+            .run_id()
+            .to_string();
+
+        assert_ne!(first_packet.id, second_packet.id);
+        assert_ne!(first_run_id, second_run_id);
+        let composer = app.chat_widget.composer_text_with_pending();
+        assert!(composer.contains(&second_packet.id));
+        assert!(!composer.contains(&first_packet.id));
+        let runs = app_server
+            .workspace_agent_run_list(WorkspaceAgentRunListParams {
+                client_id: second_packet.client_id.clone(),
+                note_id: second_packet.note_id.clone(),
+                packet_id: None,
+                limit: Some(10),
+            })
+            .await?
+            .runs;
+        assert_eq!(
+            runs.iter()
+                .find(|run| run.id == first_run_id)
+                .map(|run| run.status.as_str()),
+            Some("canceled")
+        );
+        assert_eq!(
+            runs.iter()
+                .find(|run| run.id == second_run_id)
+                .map(|run| run.status.as_str()),
+            Some("running")
+        );
+        let second_thread_id = runs
+            .iter()
+            .find(|run| run.id == second_run_id)
+            .and_then(|run| run.source_thread_id.clone())
+            .unwrap_or_else(|| "replacement-thread".to_string());
+        app.handle_workspace_agent_capture_event(
+            &mut app_server,
+            &ThreadBufferedEvent::Notification(ServerNotification::ItemCompleted(
+                ItemCompletedNotification {
+                    item: ThreadItem::UserMessage {
+                        id: "replacement-unrelated-user-message".to_string(),
+                        client_id: None,
+                        content: vec![UserInput::Text {
+                            text: "Send an unrelated message after clearing the packet prompt."
+                                .to_string(),
+                            text_elements: Vec::new(),
+                        }],
+                    },
+                    thread_id: second_thread_id,
+                    turn_id: "replacement-turn".to_string(),
+                    completed_at_ms: 1,
+                },
+            )),
+        )
+        .await;
+        assert!(app.pending_workspace_agent_capture.is_none());
+        let replacement_status = app_server
+            .workspace_agent_run_list(WorkspaceAgentRunListParams {
+                client_id: second_packet.client_id,
+                note_id: second_packet.note_id,
+                packet_id: Some(second_packet.id),
+                limit: Some(10),
+            })
+            .await?
+            .runs
+            .into_iter()
+            .next()
+            .map(|run| run.status);
+        assert_eq!(replacement_status.as_deref(), Some("canceled"));
+        app_server.shutdown().await?;
         Ok(())
     }))
 }
@@ -6022,7 +6362,8 @@ fn workspace_dashboard_saved_document_metadata_survives_reload() -> Result<()> {
         let selected_prompt = reloaded_dashboard.agent_context_prompt();
         assert!(selected_prompt.contains("include_documents: false"));
         assert!(selected_prompt.contains("patient PDF: Outside referral PDF"));
-        assert!(selected_prompt.contains("/tmp/outside-referral.pdf"));
+        assert!(selected_prompt.contains("file_name: outside-referral.pdf"));
+        assert!(!selected_prompt.contains("/tmp/outside-referral.pdf"));
 
         reloaded_app_server.shutdown().await?;
         Ok(())
@@ -6249,25 +6590,15 @@ fn medical_workspace_context_packet_and_agent_result_survive_reload() -> Result<
             .client_id_for_tests()
             .expect("saved client id")
             .to_string();
-        let replay = reloaded_app_server
+        let prepared_replay = reloaded_app_server
             .workspace_context_packet_replay(WorkspaceContextPacketReplayParams {
                 client_id: replay_client_id.clone(),
                 packet_id: packet_id.clone(),
                 context_envelope_sha256: Some(packet_hash.clone()),
             })
             .await?
-            .replay
-            .expect("packet replay");
-        assert_eq!(replay.id, packet_id);
-        assert_eq!(replay.client_id, replay_client_id);
-        assert!(
-            replay
-                .read_only_safety_constraints
-                .iter()
-                .any(|line| { line.contains("use only the stored context packet envelope") })
-        );
-        assert_eq!(replay.context_envelope_sha256, packet_hash);
-        assert!(replay.context_envelope_json.contains("promptSnapshot"));
+            .replay;
+        assert!(prepared_replay.is_none());
         assert_eq!(
             reloaded_dashboard.execute_workspace_command(":agent result"),
             WorkspaceDashboardAction::Consumed
@@ -6280,8 +6611,27 @@ fn medical_workspace_context_packet_and_agent_result_survive_reload() -> Result<
             panic!("expected SaveAgentResult action");
         };
         reloaded_dashboard
-            .save_agent_result(&mut reloaded_app_server, packet_id, body)
+            .save_agent_result(&mut reloaded_app_server, packet_id.clone(), body)
             .await?;
+        let replay = reloaded_app_server
+            .workspace_context_packet_replay(WorkspaceContextPacketReplayParams {
+                client_id: replay_client_id.clone(),
+                packet_id: packet_id.clone(),
+                context_envelope_sha256: Some(packet_hash.clone()),
+            })
+            .await?
+            .replay
+            .expect("submitted packet replay");
+        assert_eq!(replay.id, packet_id);
+        assert_eq!(replay.client_id, replay_client_id);
+        assert!(
+            replay
+                .read_only_safety_constraints
+                .iter()
+                .any(|line| line.contains("use only the stored context packet envelope"))
+        );
+        assert_eq!(replay.context_envelope_sha256, packet_hash);
+        assert!(replay.context_envelope_json.contains("promptSnapshot"));
         assert_eq!(reloaded_dashboard.agent_result_count_for_tests(), 1);
         assert_eq!(
             reloaded_dashboard.agent_result_body_for_tests(),
@@ -6312,7 +6662,7 @@ fn medical_workspace_context_packet_and_agent_result_survive_reload() -> Result<
                 .first_context_packet_for_tests()
                 .unwrap()
                 .status,
-            "result_saved"
+            "submitted"
         );
         assert_eq!(
             final_dashboard.agent_result_status_for_tests(),
@@ -6775,9 +7125,27 @@ fn workspace_context_packet_replay_stays_historical_after_daily_chart_changes() 
                 chart_context_summary:
                     "patient Riley PacketHistory; note Follow-up visit [draft r1]".to_string(),
                 context_envelope_json: envelope,
+                clinician_actor: Some("test clinician".to_string()),
+                base_note_revision: Some(note.current_revision),
+                authorized_scope_json: Some(
+                    r#"{"version":1,"categories":["packet_snapshot"]}"#.to_string(),
+                ),
+                expected_output_kind: Some("recommendation".to_string()),
             })
             .await?
             .packet;
+        app_server
+            .workspace_agent_run_start(WorkspaceAgentRunStartParams {
+                packet_id: packet.id.clone(),
+                idempotency_key: "historical-replay-test-v1".to_string(),
+                client_id: Some(patient.id.clone()),
+                context_envelope_sha256: Some(packet.context_envelope_sha256.clone()),
+                provider: None,
+                model: None,
+                source_thread_id: None,
+                source_turn_id: None,
+            })
+            .await?;
 
         app_server
             .workspace_client_upsert(WorkspaceClientUpsertParams {
@@ -7196,6 +7564,12 @@ fn workspace_context_packet_replay_is_packet_scoped_and_hash_guarded() -> Result
                     "Review selected safe packet.",
                     "SELECTED_PACKET_SAFE_SENTINEL",
                 ),
+                clinician_actor: Some("test clinician".to_string()),
+                base_note_revision: Some(note_a.current_revision),
+                authorized_scope_json: Some(
+                    r#"{"version":1,"categories":["packet_snapshot"]}"#.to_string(),
+                ),
+                expected_output_kind: Some("recommendation".to_string()),
             })
             .await?
             .packet;
@@ -7216,9 +7590,27 @@ fn workspace_context_packet_replay_is_packet_scoped_and_hash_guarded() -> Result
                     "OTHER_CLIENT_PACKET_SENTINEL",
                     "OTHER_CLIENT_PACKET_SENTINEL",
                 ),
+                clinician_actor: Some("test clinician".to_string()),
+                base_note_revision: Some(note_b.current_revision),
+                authorized_scope_json: Some(
+                    r#"{"version":1,"categories":["packet_snapshot"]}"#.to_string(),
+                ),
+                expected_output_kind: Some("recommendation".to_string()),
             })
             .await?
             .packet;
+        app_server
+            .workspace_agent_run_start(WorkspaceAgentRunStartParams {
+                packet_id: packet_a.id.clone(),
+                idempotency_key: "packet-scoped-replay-test-v1".to_string(),
+                client_id: Some(client_a.id.clone()),
+                context_envelope_sha256: Some(packet_a.context_envelope_sha256.clone()),
+                provider: None,
+                model: None,
+                source_thread_id: None,
+                source_turn_id: None,
+            })
+            .await?;
 
         let broad_context = app_server
             .workspace_context_get(WorkspaceContextGetParams {
@@ -7522,6 +7914,7 @@ fn workspace_dashboard_accepts_pending_note_proposal() -> Result<()> {
                 summary: "tighten wording".to_string(),
                 source_thread_id: Some("thread-1".to_string()),
                 source_turn_id: Some("turn-1".to_string()),
+                agent_result_id: None,
             })
             .await?;
         dashboard.load(&mut app_server).await?;
@@ -7535,12 +7928,25 @@ fn workspace_dashboard_accepts_pending_note_proposal() -> Result<()> {
             panic!("expected proposal resolve action");
         };
         assert!(accept);
+        let resolved_proposal_id = proposal_id.clone();
         dashboard
             .resolve_note_proposal(&mut app_server, proposal_id, accept)
             .await?;
 
         assert_eq!(dashboard.note_body_for_tests(), "Accepted proposal body.");
         assert_eq!(dashboard.note_revision_for_tests(), 2);
+        let decisions = app_server
+            .workspace_note_proposal_decision_list(WorkspaceNoteProposalDecisionListParams {
+                proposal_id: resolved_proposal_id,
+            })
+            .await?
+            .decisions;
+        assert_eq!(decisions.len(), 1);
+        assert_eq!(
+            decisions[0].decision_kind,
+            WorkspaceNoteProposalDecisionKind::AcceptedAll
+        );
+        assert_eq!(decisions[0].resulting_note_revision, Some(2));
 
         app_server.shutdown().await?;
         Ok(())
@@ -7573,6 +7979,7 @@ fn workspace_dashboard_declines_proposal_without_mutating_note() -> Result<()> {
                 summary: "unsafe rewrite".to_string(),
                 source_thread_id: Some("thread-1".to_string()),
                 source_turn_id: Some("turn-1".to_string()),
+                agent_result_id: None,
             })
             .await?;
         dashboard.load(&mut app_server).await?;
@@ -7586,12 +7993,25 @@ fn workspace_dashboard_declines_proposal_without_mutating_note() -> Result<()> {
             panic!("expected proposal resolve action");
         };
         assert!(!accept);
+        let resolved_proposal_id = proposal_id.clone();
         dashboard
             .resolve_note_proposal(&mut app_server, proposal_id, accept)
             .await?;
 
         assert_eq!(dashboard.note_body_for_tests(), "Original body.");
         assert_eq!(dashboard.note_revision_for_tests(), 1);
+        let decisions = app_server
+            .workspace_note_proposal_decision_list(WorkspaceNoteProposalDecisionListParams {
+                proposal_id: resolved_proposal_id,
+            })
+            .await?
+            .decisions;
+        assert_eq!(decisions.len(), 1);
+        assert_eq!(
+            decisions[0].decision_kind,
+            WorkspaceNoteProposalDecisionKind::RejectedAll
+        );
+        assert_eq!(decisions[0].resulting_note_revision, None);
 
         app_server.shutdown().await?;
         Ok(())

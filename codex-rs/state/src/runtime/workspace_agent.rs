@@ -232,6 +232,27 @@ INSERT INTO workspace_agent_runs (
         .bind(now_ms)
         .execute(&mut *tx)
         .await?;
+        let packet_contract_snapshot_json = serde_json::json!({
+            "schema": "workspace-agent-packet-contract-v1",
+            "packetId": &packet.id,
+            "clientId": &packet.client_id,
+            "encounterId": &packet.encounter_id,
+            "noteId": &packet.note_id,
+            "baseNoteRevision": packet.base_note_revision,
+            "contextEnvelopeSha256": &packet.context_envelope_sha256,
+            "contextEnvelope": serde_json::from_str::<serde_json::Value>(
+                &packet.context_envelope_json,
+            )?,
+            "authorizedScope": serde_json::from_str::<serde_json::Value>(
+                &packet.authorized_scope_json,
+            )?,
+            "expectedOutputKind": &packet.expected_output_kind,
+        })
+        .to_string();
+        let packet_contract_sha256 = format!(
+            "{:x}",
+            Sha256::digest(packet_contract_snapshot_json.as_bytes())
+        );
         let packet_source_id = Uuid::new_v4().to_string();
         sqlx::query(
             r#"
@@ -250,6 +271,23 @@ INSERT INTO workspace_agent_run_sources (
         .bind(now_ms)
         .execute(&mut *tx)
         .await?;
+        sqlx::query(
+            r#"
+INSERT INTO workspace_agent_run_sources (
+    id, run_id, source_entity_type, source_entity_id, source_revision,
+    display_label, snapshot_json, content_sha256, access_purpose, accessed_at_ms
+) VALUES (?, ?, 'packet_contract', ?, ?, 'Hashed packet authorization contract', ?, ?, 'bind scope and expected output', ?)
+            "#,
+        )
+        .bind(Uuid::new_v4().to_string())
+        .bind(&id)
+        .bind(&packet.id)
+        .bind(packet.base_note_revision)
+        .bind(&packet_contract_snapshot_json)
+        .bind(&packet_contract_sha256)
+        .bind(now_ms)
+        .execute(&mut *tx)
+        .await?;
         insert_audit_event(
             &mut tx,
             crate::WorkspaceAuditEventCreate {
@@ -257,7 +295,7 @@ INSERT INTO workspace_agent_run_sources (
                 entity_id: id.clone(),
                 action: "started".to_string(),
                 actor: nonempty_or(&input.actor, "agent"),
-                actor_kind: "agent".to_string(),
+                actor_kind: "clinician".to_string(),
                 source: "state".to_string(),
                 client_id: Some(packet.client_id),
                 encounter_id: packet.encounter_id,
@@ -266,14 +304,15 @@ INSERT INTO workspace_agent_run_sources (
                 source_turn_id: input.source_turn_id,
                 success: true,
                 summary: format!("{run_kind} run started"),
-                metadata_json: Some(format!(
-                    r#"{{"packet_id":"{}","base_note_revision":{},"context_envelope_sha256":"{}"}}"#,
-                    packet.id,
-                    packet
-                        .base_note_revision
-                        .map_or_else(|| "null".to_string(), |revision| revision.to_string()),
-                    packet.context_envelope_sha256
-                )),
+                metadata_json: Some(
+                    serde_json::json!({
+                        "packet_id": &packet.id,
+                        "base_note_revision": packet.base_note_revision,
+                        "context_envelope_sha256": &packet.context_envelope_sha256,
+                        "packet_contract_sha256": packet_contract_sha256,
+                    })
+                    .to_string(),
+                ),
                 ..Default::default()
             },
             now_ms,
@@ -392,13 +431,6 @@ LIMIT ?
         &self,
         input: crate::WorkspaceAgentRunSourceCreate,
     ) -> anyhow::Result<crate::WorkspaceAgentRunSource> {
-        if input.source_entity_type.trim().is_empty() || input.source_entity_id.trim().is_empty() {
-            anyhow::bail!("workspace agent run source type and id must not be empty");
-        }
-        let snapshot_json = input.snapshot_json.trim();
-        let snapshot: serde_json::Value = serde_json::from_str(snapshot_json).map_err(|err| {
-            anyhow::anyhow!("workspace agent run source snapshot must be valid JSON: {err}")
-        })?;
         let now_ms = datetime_to_epoch_millis(Utc::now());
         let mut tx = self.pool.begin().await?;
         let run = workspace_agent_run_row_by_id(&mut tx, &input.run_id)
@@ -413,82 +445,77 @@ LIMIT ?
                 run.status
             );
         }
-        if let Some(snapshot_client_id) = snapshot
-            .get("clientId")
-            .or_else(|| snapshot.get("client_id"))
-            .and_then(serde_json::Value::as_str)
-            && snapshot_client_id != run.client_id
-        {
+        let source = insert_agent_run_source(&mut tx, &run, input, now_ms).await?;
+        tx.commit().await?;
+        Ok(source)
+    }
+
+    pub async fn read_authorized_agent_context(
+        &self,
+        input: crate::WorkspaceAgentContextReadRequest,
+    ) -> anyhow::Result<crate::WorkspaceAgentContextRead> {
+        let category = input.category.trim();
+        if !matches!(category, "visit_history" | "progress_notes") {
+            anyhow::bail!("unsupported workspace agent context category `{category}`");
+        }
+
+        let now_ms = datetime_to_epoch_millis(Utc::now());
+        let mut tx = self.pool.begin().await?;
+        let run = workspace_agent_run_row_by_id(&mut tx, input.run_id.trim())
+            .await?
+            .ok_or_else(|| {
+                anyhow::anyhow!("workspace agent run `{}` was not found", input.run_id)
+            })?;
+        if run.status != "running" {
             anyhow::bail!(
-                "workspace agent run source snapshot belongs to client `{snapshot_client_id}` not `{}`",
-                run.client_id
+                "workspace agent run `{}` is `{}` and cannot read additional context",
+                run.id,
+                run.status
             );
         }
-        validate_agent_source_ownership(
-            &mut tx,
-            &run,
-            input.source_entity_type.trim(),
-            input.source_entity_id.trim(),
-            input.source_revision,
-        )
-        .await?;
+        let packet = workspace_context_packet_row_by_id(&mut tx, &run.packet_id)
+            .await?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "workspace context packet `{}` for run `{}` was not found",
+                    run.packet_id,
+                    run.id
+                )
+            })?;
+        validate_run_packet_binding(&run, &packet)?;
+        if packet.status != "submitted" {
+            anyhow::bail!(
+                "workspace context packet `{}` is `{}` and does not authorize agent context reads",
+                packet.id,
+                packet.status
+            );
+        }
+        let max_records = authorized_context_read_limit(
+            &packet.authorized_scope_json,
+            category,
+            input.max_records,
+        )?;
 
-        let id = Uuid::new_v4().to_string();
-        let content_sha256 = format!("{:x}", Sha256::digest(snapshot_json.as_bytes()));
-        let row = sqlx::query(
-            r#"
-INSERT INTO workspace_agent_run_sources (
-    id, run_id, source_entity_type, source_entity_id, source_revision,
-    display_label, snapshot_json, content_sha256, access_purpose, accessed_at_ms
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-RETURNING
-    id, run_id, source_entity_type, source_entity_id, source_revision,
-    display_label, snapshot_json, content_sha256, access_purpose, accessed_at_ms
-            "#,
-        )
-        .bind(&id)
-        .bind(&run.id)
-        .bind(input.source_entity_type.trim())
-        .bind(input.source_entity_id.trim())
-        .bind(input.source_revision)
-        .bind(input.display_label.trim())
-        .bind(snapshot_json)
-        .bind(&content_sha256)
-        .bind(input.access_purpose.trim())
-        .bind(now_ms)
-        .fetch_one(&mut *tx)
-        .await?;
-        insert_audit_event(
-            &mut tx,
-            crate::WorkspaceAuditEventCreate {
-                entity_type: "agent_run".to_string(),
-                entity_id: run.id,
-                action: "source_read".to_string(),
-                actor: "agent".to_string(),
-                actor_kind: "agent".to_string(),
-                source: "state".to_string(),
-                client_id: Some(run.client_id),
-                note_id: run.note_id,
-                source_thread_id: run.source_thread_id,
-                source_turn_id: run.source_turn_id,
-                success: true,
-                summary: input.display_label,
-                metadata_json: Some(format!(
-                    r#"{{"source_entity_type":"{}","source_entity_id":"{}","source_revision":{},"content_sha256":"{}"}}"#,
-                    input.source_entity_type,
-                    input.source_entity_id,
-                    input
-                        .source_revision
-                        .map_or_else(|| "null".to_string(), |revision| revision.to_string()),
-                    content_sha256
-                )),
-                ..Default::default()
-            },
-            now_ms,
-        )
-        .await?;
+        let sources = match category {
+            "visit_history" => {
+                read_visit_history_sources(&mut tx, &run, max_records, now_ms).await?
+            }
+            "progress_notes" => {
+                read_progress_note_sources(&mut tx, &run, max_records, now_ms).await?
+            }
+            _ => unreachable!("category was validated above"),
+        };
+        let result = crate::WorkspaceAgentContextRead {
+            run_id: run.id,
+            packet_id: packet.id,
+            client_id: run.client_id,
+            note_id: run.note_id,
+            category: category.to_string(),
+            max_records,
+            sources,
+        };
         tx.commit().await?;
-        WorkspaceAgentRunSourceRow::try_from_row(&row).and_then(TryInto::try_into)
+        Ok(result)
     }
 
     pub async fn list_agent_run_sources(
@@ -525,7 +552,7 @@ ORDER BY accessed_at_ms ASC, id ASC
             .ok_or_else(|| anyhow::anyhow!("workspace agent result run id must not be empty"))?;
         let now_ms = datetime_to_epoch_millis(Utc::now());
         let mut tx = self.pool.begin().await?;
-        let run = workspace_agent_run_row_by_id(&mut tx, run_id)
+        let mut run = workspace_agent_run_row_by_id(&mut tx, run_id)
             .await?
             .ok_or_else(|| anyhow::anyhow!("workspace agent run `{run_id}` was not found"))?;
         if run.packet_id != input.packet_id {
@@ -541,6 +568,73 @@ ORDER BY accessed_at_ms ASC, id ASC
             input.expected_note_id.as_deref(),
             &input.expected_context_envelope_sha256,
         )?;
+        let packet = workspace_context_packet_row_by_id(&mut tx, &run.packet_id)
+            .await?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "workspace context packet `{}` for run `{run_id}` was not found",
+                    run.packet_id
+                )
+            })?;
+        let result_kind = nonempty_or(&input.result_kind, "recommendation");
+        let expected_output_kind = nonempty_or(&packet.expected_output_kind, "recommendation");
+        if result_kind != expected_output_kind {
+            anyhow::bail!(
+                "workspace agent result kind `{result_kind}` does not match packet expected output kind `{expected_output_kind}`"
+            );
+        }
+        let source_thread_id = input
+            .source_thread_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let source_turn_id = input
+            .source_turn_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        if let (Some(existing), Some(requested)) =
+            (run.source_thread_id.as_deref(), source_thread_id)
+            && existing != requested
+        {
+            anyhow::bail!(
+                "workspace agent result source thread `{requested}` does not match run source thread `{existing}`"
+            );
+        }
+        if let (Some(existing), Some(requested)) = (run.source_turn_id.as_deref(), source_turn_id)
+            && existing != requested
+        {
+            anyhow::bail!(
+                "workspace agent result source turn `{requested}` does not match run source turn `{existing}`"
+            );
+        }
+        if source_turn_id.is_some() && source_thread_id.is_none() && run.source_thread_id.is_none()
+        {
+            anyhow::bail!("workspace agent result source turn requires a source thread");
+        }
+        let bound_source_thread_id = run
+            .source_thread_id
+            .clone()
+            .or_else(|| source_thread_id.map(ToString::to_string));
+        let bound_source_turn_id = run
+            .source_turn_id
+            .clone()
+            .or_else(|| source_turn_id.map(ToString::to_string));
+        if bound_source_thread_id != run.source_thread_id
+            || bound_source_turn_id != run.source_turn_id
+        {
+            sqlx::query(
+                "UPDATE workspace_agent_runs SET source_thread_id = ?, source_turn_id = ?, updated_at_ms = ? WHERE id = ? AND status = 'running'",
+            )
+            .bind(&bound_source_thread_id)
+            .bind(&bound_source_turn_id)
+            .bind(now_ms)
+            .bind(&run.id)
+            .execute(&mut *tx)
+            .await?;
+            run.source_thread_id = bound_source_thread_id;
+            run.source_turn_id = bound_source_turn_id;
+        }
 
         if let Some(existing) = workspace_agent_result_row_by_run(&mut tx, run_id).await? {
             if existing.body == input.body {
@@ -567,7 +661,6 @@ ORDER BY accessed_at_ms ASC, id ASC
             })?;
         let id = Uuid::new_v4().to_string();
         let status = nonempty_or(&input.status, "review_pending");
-        let result_kind = nonempty_or(&input.result_kind, "recommendation");
         sqlx::query(
             r#"
 INSERT INTO workspace_agent_results (
@@ -605,6 +698,11 @@ INSERT INTO workspace_agent_results (
         if updated.rows_affected() != 1 {
             anyhow::bail!("workspace agent run `{run_id}` completion raced");
         }
+        let (result_actor_kind, result_source) = if run.run_kind == "manual_import" {
+            ("clinician", "manual_import")
+        } else {
+            ("agent", "agent_harness")
+        };
         insert_audit_event(
             &mut tx,
             crate::WorkspaceAuditEventCreate {
@@ -612,23 +710,24 @@ INSERT INTO workspace_agent_results (
                 entity_id: id.clone(),
                 action: "saved".to_string(),
                 actor: nonempty_or(&input.actor, "agent"),
-                actor_kind: "agent".to_string(),
-                source: "state".to_string(),
+                actor_kind: result_actor_kind.to_string(),
+                source: result_source.to_string(),
                 client_id: Some(run.client_id.clone()),
                 note_id: run.note_id.clone(),
                 source_thread_id: run.source_thread_id.clone(),
                 source_turn_id: run.source_turn_id.clone(),
                 success: true,
                 summary: input.summary,
-                metadata_json: Some(format!(
-                    r#"{{"packet_id":"{}","run_id":"{}","base_note_revision":{},"context_envelope_sha256":"{}","result_kind":"{}"}}"#,
-                    run.packet_id,
-                    run.id,
-                    run.base_note_revision
-                        .map_or_else(|| "null".to_string(), |revision| revision.to_string()),
-                    run.context_envelope_sha256,
-                    result_kind
-                )),
+                metadata_json: Some(
+                    serde_json::json!({
+                        "packet_id": run.packet_id,
+                        "run_id": run.id,
+                        "base_note_revision": run.base_note_revision,
+                        "context_envelope_sha256": run.context_envelope_sha256,
+                        "result_kind": result_kind,
+                    })
+                    .to_string(),
+                ),
                 ..Default::default()
             },
             now_ms,
@@ -641,8 +740,8 @@ INSERT INTO workspace_agent_results (
                 entity_id: run.id.clone(),
                 action: "completed".to_string(),
                 actor: nonempty_or(&input.actor, "agent"),
-                actor_kind: "agent".to_string(),
-                source: "state".to_string(),
+                actor_kind: result_actor_kind.to_string(),
+                source: result_source.to_string(),
                 client_id: Some(run.client_id),
                 note_id: run.note_id,
                 source_thread_id: run.source_thread_id,
@@ -662,6 +761,386 @@ INSERT INTO workspace_agent_results (
         tx.commit().await?;
         row.try_into()
     }
+}
+
+fn validate_run_packet_binding(
+    run: &WorkspaceAgentRunRow,
+    packet: &WorkspaceContextPacketRow,
+) -> anyhow::Result<()> {
+    if packet.client_id != run.client_id
+        || packet.note_id != run.note_id
+        || packet.context_envelope_sha256 != run.context_envelope_sha256
+    {
+        anyhow::bail!(
+            "workspace agent run `{}` no longer matches its authoritative context packet `{}`",
+            run.id,
+            packet.id
+        );
+    }
+    Ok(())
+}
+
+fn authorized_context_read_limit(
+    authorized_scope_json: &str,
+    category: &str,
+    requested_max_records: Option<u32>,
+) -> anyhow::Result<u32> {
+    let scope: serde_json::Value = serde_json::from_str(authorized_scope_json).map_err(|err| {
+        anyhow::anyhow!("workspace context packet authorized scope is invalid JSON: {err}")
+    })?;
+    let categories = scope
+        .get("categories")
+        .or_else(|| scope.pointer("/read/categories"))
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "workspace context packet does not explicitly authorize context category `{category}`"
+            )
+        })?;
+    if !categories
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .any(|authorized| authorized == category)
+    {
+        anyhow::bail!(
+            "workspace context packet does not explicitly authorize context category `{category}`"
+        );
+    }
+
+    let scope_max_records = scope
+        .get("maxRecords")
+        .or_else(|| scope.pointer("/read/maxRecords"))
+        .map(|value| {
+            value.as_u64().ok_or_else(|| {
+                anyhow::anyhow!("workspace context packet maxRecords must be an unsigned integer")
+            })
+        })
+        .transpose()?
+        .unwrap_or(20)
+        .clamp(1, 100) as u32;
+    let requested_max_records = requested_max_records.unwrap_or(20).clamp(1, 100);
+    Ok(requested_max_records.min(scope_max_records))
+}
+
+const MAX_AGENT_NOTE_BODY_BYTES: usize = 32 * 1024;
+const MAX_AGENT_CONTEXT_SNAPSHOT_BYTES: usize = 512 * 1024;
+const MAX_AGENT_DISPLAY_LABEL_BYTES: usize = 512;
+
+fn truncate_utf8(value: &str, max_bytes: usize) -> (&str, bool) {
+    if value.len() <= max_bytes {
+        return (value, false);
+    }
+    let mut end = max_bytes.min(value.len());
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    (&value[..end], true)
+}
+
+fn token_looks_like_local_path(token: &str) -> bool {
+    let token = token
+        .rsplit_once('=')
+        .map_or(token, |(_, candidate)| candidate)
+        .trim_matches(|character: char| {
+            matches!(
+                character,
+                '\'' | '"' | '(' | ')' | '[' | ']' | '{' | '}' | ',' | ';'
+            )
+        });
+    token.contains("file://")
+        || token.as_bytes().windows(3).any(|window| {
+            window[0].is_ascii_alphabetic()
+                && window[1] == b':'
+                && matches!(window[2], b'/' | b'\\')
+        })
+        || token.starts_with("~/")
+        || token.starts_with("\\\\")
+        || token.starts_with("//")
+        || (token.starts_with('/') && token != "/workspacemedical")
+}
+
+fn redact_local_path_tokens(value: &str) -> (String, bool) {
+    let mut redacted = String::with_capacity(value.len());
+    let mut changed = false;
+    for segment in value.split_inclusive(char::is_whitespace) {
+        let token_len = segment.trim_end_matches(char::is_whitespace).len();
+        let (token, whitespace) = segment.split_at(token_len);
+        if token_looks_like_local_path(token) {
+            redacted.push_str("[local path omitted]");
+            changed = true;
+        } else {
+            redacted.push_str(token);
+        }
+        redacted.push_str(whitespace);
+    }
+    if value.is_empty() {
+        return (String::new(), false);
+    }
+    (redacted, changed)
+}
+
+async fn read_visit_history_sources(
+    tx: &mut sqlx::Transaction<'_, Sqlite>,
+    run: &WorkspaceAgentRunRow,
+    max_records: u32,
+    now_ms: i64,
+) -> anyhow::Result<Vec<crate::WorkspaceAgentRunSource>> {
+    let rows = sqlx::query(
+        r#"
+SELECT
+    id, client_id, kind, title, status, started_at_ms, ended_at_ms,
+    archived_at_ms, created_at_ms, updated_at_ms
+FROM workspace_encounters
+WHERE client_id = ? AND archived_at_ms IS NULL
+ORDER BY COALESCE(started_at_ms, updated_at_ms) DESC, title ASC, id ASC
+LIMIT ?
+        "#,
+    )
+    .bind(&run.client_id)
+    .bind(i64::from(max_records))
+    .fetch_all(&mut **tx)
+    .await?;
+
+    let mut sources = Vec::with_capacity(rows.len());
+    for row in rows {
+        let id: String = row.try_get("id")?;
+        let client_id: String = row.try_get("client_id")?;
+        let kind: String = row.try_get("kind")?;
+        let title: String = row.try_get("title")?;
+        let status: String = row.try_get("status")?;
+        let started_at_ms: Option<i64> = row.try_get("started_at_ms")?;
+        let ended_at_ms: Option<i64> = row.try_get("ended_at_ms")?;
+        let archived_at_ms: Option<i64> = row.try_get("archived_at_ms")?;
+        let created_at_ms: i64 = row.try_get("created_at_ms")?;
+        let updated_at_ms: i64 = row.try_get("updated_at_ms")?;
+        let (safe_title, title_paths_redacted) = redact_local_path_tokens(&title);
+        let (safe_title, title_truncated) =
+            truncate_utf8(&safe_title, MAX_AGENT_DISPLAY_LABEL_BYTES);
+        let snapshot_json = serde_json::json!({
+            "id": id,
+            "client_id": client_id,
+            "kind": kind,
+            "title": safe_title,
+            "title_truncated": title_truncated,
+            "title_local_paths_redacted": title_paths_redacted,
+            "status": status,
+            "started_at_ms": started_at_ms,
+            "ended_at_ms": ended_at_ms,
+            "archived_at_ms": archived_at_ms,
+            "created_at_ms": created_at_ms,
+            "updated_at_ms": updated_at_ms,
+        })
+        .to_string();
+        sources.push(
+            insert_agent_run_source(
+                tx,
+                run,
+                crate::WorkspaceAgentRunSourceCreate {
+                    run_id: run.id.clone(),
+                    source_entity_type: "encounter".to_string(),
+                    source_entity_id: id,
+                    source_revision: None,
+                    display_label: safe_title.to_string(),
+                    snapshot_json,
+                    access_purpose: "authorized visit_history read".to_string(),
+                },
+                now_ms,
+            )
+            .await?,
+        );
+    }
+    Ok(sources)
+}
+
+async fn read_progress_note_sources(
+    tx: &mut sqlx::Transaction<'_, Sqlite>,
+    run: &WorkspaceAgentRunRow,
+    max_records: u32,
+    now_ms: i64,
+) -> anyhow::Result<Vec<crate::WorkspaceAgentRunSource>> {
+    let rows = sqlx::query(
+        r#"
+SELECT
+    id, client_id, encounter_id, title, kind, body, status,
+    current_revision, archived_at_ms, created_at_ms, updated_at_ms
+FROM workspace_notes
+WHERE client_id = ?
+  AND archived_at_ms IS NULL
+  AND LOWER(kind) IN ('progress', 'progress_note', 'daily', 'daily_note')
+ORDER BY updated_at_ms DESC, title ASC, id ASC
+LIMIT ?
+        "#,
+    )
+    .bind(&run.client_id)
+    .bind(i64::from(max_records))
+    .fetch_all(&mut **tx)
+    .await?;
+
+    let mut sources = Vec::with_capacity(rows.len());
+    let mut returned_snapshot_bytes = 0usize;
+    for row in rows {
+        let id: String = row.try_get("id")?;
+        let client_id: String = row.try_get("client_id")?;
+        let encounter_id: Option<String> = row.try_get("encounter_id")?;
+        let title: String = row.try_get("title")?;
+        let kind: String = row.try_get("kind")?;
+        let body: String = row.try_get("body")?;
+        let status: String = row.try_get("status")?;
+        let current_revision: i64 = row.try_get("current_revision")?;
+        let archived_at_ms: Option<i64> = row.try_get("archived_at_ms")?;
+        let created_at_ms: i64 = row.try_get("created_at_ms")?;
+        let updated_at_ms: i64 = row.try_get("updated_at_ms")?;
+        let original_body_bytes = body.len();
+        let original_body_sha256 = format!("{:x}", Sha256::digest(body.as_bytes()));
+        let (safe_body, body_paths_redacted) = redact_local_path_tokens(&body);
+        let (safe_body, body_truncated) = truncate_utf8(&safe_body, MAX_AGENT_NOTE_BODY_BYTES);
+        let (safe_title, title_paths_redacted) = redact_local_path_tokens(&title);
+        let (safe_title, title_truncated) =
+            truncate_utf8(&safe_title, MAX_AGENT_DISPLAY_LABEL_BYTES);
+        let snapshot_json = serde_json::json!({
+            "id": id,
+            "client_id": client_id,
+            "encounter_id": encounter_id,
+            "title": safe_title,
+            "title_truncated": title_truncated,
+            "title_local_paths_redacted": title_paths_redacted,
+            "kind": kind,
+            "body": safe_body,
+            "body_truncated": body_truncated,
+            "body_local_paths_redacted": body_paths_redacted,
+            "body_original_bytes": original_body_bytes,
+            "body_original_sha256": original_body_sha256,
+            "status": status,
+            "current_revision": current_revision,
+            "archived_at_ms": archived_at_ms,
+            "created_at_ms": created_at_ms,
+            "updated_at_ms": updated_at_ms,
+        })
+        .to_string();
+        if returned_snapshot_bytes.saturating_add(snapshot_json.len())
+            > MAX_AGENT_CONTEXT_SNAPSHOT_BYTES
+        {
+            break;
+        }
+        returned_snapshot_bytes += snapshot_json.len();
+        sources.push(
+            insert_agent_run_source(
+                tx,
+                run,
+                crate::WorkspaceAgentRunSourceCreate {
+                    run_id: run.id.clone(),
+                    source_entity_type: "note_revision".to_string(),
+                    source_entity_id: id,
+                    source_revision: Some(current_revision),
+                    display_label: safe_title.to_string(),
+                    snapshot_json,
+                    access_purpose: "authorized progress_notes read".to_string(),
+                },
+                now_ms,
+            )
+            .await?,
+        );
+    }
+    Ok(sources)
+}
+
+async fn insert_agent_run_source(
+    tx: &mut sqlx::Transaction<'_, Sqlite>,
+    run: &WorkspaceAgentRunRow,
+    input: crate::WorkspaceAgentRunSourceCreate,
+    now_ms: i64,
+) -> anyhow::Result<crate::WorkspaceAgentRunSource> {
+    if input.run_id.trim() != run.id {
+        anyhow::bail!(
+            "workspace agent run source requested run `{}` but loaded run `{}`",
+            input.run_id,
+            run.id
+        );
+    }
+    let source_entity_type = input.source_entity_type.trim();
+    let source_entity_id = input.source_entity_id.trim();
+    if source_entity_type.is_empty() || source_entity_id.is_empty() {
+        anyhow::bail!("workspace agent run source type and id must not be empty");
+    }
+    let snapshot_json = input.snapshot_json.trim();
+    let snapshot: serde_json::Value = serde_json::from_str(snapshot_json).map_err(|err| {
+        anyhow::anyhow!("workspace agent run source snapshot must be valid JSON: {err}")
+    })?;
+    if let Some(snapshot_client_id) = snapshot
+        .get("clientId")
+        .or_else(|| snapshot.get("client_id"))
+        .and_then(serde_json::Value::as_str)
+        && snapshot_client_id != run.client_id
+    {
+        anyhow::bail!(
+            "workspace agent run source snapshot belongs to client `{snapshot_client_id}` not `{}`",
+            run.client_id
+        );
+    }
+    validate_agent_source_ownership(
+        tx,
+        run,
+        source_entity_type,
+        source_entity_id,
+        input.source_revision,
+    )
+    .await?;
+
+    let id = Uuid::new_v4().to_string();
+    let content_sha256 = format!("{:x}", Sha256::digest(snapshot_json.as_bytes()));
+    let row = sqlx::query(
+        r#"
+INSERT INTO workspace_agent_run_sources (
+    id, run_id, source_entity_type, source_entity_id, source_revision,
+    display_label, snapshot_json, content_sha256, access_purpose, accessed_at_ms
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+RETURNING
+    id, run_id, source_entity_type, source_entity_id, source_revision,
+    display_label, snapshot_json, content_sha256, access_purpose, accessed_at_ms
+        "#,
+    )
+    .bind(&id)
+    .bind(&run.id)
+    .bind(source_entity_type)
+    .bind(source_entity_id)
+    .bind(input.source_revision)
+    .bind(input.display_label.trim())
+    .bind(snapshot_json)
+    .bind(&content_sha256)
+    .bind(input.access_purpose.trim())
+    .bind(now_ms)
+    .fetch_one(&mut **tx)
+    .await?;
+    insert_audit_event(
+        tx,
+        crate::WorkspaceAuditEventCreate {
+            entity_type: "agent_run".to_string(),
+            entity_id: run.id.clone(),
+            action: "source_read".to_string(),
+            actor: "agent".to_string(),
+            actor_kind: "agent".to_string(),
+            source: "state".to_string(),
+            client_id: Some(run.client_id.clone()),
+            note_id: run.note_id.clone(),
+            source_thread_id: run.source_thread_id.clone(),
+            source_turn_id: run.source_turn_id.clone(),
+            success: true,
+            summary: input.display_label,
+            metadata_json: Some(
+                serde_json::json!({
+                    "source_entity_type": source_entity_type,
+                    "source_entity_id": source_entity_id,
+                    "source_revision": input.source_revision,
+                    "content_sha256": content_sha256,
+                })
+                .to_string(),
+            ),
+            ..Default::default()
+        },
+        now_ms,
+    )
+    .await?;
+    WorkspaceAgentRunSourceRow::try_from_row(&row).and_then(TryInto::try_into)
 }
 
 fn nonempty_or(value: &str, fallback: &str) -> String {
