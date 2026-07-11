@@ -20445,6 +20445,200 @@
       ],
       "type": "object"
     },
+    "WorkspaceGuideRun": {
+      "properties": {
+        "actor": {
+          "type": "string"
+        },
+        "clientId": {
+          "type": "string"
+        },
+        "createdAt": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "encounterId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "idempotencyKey": {
+          "type": "string"
+        },
+        "isStale": {
+          "type": "boolean"
+        },
+        "model": {
+          "type": "string"
+        },
+        "modelToolMode": {
+          "$ref": "#/definitions/ModelToolMode"
+        },
+        "noteId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider": {
+          "type": "string"
+        },
+        "requestEnvelope": true,
+        "requestEnvelopeSha256": {
+          "type": "string"
+        },
+        "requestSchemaVersion": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "sourceCheckpointId": {
+          "type": "string"
+        },
+        "sourceCheckpointRevision": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "sourceCheckpointSha256": {
+          "type": "string"
+        },
+        "sourceThreadId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sourceTurnId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "$ref": "#/definitions/WorkspaceGuideRunStatus"
+        },
+        "terminalAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "terminalEnvelope": true,
+        "terminalEnvelopeSha256": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "trigger": {
+          "type": "string"
+        },
+        "updatedAt": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "actor",
+        "clientId",
+        "createdAt",
+        "id",
+        "idempotencyKey",
+        "isStale",
+        "model",
+        "modelToolMode",
+        "provider",
+        "requestEnvelope",
+        "requestEnvelopeSha256",
+        "requestSchemaVersion",
+        "sessionId",
+        "sourceCheckpointId",
+        "sourceCheckpointRevision",
+        "sourceCheckpointSha256",
+        "status",
+        "trigger",
+        "updatedAt"
+      ],
+      "type": "object"
+    },
+    "WorkspaceGuideRunFinishOutcome": {
+      "oneOf": [
+        {
+          "properties": {
+            "result": true,
+            "type": {
+              "enum": [
+                "completed"
+              ],
+              "title": "CompletedWorkspaceGuideRunFinishOutcomeType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "result",
+            "type"
+          ],
+          "title": "CompletedWorkspaceGuideRunFinishOutcome",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "errorSummary": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "failed"
+              ],
+              "title": "FailedWorkspaceGuideRunFinishOutcomeType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "errorSummary",
+            "type"
+          ],
+          "title": "FailedWorkspaceGuideRunFinishOutcome",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "reason": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "canceled"
+              ],
+              "title": "CanceledWorkspaceGuideRunFinishOutcomeType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "reason",
+            "type"
+          ],
+          "title": "CanceledWorkspaceGuideRunFinishOutcome",
+          "type": "object"
+        }
+      ]
+    },
+    "WorkspaceGuideRunStatus": {
+      "enum": [
+        "running",
+        "completed",
+        "failed",
+        "canceled"
+      ],
+      "type": "string"
+    },
     "WorkspaceMessage": {
       "properties": {
         "archivedAt": {

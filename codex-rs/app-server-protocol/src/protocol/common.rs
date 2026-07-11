@@ -726,6 +726,24 @@ client_request_definitions! {
         serialization: global("workspace"),
         response: v2::WorkspaceDraftSessionCloseResponse,
     },
+    #[experimental("workspace/guide/run/start")]
+    WorkspaceGuideRunStart => "workspace/guide/run/start" {
+        params: v2::WorkspaceGuideRunStartParams,
+        serialization: global("workspace"),
+        response: v2::WorkspaceGuideRunStartResponse,
+    },
+    #[experimental("workspace/guide/run/finish")]
+    WorkspaceGuideRunFinish => "workspace/guide/run/finish" {
+        params: v2::WorkspaceGuideRunFinishParams,
+        serialization: global("workspace"),
+        response: v2::WorkspaceGuideRunFinishResponse,
+    },
+    #[experimental("workspace/guide/run/list")]
+    WorkspaceGuideRunList => "workspace/guide/run/list" {
+        params: v2::WorkspaceGuideRunListParams,
+        serialization: global_shared_read("workspace"),
+        response: v2::WorkspaceGuideRunListResponse,
+    },
     #[experimental("workspace/context/packet/list")]
     WorkspaceContextPacketList => "workspace/context/packet/list" {
         params: v2::WorkspaceContextPacketListParams,
