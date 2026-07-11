@@ -1,0 +1,44 @@
+---
+source: tui/src/workspace_dashboard.rs
+expression: "render_dashboard_lines_at(&dashboard, 160, 40)"
+---
+Medical Workspace
+Patient: Jordan Patient  DOB: blank  MRN: blank  Contact: Missing contact  Coverage: Missing coverage  Encounter: No encounter
+ EXPLORER                          PATIENT CHART                                                                   AGENT WORK
+┌Patient Directory───────────────┐┌Patient Demographics──────────────────────────────────────────────────────────┐┌Agent Work──────────────────────────────────┐
+│Local search: /                 ││Display: Jordan Patient                                                       ││Patient Chart: Jordan...; Save first eval   │
+│1 active patient; local only    ││Preferred:                                                                    ││[Pending]  History  Audit  ←/→              │
+│New: :patient new; / searches.  ││DOB:                                                                          ││                                            │
+│> Jordan Patient  DOB blank  MRN││Sex/Gender:                                                                   ││Pending Chart Changeset                     │
+│blank  active                   ││Patient ID / MRN:                                                             ││  BLOCKED · Canonical chart refreshed, but  │
+│                                ││Chart start:                                                                  ││this stale non...                           │
+│                                ││Chart end:                                                                    ││  Changes: demographics                     │
+│                                ││Summary: Preserved stale clinician draft.                                     ││  Patient: demographic snapshot included    │
+│                                │└──────────────────────────────────────────────────────────────────────────────┘│  Guards: 1 opaque version(s) · no note     │
+│                                │┌Note Title────────────────────────────────────────────────────────────────────┐│revision guard                              │
+└────────────────────────────────┘│Untitled note                                                                 ││  Reason: Save reviewed chart changes:      │
+┌Patient Notes───────────────────┐└──────────────────────────────────────────────────────────────────────────────┘│demographics                                │
+│Patient Notes                   │┌Note Body─────────────────────────────────────────────────────────────────────┐│  Commit key: stable-discard-key            │
+│  New note                      ││HPI:                                                                          ││                                            │
+│  No patient notes yet. Use     ││Exam:                                                                         ││  ● Esc/Ctrl-W discards and closes; reopen  │
+│:note new.                      ││Assessment:                                                                   ││loads canonical data                        │
+│  Medical, communication, and   ││Plan:                                                                         ││  Human draft stays in the center; canonical│
+│admin notes appear here.        ││                                                                              ││DB changes only after commit success.       │
+│                                ││                                                                              ││                                            │
+│                                ││                                                                              ││                                            │
+└────────────────────────────────┘│                                                                              ││                                            │
+┌Uploaded Documents──────────────┐│                                                                              ││                                            │
+│Uploaded Documents              ││                                                                              ││                                            │
+│No files yet                    ││                                                                              ││                                            │
+│Paste/drop JPG/PDF. Space...    ││                                                                              ││                                            │
+│                                ││                                                                              ││                                            │
+│                                ││                                                                              ││                                            │
+│                                ││                                                                              ││                                            │
+│                                ││                                                                              ││                                            │
+│                                ││                                                                              ││                                            │
+│                                ││                                                                              ││                                            │
+│                                ││                                                                              ││                                            │
+│                                ││                                                                              ││                                            │
+│                                ││                                                                              ││                                            │
+└────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────┘└────────────────────────────────────────────┘
+Focus: Agent | Mode: Navigate | Next: r input | p packet | i returned

@@ -1,3 +1,5 @@
+mod chart_changeset;
+
 use crate::app_server_session::AppServerSession;
 use crate::clipboard_paste::normalize_pasted_path;
 use crate::macos_native_drop::NativeMedicalDropResult;
@@ -34,8 +36,12 @@ use crate::workspace_context_assembly::edi_transaction_label;
 use crate::workspace_context_assembly::edi_transaction_label_from_text;
 use crate::workspace_context_assembly::provider_file_reference_summary;
 use crate::workspace_context_assembly::provider_reviewed_text_summary;
+use chart_changeset::ChartChangesetPurpose;
+use chart_changeset::ChartChangesetReviewState;
+use chart_changeset::PendingChartChangeset;
 use chrono::DateTime;
 use chrono::Utc;
+use codex_app_server_client::TypedRequestError;
 use codex_app_server_protocol::WorkspaceAgentResult;
 use codex_app_server_protocol::WorkspaceAgentResultCreateParams;
 use codex_app_server_protocol::WorkspaceAgentResultListParams;
@@ -46,6 +52,12 @@ use codex_app_server_protocol::WorkspaceArtifactDerivativeStatusUpdateParams;
 use codex_app_server_protocol::WorkspaceArtifactDerivativeUpsertParams;
 use codex_app_server_protocol::WorkspaceAuditEvent;
 use codex_app_server_protocol::WorkspaceAuditListParams;
+use codex_app_server_protocol::WorkspaceChartCommitErrorData;
+use codex_app_server_protocol::WorkspaceChartCommitParams;
+use codex_app_server_protocol::WorkspaceChartCommitResponse;
+use codex_app_server_protocol::WorkspaceChartEntityKind;
+use codex_app_server_protocol::WorkspaceChartExpectedVersions;
+use codex_app_server_protocol::WorkspaceChartNoteChange;
 use codex_app_server_protocol::WorkspaceClient;
 use codex_app_server_protocol::WorkspaceClientUpsertParams;
 use codex_app_server_protocol::WorkspaceContextClip;
@@ -207,6 +219,7 @@ pub(crate) enum WorkspaceDashboardAction {
     },
     Consumed,
     Close,
+    CloseAndDiscard,
     EnsureEncounter,
     ResolveProposal {
         proposal_id: String,
@@ -229,8 +242,6 @@ pub(crate) enum WorkspaceDashboardAction {
         document_id: String,
     },
     SaveDroppedFileReferences(Vec<WorkspaceDocumentUpsertParams>),
-    SaveArtifactDerivative(Box<WorkspaceArtifactDerivativeUpsertParams>),
-    SaveContextClip(Box<WorkspaceContextClipUpsertParams>),
     SendContextToAgent,
     SelectClient(usize),
     SelectNote(usize),
@@ -2513,9 +2524,70 @@ pub(crate) struct WorkspaceDashboard {
     patient_search_selection_index: usize,
     patient_search_return_focus: Option<WorkspaceFocus>,
     patient_search_return_section: Option<MedicalWorkflowSection>,
+    pending_chart_changeset: Option<PendingChartChangeset>,
+    next_chart_save_purpose: ChartChangesetPurpose,
     dirty: bool,
     status: String,
     store_description: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct ChartDraftSnapshot {
+    client: ClientDraft,
+    note: NoteDraft,
+    document: DocumentDraft,
+    safety: SafetyDraft,
+    derivative: DerivativeDraft,
+    clip: ClipDraft,
+    task: TaskDraft,
+    addendum: AddendumDraft,
+}
+
+impl ChartDraftSnapshot {
+    fn capture(dashboard: &WorkspaceDashboard) -> Self {
+        Self {
+            client: dashboard.draft_client.clone(),
+            note: dashboard.draft_note.clone(),
+            document: dashboard.draft_document.clone(),
+            safety: dashboard.draft_safety.clone(),
+            derivative: dashboard.derivative_draft.clone(),
+            clip: dashboard.clip_draft.clone(),
+            task: dashboard.draft_task.clone(),
+            addendum: dashboard.addendum_draft.clone(),
+        }
+    }
+
+    fn restore_after_conflict_refresh(self, dashboard: &mut WorkspaceDashboard) {
+        let refreshed_note_baseline = self.note.id.as_deref().and_then(|note_id| {
+            dashboard
+                .notes
+                .iter()
+                .find(|note| note.id == note_id)
+                .map(|note| {
+                    (
+                        note.encounter_id.clone(),
+                        note.status.clone(),
+                        note.current_revision,
+                    )
+                })
+        });
+
+        dashboard.draft_client = self.client;
+        dashboard.draft_note = self.note;
+        dashboard.draft_document = self.document;
+        dashboard.draft_safety = self.safety;
+        dashboard.derivative_draft = self.derivative;
+        dashboard.clip_draft = self.clip;
+        dashboard.draft_task = self.task;
+        dashboard.addendum_draft = self.addendum;
+
+        if let Some((encounter_id, status, current_revision)) = refreshed_note_baseline {
+            dashboard.draft_note.encounter_id = encounter_id;
+            dashboard.draft_note.status = status;
+            dashboard.draft_note.current_revision = current_revision;
+            dashboard.select_encounter_for_active_note();
+        }
+    }
 }
 
 impl Default for WorkspaceDashboard {
@@ -2586,6 +2658,8 @@ impl Default for WorkspaceDashboard {
             patient_search_selection_index: 0,
             patient_search_return_focus: None,
             patient_search_return_section: None,
+            pending_chart_changeset: None,
+            next_chart_save_purpose: ChartChangesetPurpose::General,
             dirty: false,
             status: "Workspace".to_string(),
             store_description: None,
@@ -2636,188 +2710,606 @@ impl WorkspaceDashboard {
     }
 
     pub(crate) async fn save(&mut self, app_server: &mut AppServerSession) -> Result<()> {
-        if self.draft_client.display_name.trim().is_empty() {
-            self.status = "Display name is required.".to_string();
+        if self
+            .pending_chart_changeset
+            .as_ref()
+            .is_some_and(PendingChartChangeset::needs_canonical_refresh)
+        {
+            return self
+                .refresh_canonical_after_chart_changeset_conflict(app_server)
+                .await;
+        }
+        if self
+            .pending_chart_changeset
+            .as_ref()
+            .is_some_and(PendingChartChangeset::needs_manual_merge)
+        {
+            self.status =
+                "Canonical data is refreshed, but this changeset still needs an explicit manual merge. Edit the conflicted draft before saving."
+                    .to_string();
+            return Ok(());
+        }
+        if self
+            .pending_chart_changeset
+            .as_ref()
+            .is_some_and(PendingChartChangeset::is_blocked)
+        {
+            self.status =
+                "This chart changeset cannot be retried or merged safely. Esc or Ctrl-W discards it and closes; reopen to load canonical data."
+                    .to_string();
             return Ok(());
         }
 
-        let client = app_server
-            .workspace_client_upsert(self.draft_client.upsert_params())
-            .await?
-            .client;
-        let client_id = client.id.clone();
-        self.draft_client = ClientDraft::from_client(&client);
+        let (params, purpose) = if let Some(pending) = self.pending_chart_changeset.as_ref() {
+            (pending.request(), pending.purpose())
+        } else {
+            let params = match self.build_chart_changeset_params() {
+                Ok(Some(params)) => params,
+                Ok(None) => {
+                    self.status = "No chart changes to save.".to_string();
+                    self.dirty = false;
+                    return Ok(());
+                }
+                Err(status) => {
+                    self.status = status;
+                    return Ok(());
+                }
+            };
+            let purpose = std::mem::take(&mut self.next_chart_save_purpose);
+            let pending = PendingChartChangeset::new_for_purpose(params, purpose);
+            let request = pending.request();
+            self.pending_chart_changeset = Some(pending);
+            (request, purpose)
+        };
 
-        if self.draft_safety.is_active() {
-            if !self.draft_safety.should_save() {
-                self.status = "Clinical safety name is required.".to_string();
-                return Ok(());
+        let response = match app_server.workspace_chart_commit(params).await {
+            Ok(response) => response,
+            Err(error) => {
+                if let Some(failure) = chart_commit_failure_from_error(&error) {
+                    match failure {
+                        ChartCommitFailure::Stale { summary, target } => {
+                            if let Some(pending) = self.pending_chart_changeset.as_mut() {
+                                pending.mark_conflict(summary.clone(), Some(target));
+                            }
+                            self.focus = WorkspaceFocus::Agent;
+                            self.agent_rail_tab = AgentRailTab::Pending;
+                            self.status = format!(
+                                "Chart changeset conflict: {summary} Draft preserved; Ctrl-S refreshes canonical data before reconciliation."
+                            );
+                        }
+                        ChartCommitFailure::Validation { message } => {
+                            self.next_chart_save_purpose = purpose;
+                            self.pending_chart_changeset = None;
+                            self.status = format!(
+                                "Chart save was rejected; draft remains editable: {}",
+                                compact_preview(&message, 120)
+                            );
+                        }
+                        ChartCommitFailure::IdempotencyConflict { summary } => {
+                            if let Some(pending) = self.pending_chart_changeset.as_mut() {
+                                pending.mark_blocked(summary.clone());
+                            }
+                            self.focus = WorkspaceFocus::Agent;
+                            self.agent_rail_tab = AgentRailTab::Pending;
+                            self.status = format!(
+                                "Chart commit blocked: {summary}. Exact request retained; no automatic retry or replacement key was created."
+                            );
+                        }
+                    }
+                    return Ok(());
+                }
+                if let Some(pending) = self.pending_chart_changeset.as_mut() {
+                    pending.mark_retryable_failure(
+                        "Save failed before a commit receipt was confirmed; exact request retained.",
+                    );
+                }
+                self.status =
+                    "Chart save failed; exact request retained. Retry Ctrl-S or :save.".to_string();
+                return Err(error);
             }
-            app_server
-                .workspace_patient_safety_item_upsert(
-                    self.draft_safety.upsert_params(client_id.clone()),
-                )
-                .await?;
-            self.draft_safety.clear();
+        };
+
+        self.apply_chart_commit_response(&response);
+        let preferred_client_id = Some(response.client.id.clone());
+        let preferred_note_id = response
+            .note
+            .as_ref()
+            .map(|note| note.id.clone())
+            .or_else(|| self.draft_note.id.clone());
+        let preferred_document_id = response
+            .document
+            .as_ref()
+            .map(|document| document.id.clone())
+            .or_else(|| self.draft_document.id.clone());
+        let preferred_encounter_id = response
+            .encounter
+            .as_ref()
+            .map(|encounter| encounter.id.clone())
+            .or_else(|| self.active_encounter_id());
+        let preferred_task_id = response
+            .task
+            .as_ref()
+            .map(|task| task.id.clone())
+            .or_else(|| self.selected_task_id());
+
+        if let Err(error) = self
+            .reload_preserving(
+                app_server,
+                preferred_client_id,
+                preferred_note_id,
+                preferred_document_id,
+                preferred_encounter_id,
+                preferred_task_id,
+            )
+            .await
+        {
+            if let Some(pending) = self.pending_chart_changeset.as_mut() {
+                pending.mark_retryable_failure(format!(
+                    "Commit {} was accepted, but chart reload failed; retry replays its receipt.",
+                    response.commit_id
+                ));
+            }
+            self.status = format!(
+                "Chart commit {} saved; refresh failed. Retry :save to replay the receipt.",
+                compact_preview(&response.commit_id, 12)
+            );
+            return Err(error);
         }
 
-        let encounter_id = if self.profile == WorkspaceProfile::Medical {
-            if self.draft_note.should_save()
-                || self.draft_document.should_save()
-                || self.derivative_draft.should_save()
-                || self.clip_draft.should_save()
-            {
-                self.ensure_encounter_for_save(app_server, &client_id)
-                    .await?
-            } else {
-                self.active_encounter_id()
+        self.draft_safety.clear();
+        self.derivative_draft.clear();
+        self.clip_draft.clear();
+        self.draft_task.clear();
+        self.pending_chart_changeset = None;
+        self.dirty = false;
+        self.status = match purpose {
+            ChartChangesetPurpose::SaveDerivative => {
+                if let Some(derivative) = response.artifact_derivative.as_ref() {
+                    self.selected_derivative_ids.insert(derivative.id.clone());
+                    self.inspected_derivative_id = Some(derivative.id.clone());
+                    self.focus_workflow_section(MedicalWorkflowSection::Documents);
+                    self.workflow_scroll = self.workflow_derivative_inspector_row();
+                }
+                "Reviewed text saved atomically and selected for the next Medical Agent Plan."
+                    .to_string()
             }
+            ChartChangesetPurpose::SaveClip => {
+                if let Some(clip) = response.context_clip.as_ref() {
+                    self.selected_clip_ids.insert(clip.id.clone());
+                    self.inspected_clip_id = Some(clip.id.clone());
+                    self.focus_workflow_section(MedicalWorkflowSection::Documents);
+                    self.workflow_scroll = self.workflow_clip_inspector_row();
+                }
+                "Context clip saved atomically and selected for the next Medical Agent Plan."
+                    .to_string()
+            }
+            ChartChangesetPurpose::General if response.replayed => {
+                "Saved from the existing chart commit receipt.".to_string()
+            }
+            ChartChangesetPurpose::General => "Saved as one atomic chart changeset.".to_string(),
+        };
+        Ok(())
+    }
+
+    async fn refresh_canonical_after_chart_changeset_conflict(
+        &mut self,
+        app_server: &mut AppServerSession,
+    ) -> Result<()> {
+        let drafts = ChartDraftSnapshot::capture(self);
+        let pending = self.pending_chart_changeset.clone();
+        let preferred_client_id = self.draft_client.id.clone();
+        let preferred_note_id = self.draft_note.id.clone();
+        let preferred_document_id = self.draft_document.id.clone();
+        let preferred_encounter_id = self.active_encounter_id();
+        let preferred_task_id = self.selected_task_id();
+
+        let refresh = self
+            .reload_preserving(
+                app_server,
+                preferred_client_id,
+                preferred_note_id,
+                preferred_document_id,
+                preferred_encounter_id,
+                preferred_task_id,
+            )
+            .await;
+        drafts.restore_after_conflict_refresh(self);
+        self.dirty = true;
+
+        match refresh {
+            Ok(()) => {
+                let target = pending
+                    .as_ref()
+                    .and_then(PendingChartChangeset::merge_target);
+                if let Some(mut pending) = pending {
+                    pending.mark_canonical_refreshed();
+                    self.pending_chart_changeset = Some(pending);
+                }
+                if self.chart_changeset_needs_manual_merge() {
+                    self.focus_chart_merge_target(target);
+                    self.status =
+                        "Canonical note refreshed and human draft preserved. Saving remains blocked until you explicitly reconcile the note."
+                            .to_string();
+                } else {
+                    self.focus = WorkspaceFocus::Agent;
+                    self.agent_rail_tab = AgentRailTab::Pending;
+                    self.status =
+                        "Canonical chart refreshed, but this stale non-note or multi-entity draft cannot be merged safely. Esc or Ctrl-W discards it and closes; reopen to load canonical data."
+                            .to_string();
+                }
+                Ok(())
+            }
+            Err(error) => {
+                self.pending_chart_changeset = pending;
+                self.status =
+                    "Canonical refresh failed; human draft and conflict retained. Retry Ctrl-S."
+                        .to_string();
+                Err(error)
+            }
+        }
+    }
+
+    fn build_chart_changeset_params(
+        &self,
+    ) -> std::result::Result<Option<WorkspaceChartCommitParams>, String> {
+        if self.draft_client.display_name.trim().is_empty() {
+            return Err("Display name is required.".to_string());
+        }
+
+        let client_upsert = self.draft_client.upsert_params();
+        let root_client_id = self.draft_client.id.clone();
+        let mut expected_versions = WorkspaceChartExpectedVersions::default();
+        let client = if let Some(client_id) = root_client_id.as_deref() {
+            let canonical = self
+                .clients
+                .iter()
+                .find(|client| client.id == client_id)
+                .ok_or_else(|| {
+                    "The loaded patient version is unavailable; reload before saving.".to_string()
+                })?;
+            let canonical_upsert = ClientDraft::from_client(canonical).upsert_params();
+            if client_upsert == canonical_upsert {
+                None
+            } else {
+                expected_versions.client = Some(canonical.version.clone());
+                Some(client_upsert)
+            }
+        } else {
+            Some(client_upsert)
+        };
+        let child_client_id = root_client_id.clone().unwrap_or_default();
+
+        if self.draft_safety.is_active() && !self.draft_safety.should_save() {
+            return Err("Clinical safety name is required.".to_string());
+        }
+        let safety_item = self
+            .draft_safety
+            .should_save()
+            .then(|| self.draft_safety.upsert_params(child_client_id.clone()));
+        if let Some(item_id) = safety_item.as_ref().and_then(|item| item.id.as_deref()) {
+            expected_versions.safety_item = Some(
+                self.patient_safety_items
+                    .iter()
+                    .find(|item| item.id == item_id)
+                    .map(|item| item.version.clone())
+                    .ok_or_else(|| {
+                        format!(
+                            "The loaded clinical safety version for `{item_id}` is unavailable; reload before saving."
+                        )
+                    })?,
+            );
+        }
+
+        let canonical_note = if let Some(note_id) = self.draft_note.id.as_deref() {
+            Some(
+                self.notes
+                    .iter()
+                    .find(|note| note.id == note_id)
+                    .ok_or_else(|| {
+                        "The loaded note revision is unavailable; reload before saving.".to_string()
+                    })?,
+            )
         } else {
             None
         };
-        let mut saved_note_id = self.draft_note.id.clone();
-        let mut saved_document_id = self.draft_document.id.clone();
-        let mut saved_task_id = self.draft_task.id.clone();
-        if self.draft_note.should_save() && !self.draft_note.is_locked() {
-            let title = if self.draft_note.title.trim().is_empty() {
-                UNTITLED_NOTE_TITLE.to_string()
-            } else {
-                self.draft_note.title.trim().to_string()
-            };
-            let note = app_server
-                .workspace_note_upsert(WorkspaceNoteUpsertParams {
-                    id: self.draft_note.id.clone(),
-                    client_id: client_id.clone(),
-                    encounter_id: encounter_id.clone(),
-                    title,
-                    kind: "note".to_string(),
-                    body: self.draft_note.body.clone(),
-                    status: "draft".to_string(),
-                    summary: None,
-                })
-                .await?
-                .note;
-            saved_note_id = Some(note.id.clone());
-            self.draft_note = NoteDraft::from_note(&note);
-        } else if self.draft_note.is_locked() {
-            self.status =
-                "Signed notes are locked. Use addenda or proposals for changes.".to_string();
+        let note_title = self.effective_note_title().to_string();
+        let note_changed = match canonical_note {
+            Some(note) => {
+                note.title != note_title
+                    || note.body != self.draft_note.body
+                    || note.status != self.draft_note.status_label()
+                    || note.encounter_id != self.draft_note.encounter_id
+            }
+            None => self.draft_note.should_save(),
+        };
+        if note_changed && self.draft_note.is_locked() {
+            return Err(
+                "Signed notes are locked. Use addenda or proposals for changes.".to_string(),
+            );
         }
 
-        if self.draft_document.should_save() {
-            if self.draft_document.title.trim().is_empty()
-                || self.draft_document.local_path.trim().is_empty()
-            {
-                self.status = "Document title and local path are required.".to_string();
-                return Ok(());
-            }
-            let document = app_server
-                .workspace_document_upsert(
-                    self.draft_document
-                        .upsert_params(client_id.clone(), encounter_id.clone()),
-                )
-                .await?
-                .document;
-            saved_document_id = Some(document.id.clone());
-            self.draft_document = DocumentDraft::from_document(&document);
+        let document_should_save = self.draft_document.should_save();
+        if document_should_save
+            && (self.draft_document.title.trim().is_empty()
+                || self.draft_document.local_path.trim().is_empty())
+        {
+            return Err("Document title and local path are required.".to_string());
         }
-
-        if self.derivative_draft.should_save() {
-            if self.derivative_draft.document_id.trim().is_empty() {
-                self.status =
-                    "Choose a saved file reference before saving reviewed text.".to_string();
-                return Ok(());
-            }
-            if self.derivative_draft.title.trim().is_empty()
-                || self.derivative_draft.body.trim().is_empty()
-            {
-                self.status = "Derivative title and body are required.".to_string();
-                return Ok(());
-            }
-            if !self
+        let derivative_should_save = self.derivative_draft.should_save();
+        if derivative_should_save
+            && (self.derivative_draft.title.trim().is_empty()
+                || self.derivative_draft.body.trim().is_empty())
+        {
+            return Err("Reviewed text title and body are required.".to_string());
+        }
+        if derivative_should_save
+            && self.derivative_draft.document_id.trim().is_empty()
+            && !document_should_save
+        {
+            return Err("Choose a saved file reference before saving reviewed text.".to_string());
+        }
+        if derivative_should_save
+            && !self.derivative_draft.document_id.trim().is_empty()
+            && !self
                 .documents
                 .iter()
                 .any(|document| document.id == self.derivative_draft.document_id)
-                && saved_document_id.as_deref() != Some(self.derivative_draft.document_id.as_str())
-            {
-                self.status =
-                    "Save file reference metadata before saving reviewed text.".to_string();
-                return Ok(());
-            }
-            app_server
-                .workspace_artifact_derivative_upsert(self.derivative_draft.upsert_params(
-                    client_id.clone(),
-                    encounter_id.clone(),
-                    saved_note_id.clone(),
-                ))
-                .await?;
-            self.derivative_draft.clear();
+            && self.draft_document.id.as_deref() != Some(self.derivative_draft.document_id.as_str())
+        {
+            return Err("Save file reference metadata before saving reviewed text.".to_string());
         }
 
-        if self.clip_draft.should_save() {
-            if self.clip_draft.derivative_id.trim().is_empty() {
-                self.status =
-                    "Choose saved reviewed text before saving a context clip.".to_string();
-                return Ok(());
-            }
-            if self.clip_draft.title.trim().is_empty() || self.clip_draft.body.trim().is_empty() {
-                self.status = "Clip title and excerpt are required.".to_string();
-                return Ok(());
-            }
-            if !self
+        let clip_should_save = self.clip_draft.should_save();
+        if clip_should_save
+            && (self.clip_draft.title.trim().is_empty() || self.clip_draft.body.trim().is_empty())
+        {
+            return Err("Clip title and excerpt are required.".to_string());
+        }
+        if clip_should_save
+            && self.clip_draft.derivative_id.trim().is_empty()
+            && !derivative_should_save
+        {
+            return Err("Choose saved reviewed text before saving a context clip.".to_string());
+        }
+        if clip_should_save
+            && !self.clip_draft.derivative_id.trim().is_empty()
+            && !self
                 .derivatives
                 .iter()
                 .any(|derivative| derivative.id == self.clip_draft.derivative_id)
-            {
-                self.status = "Save reviewed text before saving a context clip.".to_string();
-                return Ok(());
-            }
-            app_server
-                .workspace_context_clip_upsert(self.clip_draft.upsert_params(
-                    client_id.clone(),
-                    encounter_id.clone(),
-                    saved_note_id.clone(),
-                ))
-                .await?;
-            self.clip_draft.clear();
+            && self.derivative_draft.id.as_deref() != Some(self.clip_draft.derivative_id.as_str())
+        {
+            return Err("Save reviewed text before saving a context clip.".to_string());
         }
 
-        if self.draft_task.is_active() {
+        let task_priority = if self.draft_task.is_active() {
             if self.draft_task.title.trim().is_empty() {
-                self.status = "Job title is required.".to_string();
-                return Ok(());
+                return Err("Job title is required.".to_string());
             }
-            let Some(priority) = workspace_task_priority_from_text(&self.draft_task.priority)
-            else {
-                self.status = "Job priority must be low, normal, high, or urgent.".to_string();
-                return Ok(());
-            };
-            let task = app_server
-                .workspace_task_upsert(self.draft_task.upsert_params(
-                    client_id.clone(),
-                    encounter_id.clone(),
-                    saved_note_id.clone(),
-                    saved_document_id.clone(),
-                    priority,
-                ))
-                .await?
-                .task;
-            saved_task_id = Some(task.id);
-            self.draft_task.clear();
+            Some(
+                workspace_task_priority_from_text(&self.draft_task.priority).ok_or_else(|| {
+                    "Job priority must be low, normal, high, or urgent.".to_string()
+                })?,
+            )
+        } else {
+            None
+        };
+
+        let needs_encounter = self.profile == WorkspaceProfile::Medical
+            && (note_changed || document_should_save || derivative_should_save || clip_should_save);
+        let existing_encounter_id = self.active_encounter_id();
+        let encounter = (needs_encounter && existing_encounter_id.is_none()).then(|| {
+            WorkspaceEncounterUpsertParams {
+                id: None,
+                client_id: child_client_id.clone(),
+                kind: "visit".to_string(),
+                title: if self.draft_note.title.trim().is_empty() {
+                    "Open encounter".to_string()
+                } else {
+                    self.draft_note.title.trim().to_string()
+                },
+                status: "open".to_string(),
+                started_at: Some(Utc::now().timestamp()),
+                ended_at: None,
+            }
+        });
+        let linked_encounter_id = existing_encounter_id.filter(|_| encounter.is_none());
+
+        let note = note_changed.then(|| WorkspaceChartNoteChange {
+            upsert: WorkspaceNoteUpsertParams {
+                id: self.draft_note.id.clone(),
+                client_id: child_client_id.clone(),
+                encounter_id: linked_encounter_id.clone(),
+                title: note_title,
+                kind: canonical_note
+                    .map(|note| note.kind.clone())
+                    .unwrap_or_else(|| "note".to_string()),
+                body: self.draft_note.body.clone(),
+                status: "draft".to_string(),
+                summary: None,
+            },
+            expected_base_revision: canonical_note.map(|note| note.current_revision),
+        });
+
+        let document = document_should_save.then(|| {
+            self.draft_document
+                .upsert_params(child_client_id.clone(), linked_encounter_id.clone())
+        });
+        if let Some(document_id) = document
+            .as_ref()
+            .and_then(|document| document.id.as_deref())
+        {
+            expected_versions.document = Some(
+                self.documents
+                    .iter()
+                    .find(|document| document.id == document_id)
+                    .map(|document| document.version.clone())
+                    .ok_or_else(|| {
+                        format!(
+                            "The loaded document version for `{document_id}` is unavailable; reload before saving."
+                        )
+                    })?,
+            );
         }
 
-        self.reload_preserving(
-            app_server,
-            Some(client_id),
-            saved_note_id,
-            saved_document_id,
-            encounter_id,
-            saved_task_id,
-        )
-        .await?;
-        self.dirty = false;
-        self.status = "Saved.".to_string();
-        Ok(())
+        let linked_note_id = self.draft_note.id.clone().filter(|_| note.is_none());
+        let artifact_derivative = derivative_should_save.then(|| {
+            self.derivative_draft.upsert_params(
+                child_client_id.clone(),
+                linked_encounter_id.clone(),
+                linked_note_id.clone(),
+            )
+        });
+        if let Some(derivative_id) = artifact_derivative
+            .as_ref()
+            .and_then(|derivative| derivative.id.as_deref())
+        {
+            expected_versions.artifact_derivative = Some(
+                self.derivatives
+                    .iter()
+                    .find(|derivative| derivative.id == derivative_id)
+                    .map(|derivative| derivative.version.clone())
+                    .ok_or_else(|| {
+                        format!(
+                            "The loaded reviewed-text version for `{derivative_id}` is unavailable; reload before saving."
+                        )
+                    })?,
+            );
+        }
+
+        let context_clip = clip_should_save.then(|| {
+            self.clip_draft.upsert_params(
+                child_client_id.clone(),
+                linked_encounter_id.clone(),
+                linked_note_id.clone(),
+            )
+        });
+        if let Some(clip_id) = context_clip.as_ref().and_then(|clip| clip.id.as_deref()) {
+            expected_versions.context_clip = Some(
+                self.clips
+                    .iter()
+                    .find(|clip| clip.id == clip_id)
+                    .map(|clip| clip.version.clone())
+                    .ok_or_else(|| {
+                        format!(
+                            "The loaded context-clip version for `{clip_id}` is unavailable; reload before saving."
+                        )
+                    })?,
+            );
+        }
+
+        let linked_document_id = self
+            .draft_document
+            .id
+            .clone()
+            .filter(|_| document.is_none());
+        let task = task_priority.map(|priority| {
+            self.draft_task.upsert_params(
+                child_client_id,
+                linked_encounter_id,
+                linked_note_id,
+                linked_document_id,
+                priority,
+            )
+        });
+        if let Some(task_id) = task.as_ref().and_then(|task| task.id.as_deref()) {
+            expected_versions.task = Some(
+                self.tasks
+                    .iter()
+                    .find(|task| task.id == task_id)
+                    .map(|task| task.version.clone())
+                    .ok_or_else(|| {
+                        format!(
+                            "The loaded job version for `{task_id}` is unavailable; reload before saving."
+                        )
+                    })?,
+            );
+        }
+
+        let mut changed = Vec::new();
+        if client.is_some() {
+            changed.push("demographics");
+        }
+        if safety_item.is_some() {
+            changed.push("clinical safety");
+        }
+        if encounter.is_some() {
+            changed.push("encounter");
+        }
+        if note.is_some() {
+            changed.push("note");
+        }
+        if document.is_some() {
+            changed.push("document");
+        }
+        if artifact_derivative.is_some() {
+            changed.push("reviewed text");
+        }
+        if context_clip.is_some() {
+            changed.push("context clip");
+        }
+        if task.is_some() {
+            changed.push("job");
+        }
+        if changed.is_empty() {
+            return Ok(None);
+        }
+
+        let expected_versions = (!workspace_chart_expected_versions_is_empty(&expected_versions))
+            .then_some(expected_versions);
+        Ok(Some(WorkspaceChartCommitParams {
+            idempotency_key: String::new(),
+            actor: "local clinician".to_string(),
+            reason: format!("Save reviewed chart changes: {}", changed.join(", ")),
+            source_thread_id: None,
+            source_turn_id: None,
+            client_id: root_client_id,
+            client,
+            expected_versions,
+            safety_item,
+            encounter,
+            note,
+            document,
+            artifact_derivative,
+            context_clip,
+            task,
+        }))
+    }
+
+    fn apply_chart_commit_response(&mut self, response: &WorkspaceChartCommitResponse) {
+        self.client_index =
+            replace_or_push_by_id(&mut self.clients, response.client.clone(), |client| {
+                &client.id
+            });
+        self.draft_client = ClientDraft::from_client(&response.client);
+        if let Some(encounter) = response.encounter.clone() {
+            self.encounter_index =
+                replace_or_push_by_id(&mut self.encounters, encounter, |encounter| &encounter.id);
+        }
+        if let Some(note) = response.note.clone() {
+            self.note_index = replace_or_push_by_id(&mut self.notes, note.clone(), |note| &note.id);
+            self.draft_note = NoteDraft::from_note(&note);
+        }
+        if let Some(document) = response.document.clone() {
+            replace_or_push_by_id(&mut self.documents, document.clone(), |document| {
+                &document.id
+            });
+            self.draft_document = DocumentDraft::from_document(&document);
+        }
+        if let Some(item) = response.safety_item.clone() {
+            replace_or_push_by_id(&mut self.patient_safety_items, item, |item| &item.id);
+        }
+        if let Some(derivative) = response.artifact_derivative.clone() {
+            replace_or_push_by_id(&mut self.derivatives, derivative, |derivative| {
+                &derivative.id
+            });
+        }
+        if let Some(clip) = response.context_clip.clone() {
+            replace_or_push_by_id(&mut self.clips, clip, |clip| &clip.id);
+        }
+        if let Some(task) = response.task.clone() {
+            self.task_index = replace_or_push_by_id(&mut self.tasks, task, |task| &task.id);
+        }
     }
 
     pub(crate) async fn select_client(
@@ -2859,6 +3351,11 @@ impl WorkspaceDashboard {
         &mut self,
         app_server: &mut AppServerSession,
     ) -> Result<()> {
+        if self.dirty || self.pending_chart_changeset.is_some() {
+            self.status = "Save or reconcile the current chart draft before creating an encounter."
+                .to_string();
+            return Ok(());
+        }
         let Some(client_id) = self.draft_client.id.clone() else {
             self.status = "Save the patient before creating an encounter.".to_string();
             return Ok(());
@@ -2920,27 +3417,61 @@ impl WorkspaceDashboard {
         proposal_id: String,
         accept: bool,
     ) -> Result<()> {
-        app_server
+        let response = app_server
             .workspace_note_proposal_resolve(WorkspaceNoteProposalResolveParams {
                 proposal_id,
                 accept,
                 edited_body: None,
             })
             .await?;
-        let note_id = self.draft_note.id.clone();
-        self.reload_preserving(
-            app_server,
-            self.draft_client.id.clone(),
-            note_id,
-            self.draft_document.id.clone(),
-            self.active_encounter_id(),
-            self.selected_task_id(),
-        )
-        .await?;
-        self.status = if accept {
-            "Proposal accepted and note updated.".to_string()
+        let returned_status = response.proposal.map(|proposal| proposal.status);
+        let expected_status = if accept {
+            WorkspaceNoteProposalStatus::Accepted
         } else {
-            "Proposal declined.".to_string()
+            WorkspaceNoteProposalStatus::Declined
+        };
+        let note_id = self.draft_note.id.clone();
+        if let Err(error) = self
+            .reload_preserving(
+                app_server,
+                self.draft_client.id.clone(),
+                note_id,
+                self.draft_document.id.clone(),
+                self.active_encounter_id(),
+                self.selected_task_id(),
+            )
+            .await
+        {
+            self.status = match returned_status {
+                Some(status) if status == expected_status => format!(
+                    "Proposal is stored as {}, but chart refresh failed: {}. Retry the same decision safely or reopen the workspace.",
+                    proposal_status_label(status),
+                    compact_preview(&error.to_string(), 96)
+                ),
+                Some(status) => format!(
+                    "Proposal remains {}; requested {} was not applied, and chart refresh failed.",
+                    proposal_status_label(status),
+                    proposal_status_label(expected_status)
+                ),
+                None => {
+                    "Proposal was not found and chart refresh failed; no chart change is claimed."
+                        .to_string()
+                }
+            };
+            return Ok(());
+        }
+        self.status = match returned_status {
+            Some(status) if status == expected_status => format!(
+                "Proposal status is {}; canonical chart refreshed.",
+                proposal_status_label(status)
+            ),
+            Some(status) => format!(
+                "Proposal was already resolved as {}; requested {} was not applied.",
+                proposal_status_label(status),
+                proposal_status_label(expected_status)
+            ),
+            None => "Proposal was not found; canonical chart refreshed without claiming a change."
+                .to_string(),
         };
         Ok(())
     }
@@ -2982,6 +3513,11 @@ impl WorkspaceDashboard {
         task_id: String,
         status: WorkspaceTaskStatus,
     ) -> Result<()> {
+        if self.dirty || self.pending_chart_changeset.is_some() {
+            self.status = "Save or reconcile the current chart draft before updating a job status."
+                .to_string();
+            return Ok(());
+        }
         let Some(client_id) = self.draft_client.id.clone() else {
             self.status = "Save the patient before updating a job.".to_string();
             return Ok(());
@@ -3039,6 +3575,80 @@ impl WorkspaceDashboard {
             return WorkspaceDashboardAction::Consumed;
         }
         let key_event = normalize_workspace_key_event(key_event);
+
+        if self.chart_changeset_input_is_frozen() {
+            let close_action = if self
+                .pending_chart_changeset
+                .as_ref()
+                .is_some_and(PendingChartChangeset::is_blocked)
+            {
+                WorkspaceDashboardAction::CloseAndDiscard
+            } else {
+                WorkspaceDashboardAction::Close
+            };
+            if key_event.modifiers.contains(KeyModifiers::CONTROL) {
+                match key_event.code {
+                    KeyCode::Char(c) if c.eq_ignore_ascii_case(&'s') => {
+                        return WorkspaceDashboardAction::Save;
+                    }
+                    KeyCode::Char(c) if c.eq_ignore_ascii_case(&'w') => {
+                        return close_action;
+                    }
+                    _ => {}
+                }
+            }
+            if key_event.code == KeyCode::Esc {
+                return close_action;
+            }
+            self.status = match self
+                .pending_chart_changeset
+                .as_ref()
+                .map(PendingChartChangeset::review_state)
+            {
+                Some(ChartChangesetReviewState::Conflict { .. }) => {
+                    "Canonical chart changed; Ctrl-S refreshes it for reconciliation, or close without changing data."
+                }
+                Some(ChartChangesetReviewState::Blocked { .. }) => {
+                    "This draft cannot be retried or merged safely; Esc or Ctrl-W discards it and closes. Reopen to load canonical data."
+                }
+                _ => "Chart save outcome is unresolved; retry Ctrl-S or close before editing.",
+            }
+            .to_string();
+            return WorkspaceDashboardAction::Consumed;
+        }
+
+        if self.chart_changeset_needs_manual_merge() {
+            if key_event.modifiers.contains(KeyModifiers::CONTROL)
+                && matches!(key_event.code, KeyCode::Char(c) if c.eq_ignore_ascii_case(&'w'))
+            {
+                return WorkspaceDashboardAction::Close;
+            }
+            if key_event.code == KeyCode::Esc {
+                return WorkspaceDashboardAction::Close;
+            }
+            let direct_edit = self.chart_merge_target_has_focus()
+                && !key_event
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+                && match key_event.code {
+                    KeyCode::Backspace | KeyCode::Enter => true,
+                    KeyCode::Char(_) => {
+                        !(workspace_command_shortcut_key(&key_event)
+                            && self.colon_opens_command_palette()
+                            || workspace_help_shortcut_key(&key_event)
+                                && self.help_shortcut_opens()
+                            || patient_search_shortcut_key(&key_event)
+                                && self.patient_search_shortcut_opens())
+                    }
+                    _ => false,
+                };
+            if !direct_edit {
+                self.status =
+                    "Manual reconciliation is required: edit the focused conflicted draft, or close without applying it. Ctrl-S remains blocked."
+                        .to_string();
+                return WorkspaceDashboardAction::Consumed;
+            }
+        }
 
         if self.command_input.is_some() {
             return self.handle_command_prompt_key_event(key_event);
@@ -4448,6 +5058,18 @@ impl WorkspaceDashboard {
     }
 
     pub(crate) fn handle_paste(&mut self, pasted: String) -> WorkspaceDashboardAction {
+        if self.chart_changeset_input_is_frozen() {
+            self.status =
+                "Chart changeset is unresolved; use Ctrl-S for its required recovery step or close before editing."
+                    .to_string();
+            return WorkspaceDashboardAction::Consumed;
+        }
+        if self.chart_changeset_needs_manual_merge() && !self.chart_merge_target_has_focus() {
+            self.status =
+                "Paste is blocked until the focused conflicted draft is explicitly reconciled."
+                    .to_string();
+            return WorkspaceDashboardAction::Consumed;
+        }
         if let Some(command_input) = self.command_input.as_mut() {
             command_input.push_str(pasted.trim());
             self.command_selection_index = 0;
@@ -4564,6 +5186,12 @@ impl WorkspaceDashboard {
         if !self.is_patient_file_drop_scope() {
             return None;
         }
+        if self.dirty || self.pending_chart_changeset.is_some() {
+            self.status =
+                "Save or reconcile the current chart draft before adding file references."
+                    .to_string();
+            return Some(WorkspaceDashboardAction::Consumed);
+        }
         let intake = parse_dropped_file_paths(pasted);
         if !intake.looked_like_paths {
             return None;
@@ -4606,6 +5234,11 @@ impl WorkspaceDashboard {
         &mut self,
         event: NativeMedicalFileDropEvent,
     ) -> Option<Vec<WorkspaceDocumentUpsertParams>> {
+        if self.pending_chart_changeset.is_some() || self.dirty {
+            self.status = "Save or reconcile the current chart draft before adding dropped files."
+                .to_string();
+            return None;
+        }
         if self.profile != WorkspaceProfile::Medical {
             self.status =
                 "Native file drop is only available in the medical workspace.".to_string();
@@ -4963,6 +5596,12 @@ impl WorkspaceDashboard {
         app_server: &mut AppServerSession,
         params: WorkspaceDocumentUpsertParams,
     ) -> Result<()> {
+        if self.dirty || self.pending_chart_changeset.is_some() {
+            self.status =
+                "Save or reconcile the current chart draft before associating a practice file."
+                    .to_string();
+            return Ok(());
+        }
         let document = app_server.workspace_document_upsert(params).await?.document;
         let client_id = document.client_id.clone();
         let document_id = Some(document.id.clone());
@@ -4992,6 +5631,12 @@ impl WorkspaceDashboard {
             self.status = "No local file references to add.".to_string();
             return Ok(());
         }
+        if self.dirty || self.pending_chart_changeset.is_some() {
+            self.status =
+                "Save or reconcile the current chart draft before adding file references."
+                    .to_string();
+            return Ok(());
+        }
         let client_id = params[0].client_id.clone();
         let titles = params
             .iter()
@@ -5005,8 +5650,23 @@ impl WorkspaceDashboard {
         let mut saved_document_id = None;
         let mut preview_attempt_count = 0usize;
         let mut preview_ready_count = 0usize;
-        for params in params {
-            let mut document = app_server.workspace_document_upsert(params).await?.document;
+        let total_count = titles.len();
+        for (index, params) in params.into_iter().enumerate() {
+            let mut document = match app_server.workspace_document_upsert(params).await {
+                Ok(response) => response.document,
+                Err(error) => {
+                    self.status = if index == 0 {
+                        "No file references were added; the batch stopped at the first failure."
+                            .to_string()
+                    } else {
+                        format!(
+                            "Added {index} of {total_count} file references; the batch then stopped. Review the saved subset before retrying."
+                        )
+                    };
+                    return Err(error);
+                }
+            };
+            saved_document_id = Some(document.id.clone());
             if should_auto_generate_preview_after_intake()
                 && document_is_priority_preview_file(&document)
             {
@@ -5015,13 +5675,15 @@ impl WorkspaceDashboard {
                 if source_path.is_file() {
                     let thumbnail = generate_local_thumbnail(&document, &source_path);
                     let mut params = document_upsert_params_from_document(&document);
-                    if apply_thumbnail_generation_to_params(&mut params, thumbnail) {
+                    if apply_thumbnail_generation_to_params(&mut params, thumbnail)
+                        && let Ok(response) = app_server.workspace_document_upsert(params).await
+                    {
+                        document = response.document;
                         preview_ready_count += 1;
+                        saved_document_id = Some(document.id.clone());
                     }
-                    document = app_server.workspace_document_upsert(params).await?.document;
                 }
             }
-            saved_document_id = Some(document.id);
         }
         let saved_count = titles.len();
         self.reload_preserving(
@@ -5190,6 +5852,12 @@ impl WorkspaceDashboard {
         app_server: &mut AppServerSession,
         document_id: String,
     ) -> Result<()> {
+        if self.dirty || self.pending_chart_changeset.is_some() {
+            self.status =
+                "Save or reconcile the current chart draft before importing a file reference."
+                    .to_string();
+            return Ok(());
+        }
         let Some(document) = self
             .documents
             .iter()
@@ -5267,6 +5935,11 @@ impl WorkspaceDashboard {
         app_server: &mut AppServerSession,
         document_id: String,
     ) -> Result<()> {
+        if self.dirty || self.pending_chart_changeset.is_some() {
+            self.status = "Save or reconcile the current chart draft before generating a preview."
+                .to_string();
+            return Ok(());
+        }
         let Some(document) = self
             .documents
             .iter()
@@ -5352,42 +6025,18 @@ impl WorkspaceDashboard {
         Ok(())
     }
 
-    pub(crate) async fn save_artifact_derivative(
-        &mut self,
-        app_server: &mut AppServerSession,
-        params: WorkspaceArtifactDerivativeUpsertParams,
-    ) -> Result<()> {
-        let derivative = app_server
-            .workspace_artifact_derivative_upsert(params)
-            .await?
-            .derivative;
-        self.derivative_draft.clear();
-        let client_id = derivative.client_id.clone();
-        let note_id = self.draft_note.id.clone();
-        let document_id = Some(derivative.document_id.clone());
-        self.reload_preserving(
-            app_server,
-            Some(client_id),
-            note_id,
-            document_id,
-            self.active_encounter_id(),
-            self.selected_task_id(),
-        )
-        .await?;
-        self.selected_derivative_ids.insert(derivative.id.clone());
-        self.inspected_derivative_id = Some(derivative.id);
-        self.focus_workflow_section(MedicalWorkflowSection::Documents);
-        self.workflow_scroll = self.workflow_derivative_inspector_row();
-        self.status = "Derivative saved as human-provided context; included for agent.".to_string();
-        Ok(())
-    }
-
     pub(crate) async fn update_artifact_derivative_status(
         &mut self,
         app_server: &mut AppServerSession,
         derivative_id: String,
         review_status: String,
     ) -> Result<()> {
+        if self.dirty || self.pending_chart_changeset.is_some() {
+            self.status =
+                "Save or reconcile the current chart draft before changing reviewed-text status."
+                    .to_string();
+            return Ok(());
+        }
         let response = app_server
             .workspace_artifact_derivative_status_update(
                 WorkspaceArtifactDerivativeStatusUpdateParams {
@@ -5419,39 +6068,18 @@ impl WorkspaceDashboard {
         Ok(())
     }
 
-    pub(crate) async fn save_context_clip(
-        &mut self,
-        app_server: &mut AppServerSession,
-        params: WorkspaceContextClipUpsertParams,
-    ) -> Result<()> {
-        let clip = app_server.workspace_context_clip_upsert(params).await?.clip;
-        self.clip_draft.clear();
-        let client_id = clip.client_id.clone();
-        let note_id = self.draft_note.id.clone();
-        let document_id = Some(clip.document_id.clone());
-        self.reload_preserving(
-            app_server,
-            Some(client_id),
-            note_id,
-            document_id,
-            self.active_encounter_id(),
-            self.selected_task_id(),
-        )
-        .await?;
-        self.selected_clip_ids.insert(clip.id.clone());
-        self.inspected_clip_id = Some(clip.id);
-        self.focus_workflow_section(MedicalWorkflowSection::Documents);
-        self.workflow_scroll = self.workflow_clip_inspector_row();
-        self.status = "Context clip saved and included for agent.".to_string();
-        Ok(())
-    }
-
     pub(crate) async fn update_context_clip_status(
         &mut self,
         app_server: &mut AppServerSession,
         clip_id: String,
         review_status: String,
     ) -> Result<()> {
+        if self.dirty || self.pending_chart_changeset.is_some() {
+            self.status =
+                "Save or reconcile the current chart draft before changing context-clip status."
+                    .to_string();
+            return Ok(());
+        }
         let response = app_server
             .workspace_context_clip_status_update(WorkspaceContextClipStatusUpdateParams {
                 clip_id: clip_id.clone(),
@@ -5649,10 +6277,10 @@ impl WorkspaceDashboard {
     }
 
     fn request_derivative_save(&mut self) -> WorkspaceDashboardAction {
-        let Some(client_id) = self.draft_client.id.clone() else {
+        if self.draft_client.id.is_none() {
             self.status = "Save the patient before saving reviewed text.".to_string();
             return WorkspaceDashboardAction::Consumed;
-        };
+        }
         if self.derivative_draft.document_id.trim().is_empty() {
             self.status = "Choose a saved file reference before saving reviewed text.".to_string();
             return WorkspaceDashboardAction::Consumed;
@@ -5663,20 +6291,15 @@ impl WorkspaceDashboard {
             self.status = "Reviewed text title and body are required.".to_string();
             return WorkspaceDashboardAction::Consumed;
         }
-        WorkspaceDashboardAction::SaveArtifactDerivative(Box::new(
-            self.derivative_draft.upsert_params(
-                client_id,
-                self.active_encounter_id(),
-                self.draft_note.id.clone(),
-            ),
-        ))
+        self.next_chart_save_purpose = ChartChangesetPurpose::SaveDerivative;
+        WorkspaceDashboardAction::Save
     }
 
     fn request_clip_save(&mut self) -> WorkspaceDashboardAction {
-        let Some(client_id) = self.draft_client.id.clone() else {
+        if self.draft_client.id.is_none() {
             self.status = "Save the patient before saving a context clip.".to_string();
             return WorkspaceDashboardAction::Consumed;
-        };
+        }
         if self.clip_draft.derivative_id.trim().is_empty() {
             self.status = "Choose saved reviewed text before saving a context clip.".to_string();
             return WorkspaceDashboardAction::Consumed;
@@ -5685,11 +6308,8 @@ impl WorkspaceDashboard {
             self.status = "Clip title and excerpt are required.".to_string();
             return WorkspaceDashboardAction::Consumed;
         }
-        WorkspaceDashboardAction::SaveContextClip(Box::new(self.clip_draft.upsert_params(
-            client_id,
-            self.active_encounter_id(),
-            self.draft_note.id.clone(),
-        )))
+        self.next_chart_save_purpose = ChartChangesetPurpose::SaveClip;
+        WorkspaceDashboardAction::Save
     }
 
     fn start_derivative_draft(&mut self, document_id: Option<String>) {
@@ -7176,7 +7796,11 @@ impl WorkspaceDashboard {
             self.render_demographics(areas.demographics, buf);
             self.render_note_title(areas.note_title, buf);
             self.render_note_body(areas.note_body, buf);
-            self.render_workflow_without_patient_files_section(areas.active_work, buf);
+            if self.medical_chart_has_agent_changeset() {
+                self.render_medical_agent_changeset_summary(areas.active_work, buf);
+            } else {
+                self.render_workflow_without_patient_files_section(areas.active_work, buf);
+            }
         }
 
         Paragraph::new(self.status_line(areas.status.width)).render(areas.status, buf);
@@ -7292,6 +7916,11 @@ impl WorkspaceDashboard {
     }
 
     fn medical_chart_shows_workflow(&self) -> bool {
+        if self.workflow_section == MedicalWorkflowSection::Proposals
+            || self.pending_chart_changeset.is_some()
+        {
+            return false;
+        }
         if self.workflow_section_uses_agent_workpane() {
             return false;
         }
@@ -7303,6 +7932,11 @@ impl WorkspaceDashboard {
             || self.draft_task.is_active()
             || self.draft_safety.is_active()
             || self.addendum_draft.active
+    }
+
+    fn medical_chart_has_agent_changeset(&self) -> bool {
+        self.pending_chart_changeset.is_some()
+            || self.workflow_section == MedicalWorkflowSection::Proposals
     }
 
     fn medical_chart_can_render_active_work_detail(&self) -> bool {
@@ -8100,6 +8734,8 @@ impl WorkspaceDashboard {
         self.draft_task.clear();
         self.addendum_draft.clear();
         self.load_active_note_details(app_server).await?;
+        self.pending_chart_changeset = None;
+        self.next_chart_save_purpose = ChartChangesetPurpose::General;
         self.dirty = false;
         if self.status.is_empty() || self.status == "Workspace" {
             self.status = "Loaded.".to_string();
@@ -8309,6 +8945,8 @@ impl WorkspaceDashboard {
         self.inspected_artifact_id = None;
         self.inspected_derivative_id = None;
         self.inspected_clip_id = None;
+        self.pending_chart_changeset = None;
+        self.next_chart_save_purpose = ChartChangesetPurpose::General;
         self.dirty = false;
         self.status = "New workspace draft.".to_string();
         self.focus = WorkspaceFocus::Demographics;
@@ -8337,6 +8975,8 @@ impl WorkspaceDashboard {
         self.selected_clip_ids.clear();
         self.inspected_derivative_id = None;
         self.inspected_clip_id = None;
+        self.pending_chart_changeset = None;
+        self.next_chart_save_purpose = ChartChangesetPurpose::General;
         self.status = "New note draft.".to_string();
         self.focus = WorkspaceFocus::NoteBody;
     }
@@ -9536,8 +10176,102 @@ impl WorkspaceDashboard {
     }
 
     fn mark_dirty(&mut self) {
+        let merge_purpose = self
+            .pending_chart_changeset
+            .as_ref()
+            .filter(|pending| pending.needs_manual_merge())
+            .map(PendingChartChangeset::purpose);
+        if let Some(purpose) = merge_purpose
+            && self.chart_merge_target_has_focus()
+        {
+            self.next_chart_save_purpose = purpose;
+            self.pending_chart_changeset = None;
+            self.dirty = true;
+            self.status =
+                "Manual merge edit recorded against refreshed canonical data; review the full draft before saving."
+                    .to_string();
+            return;
+        }
         self.dirty = true;
         self.status = "Unsaved changes.".to_string();
+    }
+
+    fn chart_changeset_input_is_frozen(&self) -> bool {
+        self.pending_chart_changeset
+            .as_ref()
+            .is_some_and(|pending| {
+                matches!(
+                    pending.review_state(),
+                    ChartChangesetReviewState::RetryableFailure { .. }
+                        | ChartChangesetReviewState::Conflict { .. }
+                        | ChartChangesetReviewState::Blocked { .. }
+                )
+            })
+    }
+
+    fn chart_changeset_needs_manual_merge(&self) -> bool {
+        self.pending_chart_changeset
+            .as_ref()
+            .is_some_and(PendingChartChangeset::needs_manual_merge)
+    }
+
+    fn chart_merge_target_has_focus(&self) -> bool {
+        let target = self
+            .pending_chart_changeset
+            .as_ref()
+            .and_then(PendingChartChangeset::merge_target);
+        match target {
+            Some(WorkspaceChartEntityKind::Client) => self.focus == WorkspaceFocus::Demographics,
+            Some(WorkspaceChartEntityKind::SafetyItem) => {
+                self.focus == WorkspaceFocus::Workflow && self.draft_safety.is_active()
+            }
+            Some(WorkspaceChartEntityKind::Encounter) => false,
+            Some(WorkspaceChartEntityKind::Note) => {
+                matches!(
+                    self.focus,
+                    WorkspaceFocus::NoteTitle | WorkspaceFocus::NoteBody
+                )
+            }
+            Some(WorkspaceChartEntityKind::Document) => {
+                self.focus == WorkspaceFocus::Workflow && self.draft_document.is_active()
+            }
+            Some(WorkspaceChartEntityKind::ArtifactDerivative) => {
+                self.focus == WorkspaceFocus::Workflow && self.derivative_draft.is_active()
+            }
+            Some(WorkspaceChartEntityKind::ContextClip) => {
+                self.focus == WorkspaceFocus::Workflow && self.clip_draft.is_active()
+            }
+            Some(WorkspaceChartEntityKind::Task) => {
+                self.focus == WorkspaceFocus::Workflow && self.draft_task.is_active()
+            }
+            None => false,
+        }
+    }
+
+    fn focus_chart_merge_target(&mut self, target: Option<WorkspaceChartEntityKind>) {
+        match target {
+            Some(WorkspaceChartEntityKind::Client) => self.focus = WorkspaceFocus::Demographics,
+            Some(WorkspaceChartEntityKind::SafetyItem) => {
+                self.focus = WorkspaceFocus::Workflow;
+                self.set_workflow_section(MedicalWorkflowSection::Safety);
+            }
+            Some(WorkspaceChartEntityKind::Encounter) => {
+                self.focus = WorkspaceFocus::Workflow;
+                self.set_workflow_section(MedicalWorkflowSection::Visit);
+            }
+            Some(WorkspaceChartEntityKind::Note) => self.focus = WorkspaceFocus::NoteBody,
+            Some(WorkspaceChartEntityKind::Document)
+            | Some(WorkspaceChartEntityKind::ArtifactDerivative)
+            | Some(WorkspaceChartEntityKind::ContextClip) => {
+                self.focus = WorkspaceFocus::Workflow;
+                self.set_workflow_section(MedicalWorkflowSection::Documents);
+            }
+            Some(WorkspaceChartEntityKind::Task) => {
+                self.focus = WorkspaceFocus::Workflow;
+                self.set_workflow_section(MedicalWorkflowSection::Jobs);
+            }
+            None => self.focus = WorkspaceFocus::Agent,
+        }
     }
 
     fn has_unsaved_addendum_draft(&self) -> bool {
@@ -10861,6 +11595,92 @@ impl WorkspaceDashboard {
             .render(inner, buf);
     }
 
+    fn render_medical_agent_changeset_summary(&self, area: Rect, buf: &mut Buffer) {
+        let block = pane_block("Agent Recommendation", false);
+        let inner = block.inner(area);
+        block.render(area, buf);
+        if inner.width == 0 || inner.height == 0 {
+            return;
+        }
+
+        let lines = if let Some(changeset) = self.pending_chart_changeset.as_ref() {
+            let (state_label, state_summary) = match changeset.review_state() {
+                ChartChangesetReviewState::Ready => ("READY", "ready for atomic save"),
+                ChartChangesetReviewState::RetryableFailure { summary } => {
+                    ("RETRY", summary.as_str())
+                }
+                ChartChangesetReviewState::Conflict { summary, .. } => {
+                    ("CONFLICT", summary.as_str())
+                }
+                ChartChangesetReviewState::MergeRequired { summary, .. } => {
+                    ("MERGE", summary.as_str())
+                }
+                ChartChangesetReviewState::Blocked { summary } => ("BLOCKED", summary.as_str()),
+            };
+            let action = match changeset.review_state() {
+                ChartChangesetReviewState::Ready => "Ctrl-S saves all changes atomically",
+                ChartChangesetReviewState::RetryableFailure { .. } => {
+                    "Ctrl-S retries the exact request; editing is frozen"
+                }
+                ChartChangesetReviewState::Conflict { .. } => {
+                    "Ctrl-S refreshes canonical data and preserves the draft"
+                }
+                ChartChangesetReviewState::MergeRequired { .. } => {
+                    "edit the conflicted draft before saving"
+                }
+                ChartChangesetReviewState::Blocked { .. } => {
+                    "Esc/Ctrl-W discards and closes; reopen loads canonical data"
+                }
+            };
+            vec![
+                workflow_header_line("Pending Chart Changeset", WorkflowTone::Review),
+                Line::from(format!(
+                    "  {state_label} · {}",
+                    compact_preview(state_summary, 62)
+                )),
+                Line::from(format!(
+                    "  Changes: {} · guard {}",
+                    changeset.included_entity_labels().join(", "),
+                    changeset
+                        .note_revision_guard()
+                        .map(|revision| format!("note r{revision}"))
+                        .unwrap_or_else(|| "opaque versions".to_string())
+                )),
+                workflow_action_hint_line(action),
+                Line::from("  Human draft remains in the chart center until commit success."),
+            ]
+        } else if let Some(proposal) = self.selected_pending_proposal() {
+            vec![
+                workflow_header_line("Pending Proposal Changeset", WorkflowTone::Review),
+                self.proposal_review_state_line(proposal),
+                Line::from(format!(
+                    "  Guard: note r{} · Reason: {}",
+                    proposal.base_revision,
+                    compact_preview(&proposal.summary, 46)
+                )),
+                Line::from(format!(
+                    "  Proposed: {}",
+                    compact_preview(&proposal.proposed_body, 68)
+                )),
+                workflow_action_hint_line(
+                    "Tab to Agent Work for full text · :proposal accept | :proposal decline",
+                ),
+            ]
+        } else if self.workflow_section == MedicalWorkflowSection::Proposals {
+            vec![
+                workflow_header_line("Note Proposals", WorkflowTone::Review),
+                Line::from("  No pending proposals for the active note."),
+                Line::from("  Agent output never changes the chart automatically."),
+            ]
+        } else {
+            self.agent_workpane_summary_lines()
+        };
+
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .render(inner, buf);
+    }
+
     fn agent_workpane_active_lines(&self) -> Vec<Line<'static>> {
         let mut lines = vec![
             Line::from(self.workflow_single_line_chart_context()),
@@ -10868,12 +11688,22 @@ impl WorkspaceDashboard {
             Line::from(""),
         ];
         lines.extend(match self.agent_rail_tab {
-            AgentRailTab::Pending => match self.workflow_section {
-                MedicalWorkflowSection::AgentRequest => self.agent_workpane_request_lines(),
-                MedicalWorkflowSection::ContextPacket => self.agent_workpane_handoff_lines(),
-                MedicalWorkflowSection::AgentInbox => self.agent_workpane_review_lines(),
-                _ => self.agent_workpane_summary_lines(),
-            },
+            AgentRailTab::Pending => {
+                if self.pending_chart_changeset.is_some() {
+                    self.agent_workpane_chart_changeset_lines()
+                } else if self.workflow_section == MedicalWorkflowSection::Proposals {
+                    self.agent_workpane_proposal_changeset_lines()
+                } else {
+                    match self.workflow_section {
+                        MedicalWorkflowSection::AgentRequest => self.agent_workpane_request_lines(),
+                        MedicalWorkflowSection::ContextPacket => {
+                            self.agent_workpane_handoff_lines()
+                        }
+                        MedicalWorkflowSection::AgentInbox => self.agent_workpane_review_lines(),
+                        _ => self.agent_workpane_summary_lines(),
+                    }
+                }
+            }
             AgentRailTab::History => self.agent_workpane_history_lines(),
             AgentRailTab::Audit => self.agent_workpane_audit_lines(),
         });
@@ -10901,6 +11731,195 @@ impl WorkspaceDashboard {
             tab(AgentRailTab::Audit),
             Span::styled("  ←/→", Style::default().fg(Color::DarkGray)),
         ])
+    }
+
+    fn agent_workpane_chart_changeset_lines(&self) -> Vec<Line<'static>> {
+        let Some(changeset) = self.pending_chart_changeset.as_ref() else {
+            return self.agent_workpane_summary_lines();
+        };
+        let labels = changeset.included_entity_labels();
+        let (state_label, state_color, state_summary) = match changeset.review_state() {
+            ChartChangesetReviewState::Ready => ("READY", Color::Green, "ready for atomic save"),
+            ChartChangesetReviewState::RetryableFailure { summary } => {
+                ("RETRY", Color::Yellow, summary.as_str())
+            }
+            ChartChangesetReviewState::Conflict { summary, .. } => {
+                ("CONFLICT", Color::Red, summary.as_str())
+            }
+            ChartChangesetReviewState::MergeRequired { summary, .. } => {
+                ("MERGE", Color::Yellow, summary.as_str())
+            }
+            ChartChangesetReviewState::Blocked { summary } => {
+                ("BLOCKED", Color::Red, summary.as_str())
+            }
+        };
+        let patient_mode = if changeset.params().client.is_some() {
+            "demographic snapshot included"
+        } else {
+            "identity only; demographics untouched"
+        };
+        let note_guard = changeset
+            .note_revision_guard()
+            .map(|revision| format!("note r{revision}"))
+            .unwrap_or_else(|| "no note revision guard".to_string());
+        let mut lines = vec![
+            workflow_header_line("Pending Chart Changeset", WorkflowTone::Review),
+            Line::from(vec![
+                Span::styled(
+                    format!("  {state_label}"),
+                    Style::default()
+                        .fg(state_color)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!(" · {}", compact_preview(state_summary, 48)),
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ]),
+            Line::from(format!("  Changes: {}", labels.join(", "))),
+            Line::from(format!("  Patient: {patient_mode}")),
+            Line::from(format!(
+                "  Guards: {} opaque version(s) · {note_guard}",
+                changeset.expected_guard_count()
+            )),
+            Line::from(format!(
+                "  Reason: {}",
+                compact_preview(&changeset.params().reason, 52)
+            )),
+            Line::from(format!(
+                "  Commit key: {}",
+                compact_preview(&changeset.params().idempotency_key, 28)
+            )),
+            Line::from(""),
+            workflow_action_hint_line(match changeset.review_state() {
+                ChartChangesetReviewState::RetryableFailure { .. } => {
+                    "Ctrl-S retries the exact request; editing is frozen"
+                }
+                ChartChangesetReviewState::Conflict { .. } => {
+                    "Ctrl-S refreshes canonical data and preserves the draft"
+                }
+                ChartChangesetReviewState::MergeRequired { .. } => {
+                    "edit the focused conflicted draft; Ctrl-S stays blocked"
+                }
+                ChartChangesetReviewState::Blocked { .. } => {
+                    "Esc/Ctrl-W discards and closes; reopen loads canonical data"
+                }
+                ChartChangesetReviewState::Ready => "Ctrl-S saves all listed changes atomically",
+            }),
+            Line::from(
+                "  Human draft stays in the center; canonical DB changes only after commit success.",
+            ),
+        ];
+        if changeset.needs_manual_merge()
+            && changeset.merge_target() == Some(WorkspaceChartEntityKind::Note)
+        {
+            let canonical_body = self
+                .draft_note
+                .id
+                .as_deref()
+                .and_then(|note_id| self.notes.iter().find(|note| note.id == note_id))
+                .map(|note| note.body.as_str())
+                .unwrap_or("(canonical note unavailable)");
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "  Refreshed canonical note:",
+                Style::default().add_modifier(Modifier::BOLD),
+            )));
+            lines.extend(
+                canonical_body
+                    .lines()
+                    .map(|line| Line::from(format!("    - {line}"))),
+            );
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "  Preserved human draft:",
+                Style::default().add_modifier(Modifier::BOLD),
+            )));
+            lines.extend(
+                self.draft_note
+                    .body
+                    .lines()
+                    .map(|line| Line::from(format!("    + {line}"))),
+            );
+        }
+        lines
+    }
+
+    fn agent_workpane_proposal_changeset_lines(&self) -> Vec<Line<'static>> {
+        let Some(proposal) = self.selected_pending_proposal() else {
+            return vec![
+                workflow_header_line("Note Proposals", WorkflowTone::Review),
+                Line::from("  No pending proposals for the active note."),
+                Line::from("  Agent output never changes the chart automatically."),
+            ];
+        };
+        let provenance = match (
+            proposal.source_thread_id.as_deref(),
+            proposal.source_turn_id.as_deref(),
+        ) {
+            (Some(thread), Some(turn)) => format!(
+                "thread {} · turn {}",
+                compact_preview(thread, 12),
+                compact_preview(turn, 12)
+            ),
+            (Some(thread), None) => format!("thread {}", compact_preview(thread, 18)),
+            (None, Some(turn)) => format!("turn {}", compact_preview(turn, 18)),
+            (None, None) => "not recorded".to_string(),
+        };
+        let mut lines = vec![
+            workflow_header_line("Pending Proposal Changeset", WorkflowTone::Review),
+            self.proposal_review_state_line(proposal),
+            Line::from(format!(
+                "  Change: replace note {} body",
+                compact_preview(&proposal.note_id, 14)
+            )),
+            Line::from(format!(
+                "  Guard: expected canonical note r{}",
+                proposal.base_revision
+            )),
+            Line::from("  Patient: identity only; demographics untouched"),
+            Line::from(format!("  Provenance: {provenance}")),
+            Line::from(format!(
+                "  Reason: {}",
+                compact_preview(&proposal.summary, 50)
+            )),
+            Line::from(""),
+            Line::from(Span::styled(
+                "  Full proposed replacement:",
+                Style::default().add_modifier(Modifier::BOLD),
+            )),
+        ];
+        if proposal.proposed_body.is_empty() {
+            lines.push(Line::from("    (empty)"));
+        } else {
+            lines.extend(
+                proposal
+                    .proposed_body
+                    .lines()
+                    .map(|line| Line::from(format!("    + {line}"))),
+            );
+        }
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "  Current canonical note:",
+            Style::default().add_modifier(Modifier::BOLD),
+        )));
+        if self.draft_note.body.is_empty() {
+            lines.push(Line::from("    (empty)"));
+        } else {
+            lines.extend(
+                self.draft_note
+                    .body
+                    .lines()
+                    .map(|line| Line::from(format!("    - {line}"))),
+            );
+        }
+        lines.extend([
+            Line::from(""),
+            workflow_action_hint_line(":proposal accept | :proposal decline"),
+            Line::from("  Acceptance is explicit; no agent output auto-applies."),
+        ]);
+        lines
     }
 
     fn agent_workpane_history_lines(&self) -> Vec<Line<'static>> {
@@ -14049,6 +15068,113 @@ impl WorkspaceDashboard {
         }
         let visible_row = visual_row - scroll;
         (visible_row < body_height).then_some(context_height.saturating_add(visible_row))
+    }
+}
+
+fn workspace_chart_expected_versions_is_empty(versions: &WorkspaceChartExpectedVersions) -> bool {
+    versions.client.is_none()
+        && versions.safety_item.is_none()
+        && versions.encounter.is_none()
+        && versions.document.is_none()
+        && versions.artifact_derivative.is_none()
+        && versions.context_clip.is_none()
+        && versions.task.is_none()
+}
+
+fn replace_or_push_by_id<T, F>(values: &mut Vec<T>, value: T, id: F) -> usize
+where
+    F: for<'a> Fn(&'a T) -> &'a str,
+{
+    let value_id = id(&value).to_string();
+    if let Some(index) = values.iter().position(|current| id(current) == value_id) {
+        values[index] = value;
+        index
+    } else {
+        values.push(value);
+        values.len() - 1
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ChartCommitFailure {
+    Stale {
+        summary: String,
+        target: WorkspaceChartEntityKind,
+    },
+    Validation {
+        message: String,
+    },
+    IdempotencyConflict {
+        summary: String,
+    },
+}
+
+fn chart_commit_failure_from_error(error: &color_eyre::eyre::Report) -> Option<ChartCommitFailure> {
+    let typed = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<TypedRequestError>())?;
+    chart_commit_failure_from_typed_error(typed)
+}
+
+fn chart_commit_failure_from_typed_error(typed: &TypedRequestError) -> Option<ChartCommitFailure> {
+    let TypedRequestError::Server { method, source } = typed else {
+        return None;
+    };
+    if method != "workspace/chart/commit" {
+        return None;
+    }
+    let data = source.data.clone()?;
+    let error_data = serde_json::from_value::<WorkspaceChartCommitErrorData>(data).ok()?;
+    match error_data {
+        WorkspaceChartCommitErrorData::StaleNoteRevision {
+            note_id,
+            expected_revision,
+            actual_revision,
+        } => Some(ChartCommitFailure::Stale {
+            summary: format!(
+                "note {} changed from r{} to r{}; refresh before reconciling",
+                compact_preview(&note_id, 12),
+                expected_revision,
+                actual_revision
+            ),
+            target: WorkspaceChartEntityKind::Note,
+        }),
+        WorkspaceChartCommitErrorData::StaleEntityVersion {
+            entity_kind,
+            entity_id,
+            ..
+        } => Some(ChartCommitFailure::Stale {
+            summary: format!(
+                "{} {} changed; refresh before reconciling",
+                workspace_chart_entity_kind_label(entity_kind),
+                compact_preview(&entity_id, 12)
+            ),
+            target: entity_kind,
+        }),
+        WorkspaceChartCommitErrorData::IdempotencyConflict { idempotency_key } => {
+            Some(ChartCommitFailure::IdempotencyConflict {
+                summary: format!(
+                    "commit key {} was reused with different content",
+                    compact_preview(&idempotency_key, 20)
+                ),
+            })
+        }
+        WorkspaceChartCommitErrorData::Validation => Some(ChartCommitFailure::Validation {
+            message: source.message.clone(),
+        }),
+    }
+}
+
+fn workspace_chart_entity_kind_label(kind: WorkspaceChartEntityKind) -> &'static str {
+    match kind {
+        WorkspaceChartEntityKind::Client => "patient",
+        WorkspaceChartEntityKind::SafetyItem => "clinical safety item",
+        WorkspaceChartEntityKind::Encounter => "encounter",
+        WorkspaceChartEntityKind::Note => "note",
+        WorkspaceChartEntityKind::Document => "document",
+        WorkspaceChartEntityKind::ArtifactDerivative => "reviewed text",
+        WorkspaceChartEntityKind::ContextClip => "context clip",
+        WorkspaceChartEntityKind::Task => "job",
     }
 }
 
@@ -19123,7 +20249,7 @@ mod tests {
                 ":workflow proposals",
                 MedicalWorkflowSection::Proposals,
                 WorkspaceFocus::Workflow,
-                "> Note Proposals",
+                "Note Proposals",
             ),
             (
                 ":workflow documents",
@@ -22443,6 +23569,517 @@ mod tests {
     }
 
     #[test]
+    fn agent_workpane_keeps_the_full_proposed_replacement_scrollable() {
+        let sentinel = "FINAL-SENTINEL-MUST-REMAIN-VISIBLE";
+        let proposed_body = format!("{}\n{sentinel}", "Proposed detail. ".repeat(12));
+        let dashboard = WorkspaceDashboard {
+            workflow_section: MedicalWorkflowSection::Proposals,
+            draft_note: NoteDraft {
+                id: Some("note-1".to_string()),
+                body: "Canonical note body.".to_string(),
+                current_revision: 3,
+                ..NoteDraft::default()
+            },
+            proposals: vec![test_proposal("proposal-1", "note-1", 3, &proposed_body)],
+            ..medical_recursive_base_dashboard()
+        };
+
+        let rendered = dashboard
+            .agent_workpane_proposal_changeset_lines()
+            .iter()
+            .map(line_plain_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains(sentinel));
+        assert!(rendered.contains("Full proposed replacement:"));
+        assert!(rendered.contains("Current canonical note:"));
+    }
+
+    #[test]
+    fn chart_changeset_builder_keeps_patient_identity_only_and_guards_note_revision() {
+        let client = test_client("client-1", "Jordan Patient");
+        let note = test_note("note-1", "Visit note", "daily", "draft", 1);
+        let encounter = test_encounter("encounter-1", "client-1", "Visit note");
+        let mut dashboard = WorkspaceDashboard {
+            clients: vec![client.clone()],
+            encounters: vec![encounter],
+            notes: vec![note.clone()],
+            draft_client: ClientDraft::from_client(&client),
+            draft_note: NoteDraft::from_note(&note),
+            ..WorkspaceDashboard::new(WorkspaceProfile::Medical)
+        };
+        dashboard.draft_note.body = "Clinician-reviewed replacement.".to_string();
+        dashboard.mark_dirty();
+
+        let params = dashboard
+            .build_chart_changeset_params()
+            .expect("changeset should build")
+            .expect("note edit should create a changeset");
+
+        assert_eq!(params.client_id.as_deref(), Some("client-1"));
+        assert!(params.client.is_none());
+        assert!(params.encounter.is_none());
+        assert_eq!(
+            params
+                .note
+                .as_ref()
+                .and_then(|note| note.expected_base_revision),
+            Some(1)
+        );
+        assert_eq!(
+            params.note.as_ref().map(|note| note.upsert.body.as_str()),
+            Some("Clinician-reviewed replacement.")
+        );
+        assert!(params.expected_versions.is_none());
+    }
+
+    #[test]
+    fn chart_commit_typed_failures_keep_stale_validation_and_idempotency_distinct() {
+        let server_error =
+            |method: &str, message: &str, data: serde_json::Value| TypedRequestError::Server {
+                method: method.to_string(),
+                source: codex_app_server_protocol::JSONRPCErrorError {
+                    code: -32602,
+                    message: message.to_string(),
+                    data: Some(data),
+                },
+            };
+
+        let stale = server_error(
+            "workspace/chart/commit",
+            "stale note",
+            json!({
+                "kind": "staleNoteRevision",
+                "noteId": "note-1",
+                "expectedRevision": 3,
+                "actualRevision": 4
+            }),
+        );
+        assert!(matches!(
+            chart_commit_failure_from_typed_error(&stale),
+            Some(ChartCommitFailure::Stale {
+                target: WorkspaceChartEntityKind::Note,
+                ..
+            })
+        ));
+
+        let validation = server_error(
+            "workspace/chart/commit",
+            "document local path must not be empty",
+            json!({ "kind": "validation" }),
+        );
+        assert_eq!(
+            chart_commit_failure_from_typed_error(&validation),
+            Some(ChartCommitFailure::Validation {
+                message: "document local path must not be empty".to_string(),
+            })
+        );
+
+        let idempotency = server_error(
+            "workspace/chart/commit",
+            "idempotency conflict",
+            json!({
+                "kind": "idempotencyConflict",
+                "idempotencyKey": "stable-key"
+            }),
+        );
+        assert!(matches!(
+            chart_commit_failure_from_typed_error(&idempotency),
+            Some(ChartCommitFailure::IdempotencyConflict { .. })
+        ));
+
+        let malformed = server_error(
+            "workspace/chart/commit",
+            "malformed",
+            json!({ "kind": "unknown" }),
+        );
+        assert_eq!(chart_commit_failure_from_typed_error(&malformed), None);
+        let wrong_method = server_error(
+            "workspace/note/upsert",
+            "stale note",
+            json!({
+                "kind": "staleNoteRevision",
+                "noteId": "note-1",
+                "expectedRevision": 3,
+                "actualRevision": 4
+            }),
+        );
+        assert_eq!(chart_commit_failure_from_typed_error(&wrong_method), None);
+    }
+
+    #[test]
+    fn chart_changeset_builder_includes_demographics_only_when_changed_with_version() {
+        let client = test_client("client-1", "Jordan Patient");
+        let note = test_note("note-1", "Visit note", "daily", "draft", 1);
+        let mut dashboard = WorkspaceDashboard {
+            clients: vec![client.clone()],
+            notes: vec![note.clone()],
+            draft_client: ClientDraft::from_client(&client),
+            draft_note: NoteDraft::from_note(&note),
+            ..WorkspaceDashboard::new(WorkspaceProfile::Medical)
+        };
+        dashboard.draft_client.summary = "Updated by clinician.".to_string();
+        dashboard.mark_dirty();
+
+        let params = dashboard
+            .build_chart_changeset_params()
+            .expect("changeset should build")
+            .expect("demographic edit should create a changeset");
+
+        assert_eq!(params.client_id.as_deref(), Some("client-1"));
+        assert_eq!(
+            params.client.as_ref().map(|client| client.summary.as_str()),
+            Some("Updated by clinician.")
+        );
+        assert_eq!(
+            params
+                .expected_versions
+                .as_ref()
+                .and_then(|versions| versions.client.as_deref()),
+            Some("version-client-1")
+        );
+        assert!(params.note.is_none());
+    }
+
+    #[test]
+    fn chart_changeset_builder_keeps_new_ids_and_links_open_for_server_allocation() {
+        let client = test_client("client-1", "Jordan Patient");
+        let mut dashboard = WorkspaceDashboard {
+            clients: vec![client.clone()],
+            draft_client: ClientDraft::from_client(&client),
+            ..WorkspaceDashboard::new(WorkspaceProfile::Medical)
+        };
+        dashboard.draft_note.title = "New daily note".to_string();
+        dashboard.draft_note.body = "Human draft.".to_string();
+        dashboard.draft_document = DocumentDraft::start_new();
+        dashboard.draft_document.title = "New referral".to_string();
+        dashboard.draft_document.local_path = "/tmp/new-referral.pdf".to_string();
+        dashboard.derivative_draft = DerivativeDraft::start_new(
+            String::new(),
+            "human annotation".to_string(),
+            "Reviewed referral".to_string(),
+        );
+        dashboard.derivative_draft.body = "Reviewed text.".to_string();
+        dashboard.clip_draft.active = true;
+        dashboard.clip_draft.title = "Selected excerpt".to_string();
+        dashboard.clip_draft.body = "Excerpt.".to_string();
+        dashboard.dirty = true;
+
+        let params = dashboard
+            .build_chart_changeset_params()
+            .expect("changeset should build")
+            .expect("new chart records should create a changeset");
+
+        assert!(
+            params
+                .encounter
+                .as_ref()
+                .is_some_and(|encounter| encounter.id.is_none())
+        );
+        assert!(
+            params
+                .note
+                .as_ref()
+                .is_some_and(|note| note.upsert.id.is_none())
+        );
+        assert!(
+            params
+                .document
+                .as_ref()
+                .is_some_and(|document| document.id.is_none())
+        );
+        assert!(
+            params
+                .artifact_derivative
+                .as_ref()
+                .is_some_and(|derivative| {
+                    derivative.id.is_none() && derivative.document_id.is_empty()
+                })
+        );
+        assert!(params.context_clip.as_ref().is_some_and(|clip| {
+            clip.id.is_none() && clip.derivative_id.is_empty() && clip.document_id.is_empty()
+        }));
+        assert!(params.expected_versions.is_none());
+    }
+
+    #[test]
+    fn explicit_reviewed_text_and_clip_saves_preserve_agent_inclusion_purpose() {
+        let client = test_client("client-1", "Jordan Patient");
+        let document = test_document("document-1", "Referral", "pdf");
+        let mut dashboard = WorkspaceDashboard {
+            clients: vec![client.clone()],
+            documents: vec![document.clone()],
+            draft_client: ClientDraft::from_client(&client),
+            ..WorkspaceDashboard::new(WorkspaceProfile::Medical)
+        };
+        dashboard.derivative_draft = DerivativeDraft::start_new(
+            document.id.clone(),
+            "human annotation".to_string(),
+            "Reviewed referral".to_string(),
+        );
+        dashboard.derivative_draft.body = "Clinician-reviewed text.".to_string();
+
+        assert_eq!(
+            dashboard.request_derivative_save(),
+            WorkspaceDashboardAction::Save
+        );
+        assert_eq!(
+            dashboard.next_chart_save_purpose,
+            ChartChangesetPurpose::SaveDerivative
+        );
+
+        let derivative = test_derivative(
+            "derivative-1",
+            &document.id,
+            "human annotation",
+            "Reviewed referral",
+            "Clinician-reviewed text.",
+            "reviewed",
+        );
+        dashboard.clip_draft = ClipDraft::start_new(&derivative);
+        dashboard.clip_draft.body = "Selected excerpt.".to_string();
+        assert_eq!(
+            dashboard.request_clip_save(),
+            WorkspaceDashboardAction::Save
+        );
+        assert_eq!(
+            dashboard.next_chart_save_purpose,
+            ChartChangesetPurpose::SaveClip
+        );
+    }
+
+    #[test]
+    fn retryable_chart_changeset_freezes_edits_and_reuses_exact_request() {
+        let client = test_client("client-1", "Jordan Patient");
+        let note = test_note("note-1", "Visit note", "daily", "draft", 1);
+        let mut dashboard = WorkspaceDashboard {
+            clients: vec![client.clone()],
+            notes: vec![note.clone()],
+            draft_client: ClientDraft::from_client(&client),
+            draft_note: NoteDraft::from_note(&note),
+            focus: WorkspaceFocus::NoteBody,
+            ..WorkspaceDashboard::new(WorkspaceProfile::Medical)
+        };
+        dashboard.draft_note.body.push_str(" pending edit");
+        let params = dashboard
+            .build_chart_changeset_params()
+            .expect("changeset should build")
+            .expect("note edit should create a changeset");
+        let mut pending = PendingChartChangeset::new_for_tests(params, "stable-retry-key");
+        let exact_request = pending.request();
+        pending.mark_retryable_failure("transport outcome unknown");
+        dashboard.pending_chart_changeset = Some(pending);
+        let body_before = dashboard.draft_note.body.clone();
+
+        assert_eq!(
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Char('x'))),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert_eq!(dashboard.draft_note.body, body_before);
+        assert_eq!(
+            dashboard.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL,)),
+            WorkspaceDashboardAction::Save
+        );
+        assert_eq!(
+            dashboard
+                .pending_chart_changeset
+                .as_ref()
+                .expect("pending request retained")
+                .request(),
+            exact_request
+        );
+    }
+
+    #[test]
+    fn conflict_refresh_updates_note_baseline_and_preserves_human_body() {
+        let client = test_client("client-1", "Jordan Patient");
+        let mut original_note = test_note("note-1", "Visit note", "daily", "pending", 1);
+        original_note.current_revision = 3;
+        let mut dashboard = WorkspaceDashboard {
+            clients: vec![client.clone()],
+            encounters: vec![test_encounter(
+                "encounter-1",
+                "client-1",
+                "Original encounter",
+            )],
+            notes: vec![original_note.clone()],
+            draft_client: ClientDraft::from_client(&client),
+            draft_note: NoteDraft::from_note(&original_note),
+            ..WorkspaceDashboard::new(WorkspaceProfile::Medical)
+        };
+        dashboard.draft_note.body = "Human draft remains under review.".to_string();
+        let pending_params = dashboard
+            .build_chart_changeset_params()
+            .expect("changeset should build")
+            .expect("human draft should create a changeset");
+        let drafts = ChartDraftSnapshot::capture(&dashboard);
+
+        let mut refreshed_note = original_note;
+        refreshed_note.body = "Canonical body changed elsewhere.".to_string();
+        refreshed_note.status = "draft".to_string();
+        refreshed_note.current_revision = 4;
+        refreshed_note.encounter_id = Some("encounter-2".to_string());
+        dashboard.notes = vec![refreshed_note.clone()];
+        dashboard.encounters = vec![test_encounter(
+            "encounter-2",
+            "client-1",
+            "Refreshed encounter",
+        )];
+        dashboard.draft_note = NoteDraft::from_note(&refreshed_note);
+
+        drafts.restore_after_conflict_refresh(&mut dashboard);
+        let mut pending = PendingChartChangeset::new_for_tests(pending_params, "stable-merge-key");
+        pending.mark_conflict(
+            "note note-1 changed from r3 to r4",
+            Some(WorkspaceChartEntityKind::Note),
+        );
+        pending.mark_canonical_refreshed();
+        dashboard.pending_chart_changeset = Some(pending);
+        dashboard.focus = WorkspaceFocus::NoteBody;
+
+        assert_eq!(
+            dashboard.draft_note.body,
+            "Human draft remains under review."
+        );
+        assert_eq!(dashboard.draft_note.current_revision, 4);
+        assert_eq!(dashboard.draft_note.status, "draft");
+        assert_eq!(
+            dashboard.draft_note.encounter_id.as_deref(),
+            Some("encounter-2")
+        );
+        assert_eq!(
+            dashboard.active_encounter_id().as_deref(),
+            Some("encounter-2")
+        );
+        assert!(
+            dashboard
+                .pending_chart_changeset
+                .as_ref()
+                .is_some_and(PendingChartChangeset::needs_manual_merge)
+        );
+        assert_eq!(
+            dashboard.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL,)),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert!(
+            dashboard
+                .pending_chart_changeset
+                .as_ref()
+                .is_some_and(PendingChartChangeset::needs_manual_merge)
+        );
+        dashboard.handle_key_event(KeyEvent::from(KeyCode::Char('x')));
+        assert_eq!(
+            dashboard.draft_note.body,
+            "Human draft remains under review.x"
+        );
+        assert!(dashboard.pending_chart_changeset.is_none());
+        let params = dashboard
+            .build_chart_changeset_params()
+            .expect("refreshed draft should build")
+            .expect("preserved body should remain a proposed chart change");
+        assert_eq!(
+            params
+                .note
+                .as_ref()
+                .and_then(|note| note.expected_base_revision),
+            Some(4)
+        );
+    }
+
+    #[test]
+    fn refreshed_non_note_conflict_is_frozen_until_explicit_discard_and_reopen() {
+        let client = test_client("client-1", "Jordan Patient");
+        let mut dashboard = WorkspaceDashboard {
+            clients: vec![client.clone()],
+            draft_client: ClientDraft::from_client(&client),
+            focus: WorkspaceFocus::Demographics,
+            ..WorkspaceDashboard::new(WorkspaceProfile::Medical)
+        };
+        dashboard.draft_client.summary = "Preserved stale clinician draft.".to_string();
+        let params = dashboard
+            .build_chart_changeset_params()
+            .expect("changeset should build")
+            .expect("demographics edit should create a changeset");
+        let mut pending = PendingChartChangeset::new_for_tests(params, "stable-discard-key");
+        pending.mark_conflict(
+            "patient client-1 changed elsewhere",
+            Some(WorkspaceChartEntityKind::Client),
+        );
+        pending.mark_canonical_refreshed();
+        dashboard.pending_chart_changeset = Some(pending);
+        let display_name_before = dashboard.draft_client.display_name.clone();
+        let summary_before = dashboard.draft_client.summary.clone();
+
+        assert_eq!(
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Char('x'))),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert_eq!(dashboard.draft_client.display_name, display_name_before);
+        assert_eq!(dashboard.draft_client.summary, summary_before);
+        assert!(matches!(
+            dashboard
+                .pending_chart_changeset
+                .as_ref()
+                .map(PendingChartChangeset::review_state),
+            Some(ChartChangesetReviewState::Blocked { .. })
+        ));
+
+        dashboard.focus = WorkspaceFocus::Agent;
+        insta::assert_snapshot!(
+            "medical_workspace_chart_changeset_discard_required_160x40",
+            render_dashboard_lines_at(&dashboard, 160, 40)
+        );
+        assert_eq!(
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Esc)),
+            WorkspaceDashboardAction::CloseAndDiscard
+        );
+    }
+
+    #[test]
+    fn chart_changeset_conflict_keeps_human_draft_in_center_until_reload() {
+        let client = test_client("client-1", "Jordan Patient");
+        let mut note = test_note("note-1", "Visit note", "daily", "draft", 3);
+        note.current_revision = 3;
+        let mut dashboard = WorkspaceDashboard {
+            clients: vec![client.clone()],
+            notes: vec![note.clone()],
+            draft_client: ClientDraft::from_client(&client),
+            draft_note: NoteDraft::from_note(&note),
+            focus: WorkspaceFocus::Agent,
+            status: "Canonical chart changed; draft preserved.".to_string(),
+            ..WorkspaceDashboard::new(WorkspaceProfile::Medical)
+        };
+        dashboard.draft_note.body = "Unsaved clinician draft.".to_string();
+        let params = dashboard
+            .build_chart_changeset_params()
+            .expect("changeset should build")
+            .expect("note edit should create a changeset");
+        let mut pending = PendingChartChangeset::new_for_tests(params, "stable-conflict-key");
+        pending.mark_conflict(
+            "note note-1 changed from r3 to r4; refresh before reconciling",
+            Some(WorkspaceChartEntityKind::Note),
+        );
+        dashboard.pending_chart_changeset = Some(pending);
+
+        insta::assert_snapshot!(
+            "medical_workspace_chart_changeset_conflict_160x40",
+            render_dashboard_lines_at(&dashboard, 160, 40)
+        );
+
+        dashboard.focus = WorkspaceFocus::NoteBody;
+        dashboard.handle_key_event(KeyEvent::from(KeyCode::Char('x')));
+        assert_eq!(dashboard.draft_note.body, "Unsaved clinician draft.");
+        assert!(matches!(
+            dashboard
+                .pending_chart_changeset
+                .as_ref()
+                .map(PendingChartChangeset::review_state),
+            Some(ChartChangesetReviewState::Conflict { .. })
+        ));
+    }
+
+    #[test]
     fn medical_command_palette_render_snapshots() {
         let mut dashboard = WorkspaceDashboard {
             focus: WorkspaceFocus::Clients,
@@ -22668,13 +24305,12 @@ mod tests {
         dashboard.execute_workspace_command(":workflow proposals");
 
         let rendered = render_dashboard_lines_at(&dashboard, 160, 45);
-        assert!(rendered.contains("Note Proposals"));
-        assert!(rendered.contains("1 pending proposals"));
-        assert!(rendered.contains("Current chart · r3"));
-        assert!(rendered.contains("Proposed edit · from r3"));
+        assert!(rendered.contains("Pending Proposal Changeset"));
+        assert!(rendered.contains("Guard: expected canonical note r3"));
         assert!(rendered.contains("READY"));
         assert!(rendered.contains("tighten wording"));
         assert!(rendered.contains("Proposed body"));
+        assert!(rendered.contains("Human body"));
 
         assert_eq!(
             dashboard.execute_workspace_command(":proposal accept"),
@@ -22842,14 +24478,17 @@ mod tests {
         };
         let ready_render = render_dashboard_lines_at(&ready, 160, 40);
         assert!(ready_render.contains("READY"));
-        assert!(ready_render.contains("Current chart · r3"));
-        assert!(ready_render.contains("Proposed edit · from r3"));
+        assert!(ready_render.contains("Pending Proposal Changeset"));
+        assert!(ready_render.contains("Guard: expected canonical note r3"));
+        assert!(ready_render.contains("Proposed agent text"));
+        assert!(ready_render.contains("Current clinician text"));
 
         let mut stale = ready.clone();
         stale.proposals[0].base_revision = 2;
         let stale_render = render_dashboard_lines_at(&stale, 160, 40);
         assert!(stale_render.contains("STALE"));
-        assert!(stale_render.contains("current pane is live r3"));
+        assert!(stale_render.contains("current pane is live"));
+        assert!(stale_render.contains("r3; proposal was"));
         assert!(stale_render.contains("prepared from r2"));
         assert!(!stale_render.contains("Current historical base"));
 

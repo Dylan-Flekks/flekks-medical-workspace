@@ -4,8 +4,8 @@ The project is intentionally public before it is finished so contributors can he
 
 ## P0: correctness
 
-- [Make saves change-scoped, prevalidated, and atomic](https://github.com/Dylan-Flekks/flekks-medical-workspace/issues/4).
-- Add optimistic note revision checks and immutable patient ownership ([#5](https://github.com/Dylan-Flekks/flekks-medical-workspace/issues/5)).
+- [Make saves change-scoped, prevalidated, and atomic](https://github.com/Dylan-Flekks/flekks-medical-workspace/issues/4). Implemented for one patient-rooted chart changeset; atomic multi-document batch intake remains.
+- Add optimistic note revision checks and immutable patient ownership ([#5](https://github.com/Dylan-Flekks/flekks-medical-workspace/issues/5)). Implemented for atomic chart changesets and proposal acceptance.
 - Bind every request, run, result, and proposal to patient, note, and base revision ([#5](https://github.com/Dylan-Flekks/flekks-medical-workspace/issues/5)).
 - Fix responsive render/cursor/mouse geometry and unsafe implicit actions ([#11](https://github.com/Dylan-Flekks/flekks-medical-workspace/issues/11)).
 

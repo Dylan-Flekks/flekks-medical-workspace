@@ -5,32 +5,32 @@ expression: "render_dashboard_lines_at(&dashboard, width, height)"
 Medical Workspace
 Patient: Jordan Patient  DOB: blank  MRN: blank  Contact: Missing contact  Coverage: Missing coverage  Encounter: No
  EXPLORER                      PATIENT CHART
-┌Patient Directory───────────┐┌Patient Chart───────────────────────────────────────────────────────────────────────────┐
-│Local search: /             ││Current vs Proposed · Note Proposals · 1 pending proposals                              │
-│0 active patients; local    ││Review state: READY · proposal base matches current r3                                  │
-│only                        ││Summary: tighten wording                                                                │
-│No saved patients yet.      ││┌Current chart · r3────────────────────────┐┌Proposed edit · from r3───────────────────┐│
-│New patient: :patient new   │││-  1 Assessment: improving gait tolerance.││+  1 Assessment: gait tolerance improved  ││
-│                            │││-  2 Plan: continue current program.      ││with cueing.                              ││
-│                            │││                                          ││+  2 Plan: progress walking intervals next││
-│                            │││                                          ││visit.                                    ││
-└────────────────────────────┘││                                          ││                                          ││
-┌Patient Notes───────────────┐││                                          ││                                          ││
-│Patient Notes               │││                                          ││                                          ││
-│  New note                  │││                                          ││                                          ││
-│  No patient notes yet. Use │││                                          ││                                          ││
-│:note new.                  │││                                          ││                                          ││
-│  Medical, communication,   │││                                          ││                                          ││
-│and admin notes appear here.│││                                          ││                                          ││
-└────────────────────────────┘││                                          ││                                          ││
-┌Uploaded Documents──────────┐││                                          ││                                          ││
-│Uploaded Documents          │││                                          ││                                          ││
-│No files yet                │││                                          ││                                          ││
-│Paste/drop JPG/PDF. S...    │││                                          ││                                          ││
-│                            │││                                          ││                                          ││
-│                            │││                                          ││                                          ││
-│                            │││                                          ││                                          ││
-│                            ││└──────────────────────────────────────────┘└──────────────────────────────────────────┘│
-│                            ││:proposal accept | :proposal decline | :proposal next  · read-only comparison           │
+┌Patient Directory───────────┐┌Patient Demographics────────────────────────────────────────────────────────────────────┐
+│Local search: /             ││Display: Jordan Patient                                                                 │
+│0 active patients; local    ││Preferred:                                                                              │
+│only                        ││DOB:                                                                                    │
+│No saved patients yet.      ││Sex/Gender:                                                                             │
+│New patient: :patient new   ││Patient ID / MRN:                                                                       │
+│                            ││Chart start: 2026-01-01                                                                 │
+│                            ││Chart end: 2026-06-09                                                                   │
+│                            │└────────────────────────────────────────────────────────────────────────────────────────┘
+└────────────────────────────┘┌Note Title──────────────────────────────────────────────────────────────────────────────┐
+┌Patient Notes───────────────┐│Visit note                                                                              │
+│Patient Notes               │└────────────────────────────────────────────────────────────────────────────────────────┘
+│  New note                  │┌Note Body───────────────────────────────────────────────────────────────────────────────┐
+│  No patient notes yet. Use ││Assessment: improving gait tolerance.                                                   │
+│:note new.                  ││Plan: continue current program.                                                         │
+│  Medical, communication,   ││                                                                                        │
+│and admin notes appear here.││                                                                                        │
+└────────────────────────────┘│                                                                                        │
+┌Uploaded Documents──────────┐│                                                                                        │
+│Uploaded Documents          ││                                                                                        │
+│No files yet                │└────────────────────────────────────────────────────────────────────────────────────────┘
+│Paste/drop JPG/PDF. S...    │┌Agent Recommendation────────────────────────────────────────────────────────────────────┐
+│                            ││Pending Proposal Changeset                                                              │
+│                            ││Review state: READY · proposal base matches current r3                                  │
+│                            ││  Guard: note r3 · Reason: tighten wording                                              │
+│                            ││  Proposed: Assessment: gait tolerance improved with cueing. Plan: progress w...        │
+│                            ││  ● Tab to Agent Work for full text · :proposal accept | :proposal decline              │
 └────────────────────────────┘└────────────────────────────────────────────────────────────────────────────────────────┘
 Focus: Center | Mode: Read-only chart | Next: Accept proposal | Status: Reviewing returned-work proposal.

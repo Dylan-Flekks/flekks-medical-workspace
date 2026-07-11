@@ -31,6 +31,8 @@ The TUI prepares and submits the packet, starts the durable run, and opens the a
 
 If the canonical note has changed since the packet's base revision, the proposal is stale. It may be compared or regenerated, but it must not be applied automatically.
 
+Proposal decisions update the note, proposal status, append-only decision, and audit event in one serialized transaction. Exact same-decision retries converge on the stored outcome; opposite or altered retries fail closed. General human chart edits use a separate patient-rooted atomic changeset with durable idempotency receipts and optimistic version guards. After a stale note-only conflict, refreshed canonical data and the preserved human draft remain separate until the clinician makes an explicit merge edit. Stale non-note or multi-entity drafts cannot be rebased blindly; they remain frozen until the clinician explicitly discards them and reloads canonical data.
+
 ## Non-goals
 
 - Persisting hidden model chain-of-thought.

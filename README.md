@@ -32,6 +32,7 @@ See [Agent proposal workflow](docs/agent-proposal-workflow.md) and [Architecture
 - Note revision history, local note locking, addenda, and stale-proposal checks.
 - Explicit packet selection for multimodal file metadata and human-reviewed excerpts.
 - Durable prepared packets, idempotent agent runs, immutable packet-source snapshots, review-pending results, revision-bound proposals, and append-only clinician decisions.
+- Patient-rooted atomic chart changesets with optimistic note revisions, opaque entity-version guards, durable idempotency receipts, exact-request retry, explicit note-only reconciliation, and fail-closed discard/reload for broader stale drafts.
 - A model-visible `workspace_context_read` tool restricted to a running packet ID and explicitly authorized visit-history or progress-note categories; returned note bodies are byte-bounded and local-path tokens are redacted before immutable snapshot hashing.
 - Automatic packet-id/hash turn binding and review-pending capture of the final agent answer with thread/turn provenance.
 - A responsive three-zone Explorer / Patient Chart / Agent Work layout with Pending, History, and Audit views.
@@ -69,7 +70,7 @@ The repository is being opened early because the system needs help from Rust/TUI
 
 Known blockers include:
 
-- change-scoped and atomic chart saves;
+- atomic multi-document batch intake and durable restart recovery for an unresolved local changeset;
 - extension of the packet-authorized reader beyond visit history and progress notes;
 - partial per-change proposal review in both the app-server API and TUI; edited whole-proposal acceptance is state/API-ready;
 - startup reconciliation for a run abandoned by an abrupt process termination;

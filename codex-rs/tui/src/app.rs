@@ -1456,6 +1456,10 @@ See the Codex keymap documentation for supported actions and examples."
             WorkspaceDashboardAction::Close => {
                 self.hide_workspace_dashboard_and_leave_alt_screen(tui);
             }
+            WorkspaceDashboardAction::CloseAndDiscard => {
+                self.workspace_dashboard = None;
+                self.hide_workspace_dashboard_and_leave_alt_screen(tui);
+            }
             WorkspaceDashboardAction::EnsureEncounter => {
                 let result = if let Some(dashboard) = self.workspace_dashboard.as_mut() {
                     dashboard.ensure_current_encounter(app_server).await
@@ -1592,31 +1596,6 @@ See the Codex keymap documentation for supported actions and examples."
                     self.chat_widget.add_error_message(format!(
                         "Failed to save dropped workspace file reference: {err}"
                     ));
-                }
-            }
-            WorkspaceDashboardAction::SaveArtifactDerivative(params) => {
-                let result = if let Some(dashboard) = self.workspace_dashboard.as_mut() {
-                    dashboard
-                        .save_artifact_derivative(app_server, *params)
-                        .await
-                } else {
-                    Ok(())
-                };
-                if let Err(err) = result {
-                    self.chat_widget.add_error_message(format!(
-                        "Failed to save workspace artifact derivative: {err}"
-                    ));
-                }
-            }
-            WorkspaceDashboardAction::SaveContextClip(params) => {
-                let result = if let Some(dashboard) = self.workspace_dashboard.as_mut() {
-                    dashboard.save_context_clip(app_server, *params).await
-                } else {
-                    Ok(())
-                };
-                if let Err(err) = result {
-                    self.chat_widget
-                        .add_error_message(format!("Failed to save workspace context clip: {err}"));
                 }
             }
             WorkspaceDashboardAction::UpdateAgentResultStatus { result_id, status } => {

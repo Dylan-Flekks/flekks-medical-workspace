@@ -5,40 +5,40 @@ expression: "render_dashboard_lines_at(&dashboard, width, height)"
 Medical Workspace
 Patient: Jordan Patient  DOB: blank  MRN: blank  Contact: Missing contact  Coverage: Missing coverage  Encounter: No encounter
  EXPLORER                          PATIENT CHART                                                                   AGENT WORK
-┌Patient Directory───────────────┐┌Patient Chart─────────────────────────────────────────────────────────────────┐┌Agent Work──────────────────────────────────┐
-│Local search: /                 ││Current vs Proposed · Note Proposals · 1 pending proposals                    ││Patient Chart: Jordan...; Accept proposal   │
-│0 active patients; local only   ││Review state: READY · proposal base matches current r3                        ││[Pending]  History  Audit  ←/→              │
-│No saved patients yet.          ││Summary: tighten wording                                                      ││                                            │
-│New patient: :patient new       ││┌Current chart · r3───────────────────┐┌Proposed edit · from r3──────────────┐││Mode: > Input |   Packet |   Returned       │
-│                                │││-  1 Assessment: improving gait      ││+  1 Assessment: gait tolerance      │││  ● draft: No instructions drafted          │
-│                                │││tolerance.                           ││improved with cueing.                │││  ● context: 0 files | 0 text | 0 clips     │
-│                                │││-  2 Plan: continue current program. ││+  2 Plan: progress walking intervals│││  ● plan: not sent                          │
-│                                │││                                     ││next visit.                          │││  ● returned: none                          │
-│                                │││                                     ││                                     │││                                            │
-│                                │││                                     ││                                     │││  ● review: :agent preview, then Ctrl-G     │
-└────────────────────────────────┘││                                     ││                                     │││  No upload/OCR/payer action/auto-apply.    │
-┌Patient Notes───────────────────┐││                                     ││                                     │││                                            │
-│Patient Notes                   │││                                     ││                                     │││                                            │
-│  New note                      │││                                     ││                                     │││                                            │
-│  No patient notes yet. Use     │││                                     ││                                     │││                                            │
-│:note new.                      │││                                     ││                                     │││                                            │
-│  Medical, communication, and   │││                                     ││                                     │││                                            │
-│admin notes appear here.        │││                                     ││                                     │││                                            │
-│                                │││                                     ││                                     │││                                            │
-│                                │││                                     ││                                     │││                                            │
-└────────────────────────────────┘││                                     ││                                     │││                                            │
-┌Uploaded Documents──────────────┐││                                     ││                                     │││                                            │
-│Uploaded Documents              │││                                     ││                                     │││                                            │
-│No files yet                    │││                                     ││                                     │││                                            │
-│Paste/drop JPG/PDF. Space...    │││                                     ││                                     │││                                            │
-│                                │││                                     ││                                     │││                                            │
-│                                │││                                     ││                                     │││                                            │
-│                                │││                                     ││                                     │││                                            │
-│                                │││                                     ││                                     │││                                            │
-│                                │││                                     ││                                     │││                                            │
-│                                │││                                     ││                                     │││                                            │
-│                                │││                                     ││                                     │││                                            │
-│                                ││└─────────────────────────────────────┘└─────────────────────────────────────┘││                                            │
-│                                ││:proposal accept | :proposal decline | :proposal next  · read-only comparison ││                                            │
+┌Patient Directory───────────────┐┌Patient Demographics──────────────────────────────────────────────────────────┐┌Agent Work──────────────────────────────────┐
+│Local search: /                 ││Display: Jordan Patient                                                       ││Patient Chart: Jordan...; Accept proposal   │
+│0 active patients; local only   ││Preferred:                                                                    ││[Pending]  History  Audit  ←/→              │
+│No saved patients yet.          ││DOB:                                                                          ││                                            │
+│New patient: :patient new       ││Sex/Gender:                                                                   ││Pending Proposal Changeset                  │
+│                                ││Patient ID / MRN:                                                             ││Review state: READY · proposal base matches │
+│                                ││Chart start: 2026-01-01                                                       ││current r3                                  │
+│                                ││Chart end: 2026-06-09                                                         ││  Change: replace note note-1 body          │
+│                                ││Summary:                                                                      ││  Guard: expected canonical note r3         │
+│                                │└──────────────────────────────────────────────────────────────────────────────┘│  Patient: identity only; demographics      │
+│                                │┌Note Title────────────────────────────────────────────────────────────────────┐│untouched                                   │
+└────────────────────────────────┘│Visit note                                                                    ││  Provenance: thread thread-1 · turn turn-1 │
+┌Patient Notes───────────────────┐└──────────────────────────────────────────────────────────────────────────────┘│  Reason: tighten wording                   │
+│Patient Notes                   │┌Note Body─────────────────────────────────────────────────────────────────────┐│                                            │
+│  New note                      ││Assessment: improving gait tolerance.                                         ││  Full proposed replacement:                │
+│  No patient notes yet. Use     ││Plan: continue current program.                                               ││    + Assessment: gait tolerance improved   │
+│:note new.                      ││                                                                              ││with cueing.                                │
+│  Medical, communication, and   ││                                                                              ││    + Plan: progress walking intervals next │
+│admin notes appear here.        ││                                                                              ││visit.                                      │
+│                                ││                                                                              ││                                            │
+│                                ││                                                                              ││  Current canonical note:                   │
+└────────────────────────────────┘│                                                                              ││    - Assessment: improving gait tolerance. │
+┌Uploaded Documents──────────────┐│                                                                              ││    - Plan: continue current program.       │
+│Uploaded Documents              ││                                                                              ││                                            │
+│No files yet                    ││                                                                              ││  ● :proposal accept | :proposal decline    │
+│Paste/drop JPG/PDF. Space...    ││                                                                              ││  Acceptance is explicit; no agent output   │
+│                                ││                                                                              ││auto-applies.                               │
+│                                ││                                                                              ││                                            │
+│                                ││                                                                              ││                                            │
+│                                ││                                                                              ││                                            │
+│                                ││                                                                              ││                                            │
+│                                ││                                                                              ││                                            │
+│                                ││                                                                              ││                                            │
+│                                ││                                                                              ││                                            │
+│                                ││                                                                              ││                                            │
 └────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────┘└────────────────────────────────────────────┘
 Focus: Center | Mode: Read-only chart | Next: Accept proposal | Status: Reviewing returned-work proposal. | Page scroll  : command  Tab move  Esc close
