@@ -8,6 +8,7 @@ mod thread_metadata;
 mod workspace;
 mod workspace_agent;
 mod workspace_chart_commit;
+mod workspace_drafts;
 mod workspace_record_version;
 
 pub use agent_job::AgentJob;
@@ -102,6 +103,13 @@ pub use workspace_chart_commit::WorkspaceChartCommitResult;
 pub use workspace_chart_commit::WorkspaceChartEntityKind;
 pub use workspace_chart_commit::WorkspaceChartExpectedVersions;
 pub use workspace_chart_commit::WorkspaceChartNoteChange;
+pub use workspace_drafts::WorkspaceDraftCheckpoint;
+pub use workspace_drafts::WorkspaceDraftCheckpointCreate;
+pub use workspace_drafts::WorkspaceDraftCheckpointFilter;
+pub use workspace_drafts::WorkspaceDraftSession;
+pub use workspace_drafts::WorkspaceDraftSessionClose;
+pub use workspace_drafts::WorkspaceDraftSessionFilter;
+pub use workspace_drafts::WorkspaceDraftSessionTerminalStatus;
 
 pub(crate) use agent_job::AgentJobItemRow;
 pub(crate) use agent_job::AgentJobRow;
@@ -129,3 +137,5 @@ pub(crate) use workspace::legacy_client_admin_metadata_from_summary;
 pub(crate) use workspace_agent::WorkspaceAgentRunRow;
 pub(crate) use workspace_agent::WorkspaceAgentRunSourceRow;
 pub(crate) use workspace_agent::WorkspaceNoteProposalDecisionRow;
+pub(crate) use workspace_drafts::WorkspaceDraftCheckpointRow;
+pub(crate) use workspace_drafts::WorkspaceDraftSessionRow;
