@@ -131,6 +131,9 @@ pub struct WorkspaceDraftSessionClose {
     pub session_id: String,
     pub client_id: String,
     pub status: WorkspaceDraftSessionTerminalStatus,
+    pub expected_current_checkpoint_id: Option<String>,
+    pub expected_current_checkpoint_revision: Option<i64>,
+    pub expected_current_checkpoint_sha256: Option<String>,
     pub actor: String,
     pub reason: String,
 }

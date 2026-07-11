@@ -5,6 +5,7 @@ use codex_app_server_protocol::JSONRPCError;
 use codex_app_server_protocol::JSONRPCResponse;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::WorkspaceClientUpsertResponse;
+use codex_app_server_protocol::WorkspaceDraftCheckpoint;
 use codex_app_server_protocol::WorkspaceDraftCheckpointCreateResponse;
 use codex_app_server_protocol::WorkspaceDraftCheckpointListResponse;
 use codex_app_server_protocol::WorkspaceDraftSessionCloseResponse;
@@ -191,13 +192,7 @@ async fn workspace_drafts_close_and_validation_are_client_scoped() -> Result<()>
             .contains("belongs to client")
     );
 
-    let close_params = json!({
-        "sessionId": checkpoint.checkpoint.session_id,
-        "clientId": client_id,
-        "status": "discarded",
-        "actor": "Clinician Example",
-        "reason": "Dismiss recovered draft"
-    });
+    let close_params = close_params(&client_id, &checkpoint.checkpoint, "discarded");
     let discarded: WorkspaceDraftSessionCloseResponse = request(
         &mut server,
         "workspace/draft/session/close",
@@ -212,9 +207,23 @@ async fn workspace_drafts_close_and_validation_are_client_scoped() -> Result<()>
         discarded.session.current_checkpoint.id,
         checkpoint.checkpoint.id
     );
-    let replayed_close: WorkspaceDraftSessionCloseResponse =
-        request(&mut server, "workspace/draft/session/close", close_params).await?;
+    let replayed_close: WorkspaceDraftSessionCloseResponse = request(
+        &mut server,
+        "workspace/draft/session/close",
+        close_params.clone(),
+    )
+    .await?;
     assert_eq!(replayed_close, discarded);
+    let mut stale_replay = close_params;
+    stale_replay["expectedCurrentCheckpointId"] = json!("stale-checkpoint");
+    let stale_replay =
+        request_error(&mut server, "workspace/draft/session/close", stale_replay).await?;
+    assert!(
+        stale_replay
+            .error
+            .message
+            .contains("current checkpoint changed")
+    );
 
     let active: WorkspaceDraftSessionListResponse = request(
         &mut server,
@@ -292,6 +301,110 @@ async fn workspace_drafts_close_and_validation_are_client_scoped() -> Result<()>
     Ok(())
 }
 
+#[tokio::test]
+async fn workspace_draft_close_fails_closed_for_partial_or_stale_checkpoint_provenance()
+-> Result<()> {
+    let (_codex_home, mut server) = server().await?;
+    let client_id = create_client(&mut server, "Synthetic CAS Draft Patient").await?;
+    let first = create_checkpoint(
+        &mut server,
+        json!({
+            "clientId": client_id,
+            "draft": draft("First"),
+            "trigger": "manual",
+            "actor": "Clinician Example"
+        }),
+    )
+    .await?;
+
+    let partial = request_error(
+        &mut server,
+        "workspace/draft/session/close",
+        json!({
+            "sessionId": first.checkpoint.session_id,
+            "clientId": client_id,
+            "status": "closed",
+            "expectedCurrentCheckpointId": first.checkpoint.id,
+            "actor": "Clinician Example",
+            "reason": "Partial tuple"
+        }),
+    )
+    .await?;
+    assert!(partial.error.message.contains("must be provided together"));
+
+    let mut stale_id = close_params(&client_id, &first.checkpoint, "closed");
+    stale_id["expectedCurrentCheckpointId"] = json!("different-checkpoint");
+    let mut stale_revision = close_params(&client_id, &first.checkpoint, "closed");
+    stale_revision["expectedCurrentCheckpointRevision"] = json!(first.checkpoint.revision + 1);
+    let mut stale_hash = close_params(&client_id, &first.checkpoint, "closed");
+    stale_hash["expectedCurrentCheckpointSha256"] = json!("0".repeat(64));
+    for stale in [stale_id, stale_revision, stale_hash] {
+        let error = request_error(&mut server, "workspace/draft/session/close", stale).await?;
+        assert!(error.error.message.contains("current checkpoint changed"));
+    }
+
+    let newer = create_checkpoint(
+        &mut server,
+        checkpoint_params(&client_id, &first.checkpoint.session_id, draft("Newer")),
+    )
+    .await?;
+    let concurrent = request_error(
+        &mut server,
+        "workspace/draft/session/close",
+        close_params(&client_id, &first.checkpoint, "closed"),
+    )
+    .await?;
+    assert!(
+        concurrent
+            .error
+            .message
+            .contains("current checkpoint changed")
+    );
+    let active: WorkspaceDraftSessionListResponse = request(
+        &mut server,
+        "workspace/draft/session/list",
+        json!({"clientId": client_id}),
+    )
+    .await?;
+    assert_eq!(active.data[0].current_checkpoint, newer.checkpoint);
+
+    let closed: WorkspaceDraftSessionCloseResponse = request(
+        &mut server,
+        "workspace/draft/session/close",
+        close_params(&client_id, &newer.checkpoint, "closed"),
+    )
+    .await?;
+    assert_eq!(closed.session.status, WorkspaceDraftSessionStatus::Closed);
+
+    let legacy = create_checkpoint(
+        &mut server,
+        json!({
+            "clientId": client_id,
+            "draft": draft("Legacy"),
+            "trigger": "manual",
+            "actor": "Legacy client"
+        }),
+    )
+    .await?;
+    let legacy_closed: WorkspaceDraftSessionCloseResponse = request(
+        &mut server,
+        "workspace/draft/session/close",
+        json!({
+            "sessionId": legacy.checkpoint.session_id,
+            "clientId": client_id,
+            "status": "closed",
+            "actor": "Legacy client",
+            "reason": "Legacy close without provenance"
+        }),
+    )
+    .await?;
+    assert_eq!(
+        legacy_closed.session.status,
+        WorkspaceDraftSessionStatus::Closed
+    );
+    Ok(())
+}
+
 async fn server() -> Result<(TempDir, TestAppServer)> {
     let codex_home = TempDir::new()?;
     create_config_toml(codex_home.path())?;
@@ -330,6 +443,19 @@ fn checkpoint_params(client_id: &str, session_id: &str, draft: Value) -> Value {
         "draft": draft,
         "trigger": "focusChange",
         "actor": "Clinician Example"
+    })
+}
+
+fn close_params(client_id: &str, checkpoint: &WorkspaceDraftCheckpoint, status: &str) -> Value {
+    json!({
+        "sessionId": checkpoint.session_id,
+        "clientId": client_id,
+        "status": status,
+        "expectedCurrentCheckpointId": checkpoint.id,
+        "expectedCurrentCheckpointRevision": checkpoint.revision,
+        "expectedCurrentCheckpointSha256": checkpoint.content_sha256,
+        "actor": "Clinician Example",
+        "reason": "Finish exact recovered draft"
     })
 }
 
