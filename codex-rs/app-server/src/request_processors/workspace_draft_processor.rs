@@ -19,6 +19,7 @@ use serde::de::DeserializeOwned;
 
 const DEFAULT_DRAFT_PAGE_LIMIT: u32 = 50;
 const MAX_DRAFT_PAGE_LIMIT: u32 = 100;
+const GLOBAL_DRAFT_PAGE_LIMIT: u32 = 1;
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -142,7 +143,33 @@ impl WorkspaceRequestProcessor {
         &self,
         params: WorkspaceDraftSessionListParams,
     ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
-        let client_id = required_draft_text("clientId", params.client_id)?;
+        let client_id = params
+            .client_id
+            .map(|client_id| required_draft_text("clientId", client_id))
+            .transpose()?;
+        let scope = match (client_id, params.all_clients) {
+            (Some(client_id), false) => codex_state::WorkspaceDraftSessionScope::Client(client_id),
+            (None, true) => codex_state::WorkspaceDraftSessionScope::AllActiveClients,
+            (Some(_), true) => {
+                return Err(invalid_request(
+                    "workspace draft session list accepts either clientId or allClients, not both",
+                ));
+            }
+            (None, false) => {
+                return Err(invalid_request(
+                    "workspace draft session list requires clientId or allClients=true",
+                ));
+            }
+        };
+        let global_scope = matches!(
+            &scope,
+            codex_state::WorkspaceDraftSessionScope::AllActiveClients
+        );
+        if global_scope && params.include_closed {
+            return Err(invalid_request(
+                "workspace global draft discovery cannot include closed sessions",
+            ));
+        }
         let cursor = params
             .cursor
             .map(|cursor| {
@@ -155,12 +182,16 @@ impl WorkspaceRequestProcessor {
                 Ok(cursor)
             })
             .transpose()?;
-        let limit = draft_page_limit(params.limit);
+        let limit = if global_scope {
+            GLOBAL_DRAFT_PAGE_LIMIT
+        } else {
+            draft_page_limit(params.limit)
+        };
         let mut sessions = self
             .state_db()?
             .workspace()
             .list_draft_sessions(codex_state::WorkspaceDraftSessionFilter {
-                client_id,
+                scope,
                 include_closed: params.include_closed,
                 cursor_updated_at_ms: cursor.as_ref().map(|cursor| cursor.updated_at_ms),
                 cursor_id: cursor.map(|cursor| cursor.id),
