@@ -11,7 +11,8 @@ use sqlx::SqliteConnection;
 use sqlx::Transaction;
 use uuid::Uuid;
 
-const DRAFT_SCHEMA_VERSION: i64 = 1;
+const MIN_DRAFT_SCHEMA_VERSION: i64 = 1;
+const MAX_DRAFT_SCHEMA_VERSION: i64 = 2;
 const MAX_NORMALIZED_DRAFT_BYTES: usize = 1024 * 1024;
 const MAX_SESSION_CREATION_KEY_BYTES: usize = 256;
 
@@ -319,7 +320,7 @@ fn normalize_draft(draft_json: &str) -> Result<(String, i64, String), crate::Wor
         .ok_or_else(|| crate::WorkspaceDraftError::Validation {
             message: "workspace draft checkpoint schemaVersion is required".to_string(),
         })?;
-    if schema_version != DRAFT_SCHEMA_VERSION {
+    if !(MIN_DRAFT_SCHEMA_VERSION..=MAX_DRAFT_SCHEMA_VERSION).contains(&schema_version) {
         return validation(format!(
             "unsupported workspace draft checkpoint schemaVersion {schema_version}"
         ));

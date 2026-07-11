@@ -182,13 +182,15 @@ async fn workspace_drafts_checkpoint_validates_client_schema_and_size() {
             .contains("not found or is archived")
     );
 
-    let mut bad_schema = input(&client, None, "Bad schema");
-    bad_schema.draft_json = r#"{"schemaVersion":2}"#.to_string();
-    assert!(
-        checkpoint_error(&runtime, bad_schema)
-            .await
-            .contains("schemaVersion 2")
-    );
+    for unsupported in [0, 3] {
+        let mut bad_schema = input(&client, None, "Bad schema");
+        bad_schema.draft_json = format!(r#"{{"schemaVersion":{unsupported}}}"#);
+        assert!(
+            checkpoint_error(&runtime, bad_schema)
+                .await
+                .contains(&format!("schemaVersion {unsupported}"))
+        );
+    }
 
     let mut oversized = input(&client, None, "Large");
     oversized.draft_json = serde_json::json!({
