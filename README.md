@@ -31,8 +31,12 @@ See [Agent proposal workflow](docs/agent-proposal-workflow.md) and [Architecture
 - Local-only patient search across identifiers, contact, emergency-contact, and coverage fields.
 - Note revision history, local note locking, addenda, and stale-proposal checks.
 - Explicit packet selection for multimodal file metadata and human-reviewed excerpts.
-- Review-pending agent results with patient, note, and packet-hash provenance.
-- Responsive Ratatui layouts and deterministic snapshot/readability harnesses.
+- Durable prepared packets, idempotent agent runs, immutable packet-source snapshots, review-pending results, revision-bound proposals, and append-only clinician decisions.
+- A model-visible `workspace_context_read` tool restricted to a running packet ID and explicitly authorized visit-history or progress-note categories; returned note bodies are byte-bounded and local-path tokens are redacted before immutable snapshot hashing.
+- Automatic packet-id/hash turn binding and review-pending capture of the final agent answer with thread/turn provenance.
+- A responsive three-zone Explorer / Patient Chart / Agent Work layout with Pending, History, and Audit views.
+- Read-only current-versus-proposed comparison with stale and signed-note guards.
+- Deterministic Ratatui snapshot and readability harnesses.
 
 ## Build and run
 
@@ -64,11 +68,13 @@ The repository is being opened early because the system needs help from Rust/TUI
 Known blockers include:
 
 - change-scoped and atomic chart saves;
-- truthful `prepared -> submitted -> running -> reviewed` agent lifecycle;
-- packet-scoped database access and durable source manifests;
-- IDE-style proposal comparison and partial review;
+- extension of the packet-authorized reader beyond visit history and progress notes;
+- partial per-change proposal review in both the app-server API and TUI; edited whole-proposal acceptance is state/API-ready;
+- startup reconciliation for a run abandoned by an abrupt process termination;
 - synthetic-workspace enforcement and secure storage design;
 - authenticated clinician identity and production privacy controls.
+
+Matching model turns are captured automatically as review-pending Agent Work with thread/turn provenance. The explicit `:agent result save` path remains available as a clinician-attributed recovery import when a response was produced outside the bound harness turn.
 
 See the [Roadmap](ROADMAP.md) and issues labeled `help wanted`.
 

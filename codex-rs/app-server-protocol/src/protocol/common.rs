@@ -671,6 +671,36 @@ client_request_definitions! {
         serialization: global_shared_read("workspace"),
         response: v2::WorkspaceContextPacketReplayResponse,
     },
+    #[experimental("workspace/agent/run/start")]
+    WorkspaceAgentRunStart => "workspace/agent/run/start" {
+        params: v2::WorkspaceAgentRunStartParams,
+        serialization: global("workspace"),
+        response: v2::WorkspaceAgentRunStartResponse,
+    },
+    #[experimental("workspace/agent/run/list")]
+    WorkspaceAgentRunList => "workspace/agent/run/list" {
+        params: v2::WorkspaceAgentRunListParams,
+        serialization: global_shared_read("workspace"),
+        response: v2::WorkspaceAgentRunListResponse,
+    },
+    #[experimental("workspace/agent/run/status/update")]
+    WorkspaceAgentRunStatusUpdate => "workspace/agent/run/status/update" {
+        params: v2::WorkspaceAgentRunStatusUpdateParams,
+        serialization: global("workspace"),
+        response: v2::WorkspaceAgentRunStatusUpdateResponse,
+    },
+    #[experimental("workspace/agent/run/source/list")]
+    WorkspaceAgentRunSourceList => "workspace/agent/run/source/list" {
+        params: v2::WorkspaceAgentRunSourceListParams,
+        serialization: global_shared_read("workspace"),
+        response: v2::WorkspaceAgentRunSourceListResponse,
+    },
+    #[experimental("workspace/agent/run/context/read")]
+    WorkspaceAgentRunContextRead => "workspace/agent/run/context/read" {
+        params: v2::WorkspaceAgentRunContextReadParams,
+        serialization: global("workspace"),
+        response: v2::WorkspaceAgentRunContextReadResponse,
+    },
     #[experimental("workspace/agent/result/list")]
     WorkspaceAgentResultList => "workspace/agent/result/list" {
         params: v2::WorkspaceAgentResultListParams,
@@ -754,6 +784,12 @@ client_request_definitions! {
         params: v2::WorkspaceNoteProposalResolveParams,
         serialization: global("workspace"),
         response: v2::WorkspaceNoteProposalResolveResponse,
+    },
+    #[experimental("workspace/note/proposal/decision/list")]
+    WorkspaceNoteProposalDecisionList => "workspace/note/proposal/decision/list" {
+        params: v2::WorkspaceNoteProposalDecisionListParams,
+        serialization: global_shared_read("workspace"),
+        response: v2::WorkspaceNoteProposalDecisionListResponse,
     },
     #[experimental("workspace/audit/list")]
     WorkspaceAuditList => "workspace/audit/list" {

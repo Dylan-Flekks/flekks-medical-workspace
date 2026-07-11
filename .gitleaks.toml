@@ -1,13 +1,46 @@
 [extend]
 useDefault = true
 
-[[allowlists]]
-description = "Audited upstream test fixtures and generated dependency checksums"
-paths = [
-  '''^codex-rs/agent-identity/src/lib\.rs$''',
-  '''^codex-rs/app-server/tests/suite/v2/connection_handling_websocket\.rs$''',
-  '''^codex-rs/Cargo\.lock$''',
-  '''^codex-rs/cli/src/login\.rs$''',
-  '''^codex-rs/cloud-requirements/src/lib\.rs$''',
-  '''^codex-rs/login/src/auth/auth_tests\.rs$''',
-]
+[[rules]]
+id = "private-key"
+
+  [[rules.allowlists]]
+  description = "Audited upstream private-key test fixtures; allow only the PEM header line"
+  condition = "AND"
+  regexTarget = "line"
+  paths = [
+    '''(^|/)codex-rs/agent-identity/src/lib\.rs$''',
+    '''(^|/)codex-rs/login/src/auth/auth_tests\.rs$''',
+  ]
+  regexes = ['''br#"-----BEGIN PRIVATE KEY-----''']
+
+[[rules]]
+id = "generic-api-key"
+
+  [[rules.allowlists]]
+  description = "Audited websocket shared-secret fixture assignment"
+  condition = "AND"
+  regexTarget = "line"
+  paths = ['''(^|/)codex-rs/app-server/tests/suite/v2/connection_handling_websocket\.rs$''']
+  regexes = ['''^\s*let shared_secret = "[^"]+";\s*$''']
+
+  [[rules.allowlists]]
+  description = "Audited CLI key-formatting test values"
+  condition = "AND"
+  regexTarget = "line"
+  paths = ['''(^|/)codex-rs/cli/src/login\.rs$''']
+  regexes = ['''^\s*let key = "sk-proj-[A-Za-z0-9-]+";\s*$''']
+
+  [[rules.allowlists]]
+  description = "Cargo package-name false positive in generated dependency list"
+  condition = "AND"
+  regexTarget = "line"
+  paths = ['''(^|/)codex-rs/Cargo\.lock$''']
+  regexes = ['''crypto_secretbox''']
+
+  [[rules.allowlists]]
+  description = "Audited cloud-requirements synthetic agent credential fixture"
+  condition = "AND"
+  regexTarget = "line"
+  paths = ['''(^|/)codex-rs/cloud-requirements/src/lib\.rs$''']
+  regexes = ['''^\s*agent_private_key: "[^"]+"\s*$''']

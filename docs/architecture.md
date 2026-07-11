@@ -35,4 +35,4 @@ Only an explicit human decision may create a new canonical chart revision.
 
 ## Current status
 
-Several of these boundaries exist today, but packet submission lifecycle, run/source persistence, atomic saves, and the three-zone UI remain active roadmap work. See [ROADMAP.md](../ROADMAP.md).
+The first vertical slice now implements prepared/submitted packet lifecycle, idempotent runs, immutable envelope and hashed authorization-contract sources, a model-visible packet-authorized reader for bounded/path-redacted visit-history and progress-note snapshots, automatic matching-turn final-answer capture with thread/turn attribution, run-bound results, revision-bound proposals, append-only decisions, and the responsive three-zone UI. The explicit `:agent result save` path remains a clinician-attributed recovery import for output produced outside the bound turn. Atomic multi-record saves, authenticated identity, abrupt-restart reconciliation, and extending the authorized reader to additional clinical categories remain active roadmap work. See [ROADMAP.md](../ROADMAP.md).

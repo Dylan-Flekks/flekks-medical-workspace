@@ -4274,6 +4274,14 @@
       ],
       "type": "object"
     },
+    "WorkspaceAgentContextCategory": {
+      "description": "Packet-authorized database categories that an active agent run may read. The server derives patient ownership from the run and records every returned record as an immutable source snapshot.",
+      "enum": [
+        "visitHistory",
+        "progressNotes"
+      ],
+      "type": "string"
+    },
     "WorkspaceTaskPriority": {
       "enum": [
         "low",

@@ -17122,9 +17122,24 @@
       ],
       "type": "string"
     },
+    "WorkspaceAgentContextCategory": {
+      "description": "Packet-authorized database categories that an active agent run may read. The server derives patient ownership from the run and records every returned record as an immutable source snapshot.",
+      "enum": [
+        "visitHistory",
+        "progressNotes"
+      ],
+      "type": "string"
+    },
     "WorkspaceAgentResult": {
       "description": "Agent results are review-pending outputs bound to one context packet. The packet id/hash are provenance; clients must not treat result payloads as write, signing, submission, payer-contact, or workspace-wide read authority.",
       "properties": {
+        "baseNoteRevision": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "body": {
           "type": "string"
         },
@@ -17147,10 +17162,28 @@
             "null"
           ]
         },
+        "packetContextSha256": {
+          "type": "string"
+        },
         "packetId": {
           "type": "string"
         },
+        "rationaleSummary": {
+          "type": "string"
+        },
+        "resultKind": {
+          "type": "string"
+        },
+        "runId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "status": {
+          "type": "string"
+        },
+        "structuredChangesJson": {
           "type": "string"
         },
         "summary": {
@@ -17167,10 +17200,167 @@
         "contextEnvelopeSha256",
         "createdAt",
         "id",
+        "packetContextSha256",
         "packetId",
+        "rationaleSummary",
+        "resultKind",
         "status",
+        "structuredChangesJson",
         "summary",
         "updatedAt"
+      ],
+      "type": "object"
+    },
+    "WorkspaceAgentRun": {
+      "description": "One execution attempt against an immutable context packet. Retries create a new run; repeated starts with the same packet/idempotency key return the existing run.",
+      "properties": {
+        "baseNoteRevision": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "clientId": {
+          "type": "string"
+        },
+        "completedAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "contextEnvelopeSha256": {
+          "type": "string"
+        },
+        "createdAt": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "errorSummary": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "idempotencyKey": {
+          "type": "string"
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "noteId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "packetId": {
+          "type": "string"
+        },
+        "provider": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "runKind": {
+          "type": "string"
+        },
+        "sourceThreadId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sourceTurnId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "startedAt": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "status": {
+          "type": "string"
+        },
+        "updatedAt": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "clientId",
+        "contextEnvelopeSha256",
+        "createdAt",
+        "id",
+        "idempotencyKey",
+        "packetId",
+        "runKind",
+        "startedAt",
+        "status",
+        "updatedAt"
+      ],
+      "type": "object"
+    },
+    "WorkspaceAgentRunSource": {
+      "description": "Exact, immutable record returned to one agent run. The snapshot omits local filesystem paths and is hashed server-side for later audit replay.",
+      "properties": {
+        "accessPurpose": {
+          "type": "string"
+        },
+        "accessedAt": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "contentSha256": {
+          "type": "string"
+        },
+        "displayLabel": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "runId": {
+          "type": "string"
+        },
+        "snapshotJson": {
+          "type": "string"
+        },
+        "sourceEntityId": {
+          "type": "string"
+        },
+        "sourceEntityType": {
+          "type": "string"
+        },
+        "sourceRevision": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "accessPurpose",
+        "accessedAt",
+        "contentSha256",
+        "displayLabel",
+        "id",
+        "runId",
+        "snapshotJson",
+        "sourceEntityId",
+        "sourceEntityType"
       ],
       "type": "object"
     },
@@ -17663,10 +17853,30 @@
         "artifactSummary": {
           "type": "string"
         },
+        "authorizedScopeJson": {
+          "type": "string"
+        },
+        "baseNoteRevision": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "canceledAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "chartContextSummary": {
           "type": "string"
         },
         "clientId": {
+          "type": "string"
+        },
+        "clinicianActor": {
           "type": "string"
         },
         "clipSummary": {
@@ -17690,6 +17900,9 @@
             "string",
             "null"
           ]
+        },
+        "expectedOutputKind": {
+          "type": "string"
         },
         "humanRequest": {
           "type": "string"
@@ -17719,6 +17932,13 @@
         "status": {
           "type": "string"
         },
+        "submittedAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "updatedAt": {
           "format": "int64",
           "type": "integer"
@@ -17726,13 +17946,16 @@
       },
       "required": [
         "artifactSummary",
+        "authorizedScopeJson",
         "chartContextSummary",
         "clientId",
+        "clinicianActor",
         "clipSummary",
         "contextEnvelopeJson",
         "contextEnvelopeSha256",
         "createdAt",
         "derivativeSummary",
+        "expectedOutputKind",
         "humanRequest",
         "id",
         "selectedArtifactIdsJson",
@@ -17746,7 +17969,20 @@
     },
     "WorkspaceContextPacketReplay": {
       "properties": {
+        "authorizedScopeJson": {
+          "type": "string"
+        },
+        "baseNoteRevision": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "clientId": {
+          "type": "string"
+        },
+        "clinicianActor": {
           "type": "string"
         },
         "contextEnvelopeJson": {
@@ -17760,6 +17996,9 @@
             "string",
             "null"
           ]
+        },
+        "expectedOutputKind": {
+          "type": "string"
         },
         "humanRequest": {
           "type": "string"
@@ -17785,12 +18024,22 @@
         },
         "status": {
           "type": "string"
+        },
+        "submittedAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
         }
       },
       "required": [
+        "authorizedScopeJson",
         "clientId",
+        "clinicianActor",
         "contextEnvelopeJson",
         "contextEnvelopeSha256",
+        "expectedOutputKind",
         "humanRequest",
         "id",
         "readOnlySafetyConstraints",
@@ -18110,6 +18359,12 @@
     },
     "WorkspaceNoteProposal": {
       "properties": {
+        "agentResultId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "baseRevision": {
           "format": "int64",
           "type": "integer"
@@ -18163,6 +18418,91 @@
         "summary"
       ],
       "type": "object"
+    },
+    "WorkspaceNoteProposalDecision": {
+      "description": "Append-only record of what a clinician did with proposed agent work.",
+      "properties": {
+        "actor": {
+          "type": "string"
+        },
+        "agentResultId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "appliedText": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "appliedTextSha256": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "baseRevision": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "changeId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "createdAt": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "decisionKind": {
+          "$ref": "#/definitions/WorkspaceNoteProposalDecisionKind"
+        },
+        "id": {
+          "type": "string"
+        },
+        "noteId": {
+          "type": "string"
+        },
+        "proposalId": {
+          "type": "string"
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "resultingNoteRevision": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "actor",
+        "baseRevision",
+        "createdAt",
+        "decisionKind",
+        "id",
+        "noteId",
+        "proposalId"
+      ],
+      "type": "object"
+    },
+    "WorkspaceNoteProposalDecisionKind": {
+      "enum": [
+        "acceptedAll",
+        "acceptedEdited",
+        "rejectedAll",
+        "copiedChange",
+        "rejectedChange"
+      ],
+      "type": "string"
     },
     "WorkspaceNoteProposalStatus": {
       "enum": [
@@ -18244,6 +18584,92 @@
         "kind",
         "status",
         "title",
+        "updatedAt"
+      ],
+      "type": "object"
+    },
+    "WorkspacePatientSafetyItem": {
+      "properties": {
+        "archivedAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "category": {
+          "type": "string"
+        },
+        "clientId": {
+          "type": "string"
+        },
+        "createdAt": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "dose": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "frequency": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "notes": {
+          "type": "string"
+        },
+        "reaction": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "recordedDate": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "route": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "severity": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "updatedAt": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "category",
+        "clientId",
+        "createdAt",
+        "id",
+        "name",
+        "notes",
         "updatedAt"
       ],
       "type": "object"

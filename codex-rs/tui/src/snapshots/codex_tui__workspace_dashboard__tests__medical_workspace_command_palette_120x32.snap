@@ -4,24 +4,24 @@ expression: "render_dashboard_lines_at(&dashboard, width, height)"
 ---
 Medical Workspace
 Patient: Jordan Patient  DOB: blank  MRN: blank  Contact: Missing contact  Coverage: Missing coverage  Encounter: No
+ EXPLORER                      PATIENT CHART
 ┌Patient Directory───────────┐┌Patient Demographics────────────────────────────────────────────────────────────────────┐
 │Local search: /             ││Display: Jordan Patient                                                                 │
 │0 active patients; local    ││Preferred:                                                                              │
-│only                        ││DOB:                                                                                    │
-│No saved pa┌Commands──────────────────────────────────────────────────────────────────────────────────────┐           │
-│New patient│Search commands  :proposal                                                                    │           │
-│           │Enter run   Esc close   ↑/↓ move                                                              │           │
+│only       ┌Commands──────────────────────────────────────────────────────────────────────────────────────┐           │
+│No saved pa│Search commands  :proposal                                                                    │           │
+│New patient│Enter run   Esc close   ↑/↓ move                                                              │           │
 │           │                                                                                              │           │
-│           │> Select next proposal                                                    :proposal next off  │───────────┘
-└───────────│Accept proposal                                                       :proposal accept off    │───────────┐
-┌Patient Not│Decline proposal                                                     :proposal decline off    │           │
-│Patient Not│Make note proposal from returned work                        :agent result to proposal off    │───────────┘
-│  New note │Jump to proposals                                                      :workflow proposals    │───────────┐
-│  No patien│                                                                                              │           │
-│:note new. │Disabled: No pending proposals for the active note.                                           │           │
+│           │> Select next proposal                                                    :proposal next off  │           │
+│           │Accept proposal                                                       :proposal accept off    │───────────┘
+└───────────│Decline proposal                                                     :proposal decline off    │───────────┐
+┌Patient Not│Make note proposal from returned work                        :agent result to proposal off    │           │
+│Patient Not│Jump to proposals                                                      :workflow proposals    │───────────┘
+│  New note │                                                                                              │───────────┐
+│  No patien│Disabled: No pending proposals for the active note.                                           │           │
+│:note new. │                                                                                              │           │
 │  Medical, │                                                                                              │           │
 │and admin n│                                                                                              │           │
-│           │                                                                                              │           │
 └───────────│                                                                                              │           │
 ┌Uploaded Do│                                                                                              │           │
 │Uploaded Do│                                                                                              │           │

@@ -24,14 +24,24 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: codex-rs -> target
+      - name: Check formatting
+        run: cargo fmt --all -- --check
       - name: Build CLI
         run: cargo build -p codex-cli
+      - name: Check medical app-server API
+        run: cargo check -p codex-app-server
+      - name: Test app-server protocol and generated schemas
+        run: cargo test -p codex-app-server-protocol --lib
+      - name: Test packet-authorized model tool
+        run: cargo test -p codex-core workspace_context --lib
       - name: Test medical dashboard
         run: cargo test -p codex-tui workspace_dashboard --lib
       - name: Test medical app flows
         run: cargo test -p codex-tui medical_workspace --lib
+      - name: Test context-packet lifecycle
+        run: cargo test -p codex-tui workspace_context_packet --lib
       - name: Test workspace state
-        run: cargo test -p codex-state runtime::workspace::tests --lib
+        run: cargo test -p codex-state workspace --lib
 
   secrets:
     runs-on: ubuntu-latest
@@ -42,3 +52,5 @@ jobs:
       - uses: gitleaks/gitleaks-action@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_CONFIG: .gitleaks.toml
+          GITLEAKS_VERSION: 8.30.1

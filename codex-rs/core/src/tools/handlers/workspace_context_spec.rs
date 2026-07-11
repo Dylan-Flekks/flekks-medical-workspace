@@ -8,34 +8,42 @@ pub const WORKSPACE_CONTEXT_READ_TOOL_NAME: &str = "workspace_context_read";
 pub fn create_workspace_context_read_tool() -> ToolSpec {
     let properties = BTreeMap::from([
         (
-            "client_id".to_string(),
+            "run_id".to_string(),
             JsonSchema::string(Some(
-                "Required. Saved workspace client ID selected by the user.".to_string(),
+                "Required. Running medical agent run ID bound to a submitted context packet."
+                    .to_string(),
             )),
         ),
         (
-            "note_id".to_string(),
-            JsonSchema::string(Some(
-                "Optional saved workspace note ID selected by the user.".to_string(),
-            )),
+            "category".to_string(),
+            JsonSchema::string_enum(
+                vec![
+                    serde_json::json!("visit_history"),
+                    serde_json::json!("progress_notes"),
+                ],
+                Some(
+                    "Required packet-authorized record category to read.".to_string(),
+                ),
+            ),
         ),
         (
-            "include_documents".to_string(),
-            JsonSchema::boolean(Some(
-                "Optional. Include linked document metadata; defaults to true.".to_string(),
-            )),
+            "limit".to_string(),
+            JsonSchema::integer(Some(
+                    "Optional maximum records. Defaults to 20, is capped at 100, and cannot exceed the packet scope."
+                        .to_string(),
+                )),
         ),
     ]);
 
     ToolSpec::Function(ResponsesApiTool {
         name: WORKSPACE_CONTEXT_READ_TOOL_NAME.to_string(),
-        description: "Read selected workspace context by explicit saved IDs. This tool is read-only, does not list all clients, and returns document metadata plus compact open task metadata."
+        description: "Read exact immutable chart snapshots for a running medical agent run. The submitted packet must explicitly authorize the requested category; patient and note ownership are derived from the run and cannot be supplied by the model."
             .to_string(),
         strict: false,
         defer_loading: None,
         parameters: JsonSchema::object(
             properties,
-            /*required*/ Some(vec!["client_id".to_string()]),
+            /*required*/ Some(vec!["run_id".to_string(), "category".to_string()]),
             Some(false.into()),
         ),
         output_schema: None,
@@ -47,7 +55,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn workspace_context_read_requires_client_id() {
+    fn workspace_context_read_requires_run_and_category_only() {
         let ToolSpec::Function(tool) = create_workspace_context_read_tool() else {
             panic!("workspace context read should be a function tool");
         };
@@ -55,21 +63,27 @@ mod tests {
         assert_eq!(tool.name, WORKSPACE_CONTEXT_READ_TOOL_NAME);
         assert_eq!(
             tool.parameters.required,
-            Some(vec!["client_id".to_string()])
+            Some(vec!["run_id".to_string(), "category".to_string()])
         );
-        assert!(
-            tool.parameters
-                .properties
-                .as_ref()
-                .expect("parameters should have properties")
-                .contains_key("note_id")
+        let properties = tool
+            .parameters
+            .properties
+            .as_ref()
+            .expect("parameters should have properties");
+        assert_eq!(
+            properties.keys().cloned().collect::<Vec<_>>(),
+            vec![
+                "category".to_string(),
+                "limit".to_string(),
+                "run_id".to_string()
+            ]
         );
-        assert!(
-            tool.parameters
-                .properties
-                .as_ref()
-                .expect("parameters should have properties")
-                .contains_key("include_documents")
+        assert_eq!(
+            properties["category"].enum_values,
+            Some(vec![
+                serde_json::json!("visit_history"),
+                serde_json::json!("progress_notes")
+            ])
         );
     }
 }

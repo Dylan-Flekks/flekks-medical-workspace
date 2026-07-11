@@ -17,96 +17,52 @@ use serde::Serialize;
 
 pub struct WorkspaceContextReadHandler;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum WorkspaceContextCategory {
+    VisitHistory,
+    ProgressNotes,
+}
+
+impl WorkspaceContextCategory {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::VisitHistory => "visit_history",
+            Self::ProgressNotes => "progress_notes",
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, PartialEq, Eq)]
 struct WorkspaceContextReadArgs {
-    client_id: String,
-    note_id: Option<String>,
-    include_documents: Option<bool>,
+    run_id: String,
+    category: WorkspaceContextCategory,
+    limit: Option<u32>,
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
 struct WorkspaceContextReadResult {
-    context: Option<WorkspaceContextReadContext>,
-    warnings: Vec<String>,
-}
-
-#[derive(Debug, Serialize, PartialEq, Eq)]
-struct WorkspaceContextReadContext {
-    client: WorkspaceContextClient,
-    active_note: Option<WorkspaceContextNote>,
-    recent_notes: Vec<WorkspaceContextNoteSummary>,
-    documents: Vec<WorkspaceContextDocument>,
-    tasks: Vec<WorkspaceContextTask>,
-}
-
-#[derive(Debug, Serialize, PartialEq, Eq)]
-struct WorkspaceContextClient {
-    id: String,
-    display_name: String,
-    preferred_name: Option<String>,
-    date_of_birth: Option<String>,
-    sex_or_gender: Option<String>,
-    external_id: Option<String>,
-    record_start_date: Option<String>,
-    record_end_date: Option<String>,
-    summary: String,
-    created_at: i64,
-    updated_at: i64,
-}
-
-#[derive(Debug, Serialize, PartialEq, Eq)]
-struct WorkspaceContextNote {
-    id: String,
+    run_id: String,
+    packet_id: String,
     client_id: String,
-    encounter_id: Option<String>,
-    title: String,
-    kind: String,
-    body: String,
-    status: String,
-    current_revision: i64,
-    created_at: i64,
-    updated_at: i64,
-}
-
-#[derive(Debug, Serialize, PartialEq, Eq)]
-struct WorkspaceContextNoteSummary {
-    id: String,
-    client_id: String,
-    encounter_id: Option<String>,
-    title: String,
-    kind: String,
-    status: String,
-    current_revision: i64,
-    updated_at: i64,
-}
-
-#[derive(Debug, Serialize, PartialEq, Eq)]
-struct WorkspaceContextDocument {
-    id: String,
-    client_id: String,
-    encounter_id: Option<String>,
-    title: String,
-    kind: String,
-    local_path: String,
-    notes: String,
-    created_at: i64,
-    updated_at: i64,
-}
-
-#[derive(Debug, Serialize, PartialEq, Eq)]
-struct WorkspaceContextTask {
-    id: String,
-    client_id: String,
-    encounter_id: Option<String>,
     note_id: Option<String>,
-    document_id: Option<String>,
-    title: String,
-    kind: String,
-    status: String,
-    priority: String,
-    due_date: Option<String>,
-    assigned_to: Option<String>,
-    updated_at: i64,
+    category: String,
+    max_records: u32,
+    sources: Vec<WorkspaceContextSource>,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+struct WorkspaceContextSource {
+    id: String,
+    run_id: String,
+    source_entity_type: String,
+    source_entity_id: String,
+    source_revision: Option<i64>,
+    display_label: String,
+    snapshot_json: String,
+    content_sha256: String,
+    access_purpose: String,
+    accessed_at: i64,
 }
 
 #[async_trait::async_trait]
@@ -158,103 +114,34 @@ async fn read_workspace_context(
     state_db: crate::StateDbHandle,
     args: WorkspaceContextReadArgs,
 ) -> Result<WorkspaceContextReadResult, FunctionCallError> {
-    let client_id = args.client_id.trim();
-    if client_id.is_empty() {
+    let run_id = args.run_id.trim();
+    if run_id.is_empty() {
         return Err(FunctionCallError::RespondToModel(
-            "client_id must not be empty".to_string(),
+            "run_id must not be empty".to_string(),
         ));
     }
 
-    let workspace = state_db.workspace();
-    let Some(client) = workspace.get_client(client_id).await.map_err(read_error)? else {
-        return Ok(WorkspaceContextReadResult {
-            context: None,
-            warnings: vec![format!("workspace client `{client_id}` was not found")],
-        });
-    };
-
-    let mut warnings = Vec::new();
-    let active_note: Option<WorkspaceContextNote> = match args
-        .note_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|note_id| !note_id.is_empty())
-    {
-        Some(note_id) => {
-            let note = workspace.get_note(note_id).await.map_err(read_error)?;
-            match note {
-                Some(note) if note.client_id == client.id => Some(note.into()),
-                Some(_) | None => {
-                    warnings.push(format!(
-                        "workspace note `{note_id}` was not found for client `{}`",
-                        client.id
-                    ));
-                    None
-                }
-            }
-        }
-        None => None,
-    };
-    workspace
-        .record_audit_event(codex_state::WorkspaceAuditEventCreate {
-            entity_type: "client".to_string(),
-            entity_id: client.id.clone(),
-            action: "agent_read".to_string(),
-            actor: "agent".to_string(),
-            actor_kind: "agent".to_string(),
-            source: "core-tool".to_string(),
-            client_id: Some(client.id.clone()),
-            encounter_id: active_note
-                .as_ref()
-                .and_then(|note| note.encounter_id.clone()),
-            note_id: active_note.as_ref().map(|note| note.id.clone()),
-            summary: "workspace_context_read".to_string(),
-            metadata_json: Some(format!(
-                "{{\"include_documents\":{}}}",
-                args.include_documents.unwrap_or(true)
-            )),
-            ..Default::default()
+    let context = state_db
+        .workspace()
+        .read_authorized_agent_context(codex_state::WorkspaceAgentContextReadRequest {
+            run_id: run_id.to_string(),
+            category: args.category.as_str().to_string(),
+            max_records: args.limit,
         })
         .await
         .map_err(read_error)?;
-
-    let recent_notes = workspace
-        .list_notes(&client.id)
-        .await
-        .map_err(read_error)?
-        .into_iter()
-        .take(10)
-        .map(WorkspaceContextNoteSummary::from)
-        .collect();
-    let documents = if args.include_documents.unwrap_or(true) {
-        workspace
-            .list_documents(&client.id)
-            .await
-            .map_err(read_error)?
-            .into_iter()
-            .map(WorkspaceContextDocument::from)
-            .collect()
-    } else {
-        Vec::new()
-    };
-    let tasks = workspace
-        .list_open_tasks(&client.id)
-        .await
-        .map_err(read_error)?
-        .into_iter()
-        .take(10)
-        .map(WorkspaceContextTask::from)
-        .collect();
-
     Ok(WorkspaceContextReadResult {
-        context: Some(WorkspaceContextReadContext {
-            client: client.into(),
-            active_note,
-            recent_notes,
-            documents,
-            tasks,
-        }),
-        warnings,
+        run_id: context.run_id,
+        packet_id: context.packet_id,
+        client_id: context.client_id,
+        note_id: context.note_id,
+        category: context.category,
+        max_records: context.max_records,
+        sources: context
+            .sources
+            .into_iter()
+            .map(WorkspaceContextSource::from)
+            .collect(),
     })
 }
 
@@ -266,87 +153,19 @@ fn timestamp(value: DateTime<Utc>) -> i64 {
     value.timestamp()
 }
 
-impl From<codex_state::WorkspaceClient> for WorkspaceContextClient {
-    fn from(value: codex_state::WorkspaceClient) -> Self {
+impl From<codex_state::WorkspaceAgentRunSource> for WorkspaceContextSource {
+    fn from(value: codex_state::WorkspaceAgentRunSource) -> Self {
         Self {
             id: value.id,
-            display_name: value.display_name,
-            preferred_name: value.preferred_name,
-            date_of_birth: value.date_of_birth,
-            sex_or_gender: value.sex_or_gender,
-            external_id: value.external_id,
-            record_start_date: value.record_start_date,
-            record_end_date: value.record_end_date,
-            summary: value.summary,
-            created_at: timestamp(value.created_at),
-            updated_at: timestamp(value.updated_at),
-        }
-    }
-}
-
-impl From<codex_state::WorkspaceNote> for WorkspaceContextNote {
-    fn from(value: codex_state::WorkspaceNote) -> Self {
-        Self {
-            id: value.id,
-            client_id: value.client_id,
-            encounter_id: value.encounter_id,
-            title: value.title,
-            kind: value.kind,
-            body: value.body,
-            status: value.status,
-            current_revision: value.current_revision,
-            created_at: timestamp(value.created_at),
-            updated_at: timestamp(value.updated_at),
-        }
-    }
-}
-
-impl From<codex_state::WorkspaceNote> for WorkspaceContextNoteSummary {
-    fn from(value: codex_state::WorkspaceNote) -> Self {
-        Self {
-            id: value.id,
-            client_id: value.client_id,
-            encounter_id: value.encounter_id,
-            title: value.title,
-            kind: value.kind,
-            status: value.status,
-            current_revision: value.current_revision,
-            updated_at: timestamp(value.updated_at),
-        }
-    }
-}
-
-impl From<codex_state::WorkspaceDocument> for WorkspaceContextDocument {
-    fn from(value: codex_state::WorkspaceDocument) -> Self {
-        Self {
-            id: value.id,
-            client_id: value.client_id,
-            encounter_id: value.encounter_id,
-            title: value.title,
-            kind: value.kind,
-            local_path: value.local_path,
-            notes: value.notes,
-            created_at: timestamp(value.created_at),
-            updated_at: timestamp(value.updated_at),
-        }
-    }
-}
-
-impl From<codex_state::WorkspaceTask> for WorkspaceContextTask {
-    fn from(value: codex_state::WorkspaceTask) -> Self {
-        Self {
-            id: value.id,
-            client_id: value.client_id,
-            encounter_id: value.encounter_id,
-            note_id: value.note_id,
-            document_id: value.document_id,
-            title: value.title,
-            kind: value.kind,
-            status: value.status.as_str().to_string(),
-            priority: value.priority.as_str().to_string(),
-            due_date: value.due_date,
-            assigned_to: value.assigned_to,
-            updated_at: timestamp(value.updated_at),
+            run_id: value.run_id,
+            source_entity_type: value.source_entity_type,
+            source_entity_id: value.source_entity_id,
+            source_revision: value.source_revision,
+            display_label: value.display_label,
+            snapshot_json: value.snapshot_json,
+            content_sha256: value.content_sha256,
+            access_purpose: value.access_purpose,
+            accessed_at: timestamp(value.accessed_at),
         }
     }
 }
@@ -365,203 +184,251 @@ mod tests {
         (temp, state_db)
     }
 
-    async fn seed_workspace(
+    async fn seed_authorized_run(
         state_db: &crate::StateDbHandle,
+        categories: &[&str],
     ) -> (
         codex_state::WorkspaceClient,
         codex_state::WorkspaceNote,
-        codex_state::WorkspaceDocument,
-        codex_state::WorkspaceTask,
+        codex_state::WorkspaceEncounter,
+        codex_state::WorkspaceAgentRun,
     ) {
         let client = state_db
             .workspace()
             .upsert_client(codex_state::WorkspaceClientUpsert {
                 display_name: "Jordan Patient".to_string(),
-                preferred_name: Some("Jordan".to_string()),
-                date_of_birth: Some("1980-01-01".to_string()),
-                sex_or_gender: Some("X".to_string()),
-                external_id: Some("MRN-123".to_string()),
-                record_start_date: Some("2026-01-01".to_string()),
-                record_end_date: Some("2026-06-09".to_string()),
-                summary: "Example workspace summary.".to_string(),
+                summary: "Synthetic core-tool patient.".to_string(),
                 ..Default::default()
             })
             .await
             .expect("client should save");
+        let encounter = state_db
+            .workspace()
+            .upsert_encounter(codex_state::WorkspaceEncounterUpsert {
+                client_id: client.id.clone(),
+                kind: "therapy".to_string(),
+                title: "Authorized synthetic visit".to_string(),
+                status: "completed".to_string(),
+                ..Default::default()
+            })
+            .await
+            .expect("encounter should save");
         let note = state_db
             .workspace()
             .upsert_note(codex_state::WorkspaceNoteUpsert {
                 client_id: client.id.clone(),
-                title: "Initial visit".to_string(),
-                kind: "note".to_string(),
-                body: "Human-entered note body.".to_string(),
+                encounter_id: Some(encounter.id.clone()),
+                title: "Progress note".to_string(),
+                kind: "progress".to_string(),
+                body: "Exact human-authored synthetic note.".to_string(),
                 status: "draft".to_string(),
-                actor: "human".to_string(),
+                actor: "Clinician Example".to_string(),
                 ..Default::default()
             })
             .await
             .expect("note should save");
-        let document = state_db
+        let envelope = serde_json::json!({
+            "assemblyVersion": "core-tool-context-test-v1",
+            "sourceMode": "agent_request",
+            "includeDocuments": false,
+            "humanRequest": "Read explicitly authorized chart context.",
+            "ids": {
+                "selectedArtifactIds": [],
+                "selectedDerivativeIds": [],
+                "selectedClipIds": [],
+            },
+            "note": { "revision": note.current_revision },
+            "safety": [
+                "read-only context packet; do not mutate workspace records",
+                "do not sign notes, submit claims, send payer communications, or overwrite saved data",
+            ],
+            "promptSnapshot": "Synthetic packet without filesystem paths.",
+        })
+        .to_string();
+        let packet = state_db
             .workspace()
-            .upsert_document(codex_state::WorkspaceDocumentUpsert {
+            .prepare_context_packet(codex_state::WorkspaceContextPacketCreate {
                 client_id: client.id.clone(),
-                title: "Outside referral PDF".to_string(),
-                kind: "referral".to_string(),
-                local_path: "/tmp/outside-referral.pdf".to_string(),
-                notes: "Metadata only.".to_string(),
-                ..Default::default()
-            })
-            .await
-            .expect("document should save");
-        let task = state_db
-            .workspace()
-            .upsert_task(codex_state::WorkspaceTaskUpsert {
-                client_id: client.id.clone(),
+                encounter_id: Some(encounter.id.clone()),
                 note_id: Some(note.id.clone()),
-                document_id: Some(document.id.clone()),
-                title: "Request outside records".to_string(),
-                details: "Call referring office.".to_string(),
-                kind: "follow-up".to_string(),
-                status: codex_state::WorkspaceTaskStatus::Open,
-                priority: codex_state::WorkspaceTaskPriority::High,
-                due_date: Some("2026-06-12".to_string()),
-                assigned_to: Some("local staff".to_string()),
-                actor: "human".to_string(),
+                human_request: "Read explicitly authorized chart context.".to_string(),
+                selected_artifact_ids_json: "[]".to_string(),
+                selected_derivative_ids_json: "[]".to_string(),
+                selected_clip_ids_json: "[]".to_string(),
+                context_envelope_json: envelope,
+                base_note_revision: Some(note.current_revision),
+                authorized_scope_json: serde_json::json!({
+                    "categories": categories,
+                    "maxRecords": 5,
+                })
+                .to_string(),
+                expected_output_kind: "note_proposal".to_string(),
+                actor: "Clinician Example".to_string(),
                 ..Default::default()
             })
             .await
-            .expect("task should save");
-        (client, note, document, task)
+            .expect("packet should prepare");
+        let run = state_db
+            .workspace()
+            .start_agent_run(codex_state::WorkspaceAgentRunStart {
+                packet_id: packet.id.clone(),
+                expected_client_id: client.id.clone(),
+                expected_context_envelope_sha256: packet.context_envelope_sha256,
+                run_kind: "agent".to_string(),
+                idempotency_key: "core-tool-context-test".to_string(),
+                provider: "test-provider".to_string(),
+                model: "test-model".to_string(),
+                actor: "Clinician Example".to_string(),
+                ..Default::default()
+            })
+            .await
+            .expect("run should start");
+        (client, note, encounter, run)
+    }
+
+    #[test]
+    fn workspace_context_read_args_require_run_and_category() {
+        assert!(
+            serde_json::from_str::<WorkspaceContextReadArgs>(r#"{"category":"visit_history"}"#)
+                .is_err()
+        );
+        assert!(serde_json::from_str::<WorkspaceContextReadArgs>(r#"{"run_id":"run-1"}"#).is_err());
+        assert!(
+            serde_json::from_str::<WorkspaceContextReadArgs>(
+                r#"{"run_id":"run-1","category":"documents"}"#
+            )
+            .is_err()
+        );
     }
 
     #[tokio::test]
-    async fn workspace_context_read_returns_selected_context() {
+    async fn workspace_context_read_returns_authorized_hashed_sources() {
         let (_temp, state_db) = test_state_db().await;
-        let (client, note, document, task) = seed_workspace(&state_db).await;
+        let (client, note, encounter, run) =
+            seed_authorized_run(&state_db, &["visit_history", "progress_notes"]).await;
 
         let result = read_workspace_context(
             state_db.clone(),
             WorkspaceContextReadArgs {
-                client_id: client.id.clone(),
-                note_id: Some(note.id.clone()),
-                include_documents: Some(true),
+                run_id: run.id.clone(),
+                category: WorkspaceContextCategory::VisitHistory,
+                limit: Some(4),
             },
         )
         .await
-        .expect("context read should succeed");
+        .expect("authorized context read should succeed");
 
-        assert_eq!(
-            result,
-            WorkspaceContextReadResult {
-                context: Some(WorkspaceContextReadContext {
-                    client: client.clone().into(),
-                    active_note: Some(note.clone().into()),
-                    recent_notes: vec![note.clone().into()],
-                    documents: vec![document.into()],
-                    tasks: vec![task.into()],
-                }),
-                warnings: Vec::new(),
-            }
-        );
+        assert_eq!(result.run_id, run.id);
+        assert_eq!(result.client_id, client.id);
+        assert_eq!(result.note_id.as_deref(), Some(note.id.as_str()));
+        assert_eq!(result.category, "visit_history");
+        assert_eq!(result.max_records, 4);
+        assert_eq!(result.sources.len(), 1);
+        assert_eq!(result.sources[0].source_entity_type, "encounter");
+        assert_eq!(result.sources[0].source_entity_id, encounter.id);
+        assert_eq!(result.sources[0].content_sha256.len(), 64);
+        let snapshot: serde_json::Value =
+            serde_json::from_str(&result.sources[0].snapshot_json).expect("snapshot should parse");
+        assert_eq!(snapshot["client_id"], client.id);
 
-        let saved_note = state_db
+        let persisted_sources = state_db
             .workspace()
-            .get_note(&note.id)
+            .list_agent_run_sources(&run.id)
             .await
-            .expect("saved note should be readable")
-            .expect("saved note should still exist");
-        assert_eq!(saved_note, note);
-        let audit = state_db
-            .workspace()
-            .list_audit_events_filtered(codex_state::WorkspaceAuditEventFilter {
-                client_id: Some(client.id.clone()),
-                note_id: Some(note.id.clone()),
-                ..Default::default()
-            })
-            .await
-            .expect("audit should be readable");
+            .expect("source manifest should list");
         assert!(
-            audit
-                .iter()
-                .any(|event| event.action == "agent_read" && event.actor_kind == "agent")
+            persisted_sources.len() >= 2,
+            "authoritative packet and authorized visit should persist"
+        );
+        let persisted_visit = persisted_sources
+            .iter()
+            .find(|source| source.source_entity_id == encounter.id)
+            .expect("authorized visit source should persist");
+        assert_eq!(
+            result.sources[0].content_sha256,
+            persisted_visit.content_sha256
+        );
+        assert_eq!(
+            result.sources[0].snapshot_json,
+            persisted_visit.snapshot_json
         );
     }
 
     #[tokio::test]
-    async fn workspace_context_read_handles_missing_and_cross_client_ids() {
+    async fn workspace_context_read_denies_missing_terminal_or_unscoped_run() {
         let (_temp, state_db) = test_state_db().await;
-        let (_client, cross_client_note, _document, _task) = seed_workspace(&state_db).await;
-        let other_client = state_db
-            .workspace()
-            .upsert_client(codex_state::WorkspaceClientUpsert {
-                display_name: "Other Client".to_string(),
-                ..Default::default()
-            })
-            .await
-            .expect("other client should save");
+        let (_client, _note, _encounter, run) =
+            seed_authorized_run(&state_db, &["visit_history"]).await;
 
         let missing = read_workspace_context(
             state_db.clone(),
             WorkspaceContextReadArgs {
-                client_id: "missing-client".to_string(),
-                note_id: None,
-                include_documents: Some(true),
+                run_id: "missing-run".to_string(),
+                category: WorkspaceContextCategory::VisitHistory,
+                limit: None,
             },
         )
         .await
-        .expect("missing client should be a successful empty read");
-        assert_eq!(
-            missing,
-            WorkspaceContextReadResult {
-                context: None,
-                warnings: vec!["workspace client `missing-client` was not found".to_string()],
-            }
-        );
+        .expect_err("missing run should be denied");
+        assert!(matches!(missing, FunctionCallError::RespondToModel(_)));
 
-        let cross_client = read_workspace_context(
+        let unscoped = read_workspace_context(
+            state_db.clone(),
+            WorkspaceContextReadArgs {
+                run_id: run.id.clone(),
+                category: WorkspaceContextCategory::ProgressNotes,
+                limit: None,
+            },
+        )
+        .await
+        .expect_err("category omitted from packet must be denied");
+        let FunctionCallError::RespondToModel(unscoped_message) = unscoped else {
+            panic!("scope denial should be returned to the model");
+        };
+        assert!(unscoped_message.contains("does not explicitly authorize"));
+
+        state_db
+            .workspace()
+            .update_agent_run_status(codex_state::WorkspaceAgentRunStatusUpdate {
+                run_id: run.id.clone(),
+                status: "canceled".to_string(),
+                actor: "Clinician Example".to_string(),
+                ..Default::default()
+            })
+            .await
+            .expect("run cancellation should save");
+        let terminal = read_workspace_context(
             state_db,
             WorkspaceContextReadArgs {
-                client_id: other_client.id.clone(),
-                note_id: Some(cross_client_note.id.clone()),
-                include_documents: Some(false),
+                run_id: run.id,
+                category: WorkspaceContextCategory::VisitHistory,
+                limit: None,
             },
         )
         .await
-        .expect("cross-client note should be safely ignored");
-        assert_eq!(
-            cross_client,
-            WorkspaceContextReadResult {
-                context: Some(WorkspaceContextReadContext {
-                    client: other_client.clone().into(),
-                    active_note: None,
-                    recent_notes: Vec::new(),
-                    documents: Vec::new(),
-                    tasks: Vec::new(),
-                }),
-                warnings: vec![format!(
-                    "workspace note `{}` was not found for client `{}`",
-                    cross_client_note.id, other_client.id
-                )],
-            }
-        );
+        .expect_err("terminal run should be denied");
+        let FunctionCallError::RespondToModel(terminal_message) = terminal else {
+            panic!("lifecycle denial should be returned to the model");
+        };
+        assert!(terminal_message.contains("cannot read additional context"));
     }
 
     #[tokio::test]
-    async fn workspace_context_read_rejects_empty_client_id() {
+    async fn workspace_context_read_rejects_empty_run_id() {
         let (_temp, state_db) = test_state_db().await;
         let result = read_workspace_context(
             state_db,
             WorkspaceContextReadArgs {
-                client_id: "  ".to_string(),
-                note_id: None,
-                include_documents: Some(true),
+                run_id: "  ".to_string(),
+                category: WorkspaceContextCategory::VisitHistory,
+                limit: None,
             },
         )
         .await;
 
         let Err(FunctionCallError::RespondToModel(message)) = result else {
-            panic!("expected empty client_id to be rejected");
+            panic!("expected empty run_id to be rejected");
         };
-        assert_eq!(message, "client_id must not be empty");
+        assert_eq!(message, "run_id must not be empty");
     }
 }

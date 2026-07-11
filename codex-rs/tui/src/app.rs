@@ -81,7 +81,7 @@ use crate::update_action::UpdateAction;
 use crate::version::CODEX_CLI_VERSION;
 use crate::workspace_command::AppServerWorkspaceCommandRunner;
 use crate::workspace_command::WorkspaceCommandRunner;
-use crate::workspace_context_assembly::packet_scoped_agent_handoff_prompt;
+use crate::workspace_context_assembly::packet_scoped_agent_handoff_prompt_for_run;
 use crate::workspace_dashboard::WorkspaceDashboard;
 use crate::workspace_dashboard::WorkspaceDashboardAction;
 use crate::workspace_dashboard::WorkspaceProfile;
@@ -132,6 +132,9 @@ use codex_app_server_protocol::ThreadStartSource;
 use codex_app_server_protocol::Turn;
 use codex_app_server_protocol::TurnError as AppServerTurnError;
 use codex_app_server_protocol::TurnStatus;
+use codex_app_server_protocol::WorkspaceAgentRunStartParams;
+use codex_app_server_protocol::WorkspaceAgentRunStatusUpdateParams;
+use codex_app_server_protocol::WorkspaceContextPacketListParams;
 use codex_app_server_protocol::WriteStatus;
 use codex_config::ConfigLayerStackOrdering;
 use codex_config::LoaderOverrides;
@@ -223,6 +226,7 @@ mod thread_goal_actions;
 mod thread_routing;
 mod thread_session_state;
 mod thread_settings;
+mod workspace_agent_capture;
 
 use self::agent_navigation::AgentNavigationDirection;
 use self::agent_navigation::AgentNavigationState;
@@ -235,6 +239,7 @@ use self::side::SideParentStatusChange;
 use self::side::SideThreadState;
 use self::startup_prompts::*;
 use self::thread_events::*;
+use self::workspace_agent_capture::PendingWorkspaceAgentCapture;
 
 const EXTERNAL_EDITOR_HINT: &str = "Save and close external editor to continue.";
 const THREAD_EVENT_CHANNEL_CAPACITY: usize = 32768;
@@ -489,6 +494,7 @@ pub(crate) struct App {
     workspace_command_runner: Option<WorkspaceCommandRunner>,
     workspace_dashboard: Option<WorkspaceDashboard>,
     workspace_dashboard_visible: bool,
+    pending_workspace_agent_capture: Option<PendingWorkspaceAgentCapture>,
     /// Config is stored here so we can recreate ChatWidgets as needed.
     pub(crate) config: Config,
     pub(crate) state_db: Option<StateDbHandle>,
@@ -980,6 +986,7 @@ See the Codex keymap documentation for supported actions and examples."
             workspace_command_runner: Some(workspace_command_runner),
             workspace_dashboard: None,
             workspace_dashboard_visible: false,
+            pending_workspace_agent_capture: None,
             config,
             state_db,
             cli_kv_overrides,
@@ -1691,6 +1698,34 @@ See the Codex keymap documentation for supported actions and examples."
         &mut self,
         app_server: &mut AppServerSession,
     ) -> Result<()> {
+        let is_medical_handoff = self
+            .workspace_dashboard
+            .as_ref()
+            .is_some_and(|dashboard| dashboard.profile() == WorkspaceProfile::Medical);
+        let mut replaced_pending_handoff = false;
+        if is_medical_handoff && let Some(pending) = self.pending_workspace_agent_capture.take() {
+            let cancel_result = app_server
+                .workspace_agent_run_status_update(WorkspaceAgentRunStatusUpdateParams {
+                    run_id: pending.run_id().to_string(),
+                    status: "canceled".to_string(),
+                    error_summary: Some(
+                        "superseded by a newer clinician context handoff".to_string(),
+                    ),
+                })
+                .await;
+            if let Err(err) = cancel_result {
+                self.pending_workspace_agent_capture = Some(pending);
+                return Err(err);
+            }
+            replaced_pending_handoff = true;
+        }
+        let run_provider = Some(self.chat_widget.config_ref().model_provider_id.clone());
+        let run_model = self.chat_widget.current_model().to_string();
+        let run_source_thread_id = self
+            .active_thread_id
+            .as_ref()
+            .map(ToString::to_string)
+            .or_else(|| self.chat_widget.thread_id().map(|id| id.to_string()));
         let Some(dashboard) = self.workspace_dashboard.as_mut() else {
             self.workspace_dashboard_visible = false;
             return Ok(());
@@ -1703,22 +1738,54 @@ See the Codex keymap documentation for supported actions and examples."
                     return Ok(());
                 }
             };
-            let packet = app_server
+            let prepared_packet = app_server
                 .workspace_context_packet_create(params)
                 .await?
                 .packet;
-            let prompt = packet_scoped_agent_handoff_prompt(&packet);
+            let run = app_server
+                .workspace_agent_run_start(WorkspaceAgentRunStartParams {
+                    packet_id: prepared_packet.id.clone(),
+                    idempotency_key: "tui-context-handoff-v1".to_string(),
+                    client_id: Some(prepared_packet.client_id.clone()),
+                    context_envelope_sha256: Some(prepared_packet.context_envelope_sha256.clone()),
+                    provider: run_provider,
+                    model: Some(run_model),
+                    source_thread_id: run_source_thread_id,
+                    source_turn_id: None,
+                })
+                .await?
+                .run;
+            let packet = app_server
+                .workspace_context_packet_list(WorkspaceContextPacketListParams {
+                    client_id: prepared_packet.client_id.clone(),
+                    note_id: prepared_packet.note_id.clone(),
+                    limit: Some(100),
+                })
+                .await?
+                .packets
+                .into_iter()
+                .find(|packet| packet.id == prepared_packet.id)
+                .ok_or_else(|| {
+                    color_eyre::eyre::eyre!(
+                        "submitted medical context packet `{}` was not found",
+                        prepared_packet.id
+                    )
+                })?;
+            self.pending_workspace_agent_capture =
+                Some(PendingWorkspaceAgentCapture::new(&packet, &run));
+            let prompt = packet_scoped_agent_handoff_prompt_for_run(&packet, Some(run.id.as_str()));
             dashboard.mark_agent_context_sent(packet);
             prompt
         } else {
             dashboard.agent_context_prompt()
         };
 
-        if self
-            .chat_widget
-            .composer_text_with_pending()
-            .trim()
-            .is_empty()
+        if replaced_pending_handoff
+            || self
+                .chat_widget
+                .composer_text_with_pending()
+                .trim()
+                .is_empty()
         {
             self.chat_widget
                 .set_composer_text(prompt, Vec::new(), Vec::new());

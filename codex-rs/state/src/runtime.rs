@@ -69,6 +69,9 @@ mod remote_control;
 mod test_support;
 mod threads;
 mod workspace;
+mod workspace_agent;
+mod workspace_agent_proposals;
+mod workspace_agent_queries;
 
 pub use goals::GoalAccountingMode;
 pub use goals::GoalAccountingOutcome;

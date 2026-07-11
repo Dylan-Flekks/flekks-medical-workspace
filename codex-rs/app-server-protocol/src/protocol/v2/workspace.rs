@@ -192,7 +192,6 @@ pub struct WorkspacePracticeLibraryItem {
     pub owner_client_id: String,
     pub owner_display_name: String,
     pub linked_to_active_client: bool,
-    #[ts(optional = nullable)]
     pub linked_document_id: Option<String>,
     pub scope_reason: String,
     pub reviewed_text_count: i64,
@@ -980,11 +979,20 @@ pub struct WorkspaceContextPacket {
     pub chart_context_summary: String,
     pub context_envelope_json: String,
     pub context_envelope_sha256: String,
+    pub clinician_actor: String,
+    #[ts(type = "number | null")]
+    pub base_note_revision: Option<i64>,
+    pub authorized_scope_json: String,
+    pub expected_output_kind: String,
     pub status: String,
     #[ts(type = "number")]
     pub created_at: i64,
     #[ts(type = "number")]
     pub sent_at: i64,
+    #[ts(type = "number | null")]
+    pub submitted_at: Option<i64>,
+    #[ts(type = "number | null")]
+    pub canceled_at: Option<i64>,
     #[ts(type = "number")]
     pub updated_at: i64,
 }
@@ -1025,6 +1033,14 @@ pub struct WorkspaceContextPacketCreateParams {
     pub clip_summary: String,
     pub chart_context_summary: String,
     pub context_envelope_json: String,
+    #[ts(optional = nullable)]
+    pub clinician_actor: Option<String>,
+    #[ts(optional = nullable)]
+    pub base_note_revision: Option<i64>,
+    #[ts(optional = nullable)]
+    pub authorized_scope_json: Option<String>,
+    #[ts(optional = nullable)]
+    pub expected_output_kind: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
@@ -1055,10 +1071,178 @@ pub struct WorkspaceContextPacketReplay {
     pub human_request: String,
     pub context_envelope_json: String,
     pub context_envelope_sha256: String,
+    pub clinician_actor: String,
+    #[ts(type = "number | null")]
+    pub base_note_revision: Option<i64>,
+    pub authorized_scope_json: String,
+    pub expected_output_kind: String,
     pub read_only_safety_constraints: Vec<String>,
     pub status: String,
     #[ts(type = "number")]
     pub sent_at: i64,
+    #[ts(type = "number | null")]
+    pub submitted_at: Option<i64>,
+}
+
+/// One execution attempt against an immutable context packet. Retries create a
+/// new run; repeated starts with the same packet/idempotency key return the
+/// existing run.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct WorkspaceAgentRun {
+    pub id: String,
+    pub packet_id: String,
+    pub client_id: String,
+    pub note_id: Option<String>,
+    #[ts(type = "number | null")]
+    pub base_note_revision: Option<i64>,
+    pub context_envelope_sha256: String,
+    pub run_kind: String,
+    pub idempotency_key: String,
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub source_thread_id: Option<String>,
+    pub source_turn_id: Option<String>,
+    pub status: String,
+    pub error_summary: Option<String>,
+    #[ts(type = "number")]
+    pub started_at: i64,
+    #[ts(type = "number | null")]
+    pub completed_at: Option<i64>,
+    #[ts(type = "number")]
+    pub created_at: i64,
+    #[ts(type = "number")]
+    pub updated_at: i64,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct WorkspaceAgentRunStartParams {
+    pub packet_id: String,
+    pub idempotency_key: String,
+    #[ts(optional = nullable)]
+    pub client_id: Option<String>,
+    #[ts(optional = nullable)]
+    pub context_envelope_sha256: Option<String>,
+    #[ts(optional = nullable)]
+    pub provider: Option<String>,
+    #[ts(optional = nullable)]
+    pub model: Option<String>,
+    #[ts(optional = nullable)]
+    pub source_thread_id: Option<String>,
+    #[ts(optional = nullable)]
+    pub source_turn_id: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct WorkspaceAgentRunStartResponse {
+    pub run: WorkspaceAgentRun,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct WorkspaceAgentRunListParams {
+    pub client_id: String,
+    #[ts(optional = nullable)]
+    pub note_id: Option<String>,
+    #[ts(optional = nullable)]
+    pub packet_id: Option<String>,
+    #[ts(optional = nullable)]
+    pub limit: Option<u32>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct WorkspaceAgentRunListResponse {
+    pub runs: Vec<WorkspaceAgentRun>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct WorkspaceAgentRunStatusUpdateParams {
+    pub run_id: String,
+    pub status: String,
+    #[ts(optional = nullable)]
+    pub error_summary: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct WorkspaceAgentRunStatusUpdateResponse {
+    pub run: Option<WorkspaceAgentRun>,
+}
+
+/// Exact, immutable record returned to one agent run. The snapshot omits local
+/// filesystem paths and is hashed server-side for later audit replay.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct WorkspaceAgentRunSource {
+    pub id: String,
+    pub run_id: String,
+    pub source_entity_type: String,
+    pub source_entity_id: String,
+    #[ts(type = "number | null")]
+    pub source_revision: Option<i64>,
+    pub display_label: String,
+    pub snapshot_json: String,
+    pub content_sha256: String,
+    pub access_purpose: String,
+    #[ts(type = "number")]
+    pub accessed_at: i64,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct WorkspaceAgentRunSourceListParams {
+    pub run_id: String,
+    #[ts(optional = nullable)]
+    pub limit: Option<u32>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct WorkspaceAgentRunSourceListResponse {
+    pub sources: Vec<WorkspaceAgentRunSource>,
+}
+
+/// Packet-authorized database categories that an active agent run may read.
+/// The server derives patient ownership from the run and records every returned
+/// record as an immutable source snapshot.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub enum WorkspaceAgentContextCategory {
+    VisitHistory,
+    ProgressNotes,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct WorkspaceAgentRunContextReadParams {
+    pub run_id: String,
+    pub category: WorkspaceAgentContextCategory,
+    #[ts(optional = nullable)]
+    pub limit: Option<u32>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct WorkspaceAgentRunContextReadResponse {
+    pub category: WorkspaceAgentContextCategory,
+    pub sources: Vec<WorkspaceAgentRunSource>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
@@ -1076,10 +1260,17 @@ pub struct WorkspaceContextPacketReplayResponse {
 #[ts(export_to = "v2/")]
 pub struct WorkspaceAgentResult {
     pub id: String,
+    pub run_id: Option<String>,
     pub packet_id: String,
     pub client_id: String,
     pub note_id: Option<String>,
     pub context_envelope_sha256: String,
+    #[ts(type = "number | null")]
+    pub base_note_revision: Option<i64>,
+    pub packet_context_sha256: String,
+    pub result_kind: String,
+    pub structured_changes_json: String,
+    pub rationale_summary: String,
     pub body: String,
     pub summary: String,
     pub status: String,
@@ -1114,6 +1305,12 @@ pub struct WorkspaceAgentResultListResponse {
 #[ts(export_to = "v2/")]
 pub struct WorkspaceAgentResultCreateParams {
     pub packet_id: String,
+    #[ts(optional = nullable)]
+    pub run_id: Option<String>,
+    #[ts(optional = nullable)]
+    pub source_thread_id: Option<String>,
+    #[ts(optional = nullable)]
+    pub source_turn_id: Option<String>,
     pub body: String,
     #[ts(optional = nullable)]
     pub summary: Option<String>,
@@ -1123,6 +1320,12 @@ pub struct WorkspaceAgentResultCreateParams {
     pub note_id: Option<String>,
     #[ts(optional = nullable)]
     pub context_envelope_sha256: Option<String>,
+    #[ts(optional = nullable)]
+    pub result_kind: Option<String>,
+    #[ts(optional = nullable)]
+    pub structured_changes_json: Option<String>,
+    #[ts(optional = nullable)]
+    pub rationale_summary: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
@@ -1169,6 +1372,7 @@ pub struct WorkspaceNoteProposal {
     pub status: WorkspaceNoteProposalStatus,
     pub source_thread_id: Option<String>,
     pub source_turn_id: Option<String>,
+    pub agent_result_id: Option<String>,
     #[ts(type = "number")]
     pub created_at: i64,
     #[ts(type = "number | null")]
@@ -1200,6 +1404,8 @@ pub struct WorkspaceNoteProposalCreateParams {
     pub summary: String,
     pub source_thread_id: Option<String>,
     pub source_turn_id: Option<String>,
+    #[ts(optional = nullable)]
+    pub agent_result_id: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
@@ -1215,6 +1421,8 @@ pub struct WorkspaceNoteProposalCreateResponse {
 pub struct WorkspaceNoteProposalResolveParams {
     pub proposal_id: String,
     pub accept: bool,
+    #[ts(optional = nullable)]
+    pub edited_body: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
@@ -1222,6 +1430,54 @@ pub struct WorkspaceNoteProposalResolveParams {
 #[ts(export_to = "v2/")]
 pub struct WorkspaceNoteProposalResolveResponse {
     pub proposal: Option<WorkspaceNoteProposal>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub enum WorkspaceNoteProposalDecisionKind {
+    AcceptedAll,
+    AcceptedEdited,
+    RejectedAll,
+    CopiedChange,
+    RejectedChange,
+}
+
+/// Append-only record of what a clinician did with proposed agent work.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct WorkspaceNoteProposalDecision {
+    pub id: String,
+    pub proposal_id: String,
+    pub agent_result_id: Option<String>,
+    pub note_id: String,
+    #[ts(type = "number")]
+    pub base_revision: i64,
+    pub decision_kind: WorkspaceNoteProposalDecisionKind,
+    pub change_id: Option<String>,
+    pub applied_text: Option<String>,
+    pub applied_text_sha256: Option<String>,
+    #[ts(type = "number | null")]
+    pub resulting_note_revision: Option<i64>,
+    pub actor: String,
+    pub reason: Option<String>,
+    #[ts(type = "number")]
+    pub created_at: i64,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct WorkspaceNoteProposalDecisionListParams {
+    pub proposal_id: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct WorkspaceNoteProposalDecisionListResponse {
+    pub decisions: Vec<WorkspaceNoteProposalDecision>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]

@@ -4,33 +4,33 @@ expression: "render_dashboard_lines_at(&dashboard, width, height)"
 ---
 Medical Workspace  Unsaved
 Patient: Jordan Patient  DOB: blank  MRN: blank  Contact: Missing contact  Coverage: Missing coverage  Encounter: No
-┌Patient Directory───────────┐┌Patient Demographics────────────────────────────────────────────────────────────────────┐
-│Local search: /             ││Display: Jordan Patient                                                                 │
-│0 active patients; local    ││Preferred:                                                                              │
-│only                        ││DOB:                                                                                    │
-│No saved patients yet.      ││Sex/Gender:                                                                             │
-│New patient: :patient new   ││Patient ID / MRN:                                                                       │
-│                            ││Chart start: 2026-01-01                                                                 │
-│                            ││Chart end: 2026-06-09                                                                   │
-│                            │└────────────────────────────────────────────────────────────────────────────────────────┘
-└────────────────────────────┘┌Note Title──────────────────────────────────────────────────────────────────────────────┐
-┌Patient Notes───────────────┐│Visit note                                                                              │
-│Patient Notes               │└────────────────────────────────────────────────────────────────────────────────────────┘
-│  New note                  │┌Note Body───────────────────────────────────────────────────────────────────────────────┐
-│  No patient notes yet. Use ││Human-entered note body.                                                                │
+ EXPLORER                      PATIENT CHART
+┌Patient Directory───────────┐┌Today's Visit───────────────────────────────────────────────────────────────────────────┐
+│Local search: /             ││Patient: Jordan Patient; note: Visit note                                               │
+│0 active patients; local    ││Next                                                                                    │
+│only                        ││  ● Next: Save first eval                                                               │
+│No saved patients yet.      ││                                                                                        │
+│New patient: :patient new   ││Intake Checklist                                                                        │
+│                            ││  [ ] Demographics - missing DOB or Patient ID / MRN                                    │
+│                            ││  [ ] Emergency contact - missing                                                       │
+│                            ││  [ ] Coverage - missing                                                                │
+└────────────────────────────┘│  [ ] ID card - missing                                                                 │
+┌Patient Notes───────────────┐│  [ ] Insurance card - missing                                                          │
+│Patient Notes               ││  [ ] Referral - missing                                                                │
+│  New note                  ││  [ ] Allergies - not recorded                                                          │
+│  No patient notes yet. Use ││  [ ] Note - needs save                                                                 │
 │:note new.                  ││                                                                                        │
 │  Medical, communication,   ││                                                                                        │
 │and admin notes appear here.││                                                                                        │
-│                            ││                                                                                        │
 └────────────────────────────┘│                                                                                        │
 ┌Uploaded Documents──────────┐│                                                                                        │
 │Uploaded Documents          ││                                                                                        │
-│No files yet                │└────────────────────────────────────────────────────────────────────────────────────────┘
-│Paste/drop JPG/PDF. S...    │┌Today's Visit───────────────────────────────────────────────────────────────────────────┐
-│                            ││Patient: Jordan Patient; note: Visit note                                               │
-│                            ││Next                                                                                    │
-│                            ││  ● Next: Save first eval                                                               │
+│No files yet                ││                                                                                        │
+│Paste/drop JPG/PDF. S...    ││                                                                                        │
 │                            ││                                                                                        │
-│                            ││Intake Checklist                                                                        │
+│                            ││                                                                                        │
+│                            ││                                                                                        │
+│                            ││                                                                                        │
+│                            ││                                                                                        │
 └────────────────────────────┘└────────────────────────────────────────────────────────────────────────────────────────┘
 Focus: Center | Mode: Read-only chart | Next: Save first eval | Status: Unsaved changes.

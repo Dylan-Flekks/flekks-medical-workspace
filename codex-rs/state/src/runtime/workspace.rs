@@ -24,7 +24,7 @@ const NOTE_STATUS_ADDENDED: &str = "addended";
 
 #[derive(Clone)]
 pub struct WorkspaceStore {
-    pool: Arc<SqlitePool>,
+    pub(super) pool: Arc<SqlitePool>,
 }
 
 // Workspace graph invariants:
@@ -2606,7 +2606,7 @@ ORDER BY created_at_ms DESC
 
     pub async fn create_note_proposal(
         &self,
-        input: crate::WorkspaceNoteProposalCreate,
+        mut input: crate::WorkspaceNoteProposalCreate,
     ) -> anyhow::Result<crate::WorkspaceNoteProposal> {
         let id = Uuid::new_v4().to_string();
         let now_ms = datetime_to_epoch_millis(Utc::now());
@@ -2627,7 +2627,83 @@ ORDER BY created_at_ms DESC
                 "signed workspace notes require an addendum instead of replacement proposals"
             );
         }
-        if current_revision != input.base_revision {
+        if let Some(result_id) = input.agent_result_id.as_deref() {
+            let linked = sqlx::query(
+                r#"
+SELECT
+    result.client_id AS result_client_id,
+    result.note_id AS result_note_id,
+    result.base_note_revision AS result_base_note_revision,
+    result.packet_id AS result_packet_id,
+    result.packet_context_sha256 AS result_packet_context_sha256,
+    run.id AS run_id,
+    run.packet_id AS run_packet_id,
+    run.client_id AS run_client_id,
+    run.note_id AS run_note_id,
+    run.base_note_revision AS run_base_note_revision,
+    run.context_envelope_sha256 AS run_context_envelope_sha256,
+    run.source_thread_id AS run_source_thread_id,
+    run.source_turn_id AS run_source_turn_id
+FROM workspace_agent_results AS result
+LEFT JOIN workspace_agent_runs AS run ON run.id = result.run_id
+WHERE result.id = ?
+                "#,
+            )
+            .bind(result_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+            let Some(linked) = linked else {
+                anyhow::bail!("workspace agent result `{result_id}` was not found");
+            };
+            let result_client_id: String = linked.try_get("result_client_id")?;
+            let result_note_id: Option<String> = linked.try_get("result_note_id")?;
+            let result_base_revision: Option<i64> = linked.try_get("result_base_note_revision")?;
+            let result_packet_id: String = linked.try_get("result_packet_id")?;
+            let result_packet_hash: String = linked.try_get("result_packet_context_sha256")?;
+            let run_id: Option<String> = linked.try_get("run_id")?;
+            let run_packet_id: Option<String> = linked.try_get("run_packet_id")?;
+            let run_client_id: Option<String> = linked.try_get("run_client_id")?;
+            let run_note_id: Option<String> = linked.try_get("run_note_id")?;
+            let run_base_revision: Option<i64> = linked.try_get("run_base_note_revision")?;
+            let run_packet_hash: Option<String> = linked.try_get("run_context_envelope_sha256")?;
+            let source_thread_id: Option<String> = linked.try_get("run_source_thread_id")?;
+            let source_turn_id: Option<String> = linked.try_get("run_source_turn_id")?;
+            let result_base_revision = result_base_revision.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "workspace agent result `{result_id}` has no durable base note revision"
+                )
+            })?;
+            if result_client_id != client_id
+                || result_note_id.as_deref() != Some(input.note_id.as_str())
+            {
+                anyhow::bail!(
+                    "workspace agent result `{result_id}` does not belong to note `{}`",
+                    input.note_id
+                );
+            }
+            let run_id = run_id.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "workspace agent result `{result_id}` is not linked to a durable run"
+                )
+            })?;
+            if run_packet_id.as_deref() != Some(result_packet_id.as_str())
+                || run_client_id.as_deref() != Some(result_client_id.as_str())
+                || run_note_id != result_note_id
+                || run_base_revision != Some(result_base_revision)
+                || run_packet_hash.as_deref() != Some(result_packet_hash.as_str())
+            {
+                anyhow::bail!(
+                    "workspace agent result `{result_id}` provenance does not match run `{run_id}`"
+                );
+            }
+            input.base_revision = result_base_revision;
+            if input.source_thread_id.is_none() {
+                input.source_thread_id = source_thread_id;
+            }
+            if input.source_turn_id.is_none() {
+                input.source_turn_id = source_turn_id.or_else(|| Some(result_id.to_string()));
+            }
+        } else if current_revision != input.base_revision {
             tx.rollback().await?;
             anyhow::bail!(
                 "cannot create proposal based on revision {} because note is at revision {}",
@@ -2641,6 +2717,7 @@ INSERT INTO workspace_note_proposals (
     id,
     note_id,
     base_revision,
+    agent_result_id,
     proposed_body,
     summary,
     status,
@@ -2648,11 +2725,12 @@ INSERT INTO workspace_note_proposals (
     source_turn_id,
     created_at_ms,
     resolved_at_ms
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
 RETURNING
     id,
     note_id,
     base_revision,
+    agent_result_id,
     proposed_body,
     summary,
     status,
@@ -2665,6 +2743,7 @@ RETURNING
         .bind(&id)
         .bind(&input.note_id)
         .bind(input.base_revision)
+        .bind(&input.agent_result_id)
         .bind(&input.proposed_body)
         .bind(&input.summary)
         .bind(crate::WorkspaceNoteProposalStatus::Pending.as_str())
@@ -2673,6 +2752,15 @@ RETURNING
         .bind(now_ms)
         .fetch_one(&mut *tx)
         .await?;
+        if let Some(result_id) = input.agent_result_id.as_deref() {
+            sqlx::query(
+                "UPDATE workspace_agent_results SET status = 'converted', updated_at_ms = ? WHERE id = ?",
+            )
+            .bind(now_ms)
+            .bind(result_id)
+            .execute(&mut *tx)
+            .await?;
+        }
         insert_audit_event(
             &mut tx,
             crate::WorkspaceAuditEventCreate {
@@ -2689,6 +2777,9 @@ RETURNING
                 source_turn_id: input.source_turn_id,
                 success: true,
                 summary: input.summary,
+                metadata_json: input
+                    .agent_result_id
+                    .map(|result_id| format!(r#"{{"agent_result_id":"{result_id}"}}"#)),
                 ..Default::default()
             },
             now_ms,
@@ -2696,6 +2787,16 @@ RETURNING
         .await?;
         tx.commit().await?;
         WorkspaceNoteProposalRow::try_from_row(&row).and_then(TryInto::try_into)
+    }
+
+    pub async fn create_note_proposal_from_agent_result(
+        &self,
+        input: crate::WorkspaceNoteProposalCreate,
+    ) -> anyhow::Result<crate::WorkspaceNoteProposal> {
+        if input.agent_result_id.is_none() {
+            anyhow::bail!("linked workspace note proposal requires an agent result id");
+        }
+        self.create_note_proposal(input).await
     }
 
     pub async fn list_note_proposals(
@@ -2708,6 +2809,7 @@ SELECT
     id,
     note_id,
     base_revision,
+    agent_result_id,
     proposed_body,
     summary,
     status,
@@ -2735,162 +2837,18 @@ ORDER BY created_at_ms DESC
         accept: bool,
         actor: &str,
     ) -> anyhow::Result<Option<crate::WorkspaceNoteProposal>> {
-        let now_ms = datetime_to_epoch_millis(Utc::now());
-        let mut tx = self.pool.begin().await?;
-        let proposal_row = sqlx::query(
-            r#"
-SELECT
-    id,
-    note_id,
-    base_revision,
-    proposed_body,
-    summary,
-    status,
-    source_thread_id,
-    source_turn_id,
-    created_at_ms,
-    resolved_at_ms
-FROM workspace_note_proposals
-WHERE id = ?
-            "#,
-        )
-        .bind(proposal_id)
-        .fetch_optional(&mut *tx)
-        .await?;
-        let Some(proposal_row) = proposal_row else {
-            tx.rollback().await?;
-            return Ok(None);
-        };
-        let proposal: crate::WorkspaceNoteProposal =
-            WorkspaceNoteProposalRow::try_from_row(&proposal_row)?.try_into()?;
-        if proposal.status != crate::WorkspaceNoteProposalStatus::Pending {
-            tx.rollback().await?;
-            return Ok(Some(proposal));
-        }
-
-        let note: Option<(String, Option<String>, String, String, String, i64)> = sqlx::query_as(
-            "SELECT client_id, encounter_id, title, kind, status, current_revision FROM workspace_notes WHERE id = ?",
-        )
-        .bind(&proposal.note_id)
-        .fetch_optional(&mut *tx)
-        .await?;
-        let mut proposal_client_id = note.as_ref().map(|note| note.0.clone());
-        let mut proposal_encounter_id = note.as_ref().and_then(|note| note.1.clone());
-        if accept {
-            let Some((client_id, encounter_id, title, kind, status, current_revision)) = note
-            else {
-                tx.rollback().await?;
-                return Ok(None);
-            };
-            if note_status_is_locked(&status) {
-                tx.rollback().await?;
-                anyhow::bail!(
-                    "signed workspace notes require an addendum instead of replacement proposals"
-                );
-            }
-            if current_revision != proposal.base_revision {
-                anyhow::bail!(
-                    "cannot accept proposal based on revision {} because note is now at revision {}",
-                    proposal.base_revision,
-                    current_revision
-                );
-            }
-            let next_revision = current_revision + 1;
-            sqlx::query(
-                r#"
-UPDATE workspace_notes
-SET body = ?, current_revision = ?, updated_at_ms = ?
-WHERE id = ?
-                "#,
-            )
-            .bind(&proposal.proposed_body)
-            .bind(next_revision)
-            .bind(now_ms)
-            .bind(&proposal.note_id)
-            .execute(&mut *tx)
-            .await?;
-            sqlx::query(
-                r#"
-INSERT INTO workspace_note_revisions (
-    note_id,
-    revision,
-    body,
-    actor,
-    source_thread_id,
-    source_turn_id,
-    summary,
-    created_at_ms
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                "#,
-            )
-            .bind(&proposal.note_id)
-            .bind(next_revision)
-            .bind(&proposal.proposed_body)
-            .bind(actor)
-            .bind(&proposal.source_thread_id)
-            .bind(&proposal.source_turn_id)
-            .bind(&proposal.summary)
-            .bind(now_ms)
-            .execute(&mut *tx)
-            .await?;
-            proposal_client_id = Some(client_id);
-            proposal_encounter_id = encounter_id;
-            let _ = (title, kind, status);
-        }
-
-        let status = if accept {
-            crate::WorkspaceNoteProposalStatus::Accepted
+        let resolution = if accept {
+            crate::WorkspaceNoteProposalResolution::Accept
         } else {
-            crate::WorkspaceNoteProposalStatus::Declined
+            crate::WorkspaceNoteProposalResolution::Decline
         };
-        let row = sqlx::query(
-            r#"
-UPDATE workspace_note_proposals
-SET status = ?, resolved_at_ms = ?
-WHERE id = ?
-RETURNING
-    id,
-    note_id,
-    base_revision,
-    proposed_body,
-    summary,
-    status,
-    source_thread_id,
-    source_turn_id,
-    created_at_ms,
-    resolved_at_ms
-            "#,
-        )
-        .bind(status.as_str())
-        .bind(now_ms)
-        .bind(proposal_id)
-        .fetch_one(&mut *tx)
-        .await?;
-        insert_audit_event(
-            &mut tx,
-            crate::WorkspaceAuditEventCreate {
-                entity_type: "note_proposal".to_string(),
-                entity_id: proposal_id.to_string(),
-                action: status.as_str().to_string(),
-                actor: actor.to_string(),
-                actor_kind: "human".to_string(),
-                source: "state".to_string(),
-                client_id: proposal_client_id,
-                encounter_id: proposal_encounter_id,
-                note_id: Some(proposal.note_id),
-                source_thread_id: proposal.source_thread_id,
-                source_turn_id: proposal.source_turn_id,
-                success: true,
-                summary: proposal.summary,
-                ..Default::default()
-            },
-            now_ms,
-        )
-        .await?;
-        tx.commit().await?;
-        WorkspaceNoteProposalRow::try_from_row(&row)
-            .and_then(TryInto::try_into)
-            .map(Some)
+        self.resolve_note_proposal_with(crate::WorkspaceNoteProposalResolve {
+            proposal_id: proposal_id.to_string(),
+            resolution,
+            actor: actor.to_string(),
+            reason: String::new(),
+        })
+        .await
     }
 
     pub async fn create_context_packet(
@@ -2916,12 +2874,47 @@ RETURNING
         )
         .await?;
         validate_packet_context_envelope(&input)?;
+        let base_note_revision = resolve_packet_base_note_revision(&mut tx, &input).await?;
         let context_envelope_sha256 = context_envelope_sha256(&input.context_envelope_json);
         let status = if input.status.trim().is_empty() {
-            "sent".to_string()
+            "prepared".to_string()
         } else {
             input.status.trim().to_string()
         };
+        if !matches!(
+            status.as_str(),
+            "prepared" | "submitted" | "canceled" | "sent" | "result_saved"
+        ) {
+            anyhow::bail!("unsupported workspace context packet status `{status}`");
+        }
+        let clinician_actor = if input.actor.trim().is_empty() {
+            "local human".to_string()
+        } else {
+            input.actor.trim().to_string()
+        };
+        let authorized_scope_json = if input.authorized_scope_json.trim().is_empty() {
+            legacy_packet_authorized_scope_json(&input)
+        } else {
+            let value: serde_json::Value = serde_json::from_str(&input.authorized_scope_json)
+                .map_err(|err| {
+                    anyhow::anyhow!(
+                        "workspace context packet authorized scope must be valid JSON: {err}"
+                    )
+                })?;
+            if !value.is_object() {
+                anyhow::bail!("workspace context packet authorized scope must be a JSON object");
+            }
+            validate_agent_visible_json("authorized scope", &value)?;
+            input.authorized_scope_json.trim().to_string()
+        };
+        let expected_output_kind = if input.expected_output_kind.trim().is_empty() {
+            "recommendation".to_string()
+        } else {
+            input.expected_output_kind.trim().to_string()
+        };
+        let submitted_at_ms =
+            matches!(status.as_str(), "submitted" | "sent" | "result_saved").then_some(now_ms);
+        let canceled_at_ms = (status == "canceled").then_some(now_ms);
         let row = sqlx::query(
             r#"
 INSERT INTO workspace_context_packets (
@@ -2939,11 +2932,17 @@ INSERT INTO workspace_context_packets (
     chart_context_summary,
     context_envelope_json,
     context_envelope_sha256,
+    clinician_actor,
+    base_note_revision,
+    authorized_scope_json,
+    expected_output_kind,
     status,
     created_at_ms,
     sent_at_ms,
+    submitted_at_ms,
+    canceled_at_ms,
     updated_at_ms
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 RETURNING
     id,
     client_id,
@@ -2959,9 +2958,15 @@ RETURNING
     chart_context_summary,
     context_envelope_json,
     context_envelope_sha256,
+    clinician_actor,
+    base_note_revision,
+    authorized_scope_json,
+    expected_output_kind,
     status,
     created_at_ms,
     sent_at_ms,
+    submitted_at_ms,
+    canceled_at_ms,
     updated_at_ms
             "#,
         )
@@ -2979,9 +2984,15 @@ RETURNING
         .bind(&input.chart_context_summary)
         .bind(&input.context_envelope_json)
         .bind(&context_envelope_sha256)
+        .bind(&clinician_actor)
+        .bind(base_note_revision)
+        .bind(&authorized_scope_json)
+        .bind(&expected_output_kind)
         .bind(&status)
         .bind(now_ms)
         .bind(now_ms)
+        .bind(submitted_at_ms)
+        .bind(canceled_at_ms)
         .bind(now_ms)
         .fetch_one(&mut *tx)
         .await?;
@@ -2990,8 +3001,8 @@ RETURNING
             crate::WorkspaceAuditEventCreate {
                 entity_type: "context_packet".to_string(),
                 entity_id: id.clone(),
-                action: "sent".to_string(),
-                actor: input.actor,
+                action: status.clone(),
+                actor: clinician_actor,
                 actor_kind: "human".to_string(),
                 source: "state".to_string(),
                 client_id: Some(input.client_id),
@@ -3036,14 +3047,20 @@ SELECT
     chart_context_summary,
     context_envelope_json,
     context_envelope_sha256,
+    clinician_actor,
+    base_note_revision,
+    authorized_scope_json,
+    expected_output_kind,
     status,
     created_at_ms,
     sent_at_ms,
+    submitted_at_ms,
+    canceled_at_ms,
     updated_at_ms
 FROM workspace_context_packets
 WHERE client_id = ?
   AND (? IS NULL OR note_id = ?)
-ORDER BY sent_at_ms DESC
+ORDER BY COALESCE(submitted_at_ms, created_at_ms) DESC
 LIMIT ?
             "#,
         )
@@ -3083,13 +3100,20 @@ SELECT
     chart_context_summary,
     context_envelope_json,
     context_envelope_sha256,
+    clinician_actor,
+    base_note_revision,
+    authorized_scope_json,
+    expected_output_kind,
     status,
     created_at_ms,
     sent_at_ms,
+    submitted_at_ms,
+    canceled_at_ms,
     updated_at_ms
 FROM workspace_context_packets
 WHERE id = ?
   AND client_id = ?
+  AND status IN ('submitted', 'sent', 'result_saved')
 LIMIT 1
             "#,
         )
@@ -3115,125 +3139,28 @@ LIMIT 1
 
     pub async fn create_agent_result(
         &self,
-        input: crate::WorkspaceAgentResultCreate,
+        mut input: crate::WorkspaceAgentResultCreate,
     ) -> anyhow::Result<crate::WorkspaceAgentResult> {
-        let id = Uuid::new_v4().to_string();
-        let now_ms = datetime_to_epoch_millis(Utc::now());
-        let mut tx = self.pool.begin().await?;
-        let packet: Option<(String, Option<String>, String)> =
-            sqlx::query_as(
-                "SELECT client_id, note_id, context_envelope_sha256 FROM workspace_context_packets WHERE id = ?",
-            )
-                .bind(&input.packet_id)
-                .fetch_optional(&mut *tx)
+        if input.run_id.is_none() {
+            let run = self
+                .start_agent_run(crate::WorkspaceAgentRunStart {
+                    packet_id: input.packet_id.clone(),
+                    expected_client_id: input.expected_client_id.clone().unwrap_or_default(),
+                    expected_context_envelope_sha256: input
+                        .expected_context_envelope_sha256
+                        .clone(),
+                    run_kind: "manual_import".to_string(),
+                    idempotency_key: format!("manual-import:{}", Uuid::new_v4()),
+                    provider: "manual".to_string(),
+                    model: String::new(),
+                    source_thread_id: None,
+                    source_turn_id: None,
+                    actor: input.actor.clone(),
+                })
                 .await?;
-        let Some((client_id, note_id, context_envelope_sha256)) = packet else {
-            tx.rollback().await?;
-            anyhow::bail!(
-                "workspace context packet `{}` was not found",
-                input.packet_id
-            );
-        };
-        if let Some(expected_client_id) = input.expected_client_id.as_deref()
-            && expected_client_id != client_id
-        {
-            tx.rollback().await?;
-            anyhow::bail!(
-                "workspace agent result packet `{}` belongs to client `{}` not `{}`",
-                input.packet_id,
-                client_id,
-                expected_client_id
-            );
+            input.run_id = Some(run.id);
         }
-        if let Some(expected_note_id) = input.expected_note_id.as_deref()
-            && note_id.as_deref() != Some(expected_note_id)
-        {
-            tx.rollback().await?;
-            anyhow::bail!(
-                "workspace agent result packet `{}` belongs to note `{:?}` not `{}`",
-                input.packet_id,
-                note_id,
-                expected_note_id
-            );
-        }
-        let expected_hash = input.expected_context_envelope_sha256.trim();
-        if !expected_hash.is_empty() && expected_hash != context_envelope_sha256 {
-            tx.rollback().await?;
-            anyhow::bail!(
-                "workspace agent result packet `{}` envelope hash does not match",
-                input.packet_id
-            );
-        }
-        let status = if input.status.trim().is_empty() {
-            "review_pending".to_string()
-        } else {
-            input.status.trim().to_string()
-        };
-        sqlx::query(
-            r#"
-INSERT INTO workspace_agent_results (
-    id,
-    packet_id,
-    client_id,
-    note_id,
-    body,
-    summary,
-    status,
-    created_at_ms,
-    updated_at_ms
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            "#,
-        )
-        .bind(&id)
-        .bind(&input.packet_id)
-        .bind(&client_id)
-        .bind(&note_id)
-        .bind(&input.body)
-        .bind(&input.summary)
-        .bind(&status)
-        .bind(now_ms)
-        .bind(now_ms)
-        .execute(&mut *tx)
-        .await?;
-        sqlx::query(
-            r#"
-UPDATE workspace_context_packets
-SET status = ?, updated_at_ms = ?
-WHERE id = ?
-            "#,
-        )
-        .bind("result_saved")
-        .bind(now_ms)
-        .bind(&input.packet_id)
-        .execute(&mut *tx)
-        .await?;
-        insert_audit_event(
-            &mut tx,
-            crate::WorkspaceAuditEventCreate {
-                entity_type: "agent_result".to_string(),
-                entity_id: id.clone(),
-                action: "saved".to_string(),
-                actor: input.actor,
-                actor_kind: "human".to_string(),
-                source: "state".to_string(),
-                client_id: Some(client_id),
-                note_id,
-                success: true,
-                summary: input.summary,
-                metadata_json: Some(format!(
-                    r#"{{"packet_id":"{}","context_envelope_sha256":"{}","status":"{}"}}"#,
-                    json_escape(&input.packet_id),
-                    json_escape(&context_envelope_sha256),
-                    json_escape(&status)
-                )),
-                ..Default::default()
-            },
-            now_ms,
-        )
-        .await?;
-        let row = workspace_agent_result_row_by_id(&mut tx, &id).await?;
-        tx.commit().await?;
-        WorkspaceAgentResultRow::try_from_row(&row).and_then(TryInto::try_into)
+        self.complete_agent_run_with_result(input).await
     }
 
     pub async fn update_agent_result_status(
@@ -3253,9 +3180,16 @@ SELECT
     r.packet_id,
     r.client_id,
     r.note_id,
+    r.run_id,
+    r.base_note_revision,
     p.context_envelope_sha256,
+    COALESCE(NULLIF(r.packet_context_sha256, ''), p.context_envelope_sha256)
+        AS packet_context_sha256,
     r.body,
     r.summary,
+    r.result_kind,
+    r.structured_changes_json,
+    r.rationale_summary,
     r.status,
     r.created_at_ms,
     r.updated_at_ms
@@ -3276,6 +3210,16 @@ WHERE r.id = ?
         if existing_result.status == status {
             tx.rollback().await?;
             return Ok(Some(existing_result));
+        }
+        let transition_allowed = matches!(
+            (existing_result.status.as_str(), status.as_str()),
+            ("review_pending", "reviewed" | "dismissed") | ("reviewed", "dismissed")
+        );
+        if !transition_allowed {
+            anyhow::bail!(
+                "workspace agent result cannot transition from `{}` to `{status}`",
+                existing_result.status
+            );
         }
         sqlx::query(
             r#"
@@ -3334,9 +3278,16 @@ SELECT
     r.packet_id,
     r.client_id,
     r.note_id,
+    r.run_id,
+    r.base_note_revision,
     p.context_envelope_sha256,
+    COALESCE(NULLIF(r.packet_context_sha256, ''), p.context_envelope_sha256)
+        AS packet_context_sha256,
     r.body,
     r.summary,
+    r.result_kind,
+    r.structured_changes_json,
+    r.rationale_summary,
     r.status,
     r.created_at_ms,
     r.updated_at_ms
@@ -3598,9 +3549,16 @@ SELECT
     r.packet_id,
     r.client_id,
     r.note_id,
+    r.run_id,
+    r.base_note_revision,
     p.context_envelope_sha256,
+    COALESCE(NULLIF(r.packet_context_sha256, ''), p.context_envelope_sha256)
+        AS packet_context_sha256,
     r.body,
     r.summary,
+    r.result_kind,
+    r.structured_changes_json,
+    r.rationale_summary,
     r.status,
     r.created_at_ms,
     r.updated_at_ms
@@ -3615,7 +3573,7 @@ WHERE r.id = ?
     .map_err(Into::into)
 }
 
-async fn insert_audit_event(
+pub(super) async fn insert_audit_event(
     tx: &mut sqlx::Transaction<'_, Sqlite>,
     input: crate::WorkspaceAuditEventCreate,
     created_at_ms: i64,
@@ -3861,6 +3819,12 @@ fn validate_packet_context_envelope(
     if !envelope.is_object() {
         anyhow::bail!("workspace context packet envelope must be a JSON object");
     }
+    if let Some(path_key) = forbidden_packet_path_key(&envelope) {
+        anyhow::bail!(
+            "workspace context packet envelope must not contain path-bearing key `{path_key}`"
+        );
+    }
+    validate_agent_visible_json("envelope", &envelope)?;
     let assembly_version = envelope
         .get("assemblyVersion")
         .and_then(serde_json::Value::as_str)
@@ -3930,6 +3894,149 @@ fn validate_packet_context_envelope(
         anyhow::bail!("workspace context packet envelope promptSnapshot is required");
     }
     Ok(())
+}
+
+fn forbidden_packet_path_key(value: &serde_json::Value) -> Option<&str> {
+    match value {
+        serde_json::Value::Object(object) => {
+            for (key, value) in object {
+                let normalized_key = key
+                    .chars()
+                    .filter(char::is_ascii_alphanumeric)
+                    .map(|character| character.to_ascii_lowercase())
+                    .collect::<String>();
+                if matches!(
+                    normalized_key.as_str(),
+                    "localpath"
+                        | "originalpath"
+                        | "sourcepath"
+                        | "vaultpath"
+                        | "thumbnailpath"
+                        | "previewcachepath"
+                ) {
+                    return Some(key.as_str());
+                }
+                if let Some(key) = forbidden_packet_path_key(value) {
+                    return Some(key);
+                }
+            }
+            None
+        }
+        serde_json::Value::Array(values) => values.iter().find_map(forbidden_packet_path_key),
+        serde_json::Value::Null
+        | serde_json::Value::Bool(_)
+        | serde_json::Value::Number(_)
+        | serde_json::Value::String(_) => None,
+    }
+}
+
+fn validate_agent_visible_json(label: &str, value: &serde_json::Value) -> anyhow::Result<()> {
+    if let Some(path_key) = forbidden_packet_path_key(value) {
+        anyhow::bail!(
+            "workspace context packet {label} must not contain path-bearing key `{path_key}`"
+        );
+    }
+    if contains_absolute_path_value(value) {
+        anyhow::bail!(
+            "workspace context packet {label} must not contain absolute filesystem path values"
+        );
+    }
+    Ok(())
+}
+
+fn contains_absolute_path_value(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Object(object) => object.values().any(contains_absolute_path_value),
+        serde_json::Value::Array(values) => values.iter().any(contains_absolute_path_value),
+        serde_json::Value::String(value) => string_contains_absolute_path(value),
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {
+            false
+        }
+    }
+}
+
+fn string_contains_absolute_path(value: &str) -> bool {
+    if value.contains("file://") {
+        return true;
+    }
+    if value.as_bytes().windows(3).any(|window| {
+        window[0].is_ascii_alphabetic() && window[1] == b':' && matches!(window[2], b'/' | b'\\')
+    }) {
+        return true;
+    }
+    value.split_whitespace().any(|token| {
+        let token = token
+            .rsplit_once('=')
+            .map_or(token, |(_, candidate)| candidate)
+            .trim_matches(|character: char| {
+                matches!(
+                    character,
+                    '\'' | '"' | '(' | ')' | '[' | ']' | '{' | '}' | ',' | ';'
+                )
+            });
+        token.starts_with("~/")
+            || token.starts_with("\\\\")
+            || token.starts_with("//")
+            || (token.starts_with('/') && token != "/workspacemedical")
+    })
+}
+
+async fn resolve_packet_base_note_revision(
+    tx: &mut sqlx::Transaction<'_, Sqlite>,
+    input: &crate::WorkspaceContextPacketCreate,
+) -> anyhow::Result<Option<i64>> {
+    let Some(note_id) = input.note_id.as_deref() else {
+        if input.base_note_revision.is_some() {
+            anyhow::bail!("workspace context packet base note revision requires a linked note");
+        }
+        return Ok(None);
+    };
+    let current_revision: Option<i64> =
+        sqlx::query_scalar("SELECT current_revision FROM workspace_notes WHERE id = ?")
+            .bind(note_id)
+            .fetch_optional(&mut **tx)
+            .await?;
+    let current_revision = current_revision
+        .ok_or_else(|| anyhow::anyhow!("workspace note `{note_id}` was not found"))?;
+    if let Some(expected_revision) = input.base_note_revision
+        && expected_revision != current_revision
+    {
+        anyhow::bail!(
+            "workspace context packet expected note revision {expected_revision} but note `{note_id}` is at revision {current_revision}"
+        );
+    }
+    let envelope: serde_json::Value = serde_json::from_str(&input.context_envelope_json)?;
+    if let Some(envelope_revision) = envelope
+        .pointer("/note/revision")
+        .and_then(serde_json::Value::as_i64)
+        && envelope_revision != current_revision
+    {
+        anyhow::bail!(
+            "workspace context packet envelope note revision {envelope_revision} does not match saved revision {current_revision}"
+        );
+    }
+    Ok(Some(current_revision))
+}
+
+fn legacy_packet_authorized_scope_json(input: &crate::WorkspaceContextPacketCreate) -> String {
+    let selected_artifact_ids =
+        serde_json::from_str::<serde_json::Value>(&input.selected_artifact_ids_json)
+            .unwrap_or_else(|_| serde_json::json!([]));
+    let selected_derivative_ids =
+        serde_json::from_str::<serde_json::Value>(&input.selected_derivative_ids_json)
+            .unwrap_or_else(|_| serde_json::json!([]));
+    let selected_clip_ids =
+        serde_json::from_str::<serde_json::Value>(&input.selected_clip_ids_json)
+            .unwrap_or_else(|_| serde_json::json!([]));
+    serde_json::json!({
+        "version": 1,
+        "categories": ["packet_snapshot"],
+        "legacy": true,
+        "selectedArtifactIds": selected_artifact_ids,
+        "selectedDerivativeIds": selected_derivative_ids,
+        "selectedClipIds": selected_clip_ids,
+    })
+    .to_string()
 }
 
 fn validate_envelope_selected_ids(
@@ -4127,6 +4234,7 @@ mod tests {
                 summary: "tighten wording".to_string(),
                 source_thread_id: Some("thread-1".to_string()),
                 source_turn_id: Some("turn-1".to_string()),
+                ..Default::default()
             })
             .await
             .expect("proposal create");
@@ -4672,6 +4780,7 @@ Coverage notes: fake coverage note";
                 ),
                 status: "sent".to_string(),
                 actor: "human".to_string(),
+                ..Default::default()
             })
             .await
             .expect("packet create");
@@ -4686,6 +4795,7 @@ Coverage notes: fake coverage note";
                 expected_client_id: Some(client.id.clone()),
                 expected_note_id: Some(note.id.clone()),
                 expected_context_envelope_sha256: packet.context_envelope_sha256.clone(),
+                ..Default::default()
             })
             .await
             .expect("agent result create");
@@ -4704,6 +4814,7 @@ Coverage notes: fake coverage note";
                 expected_client_id: Some("client-other".to_string()),
                 expected_note_id: Some(note.id.clone()),
                 expected_context_envelope_sha256: packet.context_envelope_sha256.clone(),
+                ..Default::default()
             })
             .await;
         assert!(wrong_client.is_err());
@@ -4718,6 +4829,7 @@ Coverage notes: fake coverage note";
                 expected_client_id: Some(client.id.clone()),
                 expected_note_id: Some("note-other".to_string()),
                 expected_context_envelope_sha256: packet.context_envelope_sha256.clone(),
+                ..Default::default()
             })
             .await;
         assert!(wrong_note.is_err());
@@ -4732,6 +4844,7 @@ Coverage notes: fake coverage note";
                 expected_client_id: Some(client.id.clone()),
                 expected_note_id: Some(note.id.clone()),
                 expected_context_envelope_sha256: "wrong-envelope-hash".to_string(),
+                ..Default::default()
             })
             .await;
         assert!(wrong_hash.is_err());
@@ -4778,6 +4891,7 @@ Coverage notes: fake coverage note";
                 ),
                 status: "sent".to_string(),
                 actor: "human".to_string(),
+                ..Default::default()
             })
             .await
             .expect("other packet create");
@@ -4792,6 +4906,7 @@ Coverage notes: fake coverage note";
                 expected_client_id: Some(other_client.id.clone()),
                 expected_note_id: Some(other_note.id.clone()),
                 expected_context_envelope_sha256: other_packet.context_envelope_sha256,
+                ..Default::default()
             })
             .await
             .expect("other agent result create");
@@ -4825,6 +4940,17 @@ Coverage notes: fake coverage note";
             .expect("result exists");
         assert_eq!(reviewed.status, "reviewed");
         assert_eq!(reviewed.body, "Returned work.");
+        let invalid_conversion = runtime
+            .workspace()
+            .update_agent_result_status(crate::WorkspaceAgentResultStatusUpdate {
+                result_id: result.id.clone(),
+                status: "converted".to_string(),
+                actor: "human".to_string(),
+            })
+            .await
+            .expect_err("only proposal creation may mark a result converted")
+            .to_string();
+        assert!(invalid_conversion.contains("cannot transition"));
         let listed = runtime
             .workspace()
             .list_agent_results(crate::WorkspaceAgentResultFilter {
@@ -4881,6 +5007,7 @@ Coverage notes: fake coverage note";
                 summary: "decline".to_string(),
                 source_thread_id: None,
                 source_turn_id: None,
+                ..Default::default()
             })
             .await
             .expect("proposal create");
@@ -4949,6 +5076,7 @@ Coverage notes: fake coverage note";
                 summary: "stale".to_string(),
                 source_thread_id: None,
                 source_turn_id: None,
+                ..Default::default()
             })
             .await
             .expect("proposal create");
@@ -5471,6 +5599,7 @@ Coverage notes: fake coverage note";
                     ),
                     status: "sent".to_string(),
                     actor: "human".to_string(),
+                    ..Default::default()
                 })
                 .await
                 .expect("packet create");
@@ -5674,6 +5803,7 @@ Coverage notes: fake coverage note";
                 ),
                 status: "sent".to_string(),
                 actor: "human".to_string(),
+                ..Default::default()
             })
             .await
             .expect("packet create");
@@ -5973,6 +6103,7 @@ Coverage notes: fake coverage note";
                 ),
                 status: "sent".to_string(),
                 actor: "human".to_string(),
+                ..Default::default()
             }
         };
 
@@ -6116,6 +6247,7 @@ Coverage notes: fake coverage note";
             context_envelope_json,
             status: "sent".to_string(),
             actor: "human".to_string(),
+            ..Default::default()
         };
 
         let err = runtime
@@ -6402,6 +6534,7 @@ Coverage notes: fake coverage note";
                 summary: "unsafe replacement".to_string(),
                 source_thread_id: Some("thread-1".to_string()),
                 source_turn_id: Some("turn-1".to_string()),
+                ..Default::default()
             })
             .await;
         assert!(proposal.is_err());

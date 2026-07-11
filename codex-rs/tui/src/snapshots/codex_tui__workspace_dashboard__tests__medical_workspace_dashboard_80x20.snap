@@ -3,6 +3,7 @@ source: tui/src/workspace_dashboard.rs
 expression: "render_dashboard_lines_at(&dashboard, width, height)"
 ---
 Medical Workspace  Unsaved
+Zones: Explorer > [Patient Chart] > Agent Work  Focus: Center
 ┌Today's Visit─────────────────────────────────────────────────────────────────┐
 │Patient: Jordan Patient; note: Visit note                                     │
 │Next                                                                          │
@@ -17,7 +18,6 @@ Medical Workspace  Unsaved
 │  [ ] Referral - missing                                                      │
 │  [ ] Allergies - not recorded                                                │
 │  [ ] Note - needs save                                                       │
-│                                                                              │
 │                                                                              │
 │                                                                              │
 └──────────────────────────────────────────────────────────────────────────────┘

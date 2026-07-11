@@ -1,12 +1,23 @@
 use super::*;
 use chrono::DateTime;
 use chrono::Utc;
+use codex_app_server_protocol::WorkspaceAgentContextCategory;
 use codex_app_server_protocol::WorkspaceAgentResultCreateParams;
 use codex_app_server_protocol::WorkspaceAgentResultCreateResponse;
 use codex_app_server_protocol::WorkspaceAgentResultListParams;
 use codex_app_server_protocol::WorkspaceAgentResultListResponse;
 use codex_app_server_protocol::WorkspaceAgentResultStatusUpdateParams;
 use codex_app_server_protocol::WorkspaceAgentResultStatusUpdateResponse;
+use codex_app_server_protocol::WorkspaceAgentRunContextReadParams;
+use codex_app_server_protocol::WorkspaceAgentRunContextReadResponse;
+use codex_app_server_protocol::WorkspaceAgentRunListParams;
+use codex_app_server_protocol::WorkspaceAgentRunListResponse;
+use codex_app_server_protocol::WorkspaceAgentRunSourceListParams;
+use codex_app_server_protocol::WorkspaceAgentRunSourceListResponse;
+use codex_app_server_protocol::WorkspaceAgentRunStartParams;
+use codex_app_server_protocol::WorkspaceAgentRunStartResponse;
+use codex_app_server_protocol::WorkspaceAgentRunStatusUpdateParams;
+use codex_app_server_protocol::WorkspaceAgentRunStatusUpdateResponse;
 use codex_app_server_protocol::WorkspaceArtifactDerivativeListParams;
 use codex_app_server_protocol::WorkspaceArtifactDerivativeListResponse;
 use codex_app_server_protocol::WorkspaceArtifactDerivativeStatusUpdateParams;
@@ -63,6 +74,9 @@ use codex_app_server_protocol::WorkspaceNoteListParams;
 use codex_app_server_protocol::WorkspaceNoteListResponse;
 use codex_app_server_protocol::WorkspaceNoteProposalCreateParams;
 use codex_app_server_protocol::WorkspaceNoteProposalCreateResponse;
+use codex_app_server_protocol::WorkspaceNoteProposalDecisionKind;
+use codex_app_server_protocol::WorkspaceNoteProposalDecisionListParams;
+use codex_app_server_protocol::WorkspaceNoteProposalDecisionListResponse;
 use codex_app_server_protocol::WorkspaceNoteProposalListParams;
 use codex_app_server_protocol::WorkspaceNoteProposalListResponse;
 use codex_app_server_protocol::WorkspaceNoteProposalResolveParams;
@@ -93,7 +107,7 @@ use codex_app_server_protocol::WorkspaceTaskUpsertResponse;
 
 const AGENT_VISIBLE_PACKET_SAFETY_CONSTRAINTS: &[&str] = &[
     "use only the stored context packet envelope",
-    "do not expand the packet from current workspace source rows",
+    "additional current workspace rows require an explicitly authorized run context read and are recorded as immutable source snapshots",
     "do not read unselected artifacts, derivatives, clips, or practice records",
     "original local files are never uploaded, parsed, transcribed, OCRed, or analyzed automatically",
     "packet context is read-only and grants no write, sign, submit, payer-contact, or record-mutation authority",
@@ -969,9 +983,24 @@ impl WorkspaceRequestProcessor {
                 "workspace context packet humanRequest must not be empty",
             ));
         }
+        let clinician_actor = params
+            .clinician_actor
+            .as_deref()
+            .map(str::trim)
+            .filter(|actor| !actor.is_empty())
+            .unwrap_or("local clinician")
+            .to_string();
+        let authorized_scope_json = params
+            .authorized_scope_json
+            .filter(|scope| !scope.trim().is_empty())
+            .unwrap_or_else(|| "{\"version\":1,\"categories\":[\"packet_snapshot\"]}".to_string());
+        let expected_output_kind = params
+            .expected_output_kind
+            .filter(|kind| !kind.trim().is_empty())
+            .unwrap_or_else(|| "note_proposal".to_string());
         let packet = state_db
             .workspace()
-            .create_context_packet(codex_state::WorkspaceContextPacketCreate {
+            .prepare_context_packet(codex_state::WorkspaceContextPacketCreate {
                 client_id: params.client_id,
                 encounter_id: empty_to_none(params.encounter_id),
                 note_id: empty_to_none(params.note_id),
@@ -1004,8 +1033,11 @@ impl WorkspaceRequestProcessor {
                 } else {
                     params.context_envelope_json
                 },
-                status: "sent".to_string(),
-                actor: "human".to_string(),
+                base_note_revision: params.base_note_revision,
+                authorized_scope_json,
+                expected_output_kind,
+                status: "prepared".to_string(),
+                actor: clinician_actor,
             })
             .await
             .map_err(|err| {
@@ -1050,6 +1082,172 @@ impl WorkspaceRequestProcessor {
             })?
             .map(api_workspace_context_packet_replay_from_state);
         Ok(Some(WorkspaceContextPacketReplayResponse { replay }.into()))
+    }
+
+    pub(crate) async fn agent_run_start(
+        &self,
+        params: WorkspaceAgentRunStartParams,
+    ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        if params.packet_id.trim().is_empty() {
+            return Err(invalid_request(
+                "workspace agent run packetId must not be empty",
+            ));
+        }
+        if params.idempotency_key.trim().is_empty() {
+            return Err(invalid_request(
+                "workspace agent run idempotencyKey must not be empty",
+            ));
+        }
+        let run = self
+            .state_db()?
+            .workspace()
+            .start_agent_run(codex_state::WorkspaceAgentRunStart {
+                packet_id: params.packet_id,
+                expected_client_id: params.client_id.unwrap_or_default(),
+                expected_context_envelope_sha256: params
+                    .context_envelope_sha256
+                    .unwrap_or_default(),
+                run_kind: "agent".to_string(),
+                idempotency_key: params.idempotency_key,
+                provider: params.provider.unwrap_or_default(),
+                model: params.model.unwrap_or_default(),
+                source_thread_id: empty_to_none(params.source_thread_id),
+                source_turn_id: empty_to_none(params.source_turn_id),
+                actor: "local clinician".to_string(),
+            })
+            .await
+            .map_err(|err| {
+                invalid_request(format!("failed to start workspace agent run: {err}"))
+            })?;
+        Ok(Some(
+            WorkspaceAgentRunStartResponse {
+                run: api_workspace_agent_run_from_state(run),
+            }
+            .into(),
+        ))
+    }
+
+    pub(crate) async fn agent_run_list(
+        &self,
+        params: WorkspaceAgentRunListParams,
+    ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        if params.client_id.trim().is_empty() {
+            return Err(invalid_request(
+                "workspace agent run clientId must not be empty",
+            ));
+        }
+        let runs = self
+            .state_db()?
+            .workspace()
+            .list_agent_runs(codex_state::WorkspaceAgentRunFilter {
+                client_id: params.client_id,
+                note_id: empty_to_none(params.note_id),
+                packet_id: empty_to_none(params.packet_id),
+                limit: params.limit,
+            })
+            .await
+            .map_err(|err| internal_error(format!("failed to list workspace agent runs: {err}")))?
+            .into_iter()
+            .map(api_workspace_agent_run_from_state)
+            .collect();
+        Ok(Some(WorkspaceAgentRunListResponse { runs }.into()))
+    }
+
+    pub(crate) async fn agent_run_status_update(
+        &self,
+        params: WorkspaceAgentRunStatusUpdateParams,
+    ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        if params.run_id.trim().is_empty() {
+            return Err(invalid_request(
+                "workspace agent run runId must not be empty",
+            ));
+        }
+        let status = params.status.trim();
+        if !matches!(status, "failed" | "canceled") {
+            return Err(invalid_request(
+                "workspace agent run status must be failed or canceled; result creation owns completion",
+            ));
+        }
+        let run = self
+            .state_db()?
+            .workspace()
+            .update_agent_run_status(codex_state::WorkspaceAgentRunStatusUpdate {
+                run_id: params.run_id,
+                status: status.to_string(),
+                error_summary: params.error_summary.unwrap_or_default(),
+                actor: "agent harness".to_string(),
+            })
+            .await
+            .map_err(|err| {
+                invalid_request(format!(
+                    "failed to update workspace agent run status: {err}"
+                ))
+            })?
+            .map(api_workspace_agent_run_from_state);
+        Ok(Some(WorkspaceAgentRunStatusUpdateResponse { run }.into()))
+    }
+
+    pub(crate) async fn agent_run_source_list(
+        &self,
+        params: WorkspaceAgentRunSourceListParams,
+    ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        if params.run_id.trim().is_empty() {
+            return Err(invalid_request(
+                "workspace agent run source runId must not be empty",
+            ));
+        }
+        let limit = params.limit.unwrap_or(100).clamp(1, 500) as usize;
+        let sources = self
+            .state_db()?
+            .workspace()
+            .list_agent_run_sources(&params.run_id)
+            .await
+            .map_err(|err| {
+                internal_error(format!("failed to list workspace agent run sources: {err}"))
+            })?
+            .into_iter()
+            .take(limit)
+            .map(api_workspace_agent_run_source_from_state)
+            .collect();
+        Ok(Some(WorkspaceAgentRunSourceListResponse { sources }.into()))
+    }
+
+    pub(crate) async fn agent_run_context_read(
+        &self,
+        params: WorkspaceAgentRunContextReadParams,
+    ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        if params.run_id.trim().is_empty() {
+            return Err(invalid_request(
+                "workspace agent run context read runId must not be empty",
+            ));
+        }
+        let category = params.category;
+        let category_name = match category {
+            WorkspaceAgentContextCategory::VisitHistory => "visit_history",
+            WorkspaceAgentContextCategory::ProgressNotes => "progress_notes",
+        };
+        let read = self
+            .state_db()?
+            .workspace()
+            .read_authorized_agent_context(codex_state::WorkspaceAgentContextReadRequest {
+                run_id: params.run_id,
+                category: category_name.to_string(),
+                max_records: params.limit,
+            })
+            .await
+            .map_err(|err| {
+                invalid_request(format!(
+                    "failed to read authorized workspace agent context: {err}"
+                ))
+            })?;
+        let sources = read
+            .sources
+            .into_iter()
+            .map(api_workspace_agent_run_source_from_state)
+            .collect();
+        Ok(Some(
+            WorkspaceAgentRunContextReadResponse { category, sources }.into(),
+        ))
     }
 
     pub(crate) async fn agent_result_list(
@@ -1102,23 +1300,46 @@ impl WorkspaceRequestProcessor {
             .filter(|summary| !summary.is_empty())
             .map(ToString::to_string)
             .unwrap_or_else(|| compact_text(&params.body, 80));
-        let result = state_db
-            .workspace()
-            .create_agent_result(codex_state::WorkspaceAgentResultCreate {
-                packet_id: params.packet_id,
-                body: params.body,
-                summary,
-                status: "review_pending".to_string(),
-                actor: "human".to_string(),
-                expected_client_id: empty_to_none(params.client_id),
-                expected_note_id: empty_to_none(params.note_id),
-                expected_context_envelope_sha256: empty_to_none(params.context_envelope_sha256)
-                    .unwrap_or_default(),
-            })
-            .await
-            .map_err(|err| {
-                invalid_request(format!("failed to create workspace agent result: {err}"))
-            })?;
+        let run_id = empty_to_none(params.run_id);
+        let linked_run = run_id.is_some();
+        let input = codex_state::WorkspaceAgentResultCreate {
+            packet_id: params.packet_id,
+            run_id,
+            source_thread_id: empty_to_none(params.source_thread_id),
+            source_turn_id: empty_to_none(params.source_turn_id),
+            body: params.body,
+            summary,
+            result_kind: params
+                .result_kind
+                .filter(|kind| !kind.trim().is_empty())
+                .unwrap_or_else(|| "recommendation".to_string()),
+            structured_changes_json: params
+                .structured_changes_json
+                .filter(|changes| !changes.trim().is_empty())
+                .unwrap_or_else(|| "[]".to_string()),
+            rationale_summary: params.rationale_summary.unwrap_or_default(),
+            status: "review_pending".to_string(),
+            actor: if linked_run {
+                "agent harness".to_string()
+            } else {
+                "local clinician".to_string()
+            },
+            expected_client_id: empty_to_none(params.client_id),
+            expected_note_id: empty_to_none(params.note_id),
+            expected_context_envelope_sha256: empty_to_none(params.context_envelope_sha256)
+                .unwrap_or_default(),
+        };
+        let result = if linked_run {
+            state_db
+                .workspace()
+                .complete_agent_run_with_result(input)
+                .await
+        } else {
+            state_db.workspace().create_agent_result(input).await
+        }
+        .map_err(|err| {
+            invalid_request(format!("failed to create workspace agent result: {err}"))
+        })?;
         Ok(Some(
             WorkspaceAgentResultCreateResponse {
                 result: api_workspace_agent_result_from_state(result),
@@ -1138,12 +1359,9 @@ impl WorkspaceRequestProcessor {
             ));
         }
         let status = params.status.trim();
-        if !matches!(
-            status,
-            "review_pending" | "reviewed" | "dismissed" | "converted"
-        ) {
+        if !matches!(status, "reviewed" | "dismissed") {
             return Err(invalid_request(
-                "workspace agent result status must be review_pending, reviewed, dismissed, or converted",
+                "workspace agent result status must be reviewed or dismissed; proposal creation owns the converted transition",
             ));
         }
         let result = state_db
@@ -1374,20 +1592,27 @@ impl WorkspaceRequestProcessor {
                 "workspace note proposal body must not be empty",
             ));
         }
-        let proposal = state_db
-            .workspace()
-            .create_note_proposal(codex_state::WorkspaceNoteProposalCreate {
-                note_id: params.note_id,
-                base_revision: params.base_revision,
-                proposed_body: params.proposed_body,
-                summary: params.summary,
-                source_thread_id: empty_to_none(params.source_thread_id),
-                source_turn_id: empty_to_none(params.source_turn_id),
-            })
-            .await
-            .map_err(|err| {
-                invalid_request(format!("failed to create workspace note proposal: {err}"))
-            })?;
+        let input = codex_state::WorkspaceNoteProposalCreate {
+            note_id: params.note_id,
+            base_revision: params.base_revision,
+            agent_result_id: empty_to_none(params.agent_result_id),
+            proposed_body: params.proposed_body,
+            summary: params.summary,
+            source_thread_id: empty_to_none(params.source_thread_id),
+            source_turn_id: empty_to_none(params.source_turn_id),
+        };
+        let linked_result = input.agent_result_id.is_some();
+        let proposal = if linked_result {
+            state_db
+                .workspace()
+                .create_note_proposal_from_agent_result(input)
+                .await
+        } else {
+            state_db.workspace().create_note_proposal(input).await
+        }
+        .map_err(|err| {
+            invalid_request(format!("failed to create workspace note proposal: {err}"))
+        })?;
         Ok(Some(
             WorkspaceNoteProposalCreateResponse {
                 proposal: api_workspace_note_proposal_from_state(proposal),
@@ -1401,9 +1626,28 @@ impl WorkspaceRequestProcessor {
         params: WorkspaceNoteProposalResolveParams,
     ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
         let state_db = self.state_db()?;
+        let edited_body = empty_to_none(params.edited_body);
+        if !params.accept && edited_body.is_some() {
+            return Err(invalid_request(
+                "workspace note proposal editedBody is only valid when accept is true",
+            ));
+        }
+        let resolution = match (params.accept, edited_body) {
+            (true, Some(body)) => {
+                codex_state::WorkspaceNoteProposalResolution::AcceptEdited { body }
+            }
+            (true, None) => codex_state::WorkspaceNoteProposalResolution::Accept,
+            (false, None) => codex_state::WorkspaceNoteProposalResolution::Decline,
+            (false, Some(_)) => unreachable!("edited decline was rejected above"),
+        };
         let proposal = state_db
             .workspace()
-            .resolve_note_proposal(&params.proposal_id, params.accept, "human")
+            .resolve_note_proposal_with(codex_state::WorkspaceNoteProposalResolve {
+                proposal_id: params.proposal_id,
+                resolution,
+                actor: "local clinician".to_string(),
+                reason: String::new(),
+            })
             .await
             .map_err(|err| {
                 invalid_request(format!("failed to resolve workspace note proposal: {err}"))
@@ -1411,6 +1655,33 @@ impl WorkspaceRequestProcessor {
             .map(api_workspace_note_proposal_from_state);
         Ok(Some(
             WorkspaceNoteProposalResolveResponse { proposal }.into(),
+        ))
+    }
+
+    pub(crate) async fn proposal_decision_list(
+        &self,
+        params: WorkspaceNoteProposalDecisionListParams,
+    ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        if params.proposal_id.trim().is_empty() {
+            return Err(invalid_request(
+                "workspace note proposal decision proposalId must not be empty",
+            ));
+        }
+        let decisions = self
+            .state_db()?
+            .workspace()
+            .list_note_proposal_decisions(&params.proposal_id)
+            .await
+            .map_err(|err| {
+                internal_error(format!(
+                    "failed to list workspace note proposal decisions: {err}"
+                ))
+            })?
+            .into_iter()
+            .map(api_workspace_note_proposal_decision_from_state)
+            .collect();
+        Ok(Some(
+            WorkspaceNoteProposalDecisionListResponse { decisions }.into(),
         ))
     }
 
@@ -1841,9 +2112,17 @@ fn api_workspace_context_packet_from_state(
         chart_context_summary: value.chart_context_summary,
         context_envelope_json: value.context_envelope_json,
         context_envelope_sha256: value.context_envelope_sha256,
+        clinician_actor: value.clinician_actor,
+        base_note_revision: value.base_note_revision,
+        authorized_scope_json: value.authorized_scope_json,
+        expected_output_kind: value.expected_output_kind,
         status: value.status,
         created_at: value.created_at.timestamp(),
         sent_at: value.sent_at.timestamp(),
+        submitted_at: value
+            .submitted_at
+            .map(|submitted_at| submitted_at.timestamp()),
+        canceled_at: value.canceled_at.map(|canceled_at| canceled_at.timestamp()),
         updated_at: value.updated_at.timestamp(),
     }
 }
@@ -1859,12 +2138,66 @@ fn api_workspace_context_packet_replay_from_state(
         human_request: value.human_request,
         context_envelope_json: value.context_envelope_json,
         context_envelope_sha256: value.context_envelope_sha256,
+        clinician_actor: value.clinician_actor,
+        base_note_revision: value.base_note_revision,
+        authorized_scope_json: value.authorized_scope_json,
+        expected_output_kind: value.expected_output_kind,
         read_only_safety_constraints: AGENT_VISIBLE_PACKET_SAFETY_CONSTRAINTS
             .iter()
             .map(|line| (*line).to_string())
             .collect(),
         status: value.status,
         sent_at: value.sent_at.timestamp(),
+        submitted_at: value
+            .submitted_at
+            .map(|submitted_at| submitted_at.timestamp()),
+    }
+}
+
+fn api_workspace_agent_run_from_state(
+    value: codex_state::WorkspaceAgentRun,
+) -> codex_app_server_protocol::WorkspaceAgentRun {
+    let provider = (!value.provider.trim().is_empty()).then_some(value.provider);
+    let model = (!value.model.trim().is_empty()).then_some(value.model);
+    let error_summary = (!value.error_summary.trim().is_empty()).then_some(value.error_summary);
+    codex_app_server_protocol::WorkspaceAgentRun {
+        id: value.id,
+        packet_id: value.packet_id,
+        client_id: value.client_id,
+        note_id: value.note_id,
+        base_note_revision: value.base_note_revision,
+        context_envelope_sha256: value.context_envelope_sha256,
+        run_kind: value.run_kind,
+        idempotency_key: value.idempotency_key,
+        provider,
+        model,
+        source_thread_id: value.source_thread_id,
+        source_turn_id: value.source_turn_id,
+        status: value.status,
+        error_summary,
+        started_at: value.started_at.timestamp(),
+        completed_at: value
+            .completed_at
+            .map(|completed_at| completed_at.timestamp()),
+        created_at: value.created_at.timestamp(),
+        updated_at: value.updated_at.timestamp(),
+    }
+}
+
+fn api_workspace_agent_run_source_from_state(
+    value: codex_state::WorkspaceAgentRunSource,
+) -> codex_app_server_protocol::WorkspaceAgentRunSource {
+    codex_app_server_protocol::WorkspaceAgentRunSource {
+        id: value.id,
+        run_id: value.run_id,
+        source_entity_type: value.source_entity_type,
+        source_entity_id: value.source_entity_id,
+        source_revision: value.source_revision,
+        display_label: value.display_label,
+        snapshot_json: value.snapshot_json,
+        content_sha256: value.content_sha256,
+        access_purpose: value.access_purpose,
+        accessed_at: value.accessed_at.timestamp(),
     }
 }
 
@@ -1873,10 +2206,16 @@ fn api_workspace_agent_result_from_state(
 ) -> codex_app_server_protocol::WorkspaceAgentResult {
     codex_app_server_protocol::WorkspaceAgentResult {
         id: value.id,
+        run_id: value.run_id,
         packet_id: value.packet_id,
         client_id: value.client_id,
         note_id: value.note_id,
         context_envelope_sha256: value.context_envelope_sha256,
+        base_note_revision: value.base_note_revision,
+        packet_context_sha256: value.packet_context_sha256,
+        result_kind: value.result_kind,
+        structured_changes_json: value.structured_changes_json,
+        rationale_summary: value.rationale_summary,
         body: value.body,
         summary: value.summary,
         status: value.status,
@@ -1907,8 +2246,46 @@ fn api_workspace_note_proposal_from_state(
         },
         source_thread_id: value.source_thread_id,
         source_turn_id: value.source_turn_id,
+        agent_result_id: value.agent_result_id,
         created_at: value.created_at.timestamp(),
         resolved_at: value.resolved_at.map(|value| value.timestamp()),
+    }
+}
+
+fn api_workspace_note_proposal_decision_from_state(
+    value: codex_state::WorkspaceNoteProposalDecision,
+) -> codex_app_server_protocol::WorkspaceNoteProposalDecision {
+    let decision_kind = match value.decision_kind {
+        codex_state::WorkspaceNoteProposalDecisionKind::AcceptedAll => {
+            WorkspaceNoteProposalDecisionKind::AcceptedAll
+        }
+        codex_state::WorkspaceNoteProposalDecisionKind::AcceptedEdited => {
+            WorkspaceNoteProposalDecisionKind::AcceptedEdited
+        }
+        codex_state::WorkspaceNoteProposalDecisionKind::RejectedAll => {
+            WorkspaceNoteProposalDecisionKind::RejectedAll
+        }
+        codex_state::WorkspaceNoteProposalDecisionKind::CopiedChange => {
+            WorkspaceNoteProposalDecisionKind::CopiedChange
+        }
+        codex_state::WorkspaceNoteProposalDecisionKind::RejectedChange => {
+            WorkspaceNoteProposalDecisionKind::RejectedChange
+        }
+    };
+    codex_app_server_protocol::WorkspaceNoteProposalDecision {
+        id: value.id,
+        proposal_id: value.proposal_id,
+        agent_result_id: value.agent_result_id,
+        note_id: value.note_id,
+        base_revision: value.base_revision,
+        decision_kind,
+        change_id: value.change_id,
+        applied_text: value.applied_text,
+        applied_text_sha256: value.applied_text_sha256,
+        resulting_note_revision: value.resulting_note_revision,
+        actor: value.actor,
+        reason: (!value.reason.trim().is_empty()).then_some(value.reason),
+        created_at: value.created_at.timestamp(),
     }
 }
 
