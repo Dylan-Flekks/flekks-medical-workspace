@@ -205,6 +205,7 @@ mod workspace_messages;
 mod workspace_actions;
 mod workspace_context_assembly;
 mod workspace_dashboard;
+mod workspace_draft;
 mod wrapping;
 
 mod table_detect;

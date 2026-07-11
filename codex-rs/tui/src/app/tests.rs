@@ -93,6 +93,7 @@ use codex_app_server_protocol::WorkspaceContextGetParams;
 use codex_app_server_protocol::WorkspaceContextPacketCreateParams;
 use codex_app_server_protocol::WorkspaceContextPacketReplayParams;
 use codex_app_server_protocol::WorkspaceDocumentUpsertParams;
+use codex_app_server_protocol::WorkspaceDraftSessionListParams;
 use codex_app_server_protocol::WorkspaceEncounterUpsertParams;
 use codex_app_server_protocol::WorkspaceNoteProposalCreateParams;
 use codex_app_server_protocol::WorkspaceNoteProposalDecisionKind;
@@ -7005,6 +7006,60 @@ fn workspace_dashboard_saved_client_and_note_survive_reload() -> Result<()> {
         assert_eq!(reloaded_dashboard.note_revision_for_tests(), 1);
 
         reloaded_app_server.shutdown().await?;
+        Ok(())
+    }))
+}
+
+#[test]
+fn workspace_dashboard_checkpoints_rpc_draft_without_mutating_canonical_note() -> Result<()> {
+    run_workspace_dashboard_runtime_test(Box::pin(async {
+        let mut app = make_test_app().await;
+        let codex_home = tempdir()?;
+        app.config.codex_home = codex_home.path().to_path_buf().abs();
+        app.config.sqlite_home = codex_home.path().to_path_buf();
+
+        let mut app_server =
+            Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
+        let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+        dashboard.load(&mut app_server).await?;
+        dashboard.set_context_for_tests("Jordan Patient", "Daily note", "Canonical human note.");
+        dashboard.save(&mut app_server).await?;
+        dashboard.set_note_body_for_tests("Recovered local human note.");
+        dashboard
+            .checkpoint_draft(
+                &mut app_server,
+                crate::workspace_draft::WorkspaceDraftCheckpointTrigger::FocusChange,
+            )
+            .await?;
+        assert_eq!(
+            dashboard.draft_checkpoint_status_for_tests(),
+            "Local draft checkpoint r1 saved; canonical chart unchanged."
+        );
+        let patient_id = dashboard
+            .client_id_for_tests()
+            .expect("saved patient id should be loaded")
+            .to_string();
+        let sessions = app_server
+            .workspace_draft_session_list(WorkspaceDraftSessionListParams {
+                client_id: patient_id,
+                include_closed: false,
+                cursor: None,
+                limit: Some(10),
+            })
+            .await?;
+        assert_eq!(sessions.data.len(), 1);
+        assert_eq!(
+            sessions.data[0].current_checkpoint.draft["note"]["body"],
+            "Recovered local human note."
+        );
+
+        let mut canonical_dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+        canonical_dashboard.load(&mut app_server).await?;
+        assert_eq!(
+            canonical_dashboard.note_body_for_tests(),
+            "Canonical human note."
+        );
+        app_server.shutdown().await?;
         Ok(())
     }))
 }

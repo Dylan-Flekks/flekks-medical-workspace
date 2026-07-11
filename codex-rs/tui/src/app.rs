@@ -230,6 +230,7 @@ mod thread_routing;
 mod thread_session_state;
 mod thread_settings;
 mod workspace_agent_capture;
+mod workspace_drafts;
 
 use self::agent_navigation::AgentNavigationDirection;
 use self::agent_navigation::AgentNavigationState;
@@ -1416,6 +1417,8 @@ See the Codex keymap documentation for supported actions and examples."
                     return Ok(AppRunControl::Continue);
                 }
                 self.chat_widget.pre_draw_tick();
+                self.checkpoint_idle_workspace_draft(app_server).await;
+                self.schedule_workspace_draft_checkpoint(tui);
                 let resized = matches!(event, TuiEvent::Resize);
                 self.render_workspace_dashboard_frame(tui, resized)?;
                 if self.chat_widget.external_editor_state() == ExternalEditorState::Requested {
@@ -1454,7 +1457,7 @@ See the Codex keymap documentation for supported actions and examples."
             }
             WorkspaceDashboardAction::Consumed => {}
             WorkspaceDashboardAction::Close => {
-                self.hide_workspace_dashboard_and_leave_alt_screen(tui);
+                self.close_workspace_with_checkpoint(tui, app_server).await;
             }
             WorkspaceDashboardAction::CloseAndDiscard => {
                 self.workspace_dashboard = None;
@@ -1488,24 +1491,11 @@ See the Codex keymap documentation for supported actions and examples."
                 }
             }
             WorkspaceDashboardAction::SendContextToAgent => {
-                let was_visible = self.workspace_dashboard_active();
-                if let Err(err) = self.send_workspace_context_to_agent(app_server).await {
-                    self.chat_widget
-                        .add_error_message(format!("Failed to send workspace context: {err}"));
-                } else if was_visible && !self.workspace_dashboard_active() {
-                    let _ = tui.leave_alt_screen();
-                }
+                self.send_workspace_context_after_checkpoint(tui, app_server)
+                    .await;
             }
             WorkspaceDashboardAction::Save => {
-                let result = if let Some(dashboard) = self.workspace_dashboard.as_mut() {
-                    dashboard.save(app_server).await
-                } else {
-                    Ok(())
-                };
-                if let Err(err) = result {
-                    self.chat_widget
-                        .add_error_message(format!("Failed to save workspace: {err}"));
-                }
+                self.save_workspace_with_checkpoint(app_server).await;
             }
             WorkspaceDashboardAction::SaveAgentResult { packet_id, body } => {
                 let result = if let Some(dashboard) = self.workspace_dashboard.as_mut() {
@@ -1707,7 +1697,9 @@ See the Codex keymap documentation for supported actions and examples."
                 }
             }
         }
+        self.checkpoint_workspace_focus_change(app_server).await;
         tui.frame_requester().schedule_frame();
+        self.schedule_workspace_draft_checkpoint(tui);
     }
 
     fn workspace_dashboard_active(&self) -> bool {

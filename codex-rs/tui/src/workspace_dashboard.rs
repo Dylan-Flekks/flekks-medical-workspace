@@ -1,5 +1,8 @@
 mod chart_changeset;
+mod draft_checkpoint;
 mod footer;
+
+pub(crate) use draft_checkpoint::DashboardCheckpointOutcome;
 
 use crate::app_server_session::AppServerSession;
 use crate::clipboard_paste::normalize_pasted_path;
@@ -825,7 +828,8 @@ impl PatientAdminField {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ClientDraft {
     id: Option<String>,
     display_name: String,
@@ -1647,7 +1651,8 @@ impl DocumentField {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct NoteDraft {
     id: Option<String>,
     encounter_id: Option<String>,
@@ -2509,6 +2514,7 @@ pub(crate) struct WorkspaceDashboard {
     patient_search_return_section: Option<MedicalWorkflowSection>,
     pending_chart_changeset: Option<PendingChartChangeset>,
     next_chart_save_purpose: ChartChangesetPurpose,
+    draft_coordinator: crate::workspace_draft::WorkspaceDraftCoordinator,
     dirty: bool,
     status: String,
     store_description: Option<String>,
@@ -2643,6 +2649,7 @@ impl Default for WorkspaceDashboard {
             patient_search_return_section: None,
             pending_chart_changeset: None,
             next_chart_save_purpose: ChartChangesetPurpose::General,
+            draft_coordinator: crate::workspace_draft::WorkspaceDraftCoordinator::default(),
             dirty: false,
             status: "Workspace".to_string(),
             store_description: None,
@@ -3701,10 +3708,12 @@ impl WorkspaceDashboard {
             }
             KeyCode::Tab => {
                 self.focus_next(viewport);
+                self.draft_coordinator.request_focus_checkpoint();
                 return WorkspaceDashboardAction::Consumed;
             }
             KeyCode::BackTab => {
                 self.focus_previous(viewport);
+                self.draft_coordinator.request_focus_checkpoint();
                 return WorkspaceDashboardAction::Consumed;
             }
             _ => {}
@@ -8895,6 +8904,7 @@ impl WorkspaceDashboard {
     }
 
     fn start_new_client(&mut self) {
+        self.draft_coordinator.clear();
         self.patient_search_query = None;
         self.patient_search_selection_index = 0;
         self.patient_search_return_focus = None;
@@ -10168,6 +10178,9 @@ impl WorkspaceDashboard {
     }
 
     fn mark_dirty(&mut self) {
+        if self.profile == WorkspaceProfile::Medical {
+            self.draft_coordinator.note_edit();
+        }
         let merge_purpose = self
             .pending_chart_changeset
             .as_ref()
