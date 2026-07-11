@@ -34,6 +34,12 @@ pub struct WorkspaceDraftCheckpoint {
     pub replayed: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceDraftSessionSnapshot {
+    pub session: WorkspaceDraftSession,
+    pub current_checkpoint: WorkspaceDraftCheckpoint,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WorkspaceDraftCheckpointCreate {
     pub session_id: Option<String>,
@@ -50,6 +56,7 @@ pub struct WorkspaceDraftCheckpointCreate {
 pub struct WorkspaceDraftCheckpointFilter {
     pub client_id: String,
     pub session_id: Option<String>,
+    pub cursor_before_revision: Option<i64>,
     pub limit: Option<u32>,
 }
 
@@ -57,7 +64,51 @@ pub struct WorkspaceDraftCheckpointFilter {
 pub struct WorkspaceDraftSessionFilter {
     pub client_id: String,
     pub include_closed: bool,
+    pub cursor_updated_at_ms: Option<i64>,
+    pub cursor_id: Option<String>,
     pub limit: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorkspaceDraftError {
+    Validation { message: String },
+    Storage { message: String },
+}
+
+impl std::fmt::Display for WorkspaceDraftError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Validation { message } | Self::Storage { message } => {
+                formatter.write_str(message)
+            }
+        }
+    }
+}
+
+impl std::error::Error for WorkspaceDraftError {}
+
+impl From<anyhow::Error> for WorkspaceDraftError {
+    fn from(error: anyhow::Error) -> Self {
+        Self::Storage {
+            message: error.to_string(),
+        }
+    }
+}
+
+impl From<sqlx::Error> for WorkspaceDraftError {
+    fn from(error: sqlx::Error) -> Self {
+        Self::Storage {
+            message: error.to_string(),
+        }
+    }
+}
+
+impl From<serde_json::Error> for WorkspaceDraftError {
+    fn from(error: serde_json::Error) -> Self {
+        Self::Storage {
+            message: error.to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -130,6 +181,31 @@ pub(crate) struct WorkspaceDraftCheckpointRow {
     pub created_at_ms: i64,
 }
 
+#[derive(sqlx::FromRow)]
+pub(crate) struct WorkspaceDraftSessionSnapshotRow {
+    pub session_id: String,
+    pub session_client_id: String,
+    pub session_status: String,
+    pub session_current_revision: i64,
+    pub session_created_by: String,
+    pub session_created_at_ms: i64,
+    pub session_updated_at_ms: i64,
+    pub session_closed_at_ms: Option<i64>,
+    pub checkpoint_id: String,
+    pub checkpoint_session_id: String,
+    pub checkpoint_client_id: String,
+    pub checkpoint_encounter_id: Option<String>,
+    pub checkpoint_note_id: Option<String>,
+    pub checkpoint_base_note_revision: Option<i64>,
+    pub checkpoint_schema_version: i64,
+    pub checkpoint_revision: i64,
+    pub checkpoint_draft_json: String,
+    pub checkpoint_content_sha256: String,
+    pub checkpoint_trigger: String,
+    pub checkpoint_actor: String,
+    pub checkpoint_created_at_ms: i64,
+}
+
 impl WorkspaceDraftCheckpointRow {
     pub(crate) fn try_into_model(self, replayed: bool) -> Result<WorkspaceDraftCheckpoint> {
         Ok(WorkspaceDraftCheckpoint {
@@ -147,6 +223,44 @@ impl WorkspaceDraftCheckpointRow {
             actor: self.actor,
             created_at: epoch_millis_to_datetime(self.created_at_ms)?,
             replayed,
+        })
+    }
+}
+
+impl TryFrom<WorkspaceDraftSessionSnapshotRow> for WorkspaceDraftSessionSnapshot {
+    type Error = anyhow::Error;
+
+    fn try_from(row: WorkspaceDraftSessionSnapshotRow) -> Result<Self> {
+        let session = WorkspaceDraftSessionRow {
+            id: row.session_id,
+            client_id: row.session_client_id,
+            status: row.session_status,
+            current_revision: row.session_current_revision,
+            created_by: row.session_created_by,
+            created_at_ms: row.session_created_at_ms,
+            updated_at_ms: row.session_updated_at_ms,
+            closed_at_ms: row.session_closed_at_ms,
+        }
+        .try_into()?;
+        let current_checkpoint = WorkspaceDraftCheckpointRow {
+            id: row.checkpoint_id,
+            session_id: row.checkpoint_session_id,
+            client_id: row.checkpoint_client_id,
+            encounter_id: row.checkpoint_encounter_id,
+            note_id: row.checkpoint_note_id,
+            base_note_revision: row.checkpoint_base_note_revision,
+            schema_version: row.checkpoint_schema_version,
+            revision: row.checkpoint_revision,
+            draft_json: row.checkpoint_draft_json,
+            content_sha256: row.checkpoint_content_sha256,
+            trigger: row.checkpoint_trigger,
+            actor: row.checkpoint_actor,
+            created_at_ms: row.checkpoint_created_at_ms,
+        }
+        .try_into_model(false)?;
+        Ok(Self {
+            session,
+            current_checkpoint,
         })
     }
 }
