@@ -230,6 +230,7 @@ mod thread_routing;
 mod thread_session_state;
 mod thread_settings;
 mod workspace_agent_capture;
+mod workspace_drafts;
 
 use self::agent_navigation::AgentNavigationDirection;
 use self::agent_navigation::AgentNavigationState;
@@ -1285,6 +1286,8 @@ See the Codex keymap documentation for supported actions and examples."
     ) -> Result<AppRunControl> {
         if matches!(event, TuiEvent::Draw | TuiEvent::Resize) {
             self.handle_draw_pre_render(tui)?;
+            self.checkpoint_idle_workspace_draft(app_server).await;
+            self.schedule_workspace_draft_checkpoint(tui);
         }
 
         if self.workspace_dashboard_active() && self.overlay.is_none() {
@@ -1454,11 +1457,12 @@ See the Codex keymap documentation for supported actions and examples."
             }
             WorkspaceDashboardAction::Consumed => {}
             WorkspaceDashboardAction::Close => {
-                self.hide_workspace_dashboard_and_leave_alt_screen(tui);
+                self.close_workspace_with_checkpoint(tui, app_server).await;
             }
             WorkspaceDashboardAction::CloseAndDiscard => {
-                self.workspace_dashboard = None;
-                self.hide_workspace_dashboard_and_leave_alt_screen(tui);
+                if self.discard_workspace_dashboard_if_checkpoint_safe() {
+                    self.hide_workspace_dashboard_and_leave_alt_screen(tui);
+                }
             }
             WorkspaceDashboardAction::EnsureEncounter => {
                 let result = if let Some(dashboard) = self.workspace_dashboard.as_mut() {
@@ -1488,24 +1492,11 @@ See the Codex keymap documentation for supported actions and examples."
                 }
             }
             WorkspaceDashboardAction::SendContextToAgent => {
-                let was_visible = self.workspace_dashboard_active();
-                if let Err(err) = self.send_workspace_context_to_agent(app_server).await {
-                    self.chat_widget
-                        .add_error_message(format!("Failed to send workspace context: {err}"));
-                } else if was_visible && !self.workspace_dashboard_active() {
-                    let _ = tui.leave_alt_screen();
-                }
+                self.send_workspace_context_after_checkpoint(tui, app_server)
+                    .await;
             }
             WorkspaceDashboardAction::Save => {
-                let result = if let Some(dashboard) = self.workspace_dashboard.as_mut() {
-                    dashboard.save(app_server).await
-                } else {
-                    Ok(())
-                };
-                if let Err(err) = result {
-                    self.chat_widget
-                        .add_error_message(format!("Failed to save workspace: {err}"));
-                }
+                self.save_workspace_with_checkpoint(app_server).await;
             }
             WorkspaceDashboardAction::SaveAgentResult { packet_id, body } => {
                 let result = if let Some(dashboard) = self.workspace_dashboard.as_mut() {
@@ -1707,7 +1698,9 @@ See the Codex keymap documentation for supported actions and examples."
                 }
             }
         }
+        self.checkpoint_workspace_focus_change(app_server).await;
         tui.frame_requester().schedule_frame();
+        self.schedule_workspace_draft_checkpoint(tui);
     }
 
     fn workspace_dashboard_active(&self) -> bool {
@@ -1726,7 +1719,7 @@ See the Codex keymap documentation for supported actions and examples."
     async fn send_workspace_context_to_agent(
         &mut self,
         app_server: &mut AppServerSession,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let is_medical_handoff = self
             .workspace_dashboard
             .as_ref()
@@ -1757,14 +1750,14 @@ See the Codex keymap documentation for supported actions and examples."
             .or_else(|| self.chat_widget.thread_id().map(|id| id.to_string()));
         let Some(dashboard) = self.workspace_dashboard.as_mut() else {
             self.workspace_dashboard_visible = false;
-            return Ok(());
+            return Ok(false);
         };
         let prompt = if dashboard.profile() == WorkspaceProfile::Medical {
             let params = match dashboard.context_packet_create_params() {
                 Ok(params) => params,
                 Err(status) => {
                     dashboard.set_status(status);
-                    return Ok(());
+                    return Ok(false);
                 }
             };
             let prepared_packet = app_server
@@ -1823,7 +1816,7 @@ See the Codex keymap documentation for supported actions and examples."
             self.chat_widget.insert_str(&prompt);
         }
         self.workspace_dashboard_visible = false;
-        Ok(())
+        Ok(true)
     }
 
     pub(super) fn show_shutdown_feedback(&mut self, tui: &mut tui::Tui) -> Result<()> {

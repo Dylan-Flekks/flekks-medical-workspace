@@ -143,6 +143,13 @@ pub(super) fn compose_medical_footer(
     fit_footer_parts(&[focus, format!("Keys: {}", context.compact_hint())], width)
 }
 
+pub(super) fn compose_medical_status_footer(focus: &str, status: &str, width: u16) -> String {
+    fit_footer_parts(
+        &[format!("Focus: {focus}"), format!("Status: {status}")],
+        width,
+    )
+}
+
 pub(super) fn compose_mode_footer(
     mode: &str,
     input: &str,

@@ -159,6 +159,16 @@ use codex_app_server_protocol::WorkspaceDocumentListParams;
 use codex_app_server_protocol::WorkspaceDocumentListResponse;
 use codex_app_server_protocol::WorkspaceDocumentUpsertParams;
 use codex_app_server_protocol::WorkspaceDocumentUpsertResponse;
+use codex_app_server_protocol::WorkspaceDraftCheckpointCreateParams;
+use codex_app_server_protocol::WorkspaceDraftCheckpointCreateResponse;
+#[cfg(test)]
+use codex_app_server_protocol::WorkspaceDraftCheckpointListParams;
+#[cfg(test)]
+use codex_app_server_protocol::WorkspaceDraftCheckpointListResponse;
+use codex_app_server_protocol::WorkspaceDraftSessionCloseParams;
+use codex_app_server_protocol::WorkspaceDraftSessionCloseResponse;
+use codex_app_server_protocol::WorkspaceDraftSessionListParams;
+use codex_app_server_protocol::WorkspaceDraftSessionListResponse;
 use codex_app_server_protocol::WorkspaceEncounterListParams;
 use codex_app_server_protocol::WorkspaceEncounterListResponse;
 use codex_app_server_protocol::WorkspaceEncounterUpsertParams;
@@ -216,6 +226,8 @@ use color_eyre::eyre::Result;
 use color_eyre::eyre::WrapErr;
 use std::collections::HashMap;
 use std::path::PathBuf;
+#[cfg(test)]
+use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -270,6 +282,14 @@ pub(crate) struct AppServerSession {
     available_models: Vec<ModelPreset>,
     managed_new_thread_defaults: Option<NewThreadModelDefaults>,
     external_agent_config_import_completion_pending: AtomicBool,
+    #[cfg(test)]
+    fail_next_workspace_document_list: bool,
+    #[cfg(test)]
+    hold_next_workspace_draft_checkpoint: Option<Arc<tokio::sync::Semaphore>>,
+    #[cfg(test)]
+    fail_next_workspace_draft_checkpoint_after_response: bool,
+    #[cfg(test)]
+    workspace_draft_checkpoint_requests: Vec<WorkspaceDraftCheckpointCreateParams>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -315,6 +335,14 @@ impl AppServerSession {
             available_models: Vec::new(),
             managed_new_thread_defaults: None,
             external_agent_config_import_completion_pending: AtomicBool::new(false),
+            #[cfg(test)]
+            fail_next_workspace_document_list: false,
+            #[cfg(test)]
+            hold_next_workspace_draft_checkpoint: None,
+            #[cfg(test)]
+            fail_next_workspace_draft_checkpoint_after_response: false,
+            #[cfg(test)]
+            workspace_draft_checkpoint_requests: Vec::new(),
         }
     }
 
@@ -329,6 +357,37 @@ impl AppServerSession {
 
     pub(crate) fn uses_remote_workspace(&self) -> bool {
         matches!(self.thread_params_mode, ThreadParamsMode::Remote)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_thread_params_mode_for_tests(&mut self, mode: ThreadParamsMode) {
+        self.thread_params_mode = mode;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_next_workspace_document_list_for_tests(&mut self) {
+        self.fail_next_workspace_document_list = true;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn hold_next_workspace_draft_checkpoint_for_tests(
+        &mut self,
+    ) -> Arc<tokio::sync::Semaphore> {
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        self.hold_next_workspace_draft_checkpoint = Some(gate.clone());
+        gate
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_next_workspace_draft_checkpoint_after_response_for_tests(&mut self) {
+        self.fail_next_workspace_draft_checkpoint_after_response = true;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn workspace_draft_checkpoint_requests_for_tests(
+        &self,
+    ) -> &[WorkspaceDraftCheckpointCreateParams] {
+        &self.workspace_draft_checkpoint_requests
     }
 
     pub(crate) fn uses_embedded_app_server(&self) -> bool {
@@ -890,6 +949,81 @@ impl AppServerSession {
             .wrap_err("workspace/chart/commit failed in TUI")
     }
 
+    pub(crate) fn spawn_workspace_draft_checkpoint_create(
+        &mut self,
+        params: WorkspaceDraftCheckpointCreateParams,
+    ) -> tokio::task::JoinHandle<Result<WorkspaceDraftCheckpointCreateResponse>> {
+        let request_id = self.next_request_id();
+        let request_handle = self.request_handle();
+        #[cfg(test)]
+        self.workspace_draft_checkpoint_requests
+            .push(params.clone());
+        #[cfg(test)]
+        let checkpoint_gate = self.hold_next_workspace_draft_checkpoint.take();
+        #[cfg(test)]
+        let fail_after_response =
+            std::mem::take(&mut self.fail_next_workspace_draft_checkpoint_after_response);
+        tokio::spawn(async move {
+            #[cfg(test)]
+            if let Some(gate) = checkpoint_gate {
+                gate.acquire()
+                    .await
+                    .map_err(|error| {
+                        color_eyre::eyre::eyre!(
+                            "workspace draft checkpoint test gate closed: {error}"
+                        )
+                    })?
+                    .forget();
+            }
+            let response = request_handle
+                .request_typed(ClientRequest::WorkspaceDraftCheckpointCreate { request_id, params })
+                .await
+                .wrap_err("workspace/draft/checkpoint/create failed in TUI")?;
+            #[cfg(test)]
+            if fail_after_response {
+                color_eyre::eyre::bail!(
+                    "injected lost workspace draft checkpoint response after persistence"
+                );
+            }
+            Ok(response)
+        })
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) async fn workspace_draft_session_list(
+        &mut self,
+        params: WorkspaceDraftSessionListParams,
+    ) -> Result<WorkspaceDraftSessionListResponse> {
+        let request_id = self.next_request_id();
+        self.client
+            .request_typed(ClientRequest::WorkspaceDraftSessionList { request_id, params })
+            .await
+            .wrap_err("workspace/draft/session/list failed in TUI")
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn workspace_draft_checkpoint_list(
+        &mut self,
+        params: WorkspaceDraftCheckpointListParams,
+    ) -> Result<WorkspaceDraftCheckpointListResponse> {
+        let request_id = self.next_request_id();
+        self.client
+            .request_typed(ClientRequest::WorkspaceDraftCheckpointList { request_id, params })
+            .await
+            .wrap_err("workspace/draft/checkpoint/list failed in TUI")
+    }
+
+    pub(crate) async fn workspace_draft_session_close(
+        &mut self,
+        params: WorkspaceDraftSessionCloseParams,
+    ) -> Result<WorkspaceDraftSessionCloseResponse> {
+        let request_id = self.next_request_id();
+        self.client
+            .request_typed(ClientRequest::WorkspaceDraftSessionClose { request_id, params })
+            .await
+            .wrap_err("workspace/draft/session/close failed in TUI")
+    }
+
     pub(crate) async fn workspace_note_list(
         &mut self,
         client_id: String,
@@ -1054,6 +1188,10 @@ impl AppServerSession {
         &mut self,
         client_id: String,
     ) -> Result<WorkspaceDocumentListResponse> {
+        #[cfg(test)]
+        if std::mem::take(&mut self.fail_next_workspace_document_list) {
+            color_eyre::eyre::bail!("injected workspace/document/list failure");
+        }
         let request_id = self.next_request_id();
         self.client
             .request_typed(ClientRequest::WorkspaceDocumentList {
