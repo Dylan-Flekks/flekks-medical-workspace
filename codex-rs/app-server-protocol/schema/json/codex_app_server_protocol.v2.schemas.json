@@ -19982,6 +19982,31 @@
           "format": "int64",
           "type": "integer"
         },
+        "sourceDraftCheckpointId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sourceDraftCheckpointRevision": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "sourceDraftCheckpointSha256": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sourceDraftSessionId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "status": {
           "type": "string"
         },

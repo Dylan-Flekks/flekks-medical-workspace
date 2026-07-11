@@ -976,6 +976,11 @@ pub struct WorkspaceContextPacket {
     pub client_id: String,
     pub encounter_id: Option<String>,
     pub note_id: Option<String>,
+    pub source_draft_session_id: Option<String>,
+    pub source_draft_checkpoint_id: Option<String>,
+    #[ts(type = "number | null")]
+    pub source_draft_checkpoint_revision: Option<i64>,
+    pub source_draft_checkpoint_sha256: Option<String>,
     pub human_request: String,
     pub selected_artifact_ids_json: String,
     pub selected_derivative_ids_json: String,
@@ -1031,6 +1036,14 @@ pub struct WorkspaceContextPacketCreateParams {
     pub encounter_id: Option<String>,
     #[ts(optional = nullable)]
     pub note_id: Option<String>,
+    #[ts(optional = nullable)]
+    pub source_draft_session_id: Option<String>,
+    #[ts(optional = nullable)]
+    pub source_draft_checkpoint_id: Option<String>,
+    #[ts(type = "number | null", optional = nullable)]
+    pub source_draft_checkpoint_revision: Option<i64>,
+    #[ts(optional = nullable)]
+    pub source_draft_checkpoint_sha256: Option<String>,
     pub human_request: String,
     pub selected_artifact_ids_json: String,
     pub selected_derivative_ids_json: String,
@@ -1536,3 +1549,7 @@ pub struct WorkspaceAuditListResponse {
     pub data: Vec<WorkspaceAuditEvent>,
     pub next_cursor: Option<String>,
 }
+
+#[cfg(test)]
+#[path = "workspace_packet_tests.rs"]
+mod workspace_packet_tests;
