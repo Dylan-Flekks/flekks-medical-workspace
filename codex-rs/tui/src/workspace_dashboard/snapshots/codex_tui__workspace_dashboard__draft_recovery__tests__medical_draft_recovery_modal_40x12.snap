@@ -1,0 +1,16 @@
+---
+source: tui/src/workspace_dashboard/draft_recovery_tests.rs
+expression: "render_dashboard(&dashboard, 40, 12)"
+---
+┌Draft Recovery────────────────────────┐
+│Draft 1/2 · r7 · 2024-03-09           │
+│Patient: Jordan Recovery              │
+│Note: Daily mobility note · note-reco…│
+│Session: session-alp… · focus_change  │
+│Items: patient, note, agent request, …│
+│Conflict: 1 other unfinished draft(s)…│
+│Canonical chart unchanged.            │
+│R restore · D discard · N/P next/     │
+│previous · Esc decide later           │
+│                                      │
+└──────────────────────────────────────┘

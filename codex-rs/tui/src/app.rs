@@ -1491,6 +1491,40 @@ See the Codex keymap documentation for supported actions and examples."
                         .add_error_message(format!("Failed to resolve workspace proposal: {err}"));
                 }
             }
+            WorkspaceDashboardAction::RestoreRecoveryDraft { session_id } => {
+                let result = if let Some(dashboard) = self.workspace_dashboard.as_mut() {
+                    dashboard
+                        .restore_current_recovery(app_server, &session_id)
+                        .await
+                } else {
+                    Ok(())
+                };
+                if let Err(err) = result {
+                    if let Some(dashboard) = self.workspace_dashboard.as_mut() {
+                        dashboard.set_recovery_action_failed("restore");
+                    }
+                    self.chat_widget.add_error_message(format!(
+                        "Failed to restore local workspace draft: {err}"
+                    ));
+                }
+            }
+            WorkspaceDashboardAction::DiscardRecoveryDraft { session_id } => {
+                let result = if let Some(dashboard) = self.workspace_dashboard.as_mut() {
+                    dashboard
+                        .discard_current_recovery(app_server, &session_id)
+                        .await
+                } else {
+                    Ok(())
+                };
+                if let Err(err) = result {
+                    if let Some(dashboard) = self.workspace_dashboard.as_mut() {
+                        dashboard.set_recovery_action_failed("discard");
+                    }
+                    self.chat_widget.add_error_message(format!(
+                        "Failed to discard local workspace draft: {err}"
+                    ));
+                }
+            }
             WorkspaceDashboardAction::SendContextToAgent => {
                 self.send_workspace_context_after_checkpoint(tui, app_server)
                     .await;

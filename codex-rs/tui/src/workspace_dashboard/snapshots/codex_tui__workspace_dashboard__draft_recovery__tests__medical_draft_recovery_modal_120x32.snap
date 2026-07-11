@@ -1,0 +1,36 @@
+---
+source: tui/src/workspace_dashboard/draft_recovery_tests.rs
+expression: wide
+---
+Medical Workspace
+Patient: No patient selected  DOB: blank  MRN: blank  Contact: Missing contact  Coverage: Missing coverage  Encounter:
+ EXPLORER                      PATIENT CHART
+┌Patient Directory───────────┐┌Patient Demographics────────────────────────────────────────────────────────────────────┐
+│Local searc┌Draft Recovery────────────────────────────────────────────────────────────────────────────────┐           │
+│0 active pa│Draft 1 of 2 · checkpoint revision 7 · schema 2                                               │           │
+│only       │Patient: Jordan Recovery · patient-recovery                                                   │           │
+│No saved pa│Note: Daily mobility note · note-recovery                                                     │           │
+│New patient│Session: session-alpha                                                                        │           │
+│           │Saved: 2024-03-09 17:00 UTC · trigger: focus_change                                           │           │
+│           │Items: patient, note, agent request, 1 selected context item(s)                               │           │
+│           │Conflict check: 1 other unfinished draft(s) target this same patient and note; restore one at │───────────┘
+└───────────│a time                                                                                        │───────────┐
+┌Patient Not│Restore opens this durable checkpoint for review; the canonical chart remains unchanged until │           │
+│Patient Not│an explicit save.                                                                             │───────────┘
+│  Untitled │R restore · D discard · N/P next/previous · Esc decide later                                  │───────────┐
+│  Working d│                                                                                              │           │
+│saves it to│                                                                                              │           │
+│  Medical, │                                                                                              │           │
+│and admin n│                                                                                              │           │
+└───────────│                                                                                              │           │
+┌Uploaded Do│                                                                                              │           │
+│Uploaded Do│                                                                                              │           │
+│No files ye│                                                                                              │───────────┘
+│Paste/drop │                                                                                              │───────────┐
+│           │                                                                                              │           │
+│           │                                                                                              │           │
+│           └──────────────────────────────────────────────────────────────────────────────────────────────┘           │
+│                            ││                                                                                        │
+│                            ││Intake Checklist                                                                        │
+└────────────────────────────┘└────────────────────────────────────────────────────────────────────────────────────────┘
+Mode: Draft recovery | Keys: R restore  D discard  N/P navigate  Esc decide later

@@ -4,8 +4,10 @@
 //! draft session. It never writes canonical chart data; callers provide a
 //! schema-versioned JSON snapshot when a checkpoint is due.
 
+mod recovery;
 mod trigger;
 
+pub(crate) use recovery::RecoveredContextSubmission;
 pub(crate) use trigger::WorkspaceDraftCheckpointTrigger;
 
 use crate::app_server_session::AppServerSession;
@@ -318,30 +320,6 @@ impl WorkspaceDraftCoordinator {
         }
     }
 
-    pub(crate) async fn close_after_canonical_save(
-        &mut self,
-        app_server: &mut AppServerSession,
-    ) -> Result<bool> {
-        if self.in_flight.is_some() || self.has_uncheckpointed_edits() {
-            color_eyre::eyre::bail!(
-                "local draft checkpoint is not confirmed; draft session remains open"
-            );
-        }
-        let Some(params) = self.canonical_close_params()? else {
-            return Ok(false);
-        };
-        app_server.workspace_draft_session_close(params).await?;
-        self.session_id = None;
-        self.session_creation_key = None;
-        self.last_confirmed_checkpoint = None;
-        self.canonical_save_pending_close = false;
-        self.saved_generation = self.edit_generation;
-        self.saved_context_generation = self.context_generation;
-        self.submitted_context_generation = self.context_generation;
-        self.debounce_deadline = None;
-        Ok(true)
-    }
-
     pub(crate) fn has_uncheckpointed_edits(&self) -> bool {
         self.edit_generation != self.saved_generation
     }
@@ -352,6 +330,10 @@ impl WorkspaceDraftCoordinator {
 
     pub(crate) fn has_unsubmitted_context_edits(&self) -> bool {
         self.context_generation != self.submitted_context_generation
+    }
+
+    pub(crate) fn context_is_submitted(&self) -> bool {
+        self.context_generation == self.submitted_context_generation
     }
 
     pub(crate) fn mark_context_submitted(&mut self) {

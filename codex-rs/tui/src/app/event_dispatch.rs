@@ -33,6 +33,12 @@ impl App {
                     }
                     match dashboard.load(app_server).await {
                         Ok(()) => {
+                            if let Err(err) = dashboard.discover_draft_recovery(app_server).await {
+                                dashboard.set_recovery_discovery_failed();
+                                self.chat_widget.add_error_message(format!(
+                                    "Workspace opened, but unfinished local drafts could not be discovered: {err}"
+                                ));
+                            }
                             self.workspace_dashboard = Some(dashboard);
                         }
                         Err(err) => {
@@ -44,6 +50,12 @@ impl App {
                     }
                 } else if let Some(dashboard) = self.workspace_dashboard.as_mut() {
                     dashboard.set_profile(profile);
+                    if let Err(err) = dashboard.prepare_draft_recovery_on_reopen(app_server).await {
+                        dashboard.set_recovery_discovery_failed();
+                        self.chat_widget.add_error_message(format!(
+                            "Workspace reopened, but unfinished local drafts could not be refreshed: {err}"
+                        ));
+                    }
                 }
                 self.workspace_dashboard_visible = true;
                 tui.frame_requester().schedule_frame();

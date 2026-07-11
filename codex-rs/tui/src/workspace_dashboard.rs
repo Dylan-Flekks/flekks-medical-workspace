@@ -1,5 +1,6 @@
 mod chart_changeset;
 mod draft_checkpoint;
+mod draft_recovery;
 mod draft_snapshot;
 mod footer;
 
@@ -234,6 +235,12 @@ pub(crate) enum WorkspaceDashboardAction {
     ResolveProposal {
         proposal_id: String,
         accept: bool,
+    },
+    RestoreRecoveryDraft {
+        session_id: String,
+    },
+    DiscardRecoveryDraft {
+        session_id: String,
     },
     Save,
     SaveAgentResult {
@@ -2517,6 +2524,7 @@ pub(crate) struct WorkspaceDashboard {
     pending_chart_changeset: Option<PendingChartChangeset>,
     next_chart_save_purpose: ChartChangesetPurpose,
     draft_coordinator: crate::workspace_draft::WorkspaceDraftCoordinator,
+    draft_recovery: draft_recovery::DraftRecoveryState,
     dirty: bool,
     status: String,
     store_description: Option<String>,
@@ -2652,6 +2660,7 @@ impl Default for WorkspaceDashboard {
             pending_chart_changeset: None,
             next_chart_save_purpose: ChartChangesetPurpose::General,
             draft_coordinator: crate::workspace_draft::WorkspaceDraftCoordinator::default(),
+            draft_recovery: draft_recovery::DraftRecoveryState::default(),
             dirty: false,
             status: "Workspace".to_string(),
             store_description: None,
@@ -3603,6 +3612,10 @@ impl WorkspaceDashboard {
         }
         let key_event = normalize_workspace_key_event(key_event);
 
+        if self.recovery_modal_visible() {
+            return self.handle_recovery_key_event(key_event);
+        }
+
         if self.chart_changeset_input_is_frozen() {
             let close_action = if self
                 .pending_chart_changeset
@@ -3773,6 +3786,12 @@ impl WorkspaceDashboard {
         scroll_event: MouseScrollEvent,
         viewport: Option<Rect>,
     ) -> WorkspaceDashboardAction {
+        if self.recovery_modal_visible() {
+            self.status =
+                "Draft recovery is waiting for a keyboard decision; mouse input was ignored."
+                    .to_string();
+            return WorkspaceDashboardAction::Consumed;
+        }
         let delta = match scroll_event.direction {
             MouseScrollDirection::Up => -1,
             MouseScrollDirection::Down => 1,
@@ -5093,6 +5112,11 @@ impl WorkspaceDashboard {
     }
 
     pub(crate) fn handle_paste(&mut self, pasted: String) -> WorkspaceDashboardAction {
+        if self.recovery_modal_visible() {
+            self.status = "Draft recovery is waiting for a decision; pasted text was not applied."
+                .to_string();
+            return WorkspaceDashboardAction::Consumed;
+        }
         if self.chart_changeset_input_is_frozen() {
             self.status =
                 "Chart changeset is unresolved; use Ctrl-S for its required recovery step or close before editing."
@@ -7701,75 +7725,43 @@ impl WorkspaceDashboard {
         let mode = WorkspaceLayoutMode::for_area(area);
         if mode == WorkspaceLayoutMode::Tiny {
             self.render_tiny(area, buf);
-            if self.action_overlay_visible {
-                self.render_action_overlay(area, buf);
-            }
-            if self.command_input.is_some() {
-                self.render_command_palette(area, buf);
-            }
-            return;
-        }
-        if self.render_medical_large_chart_workspace(area, buf) {
-            if self.action_overlay_visible {
-                self.render_action_overlay(area, buf);
-            }
-            if self.command_input.is_some() {
-                self.render_command_palette(area, buf);
-            }
-            return;
-        }
-        if self.render_medical_medium_workspace(area, buf) {
-            if self.action_overlay_visible {
-                self.render_action_overlay(area, buf);
-            }
-            if self.command_input.is_some() {
-                self.render_command_palette(area, buf);
-            }
-            return;
-        }
-        if self.render_medical_focus_first_workspace(area, buf) {
-            if self.action_overlay_visible {
-                self.render_action_overlay(area, buf);
-            }
-            if self.command_input.is_some() {
-                self.render_command_palette(area, buf);
-            }
-            return;
-        }
-        if self.render_medical_dedicated_workpane(area, buf) {
-            if self.action_overlay_visible {
-                self.render_action_overlay(area, buf);
-            }
-            if self.command_input.is_some() {
-                self.render_command_palette(area, buf);
-            }
-            return;
-        }
-        let areas = WorkspaceAreas::new(area);
-        Paragraph::new(self.header_lines())
-            .wrap(Wrap { trim: true })
-            .render(areas.header, buf);
+        } else if !self.render_medical_large_chart_workspace(area, buf)
+            && !self.render_medical_medium_workspace(area, buf)
+            && !self.render_medical_focus_first_workspace(area, buf)
+            && !self.render_medical_dedicated_workpane(area, buf)
+        {
+            let areas = WorkspaceAreas::new(area);
+            Paragraph::new(self.header_lines())
+                .wrap(Wrap { trim: true })
+                .render(areas.header, buf);
 
-        self.render_clients(areas.clients, buf);
-        self.render_notes(areas.notes, buf);
-        let patient_files_visible_elsewhere = self.profile == WorkspaceProfile::Medical
-            && areas.patient_files.width > 0
-            && areas.patient_files.height > 0;
-        if patient_files_visible_elsewhere {
-            self.render_patient_files_sidepane(areas.patient_files, buf);
-        }
-        self.render_demographics(areas.demographics, buf);
-        self.render_note_title(areas.note_title, buf);
-        self.render_note_body(areas.note_body, buf);
-        self.render_chart_workflow_area(areas.workflow, mode, patient_files_visible_elsewhere, buf);
+            self.render_clients(areas.clients, buf);
+            self.render_notes(areas.notes, buf);
+            let patient_files_visible_elsewhere = self.profile == WorkspaceProfile::Medical
+                && areas.patient_files.width > 0
+                && areas.patient_files.height > 0;
+            if patient_files_visible_elsewhere {
+                self.render_patient_files_sidepane(areas.patient_files, buf);
+            }
+            self.render_demographics(areas.demographics, buf);
+            self.render_note_title(areas.note_title, buf);
+            self.render_note_body(areas.note_body, buf);
+            self.render_chart_workflow_area(
+                areas.workflow,
+                mode,
+                patient_files_visible_elsewhere,
+                buf,
+            );
 
-        Paragraph::new(self.status_line(areas.status.width)).render(areas.status, buf);
+            Paragraph::new(self.status_line(areas.status.width)).render(areas.status, buf);
+        }
         if self.action_overlay_visible {
             self.render_action_overlay(area, buf);
         }
         if self.command_input.is_some() {
             self.render_command_palette(area, buf);
         }
+        self.render_draft_recovery_modal(area, buf);
     }
 
     fn render_medical_large_chart_workspace(&self, area: Rect, buf: &mut Buffer) -> bool {
@@ -8279,6 +8271,9 @@ impl WorkspaceDashboard {
     }
 
     pub(crate) fn cursor_pos(&self, area: Rect) -> Option<(u16, u16)> {
+        if self.recovery_modal_visible() {
+            return None;
+        }
         if WorkspaceLayoutMode::for_area(area) == WorkspaceLayoutMode::Tiny {
             return None;
         }
@@ -10471,6 +10466,15 @@ impl WorkspaceDashboard {
     }
 
     fn status_line(&self, width: u16) -> Line<'static> {
+        if self.recovery_modal_visible() {
+            return Line::from(compose_legacy_footer(
+                &[
+                    "Mode: Draft recovery".to_string(),
+                    "Keys: R restore  D discard  N/P navigate  Esc decide later".to_string(),
+                ],
+                width,
+            ));
+        }
         if let Some(patient_search_query) = &self.patient_search_query {
             return if self.profile == WorkspaceProfile::Medical {
                 Line::from(compose_mode_footer(

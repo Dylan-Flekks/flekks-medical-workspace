@@ -37,6 +37,8 @@ pub(super) struct WorkspaceDraftSnapshotV2 {
     pub(super) focus: DraftFocusV1,
     pub(super) active_encounter_id: Option<String>,
     pub(super) agent_request_body: String,
+    #[serde(default)]
+    pub(super) context_submitted: bool,
     pub(super) selected_artifact_ids: Vec<String>,
     pub(super) selected_derivative_ids: Vec<String>,
     pub(super) selected_clip_ids: Vec<String>,
@@ -77,6 +79,7 @@ impl WorkspaceDashboard {
             focus: DraftFocusV1::from_dashboard(self),
             active_encounter_id: active_encounter_id.clone(),
             agent_request_body: self.agent_request.body.clone(),
+            context_submitted: self.draft_coordinator.context_is_submitted(),
             selected_artifact_ids,
             selected_derivative_ids,
             selected_clip_ids,

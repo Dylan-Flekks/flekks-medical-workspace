@@ -1,0 +1,24 @@
+---
+source: tui/src/workspace_dashboard/draft_recovery_tests.rs
+expression: "render_dashboard(&dashboard, 80, 20)"
+---
+┌Draft Recovery────────────────────────────────────────────────────────────────┐
+│Draft 1 of 2 · checkpoint revision 7 · schema 2                               │
+│Patient: Jordan Recovery · patient-recovery                                   │
+│Note: Daily mobility note · note-recovery                                     │
+│Session: session-alpha                                                        │
+│Saved: 2024-03-09 17:00 UTC · trigger: focus_change                           │
+│Items: patient, note, agent request, 1 selected context item(s)               │
+│Conflict check: 1 other unfinished draft(s) target this same patient and note;│
+│restore one at a time                                                         │
+│Restore opens this durable checkpoint for review; the canonical chart remains │
+│unchanged until an explicit save.                                             │
+│R restore · D discard · N/P next/previous · Esc decide later                  │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘

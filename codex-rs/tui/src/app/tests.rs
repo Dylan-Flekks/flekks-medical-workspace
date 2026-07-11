@@ -7,6 +7,8 @@ mod startup;
 mod workspace_draft_final_audit;
 mod workspace_draft_handoff;
 mod workspace_draft_idempotency;
+mod workspace_draft_recovery;
+mod workspace_draft_recovery_lifecycle;
 
 use super::*;
 use crate::app_backtrack::BacktrackSelection;

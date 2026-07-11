@@ -166,6 +166,9 @@ impl WorkspaceDashboard {
             || status.starts_with("Save before ")
                 && status.ends_with("; close the current draft session first.")
             || status.starts_with("Selected patient could not open")
+            || status.starts_with("Draft recovery check failed")
+            || status.starts_with("Draft restore failed")
+            || status.starts_with("Draft discard failed")
             || status.contains("draft session remains open")
     }
 
@@ -353,8 +356,12 @@ impl WorkspaceDashboard {
             .await
         {
             Ok(true) => {
-                self.status =
-                    "Canonical chart saved; local draft checkpoint session closed.".to_string();
+                self.status = if self.resume_recovery_after_owned_close() {
+                    "Canonical chart saved; local draft checkpoint session closed. Review the next unfinished local draft."
+                        .to_string()
+                } else {
+                    "Canonical chart saved; local draft checkpoint session closed.".to_string()
+                };
                 Ok(())
             }
             Ok(false) if self.draft_coordinator.canonical_save_pending_close() => {
