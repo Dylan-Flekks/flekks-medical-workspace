@@ -43,6 +43,7 @@ pub struct WorkspaceDraftSessionSnapshot {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WorkspaceDraftCheckpointCreate {
     pub session_id: Option<String>,
+    pub session_creation_key: Option<String>,
     pub client_id: String,
     pub encounter_id: Option<String>,
     pub note_id: Option<String>,

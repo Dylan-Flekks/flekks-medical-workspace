@@ -1,144 +1,12 @@
 use super::workspace::WorkspaceStore;
 use crate::model::WorkspaceDraftCheckpointRow;
-use crate::model::WorkspaceDraftSessionRow;
-use crate::model::datetime_to_epoch_millis;
-use chrono::Utc;
-use serde_json::Value;
-use sha2::Digest;
-use sha2::Sha256;
-use sqlx::Sqlite;
-use uuid::Uuid;
 
-const DRAFT_SCHEMA_VERSION: i64 = 1;
-const MAX_NORMALIZED_DRAFT_BYTES: usize = 1024 * 1024;
-
+#[path = "workspace_drafts/checkpoint_create.rs"]
+mod checkpoint_create;
 #[path = "workspace_drafts/session_list.rs"]
 mod session_list;
 
 impl WorkspaceStore {
-    pub async fn create_draft_checkpoint(
-        &self,
-        input: crate::WorkspaceDraftCheckpointCreate,
-    ) -> Result<crate::WorkspaceDraftCheckpoint, crate::WorkspaceDraftError> {
-        let (draft_json, schema_version, content_sha256) = normalize_draft(&input.draft_json)?;
-        let now_ms = datetime_to_epoch_millis(Utc::now());
-        let actor = nonempty_or(&input.actor, "local human");
-        let trigger = nonempty_or(&input.trigger, "manual");
-        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        let client_exists: Option<i64> = sqlx::query_scalar(
-            "SELECT 1 FROM workspace_clients WHERE id = ? AND archived_at_ms IS NULL",
-        )
-        .bind(input.client_id.trim())
-        .fetch_optional(&mut *tx)
-        .await?;
-        if client_exists.is_none() {
-            return validation(format!(
-                "workspace draft client `{}` was not found or is archived",
-                input.client_id
-            ));
-        }
-
-        let session_id = match input.session_id.as_deref().map(str::trim) {
-            Some("") => return validation("workspace draft session id must not be empty"),
-            Some(session_id) => {
-                let session = session_by_id(&mut tx, session_id).await?.ok_or_else(|| {
-                    crate::WorkspaceDraftError::Validation {
-                        message: format!("workspace draft session `{session_id}` was not found"),
-                    }
-                })?;
-                if session.client_id != input.client_id.trim() {
-                    return validation(format!(
-                        "workspace draft session `{session_id}` belongs to client `{}` not `{}`",
-                        session.client_id, input.client_id
-                    ));
-                }
-                if session.status != "active" {
-                    return validation(format!(
-                        "workspace draft session `{session_id}` is `{}` and cannot checkpoint",
-                        session.status
-                    ));
-                }
-                session_id.to_string()
-            }
-            None => {
-                let session_id = Uuid::new_v4().to_string();
-                sqlx::query(
-                    r#"
-INSERT INTO workspace_draft_sessions (
-    id, client_id, status, current_revision, created_by,
-    created_at_ms, updated_at_ms, closed_at_ms
-) VALUES (?, ?, 'active', 0, ?, ?, ?, NULL)
-                    "#,
-                )
-                .bind(&session_id)
-                .bind(input.client_id.trim())
-                .bind(&actor)
-                .bind(now_ms)
-                .bind(now_ms)
-                .execute(&mut *tx)
-                .await?;
-                session_id
-            }
-        };
-
-        if let Some(existing) = checkpoint_by_hash(&mut tx, &session_id, &content_sha256).await? {
-            validate_replay(&existing, &input, schema_version, &draft_json)?;
-            sqlx::query(
-                "UPDATE workspace_draft_sessions SET current_revision = ?, updated_at_ms = ? WHERE id = ?",
-            )
-            .bind(existing.revision)
-            .bind(now_ms)
-            .bind(&session_id)
-            .execute(&mut *tx)
-            .await?;
-            tx.commit().await?;
-            return Ok(existing.try_into_model(true)?);
-        }
-
-        let revision: i64 = sqlx::query_scalar(
-            "SELECT COALESCE(MAX(revision), 0) + 1 FROM workspace_draft_checkpoints WHERE session_id = ?",
-        )
-        .bind(&session_id)
-        .fetch_one(&mut *tx)
-        .await?;
-        let checkpoint_id = Uuid::new_v4().to_string();
-        let checkpoint = sqlx::query_as::<_, WorkspaceDraftCheckpointRow>(
-            r#"
-INSERT INTO workspace_draft_checkpoints (
-    id, session_id, client_id, encounter_id, note_id, base_note_revision,
-    schema_version, revision, draft_json, content_sha256, trigger, actor, created_at_ms
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-RETURNING id, session_id, client_id, encounter_id, note_id, base_note_revision,
-          schema_version, revision, draft_json, content_sha256, trigger, actor, created_at_ms
-            "#,
-        )
-        .bind(&checkpoint_id)
-        .bind(&session_id)
-        .bind(input.client_id.trim())
-        .bind(normalize_optional(input.encounter_id.as_deref()))
-        .bind(normalize_optional(input.note_id.as_deref()))
-        .bind(input.base_note_revision)
-        .bind(schema_version)
-        .bind(revision)
-        .bind(&draft_json)
-        .bind(&content_sha256)
-        .bind(&trigger)
-        .bind(&actor)
-        .bind(now_ms)
-        .fetch_one(&mut *tx)
-        .await?;
-        sqlx::query(
-            "UPDATE workspace_draft_sessions SET current_revision = ?, updated_at_ms = ? WHERE id = ?",
-        )
-        .bind(revision)
-        .bind(now_ms)
-        .bind(&session_id)
-        .execute(&mut *tx)
-        .await?;
-        tx.commit().await?;
-        Ok(checkpoint.try_into_model(false)?)
-    }
-
     pub async fn list_draft_checkpoints(
         &self,
         filter: crate::WorkspaceDraftCheckpointFilter,
@@ -203,89 +71,6 @@ LIMIT ?
     }
 }
 
-async fn session_by_id(
-    tx: &mut sqlx::Transaction<'_, Sqlite>,
-    id: &str,
-) -> anyhow::Result<Option<WorkspaceDraftSessionRow>> {
-    sqlx::query_as::<_, WorkspaceDraftSessionRow>(
-        "SELECT id, client_id, status, current_revision, created_by, created_at_ms, updated_at_ms, closed_at_ms FROM workspace_draft_sessions WHERE id = ?",
-    )
-    .bind(id)
-    .fetch_optional(&mut **tx)
-    .await
-    .map_err(Into::into)
-}
-
-async fn checkpoint_by_hash(
-    tx: &mut sqlx::Transaction<'_, Sqlite>,
-    session_id: &str,
-    hash: &str,
-) -> anyhow::Result<Option<WorkspaceDraftCheckpointRow>> {
-    sqlx::query_as::<_, WorkspaceDraftCheckpointRow>(
-        r#"
-SELECT id, session_id, client_id, encounter_id, note_id, base_note_revision,
-       schema_version, revision, draft_json, content_sha256, trigger, actor, created_at_ms
-FROM workspace_draft_checkpoints
-WHERE session_id = ? AND content_sha256 = ?
-        "#,
-    )
-    .bind(session_id)
-    .bind(hash)
-    .fetch_optional(&mut **tx)
-    .await
-    .map_err(Into::into)
-}
-
-fn normalize_draft(draft_json: &str) -> Result<(String, i64, String), crate::WorkspaceDraftError> {
-    let value: Value = serde_json::from_str(draft_json.trim()).map_err(|error| {
-        crate::WorkspaceDraftError::Validation {
-            message: format!("workspace draft checkpoint must be valid JSON: {error}"),
-        }
-    })?;
-    if !value.is_object() {
-        return validation("workspace draft checkpoint must be a JSON object");
-    }
-    let schema_version = value
-        .get("schemaVersion")
-        .and_then(Value::as_i64)
-        .ok_or_else(|| crate::WorkspaceDraftError::Validation {
-            message: "workspace draft checkpoint schemaVersion is required".to_string(),
-        })?;
-    if schema_version != DRAFT_SCHEMA_VERSION {
-        return validation(format!(
-            "unsupported workspace draft checkpoint schemaVersion {schema_version}"
-        ));
-    }
-    let normalized = serde_json::to_string(&value)?;
-    if normalized.len() > MAX_NORMALIZED_DRAFT_BYTES {
-        return validation(format!(
-            "workspace draft checkpoint exceeds the {MAX_NORMALIZED_DRAFT_BYTES} byte normalized limit"
-        ));
-    }
-    let hash = format!("{:x}", Sha256::digest(normalized.as_bytes()));
-    Ok((normalized, schema_version, hash))
-}
-
-fn validate_replay(
-    checkpoint: &WorkspaceDraftCheckpointRow,
-    input: &crate::WorkspaceDraftCheckpointCreate,
-    schema_version: i64,
-    draft_json: &str,
-) -> Result<(), crate::WorkspaceDraftError> {
-    if checkpoint.client_id != input.client_id.trim()
-        || checkpoint.encounter_id != normalized_owned(input.encounter_id.as_deref())
-        || checkpoint.note_id != normalized_owned(input.note_id.as_deref())
-        || checkpoint.base_note_revision != input.base_note_revision
-        || checkpoint.schema_version != schema_version
-        || checkpoint.draft_json != draft_json
-    {
-        return validation(
-            "workspace draft checkpoint content hash was reused with different metadata",
-        );
-    }
-    Ok(())
-}
-
 fn required<'a>(label: &str, value: &'a str) -> Result<&'a str, crate::WorkspaceDraftError> {
     let value = value.trim();
     if value.is_empty() {
@@ -300,26 +85,17 @@ fn validation<T>(message: impl Into<String>) -> Result<T, crate::WorkspaceDraftE
     })
 }
 
-fn nonempty_or(value: &str, fallback: &str) -> String {
-    let value = value.trim();
-    if value.is_empty() {
-        fallback.to_string()
-    } else {
-        value.to_string()
-    }
-}
-
 fn normalize_optional(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|value| !value.is_empty())
-}
-
-fn normalized_owned(value: Option<&str>) -> Option<String> {
-    normalize_optional(value).map(str::to_string)
 }
 
 #[cfg(test)]
 #[path = "workspace_drafts_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "workspace_draft_idempotency_tests.rs"]
+mod idempotency_tests;
 
 #[cfg(test)]
 #[path = "workspace_draft_global_list_tests.rs"]
