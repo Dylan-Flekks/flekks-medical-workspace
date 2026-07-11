@@ -103,6 +103,7 @@ use crossterm::event::KeyModifiers;
 use footer::MedicalKeyContext;
 use footer::compose_legacy_footer;
 use footer::compose_medical_footer;
+use footer::compose_medical_status_footer;
 use footer::compose_mode_footer;
 use image::GenericImageView;
 use image::imageops::FilterType;
@@ -3307,14 +3308,22 @@ impl WorkspaceDashboard {
         app_server: &mut AppServerSession,
         index: usize,
     ) -> Result<()> {
+        if self.block_checkpoint_scope_change("switching patients") {
+            return Ok(());
+        }
         if index >= self.clients.len() {
             self.start_new_client();
             return Ok(());
         }
 
         let client_id = self.clients[index].id.clone();
-        self.reload_preserving(app_server, Some(client_id), None, None, None, None)
+        self.reload_preserving(app_server, Some(client_id.clone()), None, None, None, None)
             .await?;
+        if !self.draft_coordinator.prepare_client_scope(&client_id) {
+            color_eyre::eyre::bail!(
+                "draft checkpoint scope changed while the patient chart was loading"
+            );
+        }
         Ok(())
     }
 
@@ -3323,6 +3332,9 @@ impl WorkspaceDashboard {
         app_server: &mut AppServerSession,
         index: usize,
     ) -> Result<()> {
+        if self.block_checkpoint_scope_change("switching notes") {
+            return Ok(());
+        }
         if index >= self.notes.len() {
             self.start_new_note();
             return Ok(());
@@ -8903,8 +8915,22 @@ impl WorkspaceDashboard {
             .map(|encounter| encounter.id.clone())
     }
 
+    fn block_checkpoint_scope_change(&mut self, target: &str) -> bool {
+        if !self.draft_checkpoint_blocks_scope_change() {
+            return false;
+        }
+        self.set_checkpoint_scope_change_blocked_status(target);
+        true
+    }
+
     fn start_new_client(&mut self) {
-        self.draft_coordinator.clear();
+        if self.block_checkpoint_scope_change("creating a new patient") {
+            return;
+        }
+        if !self.draft_coordinator.try_clear() {
+            self.set_checkpoint_scope_change_blocked_status("creating a new patient");
+            return;
+        }
         self.patient_search_query = None;
         self.patient_search_selection_index = 0;
         self.patient_search_return_focus = None;
@@ -8953,6 +8979,9 @@ impl WorkspaceDashboard {
     }
 
     fn start_new_note(&mut self) {
+        if self.block_checkpoint_scope_change("creating a new note") {
+            return;
+        }
         self.note_index = self.notes.len();
         self.draft_note = NoteDraft::default();
         self.signatures.clear();
@@ -9592,6 +9621,9 @@ impl WorkspaceDashboard {
         if total == 0 {
             return WorkspaceDashboardAction::Consumed;
         }
+        if self.block_checkpoint_scope_change("switching workspace records") {
+            return WorkspaceDashboardAction::Consumed;
+        }
         if self.dirty || self.has_unsaved_addendum_draft() {
             self.status = "Save before switching workspace records.".to_string();
             return WorkspaceDashboardAction::Consumed;
@@ -9608,6 +9640,9 @@ impl WorkspaceDashboard {
     fn request_visible_patient_delta(&mut self, delta: isize) -> WorkspaceDashboardAction {
         let visible_indices = self.visible_patient_directory_indices();
         if visible_indices.is_empty() {
+            return WorkspaceDashboardAction::Consumed;
+        }
+        if self.block_checkpoint_scope_change("switching patients") {
             return WorkspaceDashboardAction::Consumed;
         }
         if self.dirty || self.has_unsaved_addendum_draft() {
@@ -9654,6 +9689,9 @@ impl WorkspaceDashboard {
     fn request_note_delta(&mut self, delta: isize) -> WorkspaceDashboardAction {
         let total = self.total_note_rows();
         if total == 0 {
+            return WorkspaceDashboardAction::Consumed;
+        }
+        if self.block_checkpoint_scope_change("switching notes") {
             return WorkspaceDashboardAction::Consumed;
         }
         if self.dirty || self.has_unsaved_addendum_draft() {
@@ -9736,7 +9774,10 @@ impl WorkspaceDashboard {
             return WorkspaceDashboardAction::Consumed;
         }
         match key_event.code {
-            KeyCode::Enter => self.focus = WorkspaceFocus::NoteBody,
+            KeyCode::Enter => {
+                self.focus = WorkspaceFocus::NoteBody;
+                self.draft_coordinator.request_focus_checkpoint();
+            }
             KeyCode::Down if self.profile != WorkspaceProfile::Medical => {
                 self.focus = WorkspaceFocus::NoteBody;
             }
@@ -10408,6 +10449,13 @@ impl WorkspaceDashboard {
     }
 
     fn medical_footer_text(&self, width: u16) -> String {
+        if self.draft_checkpoint_status_requires_attention() {
+            return compose_medical_status_footer(
+                self.medical_focus_footer_label(),
+                &self.status,
+                width,
+            );
+        }
         let input_mode = self.medical_input_mode();
         compose_medical_footer(
             self.medical_focus_footer_label(),
@@ -19408,6 +19456,99 @@ mod tests {
     }
 
     #[test]
+    fn medical_note_title_enter_requests_immediate_focus_checkpoint() {
+        let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+        dashboard.focus = WorkspaceFocus::NoteTitle;
+        dashboard.handle_key_event(KeyEvent::from(KeyCode::Char('x')));
+
+        assert_eq!(
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Enter)),
+            WorkspaceDashboardAction::Consumed
+        );
+
+        assert_eq!(dashboard.focus, WorkspaceFocus::NoteBody);
+        assert!(dashboard.take_focus_checkpoint_request());
+    }
+
+    #[test]
+    fn medical_checkpoint_detects_unsaved_agent_editor_before_generation_short_circuit() {
+        let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+        dashboard.agent_request.start();
+        dashboard.agent_request.body = "Draft agent instruction".to_string();
+
+        assert!(!dashboard.draft_coordinator.has_uncheckpointed_edits());
+        assert!(dashboard.has_unsaved_unsupported_checkpoint_editor());
+
+        dashboard.status =
+            "Local checkpoints currently cover patient and note fields only; save or clear the open file, safety, job, addendum, or agent draft."
+                .to_string();
+        insta::assert_snapshot!(
+            "medical_workspace_checkpoint_unavailable_120x32",
+            render_dashboard_lines_at(&dashboard, 120, 32)
+        );
+    }
+
+    #[test]
+    fn unsupported_chart_editor_only_requires_checkpoint_when_patient_or_note_also_changed() {
+        let client = test_client("client-1", "Jordan Patient");
+        let note = test_note("note-1", "Daily note", "daily", "draft", 1);
+        let mut dashboard = WorkspaceDashboard {
+            clients: vec![client.clone()],
+            notes: vec![note.clone()],
+            draft_client: ClientDraft::from_client(&client),
+            draft_note: NoteDraft::from_note(&note),
+            ..WorkspaceDashboard::new(WorkspaceProfile::Medical)
+        };
+        dashboard.set_document_draft_for_tests(
+            "referral",
+            "Referral",
+            "/tmp/referral.pdf",
+            "metadata only",
+        );
+
+        assert!(dashboard.has_unsaved_unsupported_chart_editor());
+        assert!(!dashboard.has_checkpointable_patient_or_note_changes());
+
+        dashboard.draft_note.body.push_str(" clinician edit");
+        dashboard.mark_dirty();
+        assert!(dashboard.has_checkpointable_patient_or_note_changes());
+    }
+
+    #[test]
+    fn pending_checkpoint_close_blocks_patient_and_note_scope_replacement() {
+        let client = test_client("client-1", "Jordan Patient");
+        let note = test_note("note-1", "Daily note", "daily", "draft", 1);
+        let mut dashboard = WorkspaceDashboard {
+            clients: vec![client.clone(), test_client("client-2", "Riley Patient")],
+            notes: vec![note.clone()],
+            client_index: 0,
+            note_index: 0,
+            draft_client: ClientDraft::from_client(&client),
+            draft_note: NoteDraft::from_note(&note),
+            ..WorkspaceDashboard::new(WorkspaceProfile::Medical)
+        };
+        dashboard.mark_canonical_save_pending_close();
+
+        dashboard.start_new_client();
+        assert_eq!(dashboard.draft_client.id.as_deref(), Some("client-1"));
+        assert_eq!(dashboard.client_index, 0);
+        assert!(dashboard.status.contains("Canonical chart saved"));
+        assert!(dashboard.status.contains("before creating a new patient"));
+
+        assert_eq!(
+            dashboard.request_visible_patient_delta(1),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert_eq!(dashboard.client_index, 0);
+        assert!(dashboard.status.contains("before switching patients"));
+
+        dashboard.start_new_note();
+        assert_eq!(dashboard.draft_note.id.as_deref(), Some("note-1"));
+        assert_eq!(dashboard.note_index, 0);
+        assert!(dashboard.status.contains("before creating a new note"));
+    }
+
+    #[test]
     fn medical_recursive_patient_directory_loop_stays_selection_only() {
         let mut dashboard = medical_recursive_directory_dashboard();
         dashboard.focus = WorkspaceFocus::Clients;
@@ -20119,6 +20260,41 @@ mod tests {
         let command_footer = line_plain_text(&search.status_line(80));
         assert!(command_footer.contains("Keys: ↑/↓ command"));
         assert!(command_footer.contains("Enter"));
+    }
+
+    #[test]
+    fn checkpoint_attention_is_transient_after_success() {
+        let mut dashboard = medical_recursive_files_dashboard();
+        for status in [
+            "Local draft checkpoint r4 saved; canonical chart unchanged.",
+            "Canonical chart saved; local draft checkpoint session closed.",
+        ] {
+            dashboard.status = status.to_string();
+            assert!(
+                !dashboard.draft_checkpoint_status_requires_attention(),
+                "successful status should not permanently replace key guidance: {status}"
+            );
+            let footer = line_plain_text(&dashboard.status_line(120));
+            assert!(footer.contains("Keys:"), "missing key guidance: {footer}");
+        }
+
+        for status in [
+            "Local draft checkpoint is still saving; canonical chart unchanged.",
+            "Local draft checkpoint failed; canonical chart unchanged. Retry after idle.",
+            "Local draft checkpoints are unavailable through a remote app-server.",
+            "Canonical chart saved; local draft checkpoint is still saving; draft session remains open.",
+        ] {
+            dashboard.status = status.to_string();
+            assert!(
+                dashboard.draft_checkpoint_status_requires_attention(),
+                "pending or failed status should remain visible: {status}"
+            );
+            let footer = line_plain_text(&dashboard.status_line(120));
+            assert!(
+                footer.contains("Status:"),
+                "missing status guidance: {footer}"
+            );
+        }
     }
 
     #[test]

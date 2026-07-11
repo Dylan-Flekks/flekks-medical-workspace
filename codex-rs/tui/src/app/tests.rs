@@ -29,6 +29,7 @@ use crate::multi_agents::SubAgentActivityDisplay;
 use assert_matches::assert_matches;
 
 use crate::app_command::AppCommand as Op;
+use crate::app_server_session::ThreadParamsMode;
 use crate::diff_model::FileChange;
 use crate::legacy_core::config::ConfigBuilder;
 use crate::legacy_core::config::ConfigOverrides;
@@ -7058,6 +7059,287 @@ fn workspace_dashboard_checkpoints_rpc_draft_without_mutating_canonical_note() -
         assert_eq!(
             canonical_dashboard.note_body_for_tests(),
             "Canonical human note."
+        );
+        app_server.shutdown().await?;
+        Ok(())
+    }))
+}
+
+#[test]
+fn medical_checkpoint_rejects_remote_session_before_sending_snapshot() -> Result<()> {
+    run_workspace_dashboard_runtime_test(Box::pin(async {
+        let mut app = make_test_app().await;
+        let codex_home = tempdir()?;
+        app.config.codex_home = codex_home.path().to_path_buf().abs();
+        app.config.sqlite_home = codex_home.path().to_path_buf();
+
+        let mut app_server =
+            Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
+        let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+        dashboard.load(&mut app_server).await?;
+        dashboard.set_context_for_tests("Jordan Patient", "Daily note", "Canonical note.");
+        dashboard.save(&mut app_server).await?;
+        dashboard.set_note_body_for_tests("Local draft must not leave this process.");
+        let patient_id = dashboard
+            .client_id_for_tests()
+            .expect("saved patient should have an id")
+            .to_string();
+
+        app_server.set_thread_params_mode_for_tests(ThreadParamsMode::Remote);
+        let error = dashboard
+            .checkpoint_draft(
+                &mut app_server,
+                crate::workspace_draft::WorkspaceDraftCheckpointTrigger::FocusChange,
+            )
+            .await
+            .expect_err("remote workspace checkpoint must fail closed");
+        assert!(error.to_string().contains("require a local app-server"));
+        assert!(
+            dashboard
+                .draft_checkpoint_status_for_tests()
+                .contains("no workspace snapshot was sent")
+        );
+
+        app_server.set_thread_params_mode_for_tests(ThreadParamsMode::Embedded);
+        let sessions = app_server
+            .workspace_draft_session_list(WorkspaceDraftSessionListParams {
+                client_id: patient_id,
+                include_closed: true,
+                cursor: None,
+                limit: Some(10),
+            })
+            .await?;
+        assert!(sessions.data.is_empty());
+        app_server.shutdown().await?;
+        Ok(())
+    }))
+}
+
+#[test]
+fn medical_canonical_save_fails_closed_when_checkpoint_fails() -> Result<()> {
+    run_workspace_dashboard_runtime_test(Box::pin(async {
+        let mut app = make_test_app().await;
+        let codex_home = tempdir()?;
+        app.config.codex_home = codex_home.path().to_path_buf().abs();
+        app.config.sqlite_home = codex_home.path().to_path_buf();
+
+        let mut app_server =
+            Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
+        let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+        dashboard.load(&mut app_server).await?;
+        dashboard.set_context_for_tests("Jordan Patient", "Daily note", "Canonical note.");
+        dashboard.save(&mut app_server).await?;
+        dashboard.set_note_body_for_tests("Draft blocked by checkpoint failure.");
+        app.workspace_dashboard = Some(dashboard);
+        app.workspace_dashboard_visible = true;
+
+        app_server.set_thread_params_mode_for_tests(ThreadParamsMode::Remote);
+        app.save_workspace_with_checkpoint(&mut app_server).await;
+        app_server.set_thread_params_mode_for_tests(ThreadParamsMode::Embedded);
+
+        assert_eq!(
+            app.workspace_dashboard
+                .as_ref()
+                .expect("workspace should remain loaded")
+                .note_body_for_tests(),
+            "Draft blocked by checkpoint failure."
+        );
+        let mut canonical = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+        canonical.load(&mut app_server).await?;
+        assert_eq!(canonical.note_body_for_tests(), "Canonical note.");
+        app_server.shutdown().await?;
+        Ok(())
+    }))
+}
+
+#[test]
+fn medical_close_fails_closed_when_checkpoint_is_unavailable() -> Result<()> {
+    run_workspace_dashboard_runtime_test(Box::pin(async {
+        let mut app = make_test_app().await;
+        let codex_home = tempdir()?;
+        app.config.codex_home = codex_home.path().to_path_buf().abs();
+        app.config.sqlite_home = codex_home.path().to_path_buf();
+        let mut app_server =
+            Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
+        let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+        dashboard.set_note_body_for_tests("Unsaved patient draft.");
+        app.workspace_dashboard = Some(dashboard);
+        app.workspace_dashboard_visible = true;
+
+        let permits_hide = app
+            .workspace_close_checkpoint_permits_hide(&mut app_server)
+            .await;
+
+        assert!(!permits_hide);
+        assert!(app.workspace_dashboard_active());
+        assert!(
+            app.workspace_dashboard
+                .as_ref()
+                .expect("workspace should remain loaded")
+                .draft_checkpoint_status_for_tests()
+                .contains("Save this new patient")
+        );
+        app_server.shutdown().await?;
+        Ok(())
+    }))
+}
+
+#[tokio::test]
+async fn medical_dashboard_discard_waits_for_owned_checkpoint_continuation() {
+    let mut app = make_test_app().await;
+    let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+    dashboard.mark_canonical_save_pending_close();
+    app.workspace_dashboard = Some(dashboard);
+    app.workspace_dashboard_visible = true;
+
+    assert!(!app.discard_workspace_dashboard_if_checkpoint_safe());
+
+    let dashboard = app
+        .workspace_dashboard
+        .as_ref()
+        .expect("blocked clear must retain the dashboard and its coordinator");
+    assert!(!dashboard.can_clear_dashboard_checkpoint_safely());
+    assert!(
+        dashboard
+            .draft_checkpoint_status_for_tests()
+            .contains("before closing the workspace")
+    );
+}
+
+#[test]
+fn medical_unsupported_only_canonical_save_remains_available() -> Result<()> {
+    run_workspace_dashboard_runtime_test(Box::pin(async {
+        let mut app = make_test_app().await;
+        let codex_home = tempdir()?;
+        app.config.codex_home = codex_home.path().to_path_buf().abs();
+        app.config.sqlite_home = codex_home.path().to_path_buf();
+        let mut app_server =
+            Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
+        let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+        dashboard.load(&mut app_server).await?;
+        dashboard.set_context_for_tests("Jordan Patient", "Daily note", "Canonical note.");
+        dashboard.save(&mut app_server).await?;
+        dashboard.set_document_draft_for_tests(
+            "referral",
+            "Outside referral",
+            "/tmp/outside-referral.pdf",
+            "metadata only",
+        );
+        app.workspace_dashboard = Some(dashboard);
+        app.workspace_dashboard_visible = true;
+
+        app.save_workspace_with_checkpoint(&mut app_server).await;
+
+        assert_eq!(
+            app.workspace_dashboard
+                .as_ref()
+                .and_then(WorkspaceDashboard::document_title_for_tests),
+            Some("Outside referral")
+        );
+        app_server.shutdown().await?;
+        Ok(())
+    }))
+}
+
+#[test]
+fn medical_first_canonical_save_bootstraps_and_closes_draft_checkpoint() -> Result<()> {
+    run_workspace_dashboard_runtime_test(Box::pin(async {
+        let mut app = make_test_app().await;
+        let codex_home = tempdir()?;
+        app.config.codex_home = codex_home.path().to_path_buf().abs();
+        app.config.sqlite_home = codex_home.path().to_path_buf();
+        let mut app_server =
+            Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
+        let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+        dashboard.load(&mut app_server).await?;
+        dashboard.set_context_for_tests("Jordan Patient", "Daily note", "Initial draft.");
+        dashboard.set_note_body_for_tests("Initial clinician draft.");
+        app.workspace_dashboard = Some(dashboard);
+        app.workspace_dashboard_visible = true;
+
+        app.save_workspace_with_checkpoint(&mut app_server).await;
+
+        let dashboard = app
+            .workspace_dashboard
+            .as_ref()
+            .expect("workspace should remain loaded");
+        let client_id = dashboard
+            .client_id_for_tests()
+            .expect("canonical save should allocate patient id")
+            .to_string();
+        let sessions = app_server
+            .workspace_draft_session_list(WorkspaceDraftSessionListParams {
+                client_id,
+                include_closed: true,
+                cursor: None,
+                limit: Some(10),
+            })
+            .await?;
+        assert_eq!(sessions.data.len(), 1);
+        assert_eq!(
+            sessions.data[0].status,
+            codex_app_server_protocol::WorkspaceDraftSessionStatus::Closed
+        );
+        assert_eq!(
+            sessions.data[0].current_checkpoint.draft["note"]["body"],
+            "Initial clinician draft."
+        );
+        app_server.shutdown().await?;
+        Ok(())
+    }))
+}
+
+#[test]
+fn medical_saved_bootstrap_pending_close_finishes_on_idle_tick() -> Result<()> {
+    run_workspace_dashboard_runtime_test(Box::pin(async {
+        let mut app = make_test_app().await;
+        let codex_home = tempdir()?;
+        app.config.codex_home = codex_home.path().to_path_buf().abs();
+        app.config.sqlite_home = codex_home.path().to_path_buf();
+        let mut app_server =
+            Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
+        let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+        dashboard.load(&mut app_server).await?;
+        dashboard.set_context_for_tests("Jordan Patient", "Daily note", "Initial canonical note.");
+        dashboard.save(&mut app_server).await?;
+        dashboard.set_note_body_for_tests("Canonical body saved after checkpoint.");
+        dashboard
+            .checkpoint_draft(
+                &mut app_server,
+                crate::workspace_draft::WorkspaceDraftCheckpointTrigger::FocusChange,
+            )
+            .await?;
+        dashboard.save(&mut app_server).await?;
+        dashboard.mark_canonical_save_pending_close();
+        let client_id = dashboard
+            .client_id_for_tests()
+            .expect("saved patient should have an id")
+            .to_string();
+        app.workspace_dashboard = Some(dashboard);
+        app.workspace_dashboard_visible = true;
+
+        app.checkpoint_idle_workspace_draft(&mut app_server).await;
+
+        let dashboard = app
+            .workspace_dashboard
+            .as_ref()
+            .expect("continuation should keep the dashboard loaded");
+        assert_eq!(
+            dashboard.draft_checkpoint_status_for_tests(),
+            "Canonical chart saved; local draft checkpoint session closed."
+        );
+        let sessions = app_server
+            .workspace_draft_session_list(WorkspaceDraftSessionListParams {
+                client_id,
+                include_closed: true,
+                cursor: None,
+                limit: Some(10),
+            })
+            .await?;
+        assert_eq!(sessions.data.len(), 1);
+        assert_eq!(
+            sessions.data[0].status,
+            codex_app_server_protocol::WorkspaceDraftSessionStatus::Closed
         );
         app_server.shutdown().await?;
         Ok(())

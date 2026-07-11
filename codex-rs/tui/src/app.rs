@@ -1460,8 +1460,9 @@ See the Codex keymap documentation for supported actions and examples."
                 self.close_workspace_with_checkpoint(tui, app_server).await;
             }
             WorkspaceDashboardAction::CloseAndDiscard => {
-                self.workspace_dashboard = None;
-                self.hide_workspace_dashboard_and_leave_alt_screen(tui);
+                if self.discard_workspace_dashboard_if_checkpoint_safe() {
+                    self.hide_workspace_dashboard_and_leave_alt_screen(tui);
+                }
             }
             WorkspaceDashboardAction::EnsureEncounter => {
                 let result = if let Some(dashboard) = self.workspace_dashboard.as_mut() {

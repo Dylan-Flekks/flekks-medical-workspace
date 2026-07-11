@@ -1,0 +1,36 @@
+---
+source: tui/src/workspace_dashboard.rs
+expression: "render_dashboard_lines_at(&dashboard, 120, 32)"
+---
+Medical Workspace
+Patient: No patient selected  DOB: blank  MRN: blank  Contact: Missing contact  Coverage: Missing coverage  Encounter:
+ EXPLORER                      PATIENT CHART
+┌Patient Directory───────────┐┌Patient Demographics────────────────────────────────────────────────────────────────────┐
+│Local search: /             ││Display: New patient                                                                    │
+│0 active patients; local    ││Preferred:                                                                              │
+│only                        ││DOB:                                                                                    │
+│No saved patients yet.      ││Sex/Gender:                                                                             │
+│New patient: :patient new   ││Patient ID / MRN:                                                                       │
+│                            ││Chart start:                                                                            │
+│                            ││Chart end:                                                                              │
+│                            │└────────────────────────────────────────────────────────────────────────────────────────┘
+└────────────────────────────┘┌Note Title──────────────────────────────────────────────────────────────────────────────┐
+┌Patient Notes───────────────┐│Untitled note                                                                           │
+│Patient Notes               │└────────────────────────────────────────────────────────────────────────────────────────┘
+│  New note                  │┌Note Body───────────────────────────────────────────────────────────────────────────────┐
+│  No patient notes yet. Use ││HPI:                                                                                    │
+│:note new.                  ││Exam:                                                                                   │
+│  Medical, communication,   ││Assessment:                                                                             │
+│and admin notes appear here.││Plan:                                                                                   │
+└────────────────────────────┘│                                                                                        │
+┌Uploaded Documents──────────┐│                                                                                        │
+│Uploaded Documents          ││                                                                                        │
+│No files yet                │└────────────────────────────────────────────────────────────────────────────────────────┘
+│Paste/drop JPG/PDF. S...    │┌Today's Visit───────────────────────────────────────────────────────────────────────────┐
+│                            ││Patient: New patient; note: untitled note                                               │
+│                            ││Next                                                                                    │
+│                            ││  ● Next: Save first eval                                                               │
+│                            ││                                                                                        │
+│                            ││Intake Checklist                                                                        │
+└────────────────────────────┘└────────────────────────────────────────────────────────────────────────────────────────┘
+Focus: Directory | Status: Local checkpoints currently cover patient and note fields only; save or clear the open file,…

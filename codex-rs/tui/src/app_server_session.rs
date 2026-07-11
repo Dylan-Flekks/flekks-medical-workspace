@@ -337,6 +337,11 @@ impl AppServerSession {
         matches!(self.thread_params_mode, ThreadParamsMode::Remote)
     }
 
+    #[cfg(test)]
+    pub(crate) fn set_thread_params_mode_for_tests(&mut self, mode: ThreadParamsMode) {
+        self.thread_params_mode = mode;
+    }
+
     pub(crate) fn uses_embedded_app_server(&self) -> bool {
         matches!(&self.client, AppServerClient::InProcess(_))
     }
@@ -896,15 +901,18 @@ impl AppServerSession {
             .wrap_err("workspace/chart/commit failed in TUI")
     }
 
-    pub(crate) async fn workspace_draft_checkpoint_create(
+    pub(crate) fn spawn_workspace_draft_checkpoint_create(
         &mut self,
         params: WorkspaceDraftCheckpointCreateParams,
-    ) -> Result<WorkspaceDraftCheckpointCreateResponse> {
+    ) -> tokio::task::JoinHandle<Result<WorkspaceDraftCheckpointCreateResponse>> {
         let request_id = self.next_request_id();
-        self.client
-            .request_typed(ClientRequest::WorkspaceDraftCheckpointCreate { request_id, params })
-            .await
-            .wrap_err("workspace/draft/checkpoint/create failed in TUI")
+        let request_handle = self.request_handle();
+        tokio::spawn(async move {
+            request_handle
+                .request_typed(ClientRequest::WorkspaceDraftCheckpointCreate { request_id, params })
+                .await
+                .wrap_err("workspace/draft/checkpoint/create failed in TUI")
+        })
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
