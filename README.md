@@ -1,6 +1,6 @@
 # Flekks Medical Workspace
 
-Flekks Medical Workspace is an open-source Rust terminal UI for patient-centered chart workflows and human-reviewed AI agent recommendations. It is derived from [OpenAI Codex](https://github.com/openai/codex) and explores an IDE-style model for clinical documentation: clinicians own the canonical chart, agents propose reviewable changes, and every request, source access, recommendation, decision, and accepted revision is auditable.
+Flekks Medical Workspace is an open-source Rust terminal UI for patient-centered chart workflows and human-reviewed AI agent recommendations. It is derived from [OpenAI Codex](https://github.com/openai/codex) and explores a TUI-style model for clinical documentation: clinicians own the canonical chart, agents propose reviewable changes, and every request, source access, recommendation, decision, and accepted revision is auditable.
 
 > [!WARNING]
 > This project is alpha research software for synthetic data only. It is not an electronic health record, medical device, clinical decision-support system, or HIPAA-ready product. Do not enter protected health information or use it for patient care.
