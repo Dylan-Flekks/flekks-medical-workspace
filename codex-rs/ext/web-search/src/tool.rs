@@ -1,8 +1,11 @@
 use codex_api::ReqwestTransport;
 use codex_api::SearchClient;
 use codex_api::SearchCommands;
+use codex_api::SearchQuery;
 use codex_api::SearchRequest;
 use codex_api::SearchSettings;
+use codex_core::web_search_action_detail;
+use codex_extension_api::ExtensionTurnItem;
 use codex_extension_api::FunctionCallError;
 use codex_extension_api::ResponsesApiTool;
 use codex_extension_api::ToolCall;
@@ -11,20 +14,28 @@ use codex_extension_api::ToolName;
 use codex_extension_api::ToolOutput;
 use codex_extension_api::ToolSpec;
 use codex_extension_api::parse_tool_input_schema_without_compaction;
+use codex_extension_items::ExtensionItem;
+use codex_extension_items::web_search::WebSearchAction;
+use codex_extension_items::web_search::WebSearchItem;
 use codex_login::default_client::build_reqwest_client;
 use codex_model_provider::SharedModelProvider;
+use codex_protocol::models::WebSearchAction as CoreWebSearchAction;
+use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::WebSearchBeginEvent;
+use codex_protocol::protocol::WebSearchEndEvent;
 use codex_tools::ResponsesApiNamespace;
 use codex_tools::ResponsesApiNamespaceTool;
 use codex_tools::ToolExposure;
 use codex_tools::default_namespace_description;
 use http::HeaderMap;
+use url::Url;
 
 use crate::history::recent_input;
-use crate::output::EncryptedSearchOutput;
+use crate::output::SearchOutput;
 use crate::schema::commands_schema;
 
-const WEB_NAMESPACE: &str = "web";
-const RUN_TOOL_NAME: &str = "run";
+pub(crate) const WEB_NAMESPACE: &str = "web";
+pub(crate) const RUN_TOOL_NAME: &str = "run";
 const WEB_RUN_DESCRIPTION: &str = include_str!("../web_run_description.md");
 
 pub(crate) struct WebSearchTool {
@@ -33,7 +44,6 @@ pub(crate) struct WebSearchTool {
     pub(crate) settings: SearchSettings,
 }
 
-#[async_trait::async_trait]
 impl ToolExecutor<ToolCall> for WebSearchTool {
     fn tool_name(&self) -> ToolName {
         ToolName::namespaced(WEB_NAMESPACE, RUN_TOOL_NAME)
@@ -61,11 +71,22 @@ impl ToolExecutor<ToolCall> for WebSearchTool {
     }
 
     fn exposure(&self) -> ToolExposure {
-        ToolExposure::DirectModelOnly
+        ToolExposure::Direct
     }
 
-    async fn handle(&self, call: ToolCall) -> Result<Box<dyn ToolOutput>, FunctionCallError> {
+    fn supports_parallel_tool_calls(&self) -> bool {
+        true
+    }
+
+    fn handle(&self, call: ToolCall) -> codex_extension_api::ToolExecutorFuture<'_> {
+        Box::pin(self.handle_call(call))
+    }
+}
+
+impl WebSearchTool {
+    async fn handle_call(&self, call: ToolCall) -> Result<Box<dyn ToolOutput>, FunctionCallError> {
         let commands = parse_commands(&call)?;
+        let command_action = command_action(&commands);
         let provider = self
             .provider
             .api_provider()
@@ -83,7 +104,7 @@ impl ToolExecutor<ToolCall> for WebSearchTool {
         );
         let request = SearchRequest {
             id: self.session_id.clone(),
-            model: None,
+            model: call.model.clone(),
             reasoning: None,
             input: recent_input(call.conversation_history.items()),
             commands: Some(commands),
@@ -92,14 +113,51 @@ impl ToolExecutor<ToolCall> for WebSearchTool {
                 u64::try_from(call.truncation_policy.token_budget()).unwrap_or(u64::MAX),
             ),
         };
+        call.turn_item_emitter
+            .emit_started(extension_turn_item(
+                WebSearchItem {
+                    id: call.call_id.clone(),
+                    query: String::new(),
+                    action: None,
+                },
+                EventMsg::WebSearchBegin(WebSearchBeginEvent {
+                    call_id: call.call_id.clone(),
+                }),
+            ))
+            .await;
         let response = client
             .search(&request, HeaderMap::new())
             .await
             .map_err(|err| FunctionCallError::Fatal(err.to_string()))?;
+        let legacy_action = match &command_action {
+            WebSearchAction::Search { query, queries } => CoreWebSearchAction::Search {
+                query: query.clone(),
+                queries: queries.clone(),
+            },
+            WebSearchAction::OpenPage { url } => CoreWebSearchAction::OpenPage { url: url.clone() },
+            WebSearchAction::FindInPage { url, pattern } => CoreWebSearchAction::FindInPage {
+                url: url.clone(),
+                pattern: pattern.clone(),
+            },
+            WebSearchAction::Other => CoreWebSearchAction::Other,
+        };
+        let query = web_search_action_detail(&legacy_action);
+        call.turn_item_emitter
+            .emit_completed(extension_turn_item(
+                WebSearchItem {
+                    id: call.call_id.clone(),
+                    query: query.clone(),
+                    action: Some(command_action),
+                },
+                EventMsg::WebSearchEnd(WebSearchEndEvent {
+                    call_id: call.call_id.clone(),
+                    query,
+                    action: legacy_action,
+                }),
+            ))
+            .await;
 
-        Ok(Box::new(EncryptedSearchOutput::new(
-            response.encrypted_output,
-        )))
+        Ok(Box::new(SearchOutput::new(response.output)))
     }
 }
 
@@ -111,4 +169,110 @@ fn parse_commands(call: &ToolCall) -> Result<SearchCommands, FunctionCallError> 
 
     serde_json::from_str(arguments)
         .map_err(|err| FunctionCallError::RespondToModel(err.to_string()))
+}
+
+fn command_action(commands: &SearchCommands) -> WebSearchAction {
+    commands
+        .search_query
+        .as_deref()
+        .and_then(query_action)
+        .or_else(|| commands.image_query.as_deref().and_then(query_action))
+        .or_else(|| {
+            commands
+                .open
+                .as_deref()
+                .and_then(|operations| operations.first())
+                .and_then(|operation| {
+                    literal_url(&operation.ref_id)
+                        .map(|url| WebSearchAction::OpenPage { url: Some(url) })
+                })
+        })
+        .or_else(|| {
+            commands
+                .find
+                .as_deref()
+                .and_then(|operations| operations.first())
+                .map(|operation| WebSearchAction::FindInPage {
+                    url: literal_url(&operation.ref_id),
+                    pattern: Some(operation.pattern.clone()),
+                })
+        })
+        .unwrap_or(WebSearchAction::Other)
+}
+
+fn query_action(queries: &[SearchQuery]) -> Option<WebSearchAction> {
+    match queries {
+        [] => None,
+        [query] => Some(WebSearchAction::Search {
+            query: Some(query.q.clone()),
+            queries: None,
+        }),
+        queries => Some(WebSearchAction::Search {
+            query: None,
+            queries: Some(queries.iter().map(|query| query.q.clone()).collect()),
+        }),
+    }
+}
+
+fn literal_url(ref_id: &str) -> Option<String> {
+    Url::parse(ref_id).is_ok().then(|| ref_id.to_string())
+}
+
+fn extension_turn_item(item: WebSearchItem, legacy_event: EventMsg) -> ExtensionTurnItem {
+    ExtensionTurnItem {
+        item: ExtensionItem::WebSearch(item),
+        legacy_events: vec![legacy_event],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use codex_api::SearchCommands;
+    use codex_extension_items::web_search::WebSearchAction;
+    use pretty_assertions::assert_eq;
+
+    use super::command_action;
+
+    #[test]
+    fn command_action_reports_queries_and_navigation_detail() {
+        let cases = [
+            (
+                r#"{"image_query":[{"q":"waterfalls"},{"q":"mountains"}]}"#,
+                WebSearchAction::Search {
+                    query: None,
+                    queries: Some(vec!["waterfalls".to_string(), "mountains".to_string()]),
+                },
+            ),
+            (
+                r#"{"open":[{"ref_id":"https://example.com/docs"}]}"#,
+                WebSearchAction::OpenPage {
+                    url: Some("https://example.com/docs".to_string()),
+                },
+            ),
+            (
+                r#"{"find":[{"ref_id":"https://example.com/docs","pattern":"install"}]}"#,
+                WebSearchAction::FindInPage {
+                    url: Some("https://example.com/docs".to_string()),
+                    pattern: Some("install".to_string()),
+                },
+            ),
+            (
+                r#"{"find":[{"ref_id":"turn0search0","pattern":"install"}]}"#,
+                WebSearchAction::FindInPage {
+                    url: None,
+                    pattern: Some("install".to_string()),
+                },
+            ),
+            (
+                r#"{"open":[{"ref_id":"turn0search0"}]}"#,
+                WebSearchAction::Other,
+            ),
+        ];
+
+        for (arguments, expected) in cases {
+            let commands: SearchCommands =
+                serde_json::from_str(arguments).expect("valid search command arguments");
+            assert_eq!(command_action(&commands), expected);
+        }
+    }
 }

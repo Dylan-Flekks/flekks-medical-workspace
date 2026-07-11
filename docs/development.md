@@ -5,12 +5,14 @@
 Install Git, the Rust toolchain from `codex-rs/rust-toolchain.toml`, and `just`.
 
 ```bash
-cd codex-rs
-cargo build -p codex-cli
-./target/debug/codex
+just medical-workspace
 ```
 
-Run `/workspacemedical` inside the TUI. Use only synthetic records and files.
+Run `/workspacemedical` when the TUI opens. Use only synthetic records and files.
+
+For a manual debug build, run `cargo build -p codex-cli` from `codex-rs`, set a
+readable terminal size with `stty cols 160 rows 45`, then launch
+`./target/debug/codex`.
 
 ## Focused tests
 

@@ -293,16 +293,12 @@ impl EventProcessorWithJsonOutput {
                     },
                 }),
             }),
-            ThreadItem::WebSearch {
-                id: raw_id,
-                query,
-                action,
-            } => Some(ExecThreadItem {
+            ThreadItem::WebSearch(item) => Some(ExecThreadItem {
                 id: make_id(),
                 details: ThreadItemDetails::WebSearch(WebSearchItem {
-                    id: raw_id,
-                    query,
-                    action: match action {
+                    id: item.id,
+                    query: item.query,
+                    action: match item.action {
                         Some(action) => serde_json::from_value(
                             serde_json::to_value(action).unwrap_or_else(|_| json!("other")),
                         )
@@ -429,6 +425,11 @@ impl EventProcessorWithJsonOutput {
                     },
                 }));
                 CodexStatus::Running
+            }
+            ServerNotification::Warning(notification) => {
+                let warning = self.collect_warning(notification.message);
+                events.extend(warning.events);
+                warning.status
             }
             ServerNotification::Error(notification) => {
                 let message = match notification.error.additional_details {
