@@ -601,6 +601,10 @@ pub struct WorkspaceContextPacket {
     pub client_id: String,
     pub encounter_id: Option<String>,
     pub note_id: Option<String>,
+    pub source_draft_session_id: Option<String>,
+    pub source_draft_checkpoint_id: Option<String>,
+    pub source_draft_checkpoint_revision: Option<i64>,
+    pub source_draft_checkpoint_sha256: Option<String>,
     pub human_request: String,
     pub selected_artifact_ids_json: String,
     pub selected_derivative_ids_json: String,
@@ -631,11 +635,17 @@ pub struct WorkspaceContextPacket {
 /// - unselected artifacts, derivatives, and clips must never appear in agent-visible payloads
 /// - original local files are never uploaded or read automatically
 /// - packet context grants no authority to write, sign, submit, or contact payers
+/// - reviewed workspace handoffs bind all four draft-source fields to one current checkpoint
+/// - legacy/manual callers may omit the entire draft-source tuple
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WorkspaceContextPacketCreate {
     pub client_id: String,
     pub encounter_id: Option<String>,
     pub note_id: Option<String>,
+    pub source_draft_session_id: Option<String>,
+    pub source_draft_checkpoint_id: Option<String>,
+    pub source_draft_checkpoint_revision: Option<i64>,
+    pub source_draft_checkpoint_sha256: Option<String>,
     pub human_request: String,
     pub selected_artifact_ids_json: String,
     pub selected_derivative_ids_json: String,
@@ -1819,6 +1829,10 @@ pub(crate) struct WorkspaceContextPacketRow {
     pub client_id: String,
     pub encounter_id: Option<String>,
     pub note_id: Option<String>,
+    pub source_draft_session_id: Option<String>,
+    pub source_draft_checkpoint_id: Option<String>,
+    pub source_draft_checkpoint_revision: Option<i64>,
+    pub source_draft_checkpoint_sha256: Option<String>,
     pub human_request: String,
     pub selected_artifact_ids_json: String,
     pub selected_derivative_ids_json: String,
@@ -1848,6 +1862,10 @@ impl WorkspaceContextPacketRow {
             client_id: row.try_get("client_id")?,
             encounter_id: row.try_get("encounter_id")?,
             note_id: row.try_get("note_id")?,
+            source_draft_session_id: row.try_get("source_draft_session_id")?,
+            source_draft_checkpoint_id: row.try_get("source_draft_checkpoint_id")?,
+            source_draft_checkpoint_revision: row.try_get("source_draft_checkpoint_revision")?,
+            source_draft_checkpoint_sha256: row.try_get("source_draft_checkpoint_sha256")?,
             human_request: row.try_get("human_request")?,
             selected_artifact_ids_json: row.try_get("selected_artifact_ids_json")?,
             selected_derivative_ids_json: row.try_get("selected_derivative_ids_json")?,
@@ -1881,6 +1899,10 @@ impl TryFrom<WorkspaceContextPacketRow> for WorkspaceContextPacket {
             client_id: row.client_id,
             encounter_id: row.encounter_id,
             note_id: row.note_id,
+            source_draft_session_id: row.source_draft_session_id,
+            source_draft_checkpoint_id: row.source_draft_checkpoint_id,
+            source_draft_checkpoint_revision: row.source_draft_checkpoint_revision,
+            source_draft_checkpoint_sha256: row.source_draft_checkpoint_sha256,
             human_request: row.human_request,
             selected_artifact_ids_json: row.selected_artifact_ids_json,
             selected_derivative_ids_json: row.selected_derivative_ids_json,
