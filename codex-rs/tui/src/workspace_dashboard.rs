@@ -228,12 +228,14 @@ pub(crate) enum WorkspaceDashboardAction {
     Consumed,
     Close,
     CloseAndDiscard,
+    DiscardDraftCheckpoint,
     EnsureEncounter,
     ResolveProposal {
         proposal_id: String,
         accept: bool,
     },
     Save,
+    RestoreDraftCheckpoint,
     SaveAgentResult {
         packet_id: String,
         body: String,
@@ -2696,7 +2698,9 @@ impl WorkspaceDashboard {
 
     pub(crate) async fn load(&mut self, app_server: &mut AppServerSession) -> Result<()> {
         self.reload_preserving(app_server, None, None, None, None, None)
-            .await
+            .await?;
+        self.refresh_draft_recovery(app_server).await;
+        Ok(())
     }
 
     pub(crate) async fn save(&mut self, app_server: &mut AppServerSession) -> Result<()> {
@@ -3315,6 +3319,7 @@ impl WorkspaceDashboard {
         let client_id = self.clients[index].id.clone();
         self.reload_preserving(app_server, Some(client_id), None, None, None, None)
             .await?;
+        self.refresh_draft_recovery(app_server).await;
         Ok(())
     }
 
@@ -3566,6 +3571,10 @@ impl WorkspaceDashboard {
         }
         let key_event = normalize_workspace_key_event(key_event);
 
+        if let Some(action) = self.draft_recovery_key_action(key_event) {
+            return action;
+        }
+
         if self.chart_changeset_input_is_frozen() {
             let close_action = if self
                 .pending_chart_changeset
@@ -3736,6 +3745,11 @@ impl WorkspaceDashboard {
         scroll_event: MouseScrollEvent,
         viewport: Option<Rect>,
     ) -> WorkspaceDashboardAction {
+        if self.block_interaction_for_draft_recovery(
+            "Choose R to restore or D to discard the local draft checkpoint first.",
+        ) {
+            return WorkspaceDashboardAction::Consumed;
+        }
         let delta = match scroll_event.direction {
             MouseScrollDirection::Up => -1,
             MouseScrollDirection::Down => 1,
@@ -5057,6 +5071,11 @@ impl WorkspaceDashboard {
     }
 
     pub(crate) fn handle_paste(&mut self, pasted: String) -> WorkspaceDashboardAction {
+        if self.block_interaction_for_draft_recovery(
+            "Choose R to restore or D to discard the local draft checkpoint before editing.",
+        ) {
+            return WorkspaceDashboardAction::Consumed;
+        }
         if self.chart_changeset_input_is_frozen() {
             self.status =
                 "Chart changeset is unresolved; use Ctrl-S for its required recovery step or close before editing."
@@ -7633,6 +7652,7 @@ impl WorkspaceDashboard {
             if self.command_input.is_some() {
                 self.render_command_palette(area, buf);
             }
+            self.render_draft_recovery_overlay(area, buf);
             return;
         }
         if self.render_medical_large_chart_workspace(area, buf) {
@@ -7642,6 +7662,7 @@ impl WorkspaceDashboard {
             if self.command_input.is_some() {
                 self.render_command_palette(area, buf);
             }
+            self.render_draft_recovery_overlay(area, buf);
             return;
         }
         if self.render_medical_medium_workspace(area, buf) {
@@ -7651,6 +7672,7 @@ impl WorkspaceDashboard {
             if self.command_input.is_some() {
                 self.render_command_palette(area, buf);
             }
+            self.render_draft_recovery_overlay(area, buf);
             return;
         }
         if self.render_medical_focus_first_workspace(area, buf) {
@@ -7660,6 +7682,7 @@ impl WorkspaceDashboard {
             if self.command_input.is_some() {
                 self.render_command_palette(area, buf);
             }
+            self.render_draft_recovery_overlay(area, buf);
             return;
         }
         if self.render_medical_dedicated_workpane(area, buf) {
@@ -7669,6 +7692,7 @@ impl WorkspaceDashboard {
             if self.command_input.is_some() {
                 self.render_command_palette(area, buf);
             }
+            self.render_draft_recovery_overlay(area, buf);
             return;
         }
         let areas = WorkspaceAreas::new(area);
@@ -7696,6 +7720,7 @@ impl WorkspaceDashboard {
         if self.command_input.is_some() {
             self.render_command_palette(area, buf);
         }
+        self.render_draft_recovery_overlay(area, buf);
     }
 
     fn render_medical_large_chart_workspace(&self, area: Rect, buf: &mut Buffer) -> bool {
@@ -8205,6 +8230,9 @@ impl WorkspaceDashboard {
     }
 
     pub(crate) fn cursor_pos(&self, area: Rect) -> Option<(u16, u16)> {
+        if self.draft_coordinator.pending_recovery().is_some() {
+            return None;
+        }
         if WorkspaceLayoutMode::for_area(area) == WorkspaceLayoutMode::Tiny {
             return None;
         }

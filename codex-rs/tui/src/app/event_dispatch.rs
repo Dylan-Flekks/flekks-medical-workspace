@@ -44,6 +44,7 @@ impl App {
                     }
                 } else if let Some(dashboard) = self.workspace_dashboard.as_mut() {
                     dashboard.set_profile(profile);
+                    dashboard.refresh_draft_recovery(app_server).await;
                 }
                 self.workspace_dashboard_visible = true;
                 tui.frame_requester().schedule_frame();

@@ -1463,6 +1463,9 @@ See the Codex keymap documentation for supported actions and examples."
                 self.workspace_dashboard = None;
                 self.hide_workspace_dashboard_and_leave_alt_screen(tui);
             }
+            WorkspaceDashboardAction::DiscardDraftCheckpoint => {
+                self.discard_workspace_recovery(app_server).await;
+            }
             WorkspaceDashboardAction::EnsureEncounter => {
                 let result = if let Some(dashboard) = self.workspace_dashboard.as_mut() {
                     dashboard.ensure_current_encounter(app_server).await
@@ -1496,6 +1499,9 @@ See the Codex keymap documentation for supported actions and examples."
             }
             WorkspaceDashboardAction::Save => {
                 self.save_workspace_with_checkpoint(app_server).await;
+            }
+            WorkspaceDashboardAction::RestoreDraftCheckpoint => {
+                self.restore_workspace_recovery(app_server).await;
             }
             WorkspaceDashboardAction::SaveAgentResult { packet_id, body } => {
                 let result = if let Some(dashboard) = self.workspace_dashboard.as_mut() {

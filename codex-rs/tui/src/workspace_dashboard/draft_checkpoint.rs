@@ -2,6 +2,8 @@ use super::*;
 use crate::workspace_draft::WorkspaceDraftCheckpointInput;
 use crate::workspace_draft::WorkspaceDraftCheckpointOutcome;
 use crate::workspace_draft::WorkspaceDraftCheckpointTrigger;
+use codex_app_server_protocol::WorkspaceDraftSession;
+use ratatui::style::Stylize;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -53,8 +55,8 @@ impl WorkspaceDashboard {
     }
 
     #[cfg(test)]
-    pub(crate) fn draft_checkpoint_status_for_tests(&self) -> &str {
-        &self.status
+    pub(crate) fn has_pending_draft_recovery_for_tests(&self) -> bool {
+        self.draft_coordinator.pending_recovery().is_some()
     }
 
     pub(crate) async fn checkpoint_idle_draft_if_due(
@@ -110,6 +112,101 @@ impl WorkspaceDashboard {
         }
     }
 
+    async fn detect_draft_recovery(&mut self, app_server: &mut AppServerSession) -> Result<()> {
+        if self.profile != WorkspaceProfile::Medical {
+            self.draft_coordinator.clear();
+            return Ok(());
+        }
+        let Some(client_id) = self.draft_client.id.clone() else {
+            self.draft_coordinator.clear();
+            self.status =
+                "Save this new patient before local draft checkpointing is available; canonical chart unchanged."
+                    .to_string();
+            return Ok(());
+        };
+        self.draft_coordinator
+            .detect_recovery(app_server, &client_id)
+            .await?;
+        if self.draft_coordinator.pending_recovery().is_some() {
+            self.status =
+                "Local draft checkpoint found. Restore or discard it explicitly; canonical chart unchanged."
+                    .to_string();
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn refresh_draft_recovery(&mut self, app_server: &mut AppServerSession) {
+        if let Err(error) = self.detect_draft_recovery(app_server).await {
+            self.status =
+                format!("Workspace opened, but local draft recovery is unavailable: {error}");
+        }
+    }
+
+    pub(super) fn draft_recovery_key_action(
+        &mut self,
+        key_event: KeyEvent,
+    ) -> Option<WorkspaceDashboardAction> {
+        self.draft_coordinator.pending_recovery()?;
+        Some(match key_event.code {
+            KeyCode::Char(c) if c.eq_ignore_ascii_case(&'r') => {
+                WorkspaceDashboardAction::RestoreDraftCheckpoint
+            }
+            KeyCode::Char(c) if c.eq_ignore_ascii_case(&'d') => {
+                WorkspaceDashboardAction::DiscardDraftCheckpoint
+            }
+            _ => {
+                self.status =
+                    "Choose R to restore or D to discard the local draft checkpoint; canonical chart unchanged."
+                        .to_string();
+                WorkspaceDashboardAction::Consumed
+            }
+        })
+    }
+
+    pub(super) fn block_interaction_for_draft_recovery(&mut self, status: &str) -> bool {
+        if self.draft_coordinator.pending_recovery().is_none() {
+            return false;
+        }
+        self.status = status.to_string();
+        true
+    }
+
+    pub(crate) async fn restore_pending_draft(
+        &mut self,
+        app_server: &mut AppServerSession,
+    ) -> Result<()> {
+        let Some(recovery) = self.draft_coordinator.pending_recovery().cloned() else {
+            return Ok(());
+        };
+        let snapshot = match self.validate_recovery_snapshot(&recovery) {
+            Ok(snapshot) => snapshot,
+            Err(status) => {
+                self.status = status;
+                return Ok(());
+            }
+        };
+        let restored_revision = recovery.current_checkpoint.revision;
+        self.apply_recovery_snapshot(snapshot);
+        self.draft_coordinator.accept_recovery();
+        self.reload_packet_history(app_server).await?;
+        self.load_active_note_details(app_server).await?;
+        self.status = format!(
+            "Restored local draft checkpoint r{restored_revision}; canonical chart unchanged."
+        );
+        Ok(())
+    }
+
+    pub(crate) async fn discard_pending_draft(
+        &mut self,
+        app_server: &mut AppServerSession,
+    ) -> Result<()> {
+        if self.draft_coordinator.discard_recovery(app_server).await? {
+            self.status =
+                "Discarded local draft checkpoint; canonical chart unchanged.".to_string();
+        }
+        Ok(())
+    }
+
     pub(crate) async fn close_draft_after_canonical_save(
         &mut self,
         app_server: &mut AppServerSession,
@@ -123,6 +220,57 @@ impl WorkspaceDashboard {
                 "Canonical chart saved; local draft checkpoint session closed.".to_string();
         }
         Ok(())
+    }
+
+    pub(super) fn render_draft_recovery_overlay(&self, area: Rect, buf: &mut Buffer) {
+        let Some(recovery) = self.draft_coordinator.pending_recovery() else {
+            return;
+        };
+        let width = area.width.saturating_sub(4).min(76);
+        let height = area.height.min(11);
+        let overlay = Rect::new(
+            area.x + area.width.saturating_sub(width) / 2,
+            area.y + area.height.saturating_sub(height) / 2,
+            width,
+            height,
+        );
+        let checkpoint = &recovery.current_checkpoint;
+        let note_scope = checkpoint
+            .note_id
+            .as_deref()
+            .map(|_| "saved note")
+            .unwrap_or("new note");
+        let mut lines: Vec<Line<'static>> = vec![
+            "A local workspace draft was not closed.".into(),
+            format!(
+                "Checkpoint r{} · {} · {}",
+                checkpoint.revision, note_scope, checkpoint.trigger
+            )
+            .into(),
+            "".into(),
+            "R  Restore this exact local draft".into(),
+            "D  Discard this checkpoint session".into(),
+            "".into(),
+            "Canonical chart data is unchanged until Ctrl-S saves."
+                .dim()
+                .into(),
+            "Restore is blocked if the patient or note baseline changed."
+                .dim()
+                .into(),
+        ];
+        if self.status.starts_with("Restore blocked") {
+            lines.push(self.status.clone().cyan().into());
+        }
+        Clear.render(overlay, buf);
+        Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .title(" Restore local draft? ")
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::Cyan)),
+            )
+            .wrap(Wrap { trim: true })
+            .render(overlay, buf);
     }
 
     fn draft_checkpoint_input(&self) -> std::result::Result<WorkspaceDraftCheckpointInput, String> {
@@ -167,6 +315,87 @@ impl WorkspaceDashboard {
         })
     }
 
+    fn validate_recovery_snapshot(
+        &self,
+        recovery: &WorkspaceDraftSession,
+    ) -> std::result::Result<WorkspaceDraftSnapshotV1, String> {
+        let checkpoint = &recovery.current_checkpoint;
+        let snapshot: WorkspaceDraftSnapshotV1 = serde_json::from_value(checkpoint.draft.clone())
+            .map_err(|error| {
+            format!("Restore blocked: checkpoint schema is invalid ({error}).")
+        })?;
+        if snapshot.schema_version != DRAFT_SCHEMA_VERSION {
+            return Err("Restore blocked: checkpoint schema version is unsupported.".to_string());
+        }
+        let Some(canonical_client) = self.clients.get(self.client_index) else {
+            return Err("Restore blocked: saved patient is no longer loaded.".to_string());
+        };
+        if snapshot.client.id.as_deref() != Some(canonical_client.id.as_str())
+            || checkpoint.client_id != canonical_client.id
+            || snapshot.base_client_version != canonical_client.version
+        {
+            return Err(
+                "Restore blocked: canonical patient data changed; discard or reload before editing."
+                    .to_string(),
+            );
+        }
+        if snapshot.note.id != checkpoint.note_id
+            || snapshot.note.encounter_id != checkpoint.encounter_id
+        {
+            return Err("Restore blocked: checkpoint note scope is inconsistent.".to_string());
+        }
+        match snapshot.note.id.as_deref() {
+            Some(note_id) => {
+                let Some(canonical_note) = self.notes.iter().find(|note| note.id == note_id) else {
+                    return Err(
+                        "Restore blocked: canonical note is no longer available.".to_string()
+                    );
+                };
+                if checkpoint.base_note_revision != Some(canonical_note.current_revision)
+                    || snapshot.note.current_revision != canonical_note.current_revision
+                    || snapshot.note.status != canonical_note.status
+                {
+                    return Err(
+                        "Restore blocked: canonical note revision changed; no draft was merged."
+                            .to_string(),
+                    );
+                }
+            }
+            None if checkpoint.base_note_revision.is_some() => {
+                return Err("Restore blocked: new-note checkpoint has a note revision.".to_string());
+            }
+            None => {}
+        }
+        if let Some(encounter_id) = snapshot.note.encounter_id.as_deref()
+            && !self
+                .encounters
+                .iter()
+                .any(|encounter| encounter.id == encounter_id)
+        {
+            return Err(
+                "Restore blocked: checkpoint encounter is no longer available.".to_string(),
+            );
+        }
+        Ok(snapshot)
+    }
+
+    fn apply_recovery_snapshot(&mut self, snapshot: WorkspaceDraftSnapshotV1) {
+        self.draft_client = snapshot.client;
+        self.draft_note = snapshot.note;
+        self.note_index = self
+            .draft_note
+            .id
+            .as_deref()
+            .and_then(|id| self.notes.iter().position(|note| note.id == id))
+            .unwrap_or(self.notes.len());
+        self.focus = snapshot.focus.workspace_focus();
+        self.select_encounter_for_active_note();
+        self.pending_chart_changeset = None;
+        self.next_chart_save_purpose = ChartChangesetPurpose::General;
+        self.addendum_draft.clear();
+        self.dirty = true;
+    }
+
     fn has_unsupported_checkpoint_editor(&self) -> bool {
         self.draft_document.is_active()
             || self.draft_safety.is_active()
@@ -192,4 +421,17 @@ impl DraftFocusV1 {
             | WorkspaceFocus::PatientFiles => Self::Workflow,
         }
     }
+
+    fn workspace_focus(self) -> WorkspaceFocus {
+        match self {
+            Self::Demographics => WorkspaceFocus::Demographics,
+            Self::NoteTitle => WorkspaceFocus::NoteTitle,
+            Self::NoteBody => WorkspaceFocus::NoteBody,
+            Self::Workflow => WorkspaceFocus::Workflow,
+        }
+    }
 }
+
+#[cfg(test)]
+#[path = "draft_checkpoint_tests.rs"]
+mod tests;
