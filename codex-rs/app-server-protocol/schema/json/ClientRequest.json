@@ -4865,6 +4865,13 @@
       ],
       "type": "string"
     },
+    "WorkspaceDraftSessionCloseStatus": {
+      "enum": [
+        "closed",
+        "discarded"
+      ],
+      "type": "string"
+    },
     "WorkspaceTaskPriority": {
       "enum": [
         "low",

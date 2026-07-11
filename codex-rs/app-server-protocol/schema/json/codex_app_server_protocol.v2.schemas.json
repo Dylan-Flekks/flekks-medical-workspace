@@ -20244,6 +20244,137 @@
       ],
       "type": "object"
     },
+    "WorkspaceDraftCheckpoint": {
+      "properties": {
+        "actor": {
+          "type": "string"
+        },
+        "baseNoteRevision": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "clientId": {
+          "type": "string"
+        },
+        "contentSha256": {
+          "type": "string"
+        },
+        "createdAt": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "draft": true,
+        "encounterId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "noteId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "revision": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "schemaVersion": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "trigger": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "actor",
+        "clientId",
+        "contentSha256",
+        "createdAt",
+        "draft",
+        "id",
+        "revision",
+        "schemaVersion",
+        "sessionId",
+        "trigger"
+      ],
+      "type": "object"
+    },
+    "WorkspaceDraftSession": {
+      "properties": {
+        "clientId": {
+          "type": "string"
+        },
+        "closedAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "createdAt": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "createdBy": {
+          "type": "string"
+        },
+        "currentCheckpoint": {
+          "$ref": "#/definitions/WorkspaceDraftCheckpoint"
+        },
+        "currentRevision": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "id": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/definitions/WorkspaceDraftSessionStatus"
+        },
+        "updatedAt": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "clientId",
+        "createdAt",
+        "createdBy",
+        "currentCheckpoint",
+        "currentRevision",
+        "id",
+        "status",
+        "updatedAt"
+      ],
+      "type": "object"
+    },
+    "WorkspaceDraftSessionCloseStatus": {
+      "enum": [
+        "closed",
+        "discarded"
+      ],
+      "type": "string"
+    },
+    "WorkspaceDraftSessionStatus": {
+      "enum": [
+        "active",
+        "closed",
+        "discarded"
+      ],
+      "type": "string"
+    },
     "WorkspaceEncounter": {
       "properties": {
         "archivedAt": {
