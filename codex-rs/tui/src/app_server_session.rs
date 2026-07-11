@@ -222,6 +222,8 @@ use color_eyre::eyre::Result;
 use color_eyre::eyre::WrapErr;
 use std::collections::HashMap;
 use std::path::PathBuf;
+#[cfg(test)]
+use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -276,6 +278,10 @@ pub(crate) struct AppServerSession {
     available_models: Vec<ModelPreset>,
     managed_new_thread_defaults: Option<NewThreadModelDefaults>,
     external_agent_config_import_completion_pending: AtomicBool,
+    #[cfg(test)]
+    fail_next_workspace_document_list: bool,
+    #[cfg(test)]
+    hold_next_workspace_draft_checkpoint: Option<Arc<tokio::sync::Semaphore>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -321,6 +327,10 @@ impl AppServerSession {
             available_models: Vec::new(),
             managed_new_thread_defaults: None,
             external_agent_config_import_completion_pending: AtomicBool::new(false),
+            #[cfg(test)]
+            fail_next_workspace_document_list: false,
+            #[cfg(test)]
+            hold_next_workspace_draft_checkpoint: None,
         }
     }
 
@@ -340,6 +350,20 @@ impl AppServerSession {
     #[cfg(test)]
     pub(crate) fn set_thread_params_mode_for_tests(&mut self, mode: ThreadParamsMode) {
         self.thread_params_mode = mode;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_next_workspace_document_list_for_tests(&mut self) {
+        self.fail_next_workspace_document_list = true;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn hold_next_workspace_draft_checkpoint_for_tests(
+        &mut self,
+    ) -> Arc<tokio::sync::Semaphore> {
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        self.hold_next_workspace_draft_checkpoint = Some(gate.clone());
+        gate
     }
 
     pub(crate) fn uses_embedded_app_server(&self) -> bool {
@@ -907,7 +931,20 @@ impl AppServerSession {
     ) -> tokio::task::JoinHandle<Result<WorkspaceDraftCheckpointCreateResponse>> {
         let request_id = self.next_request_id();
         let request_handle = self.request_handle();
+        #[cfg(test)]
+        let checkpoint_gate = self.hold_next_workspace_draft_checkpoint.take();
         tokio::spawn(async move {
+            #[cfg(test)]
+            if let Some(gate) = checkpoint_gate {
+                gate.acquire()
+                    .await
+                    .map_err(|error| {
+                        color_eyre::eyre::eyre!(
+                            "workspace draft checkpoint test gate closed: {error}"
+                        )
+                    })?
+                    .forget();
+            }
             request_handle
                 .request_typed(ClientRequest::WorkspaceDraftCheckpointCreate { request_id, params })
                 .await
@@ -1102,6 +1139,10 @@ impl AppServerSession {
         &mut self,
         client_id: String,
     ) -> Result<WorkspaceDocumentListResponse> {
+        #[cfg(test)]
+        if std::mem::take(&mut self.fail_next_workspace_document_list) {
+            color_eyre::eyre::bail!("injected workspace/document/list failure");
+        }
         let request_id = self.next_request_id();
         self.client
             .request_typed(ClientRequest::WorkspaceDocumentList {

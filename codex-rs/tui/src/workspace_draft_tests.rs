@@ -52,6 +52,7 @@ async fn pending_checkpoint_timeout_keeps_generation_and_task_for_later_poll() {
         in_flight: Some(WorkspaceDraftCheckpointInFlight {
             client_id: "client-1".to_string(),
             generation: 3,
+            started_without_session: false,
             task,
         }),
         ..WorkspaceDraftCoordinator::default()
@@ -74,7 +75,7 @@ async fn pending_checkpoint_timeout_keeps_generation_and_task_for_later_poll() {
 }
 
 #[tokio::test]
-async fn first_client_checkpoint_failure_preserves_unsaved_generation_for_retry() {
+async fn first_client_checkpoint_failure_preserves_edits_and_blocks_unsafe_retry() {
     let mut coordinator = WorkspaceDraftCoordinator {
         edit_generation: 3,
         saved_generation: 2,
@@ -96,19 +97,22 @@ async fn first_client_checkpoint_failure_preserves_unsaved_generation_for_retry(
     coordinator.in_flight = Some(WorkspaceDraftCheckpointInFlight {
         client_id: "client-1".to_string(),
         generation: 3,
+        started_without_session: true,
         task,
     });
 
     let _error = coordinator
         .poll_in_flight_checkpoint(Duration::from_secs(1))
         .await
-        .expect_err("failed persistence must stay retryable");
+        .expect_err("unknown first-session persistence must fail closed");
 
     assert_eq!(coordinator.edit_generation, 3);
     assert_eq!(coordinator.saved_generation, 2);
     assert!(coordinator.has_uncheckpointed_edits());
     assert!(coordinator.should_checkpoint(WorkspaceDraftCheckpointTrigger::ExplicitSave));
     assert!(coordinator.should_checkpoint(WorkspaceDraftCheckpointTrigger::Close));
+    assert!(coordinator.first_session_retry_is_blocked());
+    assert_eq!(coordinator.pending_delay(), None);
 }
 
 #[tokio::test]
@@ -123,6 +127,7 @@ async fn in_flight_checkpoint_blocks_scope_change_and_clear_without_detaching_ta
         in_flight: Some(WorkspaceDraftCheckpointInFlight {
             client_id: "client-1".to_string(),
             generation: 4,
+            started_without_session: false,
             task,
         }),
         ..WorkspaceDraftCoordinator::default()
@@ -155,6 +160,7 @@ async fn canonical_saved_pending_checkpoint_remains_owned_and_retry_scheduled() 
         in_flight: Some(WorkspaceDraftCheckpointInFlight {
             client_id: "client-1".to_string(),
             generation: 2,
+            started_without_session: false,
             task,
         }),
         canonical_save_pending_close: true,
@@ -179,4 +185,56 @@ async fn canonical_saved_pending_checkpoint_remains_owned_and_retry_scheduled() 
         .expect("pending continuation must retain owned task")
         .task
         .abort();
+}
+
+#[test]
+fn canonical_close_maps_the_exact_last_confirmed_checkpoint_cas() {
+    let checkpoint = WorkspaceDraftCheckpoint {
+        id: "checkpoint-7".to_string(),
+        session_id: "session-1".to_string(),
+        client_id: "client-1".to_string(),
+        encounter_id: Some("encounter-1".to_string()),
+        note_id: Some("note-1".to_string()),
+        base_note_revision: Some(4),
+        schema_version: 1,
+        revision: 7,
+        draft: serde_json::json!({"schemaVersion": 1}),
+        content_sha256: "a".repeat(64),
+        trigger: "explicit_save".to_string(),
+        actor: "test clinician".to_string(),
+        created_at: 1,
+    };
+    let coordinator = WorkspaceDraftCoordinator {
+        active_client_id: Some("client-1".to_string()),
+        session_id: Some("session-1".to_string()),
+        last_confirmed_checkpoint: Some(checkpoint.clone()),
+        ..WorkspaceDraftCoordinator::default()
+    };
+
+    let params = coordinator
+        .canonical_close_params()
+        .expect("confirmed checkpoint identity should map")
+        .expect("active session should produce close params");
+
+    assert_eq!(params.session_id, checkpoint.session_id);
+    assert_eq!(params.client_id, checkpoint.client_id);
+    assert_eq!(
+        params.expected_current_checkpoint_id.as_deref(),
+        Some(checkpoint.id.as_str())
+    );
+    assert_eq!(
+        params.expected_current_checkpoint_revision,
+        Some(checkpoint.revision)
+    );
+    assert_eq!(
+        params.expected_current_checkpoint_sha256.as_deref(),
+        Some(checkpoint.content_sha256.as_str())
+    );
+
+    let missing_checkpoint = WorkspaceDraftCoordinator {
+        active_client_id: Some("client-1".to_string()),
+        session_id: Some("session-1".to_string()),
+        ..WorkspaceDraftCoordinator::default()
+    };
+    assert!(missing_checkpoint.canonical_close_params().is_err());
 }

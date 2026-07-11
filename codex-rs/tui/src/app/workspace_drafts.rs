@@ -42,9 +42,17 @@ impl App {
             Ok(())
         };
         if let Err(error) = result {
-            self.chat_widget.add_error_message(format!(
-                "Local draft checkpoint continuation failed and will retry: {error}"
-            ));
+            let retry_blocked = self
+                .workspace_dashboard
+                .as_ref()
+                .is_some_and(WorkspaceDashboard::first_session_checkpoint_retry_is_blocked);
+            self.chat_widget.add_error_message(if retry_blocked {
+                format!(
+                    "Local draft checkpoint continuation is blocked pending safe first-session recovery: {error}"
+                )
+            } else {
+                format!("Local draft checkpoint continuation failed and will retry: {error}")
+            });
         }
     }
 
@@ -181,8 +189,17 @@ impl App {
                     return;
                 }
                 Err(error) => {
+                    let retry_blocked = self
+                        .workspace_dashboard
+                        .as_ref()
+                        .is_some_and(WorkspaceDashboard::first_session_checkpoint_retry_is_blocked);
                     self.chat_widget.add_error_message(format!(
-                        "Canonical chart saved, but its first local draft checkpoint failed; the draft session remains open and will retry: {error}"
+                        "Canonical chart saved, but its first local draft checkpoint failed; the draft session remains open and {}: {error}",
+                        if retry_blocked {
+                            "automatic retry is blocked pending safe recovery"
+                        } else {
+                            "will retry"
+                        }
                     ));
                     return;
                 }
@@ -191,6 +208,9 @@ impl App {
             && let Some(dashboard) = self.workspace_dashboard.as_mut()
         {
             dashboard.acknowledge_canonical_only_save();
+        }
+        if let Some(dashboard) = self.workspace_dashboard.as_mut() {
+            dashboard.arm_canonical_close_if_confirmed();
         }
         let close_result = if let Some(dashboard) = self.workspace_dashboard.as_mut() {
             dashboard.close_draft_after_canonical_save(app_server).await

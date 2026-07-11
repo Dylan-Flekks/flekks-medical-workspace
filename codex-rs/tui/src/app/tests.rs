@@ -4,6 +4,7 @@ mod model_catalog;
 mod plugin_catalog;
 mod session_summary;
 mod startup;
+mod workspace_draft_final_audit;
 
 use super::*;
 use crate::app_backtrack::BacktrackSelection;
@@ -7225,16 +7226,34 @@ fn medical_unsupported_only_canonical_save_remains_available() -> Result<()> {
             "/tmp/outside-referral.pdf",
             "metadata only",
         );
+        let client_id = dashboard
+            .client_id_for_tests()
+            .expect("canonical patient should have an id")
+            .to_string();
         app.workspace_dashboard = Some(dashboard);
         app.workspace_dashboard_visible = true;
 
+        app_server.set_thread_params_mode_for_tests(ThreadParamsMode::Remote);
         app.save_workspace_with_checkpoint(&mut app_server).await;
+        app_server.set_thread_params_mode_for_tests(ThreadParamsMode::Embedded);
 
         assert_eq!(
             app.workspace_dashboard
                 .as_ref()
                 .and_then(WorkspaceDashboard::document_title_for_tests),
             Some("Outside referral")
+        );
+        let sessions = app_server
+            .workspace_draft_session_list(WorkspaceDraftSessionListParams {
+                client_id,
+                include_closed: true,
+                cursor: None,
+                limit: Some(10),
+            })
+            .await?;
+        assert!(
+            sessions.data.is_empty(),
+            "unsupported-only remote save must not send a checkpoint RPC or snapshot"
         );
         app_server.shutdown().await?;
         Ok(())
@@ -7283,63 +7302,6 @@ fn medical_first_canonical_save_bootstraps_and_closes_draft_checkpoint() -> Resu
         assert_eq!(
             sessions.data[0].current_checkpoint.draft["note"]["body"],
             "Initial clinician draft."
-        );
-        app_server.shutdown().await?;
-        Ok(())
-    }))
-}
-
-#[test]
-fn medical_saved_bootstrap_pending_close_finishes_on_idle_tick() -> Result<()> {
-    run_workspace_dashboard_runtime_test(Box::pin(async {
-        let mut app = make_test_app().await;
-        let codex_home = tempdir()?;
-        app.config.codex_home = codex_home.path().to_path_buf().abs();
-        app.config.sqlite_home = codex_home.path().to_path_buf();
-        let mut app_server =
-            Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
-        let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
-        dashboard.load(&mut app_server).await?;
-        dashboard.set_context_for_tests("Jordan Patient", "Daily note", "Initial canonical note.");
-        dashboard.save(&mut app_server).await?;
-        dashboard.set_note_body_for_tests("Canonical body saved after checkpoint.");
-        dashboard
-            .checkpoint_draft(
-                &mut app_server,
-                crate::workspace_draft::WorkspaceDraftCheckpointTrigger::FocusChange,
-            )
-            .await?;
-        dashboard.save(&mut app_server).await?;
-        dashboard.mark_canonical_save_pending_close();
-        let client_id = dashboard
-            .client_id_for_tests()
-            .expect("saved patient should have an id")
-            .to_string();
-        app.workspace_dashboard = Some(dashboard);
-        app.workspace_dashboard_visible = true;
-
-        app.checkpoint_idle_workspace_draft(&mut app_server).await;
-
-        let dashboard = app
-            .workspace_dashboard
-            .as_ref()
-            .expect("continuation should keep the dashboard loaded");
-        assert_eq!(
-            dashboard.draft_checkpoint_status_for_tests(),
-            "Canonical chart saved; local draft checkpoint session closed."
-        );
-        let sessions = app_server
-            .workspace_draft_session_list(WorkspaceDraftSessionListParams {
-                client_id,
-                include_closed: true,
-                cursor: None,
-                limit: Some(10),
-            })
-            .await?;
-        assert_eq!(sessions.data.len(), 1);
-        assert_eq!(
-            sessions.data[0].status,
-            codex_app_server_protocol::WorkspaceDraftSessionStatus::Closed
         );
         app_server.shutdown().await?;
         Ok(())

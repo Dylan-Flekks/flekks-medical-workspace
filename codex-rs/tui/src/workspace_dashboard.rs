@@ -3317,13 +3317,19 @@ impl WorkspaceDashboard {
         }
 
         let client_id = self.clients[index].id.clone();
-        self.reload_preserving(app_server, Some(client_id.clone()), None, None, None, None)
+        let mut staged = self.clone();
+        staged
+            .reload_preserving(app_server, Some(client_id.clone()), None, None, None, None)
             .await?;
-        if !self.draft_coordinator.prepare_client_scope(&client_id) {
+        if staged.draft_client.id.as_deref() != Some(client_id.as_str()) {
+            color_eyre::eyre::bail!("selected patient changed while the chart was loading");
+        }
+        if !staged.draft_coordinator.prepare_client_scope(&client_id) {
             color_eyre::eyre::bail!(
                 "draft checkpoint scope changed while the patient chart was loading"
             );
         }
+        *self = staged;
         Ok(())
     }
 
@@ -4371,12 +4377,7 @@ impl WorkspaceDashboard {
                 if results.is_empty() {
                     if self.dirty || self.has_unsaved_addendum_draft() {
                         self.status = "Save before creating or switching patients.".to_string();
-                    } else {
-                        self.patient_search_query = None;
-                        self.patient_search_selection_index = 0;
-                        self.patient_search_return_focus = None;
-                        self.patient_search_return_section = None;
-                        self.start_new_client();
+                    } else if self.start_new_client() {
                         self.status = "New patient draft.".to_string();
                     }
                     return WorkspaceDashboardAction::Consumed;
@@ -8595,8 +8596,9 @@ impl WorkspaceDashboard {
     ) -> Result<()> {
         self.clients = app_server.workspace_client_list().await?.clients;
         if self.clients.is_empty() {
-            self.start_new_client();
-            self.status = "New workspace draft.".to_string();
+            if self.start_new_client() {
+                self.status = "New workspace draft.".to_string();
+            }
             return Ok(());
         }
 
@@ -8923,13 +8925,13 @@ impl WorkspaceDashboard {
         true
     }
 
-    fn start_new_client(&mut self) {
+    fn start_new_client(&mut self) -> bool {
         if self.block_checkpoint_scope_change("creating a new patient") {
-            return;
+            return false;
         }
         if !self.draft_coordinator.try_clear() {
             self.set_checkpoint_scope_change_blocked_status("creating a new patient");
-            return;
+            return false;
         }
         self.patient_search_query = None;
         self.patient_search_selection_index = 0;
@@ -8976,6 +8978,7 @@ impl WorkspaceDashboard {
         self.dirty = false;
         self.status = "New workspace draft.".to_string();
         self.focus = WorkspaceFocus::Demographics;
+        true
     }
 
     fn start_new_note(&mut self) {
@@ -15579,6 +15582,24 @@ impl WorkspaceDashboard {
         self.draft_client.id.as_deref()
     }
 
+    pub(crate) fn checkpoint_client_id_for_tests(&self) -> Option<&str> {
+        self.draft_coordinator.active_client_id_for_tests()
+    }
+
+    pub(crate) fn client_index_for_display_name_for_tests(
+        &self,
+        display_name: &str,
+    ) -> Option<usize> {
+        self.clients
+            .iter()
+            .position(|client| client.display_name == display_name)
+    }
+
+    pub(crate) fn corrupt_confirmed_checkpoint_sha_for_tests(&mut self) {
+        self.draft_coordinator
+            .corrupt_confirmed_checkpoint_sha_for_tests();
+    }
+
     pub(crate) fn note_id_for_tests(&self) -> Option<&str> {
         self.draft_note.id.as_deref()
     }
@@ -19489,6 +19510,20 @@ mod tests {
     }
 
     #[test]
+    fn medical_unknown_first_checkpoint_status_stays_visibly_blocked() {
+        let mut dashboard = medical_recursive_base_dashboard();
+        dashboard.status =
+            "Canonical chart saved; local draft checkpoint outcome is unknown; automatic retry is blocked to avoid a duplicate session, and the draft session remains open."
+                .to_string();
+
+        assert!(dashboard.draft_checkpoint_status_requires_attention());
+        insta::assert_snapshot!(
+            "medical_workspace_checkpoint_recovery_required_120x32",
+            render_dashboard_lines_at(&dashboard, 120, 32)
+        );
+    }
+
+    #[test]
     fn unsupported_chart_editor_only_requires_checkpoint_when_patient_or_note_also_changed() {
         let client = test_client("client-1", "Jordan Patient");
         let note = test_note("note-1", "Daily note", "daily", "draft", 1);
@@ -19546,6 +19581,16 @@ mod tests {
         assert_eq!(dashboard.draft_note.id.as_deref(), Some("note-1"));
         assert_eq!(dashboard.note_index, 0);
         assert!(dashboard.status.contains("before creating a new note"));
+
+        dashboard.patient_search_query = Some("no matching patient".to_string());
+        assert_eq!(
+            dashboard.handle_patient_search_key_event(KeyEvent::from(KeyCode::Enter)),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert_eq!(dashboard.draft_client.id.as_deref(), Some("client-1"));
+        assert!(dashboard.patient_search_query.is_some());
+        assert!(dashboard.status.contains("before creating a new patient"));
+        assert!(!dashboard.status.contains("New patient draft"));
     }
 
     #[test]

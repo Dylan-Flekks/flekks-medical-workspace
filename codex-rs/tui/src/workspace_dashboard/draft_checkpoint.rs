@@ -101,6 +101,18 @@ impl WorkspaceDashboard {
                 .to_string();
     }
 
+    pub(crate) fn arm_canonical_close_if_confirmed(&mut self) -> bool {
+        if !self.draft_coordinator.has_confirmed_session() {
+            return false;
+        }
+        self.mark_canonical_save_pending_close();
+        true
+    }
+
+    pub(crate) fn first_session_checkpoint_retry_is_blocked(&self) -> bool {
+        self.draft_coordinator.first_session_retry_is_blocked()
+    }
+
     pub(crate) fn draft_checkpoint_blocks_scope_change(&self) -> bool {
         self.draft_coordinator.scope_change_is_blocked()
     }
@@ -110,7 +122,11 @@ impl WorkspaceDashboard {
     }
 
     pub(crate) fn set_checkpoint_scope_change_blocked_status(&mut self, target: &str) {
-        self.status = if self.draft_coordinator.canonical_save_pending_close() {
+        self.status = if self.draft_coordinator.first_session_retry_is_blocked() {
+            format!(
+                "Local draft checkpoint outcome is unknown; safe recovery is required before {target}."
+            )
+        } else if self.draft_coordinator.canonical_save_pending_close() {
             format!(
                 "Canonical chart saved; wait for the local draft session to close before {target}."
             )
@@ -130,6 +146,9 @@ impl WorkspaceDashboard {
         self.status
             .starts_with("Local draft checkpoint is still saving")
             || self.status.starts_with("Local draft checkpoint failed")
+            || self
+                .status
+                .starts_with("Local draft checkpoint outcome is unknown")
             || self
                 .status
                 .starts_with("Local draft checkpoints are unavailable")
@@ -153,6 +172,7 @@ impl WorkspaceDashboard {
             }
         }
         if self.draft_coordinator.canonical_save_pending_close()
+            && !self.draft_coordinator.first_session_retry_is_blocked()
             && !self.draft_coordinator.has_in_flight_checkpoint()
             && !self.draft_coordinator.has_uncheckpointed_edits()
         {
@@ -170,11 +190,26 @@ impl WorkspaceDashboard {
             return Ok(DashboardCheckpointOutcome::AlreadyCurrent);
         }
 
-        let checkpoint_needed = self.draft_coordinator.has_in_flight_checkpoint()
+        let canonical_bootstrap = trigger == WorkspaceDraftCheckpointTrigger::ExplicitSave
+            && self.draft_client.id.is_none();
+        let checkpoint_needed = canonical_bootstrap
+            || self.draft_coordinator.has_in_flight_checkpoint()
             || self.draft_coordinator.should_checkpoint(trigger)
             || self.has_unsaved_unsupported_checkpoint_editor();
         if !checkpoint_needed {
             return Ok(DashboardCheckpointOutcome::AlreadyCurrent);
+        }
+        if !self.draft_coordinator.has_in_flight_checkpoint()
+            && trigger == WorkspaceDraftCheckpointTrigger::ExplicitSave
+            && self.has_unsaved_unsupported_chart_editor()
+            && !self.has_unsaved_agent_or_addendum_editor()
+            && !self.has_checkpointable_patient_or_note_changes()
+        {
+            self.draft_coordinator.pause_debounce();
+            self.status =
+                "This file, safety, or job draft will save canonically without a local draft checkpoint."
+                    .to_string();
+            return Ok(DashboardCheckpointOutcome::CanonicalOnly);
         }
         if app_server.uses_remote_workspace() {
             self.draft_coordinator.pause_debounce();
@@ -221,16 +256,6 @@ impl WorkspaceDashboard {
 
         if self.has_unsaved_unsupported_checkpoint_editor() {
             self.draft_coordinator.pause_debounce();
-            if trigger == WorkspaceDraftCheckpointTrigger::ExplicitSave
-                && self.has_unsaved_unsupported_chart_editor()
-                && !self.has_unsaved_agent_or_addendum_editor()
-                && !self.has_checkpointable_patient_or_note_changes()
-            {
-                self.status =
-                    "This file, safety, or job draft will save canonically without a local draft checkpoint."
-                        .to_string();
-                return Ok(DashboardCheckpointOutcome::CanonicalOnly);
-            }
             self.status =
                 "Local checkpoints currently cover patient and note fields only; save or clear the open file, safety, job, addendum, or agent draft."
                     .to_string();
@@ -340,6 +365,18 @@ impl WorkspaceDashboard {
     }
 
     fn set_checkpoint_failure_status(&mut self, error: &color_eyre::Report) {
+        if self.draft_coordinator.first_session_retry_is_blocked() {
+            self.status = if self.draft_coordinator.canonical_save_pending_close() {
+                format!(
+                    "Canonical chart saved; local draft checkpoint outcome is unknown; automatic retry is blocked to avoid a duplicate session, and the draft session remains open: {error}"
+                )
+            } else {
+                format!(
+                    "Local draft checkpoint outcome is unknown; automatic retry is blocked to avoid a duplicate active session: {error}"
+                )
+            };
+            return;
+        }
         self.status = if self.draft_coordinator.canonical_save_pending_close() {
             format!(
                 "Canonical chart saved; local draft checkpoint failed; draft session remains open and will retry: {error}"
