@@ -161,6 +161,10 @@ use codex_app_server_protocol::WorkspaceDocumentUpsertParams;
 use codex_app_server_protocol::WorkspaceDocumentUpsertResponse;
 use codex_app_server_protocol::WorkspaceDraftCheckpointCreateParams;
 use codex_app_server_protocol::WorkspaceDraftCheckpointCreateResponse;
+#[cfg(test)]
+use codex_app_server_protocol::WorkspaceDraftCheckpointListParams;
+#[cfg(test)]
+use codex_app_server_protocol::WorkspaceDraftCheckpointListResponse;
 use codex_app_server_protocol::WorkspaceDraftSessionCloseParams;
 use codex_app_server_protocol::WorkspaceDraftSessionCloseResponse;
 use codex_app_server_protocol::WorkspaceDraftSessionListParams;
@@ -995,6 +999,18 @@ impl AppServerSession {
             .request_typed(ClientRequest::WorkspaceDraftSessionList { request_id, params })
             .await
             .wrap_err("workspace/draft/session/list failed in TUI")
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn workspace_draft_checkpoint_list(
+        &mut self,
+        params: WorkspaceDraftCheckpointListParams,
+    ) -> Result<WorkspaceDraftCheckpointListResponse> {
+        let request_id = self.next_request_id();
+        self.client
+            .request_typed(ClientRequest::WorkspaceDraftCheckpointList { request_id, params })
+            .await
+            .wrap_err("workspace/draft/checkpoint/list failed in TUI")
     }
 
     pub(crate) async fn workspace_draft_session_close(

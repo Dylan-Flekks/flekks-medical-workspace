@@ -40,6 +40,33 @@ fn newer_edit_cancels_a_stale_canonical_close_continuation() {
     assert!(coordinator.has_uncheckpointed_edits());
 }
 
+#[test]
+fn canonical_only_acknowledges_only_the_pre_save_generation() {
+    let mut coordinator = WorkspaceDraftCoordinator::default();
+    coordinator.note_edit();
+    let pre_save_generation = coordinator.generation();
+
+    coordinator.context_edit();
+    coordinator.acknowledge_canonical_only_save_through(pre_save_generation);
+
+    assert!(coordinator.has_uncheckpointed_edits());
+    assert!(coordinator.has_uncheckpointed_context_edits());
+    assert!(coordinator.pending_delay().is_some());
+}
+
+#[test]
+fn submitted_context_is_distinct_from_checkpointed_context() {
+    let mut coordinator = WorkspaceDraftCoordinator::default();
+    coordinator.context_edit();
+
+    assert!(coordinator.has_unsubmitted_context_edits());
+    coordinator.mark_context_submitted();
+    assert!(!coordinator.has_unsubmitted_context_edits());
+
+    coordinator.context_edit();
+    assert!(coordinator.has_unsubmitted_context_edits());
+}
+
 #[tokio::test]
 async fn pending_checkpoint_timeout_keeps_generation_and_task_for_later_poll() {
     let task = tokio::spawn(async {
@@ -53,6 +80,7 @@ async fn pending_checkpoint_timeout_keeps_generation_and_task_for_later_poll() {
         in_flight: Some(WorkspaceDraftCheckpointInFlight {
             client_id: "client-1".to_string(),
             generation: 3,
+            context_generation: 0,
             task,
         }),
         ..WorkspaceDraftCoordinator::default()
@@ -101,6 +129,7 @@ async fn first_client_checkpoint_failure_preserves_key_and_schedules_safe_retry(
     coordinator.in_flight = Some(WorkspaceDraftCheckpointInFlight {
         client_id: "client-1".to_string(),
         generation: 3,
+        context_generation: 0,
         task,
     });
     coordinator.session_creation_key = Some("stable-first-session-key".to_string());
@@ -134,6 +163,7 @@ async fn in_flight_checkpoint_blocks_scope_change_and_clear_without_detaching_ta
         in_flight: Some(WorkspaceDraftCheckpointInFlight {
             client_id: "client-1".to_string(),
             generation: 4,
+            context_generation: 0,
             task,
         }),
         ..WorkspaceDraftCoordinator::default()
@@ -166,6 +196,7 @@ async fn canonical_saved_pending_checkpoint_remains_owned_and_retry_scheduled() 
         in_flight: Some(WorkspaceDraftCheckpointInFlight {
             client_id: "client-1".to_string(),
             generation: 2,
+            context_generation: 0,
             task,
         }),
         canonical_save_pending_close: true,

@@ -107,11 +107,65 @@ impl App {
         {
             Ok(outcome) if outcome.permits_handoff() => {
                 let was_visible = self.workspace_dashboard_active();
-                if let Err(error) = self.send_workspace_context_to_agent(app_server).await {
-                    self.chat_widget
-                        .add_error_message(format!("Failed to send workspace context: {error}"));
-                } else if was_visible && !self.workspace_dashboard_active() {
-                    let _ = tui.leave_alt_screen();
+                let is_medical = self
+                    .workspace_dashboard
+                    .as_ref()
+                    .is_some_and(|dashboard| dashboard.profile() == WorkspaceProfile::Medical);
+                match self.send_workspace_context_to_agent(app_server).await {
+                    Err(error) => self
+                        .chat_widget
+                        .add_error_message(format!("Failed to send workspace context: {error}")),
+                    Ok(sent) => {
+                        if sent && is_medical {
+                            match self
+                                .checkpoint_workspace_draft(
+                                    app_server,
+                                    WorkspaceDraftCheckpointTrigger::HandoffCleared,
+                                )
+                                .await
+                            {
+                                Ok(DashboardCheckpointOutcome::Saved)
+                                | Ok(DashboardCheckpointOutcome::AlreadyCurrent) => {
+                                    if let Some(dashboard) = self.workspace_dashboard.as_mut() {
+                                        dashboard.set_status(
+                                            "Medical Agent Plan sent; cleared local request checkpoint saved and the draft session remains open.",
+                                        );
+                                    }
+                                }
+                                Ok(DashboardCheckpointOutcome::Pending) => {
+                                    if let Some(dashboard) = self.workspace_dashboard.as_mut() {
+                                        dashboard.set_status(
+                                            "Medical Agent Plan sent; cleared local request checkpoint is still saving and the draft session remains open.",
+                                        );
+                                    }
+                                }
+                                Ok(_) => {
+                                    if let Some(dashboard) = self.workspace_dashboard.as_mut() {
+                                        dashboard.set_status(
+                                            "Medical Agent Plan sent; cleared local request was not checkpointed and the draft session remains open.",
+                                        );
+                                    }
+                                    self.chat_widget.add_error_message(
+                                        "Medical Agent Plan was sent, but its cleared request checkpoint is unavailable and will retry."
+                                            .to_string(),
+                                    );
+                                }
+                                Err(error) => {
+                                    if let Some(dashboard) = self.workspace_dashboard.as_mut() {
+                                        dashboard.set_status(
+                                            "Medical Agent Plan sent; cleared local request checkpoint failed and will retry while the draft session remains open.",
+                                        );
+                                    }
+                                    self.chat_widget.add_error_message(format!(
+                                        "Medical Agent Plan was sent, but its cleared request checkpoint failed and will retry: {error}"
+                                    ));
+                                }
+                            }
+                        }
+                        if was_visible && !self.workspace_dashboard_active() {
+                            let _ = tui.leave_alt_screen();
+                        }
+                    }
                 }
             }
             Ok(_) => {}
@@ -144,6 +198,11 @@ impl App {
                 return;
             }
         };
+        let pre_save_generation = self
+            .workspace_dashboard
+            .as_ref()
+            .map(WorkspaceDashboard::draft_checkpoint_generation)
+            .unwrap_or_default();
         let result = if let Some(dashboard) = self.workspace_dashboard.as_mut() {
             dashboard.save(app_server).await
         } else {
@@ -161,36 +220,69 @@ impl App {
         {
             return;
         }
-        if checkpoint_outcome == DashboardCheckpointOutcome::CanonicalBootstrap {
-            if let Some(dashboard) = self.workspace_dashboard.as_mut() {
+        if checkpoint_outcome == DashboardCheckpointOutcome::CanonicalOnly
+            && let Some(dashboard) = self.workspace_dashboard.as_mut()
+        {
+            dashboard.acknowledge_canonical_only_save_through(pre_save_generation);
+        }
+
+        let retain_for_context = self
+            .workspace_dashboard
+            .as_ref()
+            .is_some_and(WorkspaceDashboard::has_unsent_checkpoint_context);
+        let post_save_checkpoint_needed = checkpoint_outcome
+            == DashboardCheckpointOutcome::CanonicalBootstrap
+            || retain_for_context
+            || self
+                .workspace_dashboard
+                .as_ref()
+                .is_some_and(WorkspaceDashboard::has_uncheckpointed_draft_edits);
+        if post_save_checkpoint_needed {
+            if !retain_for_context && let Some(dashboard) = self.workspace_dashboard.as_mut() {
                 dashboard.mark_canonical_save_pending_close();
             }
-            match self
+            let post_save_outcome = self
                 .checkpoint_workspace_draft(
                     app_server,
-                    WorkspaceDraftCheckpointTrigger::ExplicitSave,
+                    WorkspaceDraftCheckpointTrigger::PostCanonicalSave,
                 )
-                .await
-            {
+                .await;
+            if retain_for_context {
+                match post_save_outcome {
+                    Ok(outcome) => {
+                        if let Some(dashboard) = self.workspace_dashboard.as_mut() {
+                            dashboard.set_post_canonical_context_status(outcome);
+                        }
+                    }
+                    Err(error) => {
+                        if let Some(dashboard) = self.workspace_dashboard.as_mut() {
+                            dashboard.set_status(
+                                "Canonical chart saved; agent context checkpoint failed and will retry while the draft session remains open.",
+                            );
+                        }
+                        self.chat_widget.add_error_message(format!(
+                            "Canonical chart saved, but its agent context checkpoint failed; the draft session remains open and will retry safely: {error}"
+                        ));
+                    }
+                }
+                return;
+            }
+            match post_save_outcome {
                 Ok(outcome) if outcome.permits_close() => {}
                 Ok(_) => {
                     self.chat_widget.add_error_message(
-                        "Canonical chart saved, but its first local draft checkpoint is still pending; the draft session remains open and will continue in the background."
+                        "Canonical chart saved, but its local draft checkpoint is still pending; the draft session remains open and will continue in the background."
                             .to_string(),
                     );
                     return;
                 }
                 Err(error) => {
                     self.chat_widget.add_error_message(format!(
-                        "Canonical chart saved, but its first local draft checkpoint failed; the draft session remains open and will retry safely: {error}"
+                        "Canonical chart saved, but its local draft checkpoint failed; the draft session remains open and will retry safely: {error}"
                     ));
                     return;
                 }
             }
-        } else if checkpoint_outcome == DashboardCheckpointOutcome::CanonicalOnly
-            && let Some(dashboard) = self.workspace_dashboard.as_mut()
-        {
-            dashboard.acknowledge_canonical_only_save();
         }
         if let Some(dashboard) = self.workspace_dashboard.as_mut() {
             dashboard.arm_canonical_close_if_confirmed();

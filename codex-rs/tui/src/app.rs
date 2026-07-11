@@ -1286,6 +1286,8 @@ See the Codex keymap documentation for supported actions and examples."
     ) -> Result<AppRunControl> {
         if matches!(event, TuiEvent::Draw | TuiEvent::Resize) {
             self.handle_draw_pre_render(tui)?;
+            self.checkpoint_idle_workspace_draft(app_server).await;
+            self.schedule_workspace_draft_checkpoint(tui);
         }
 
         if self.workspace_dashboard_active() && self.overlay.is_none() {
@@ -1417,8 +1419,6 @@ See the Codex keymap documentation for supported actions and examples."
                     return Ok(AppRunControl::Continue);
                 }
                 self.chat_widget.pre_draw_tick();
-                self.checkpoint_idle_workspace_draft(app_server).await;
-                self.schedule_workspace_draft_checkpoint(tui);
                 let resized = matches!(event, TuiEvent::Resize);
                 self.render_workspace_dashboard_frame(tui, resized)?;
                 if self.chat_widget.external_editor_state() == ExternalEditorState::Requested {
@@ -1719,7 +1719,7 @@ See the Codex keymap documentation for supported actions and examples."
     async fn send_workspace_context_to_agent(
         &mut self,
         app_server: &mut AppServerSession,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let is_medical_handoff = self
             .workspace_dashboard
             .as_ref()
@@ -1750,14 +1750,14 @@ See the Codex keymap documentation for supported actions and examples."
             .or_else(|| self.chat_widget.thread_id().map(|id| id.to_string()));
         let Some(dashboard) = self.workspace_dashboard.as_mut() else {
             self.workspace_dashboard_visible = false;
-            return Ok(());
+            return Ok(false);
         };
         let prompt = if dashboard.profile() == WorkspaceProfile::Medical {
             let params = match dashboard.context_packet_create_params() {
                 Ok(params) => params,
                 Err(status) => {
                     dashboard.set_status(status);
-                    return Ok(());
+                    return Ok(false);
                 }
             };
             let prepared_packet = app_server
@@ -1816,7 +1816,7 @@ See the Codex keymap documentation for supported actions and examples."
             self.chat_widget.insert_str(&prompt);
         }
         self.workspace_dashboard_visible = false;
-        Ok(())
+        Ok(true)
     }
 
     pub(super) fn show_shutdown_feedback(&mut self, tui: &mut tui::Tui) -> Result<()> {

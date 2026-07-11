@@ -5,6 +5,7 @@ mod plugin_catalog;
 mod session_summary;
 mod startup;
 mod workspace_draft_final_audit;
+mod workspace_draft_handoff;
 mod workspace_draft_idempotency;
 
 use super::*;

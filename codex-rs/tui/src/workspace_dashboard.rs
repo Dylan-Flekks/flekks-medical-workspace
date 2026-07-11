@@ -1,5 +1,6 @@
 mod chart_changeset;
 mod draft_checkpoint;
+mod draft_snapshot;
 mod footer;
 
 pub(crate) use draft_checkpoint::DashboardCheckpointOutcome;
@@ -2856,7 +2857,9 @@ impl WorkspaceDashboard {
         self.status = match purpose {
             ChartChangesetPurpose::SaveDerivative => {
                 if let Some(derivative) = response.artifact_derivative.as_ref() {
-                    self.selected_derivative_ids.insert(derivative.id.clone());
+                    if self.selected_derivative_ids.insert(derivative.id.clone()) {
+                        self.mark_checkpoint_context_dirty();
+                    }
                     self.inspected_derivative_id = Some(derivative.id.clone());
                     self.focus_workflow_section(MedicalWorkflowSection::Documents);
                     self.workflow_scroll = self.workflow_derivative_inspector_row();
@@ -2866,7 +2869,9 @@ impl WorkspaceDashboard {
             }
             ChartChangesetPurpose::SaveClip => {
                 if let Some(clip) = response.context_clip.as_ref() {
-                    self.selected_clip_ids.insert(clip.id.clone());
+                    if self.selected_clip_ids.insert(clip.id.clone()) {
+                        self.mark_checkpoint_context_dirty();
+                    }
                     self.inspected_clip_id = Some(clip.id.clone());
                     self.focus_workflow_section(MedicalWorkflowSection::Documents);
                     self.workflow_scroll = self.workflow_clip_inspector_row();
@@ -3318,18 +3323,32 @@ impl WorkspaceDashboard {
 
         let client_id = self.clients[index].id.clone();
         let mut staged = self.clone();
-        staged
-            .reload_preserving(app_server, Some(client_id.clone()), None, None, None, None)
-            .await?;
-        if staged.draft_client.id.as_deref() != Some(client_id.as_str()) {
-            color_eyre::eyre::bail!("selected patient changed while the chart was loading");
+        let selection_result: Result<()> = async {
+            staged.selected_artifact_ids.clear();
+            staged.selected_derivative_ids.clear();
+            staged.selected_clip_ids.clear();
+            staged.stale_context_notice = None;
+            if !staged.draft_coordinator.prepare_client_scope(&client_id) {
+                color_eyre::eyre::bail!(
+                    "draft checkpoint scope changed while the patient chart was loading"
+                );
+            }
+            staged
+                .reload_preserving(app_server, Some(client_id.clone()), None, None, None, None)
+                .await?;
+            if staged.draft_client.id.as_deref() != Some(client_id.as_str()) {
+                color_eyre::eyre::bail!("selected patient changed while the chart was loading");
+            }
+            Ok(())
         }
-        if !staged.draft_coordinator.prepare_client_scope(&client_id) {
-            color_eyre::eyre::bail!(
-                "draft checkpoint scope changed while the patient chart was loading"
-            );
+        .await;
+        if let Err(error) = selection_result {
+            self.status =
+                "Selected patient could not open; current patient is unchanged.".to_string();
+            return Err(error);
         }
         *self = staged;
+        self.status = "Selected patient chart opened and active.".to_string();
         Ok(())
     }
 
@@ -4511,7 +4530,11 @@ impl WorkspaceDashboard {
                 WorkspaceDashboardAction::Consumed
             }
             WorkspaceActionId::AgentClear => {
+                let context_changed = !self.agent_request.body.is_empty();
                 self.agent_request.clear();
+                if context_changed {
+                    self.mark_checkpoint_context_dirty();
+                }
                 self.focus_workflow_section(MedicalWorkflowSection::AgentRequest);
                 self.status = "Agent instructions cleared.".to_string();
                 WorkspaceDashboardAction::Consumed
@@ -5162,6 +5185,9 @@ impl WorkspaceDashboard {
                     self.status = "Unsaved returned work draft.".to_string();
                 } else if self.agent_request.is_active() {
                     self.agent_request.body.push_str(&pasted);
+                    if !pasted.is_empty() {
+                        self.mark_checkpoint_context_dirty();
+                    }
                     self.status = "Local agent instructions draft.".to_string();
                 } else {
                     self.status =
@@ -5536,7 +5562,12 @@ impl WorkspaceDashboard {
     pub(crate) fn mark_agent_context_sent(&mut self, packet: WorkspaceContextPacket) {
         self.context_packets.retain(|entry| entry.id != packet.id);
         self.context_packets.insert(0, packet);
+        let context_changed = !self.agent_request.body.is_empty();
         self.agent_request.clear();
+        if context_changed {
+            self.mark_checkpoint_context_dirty();
+        }
+        self.draft_coordinator.mark_context_submitted();
         self.agent_result.clear();
         self.stale_context_notice = None;
         self.focus = WorkspaceFocus::Agent;
@@ -6067,7 +6098,9 @@ impl WorkspaceDashboard {
         )
         .await?;
         if review_status == "archived" {
-            self.selected_derivative_ids.remove(&derivative_id);
+            if self.selected_derivative_ids.remove(&derivative_id) {
+                self.mark_checkpoint_context_dirty();
+            }
             self.inspected_derivative_id = None;
         } else if let Some(derivative) = response.derivative {
             self.inspected_derivative_id = Some(derivative.id);
@@ -6108,7 +6141,9 @@ impl WorkspaceDashboard {
         )
         .await?;
         if review_status == "archived" {
-            self.selected_clip_ids.remove(&clip_id);
+            if self.selected_clip_ids.remove(&clip_id) {
+                self.mark_checkpoint_context_dirty();
+            }
             self.inspected_clip_id = None;
         } else if let Some(clip) = response.clip {
             self.inspected_clip_id = Some(clip.id);
@@ -6412,7 +6447,11 @@ impl WorkspaceDashboard {
             self.focus_workflow_section(MedicalWorkflowSection::AgentInbox);
             return;
         };
+        let context_changed = !self.agent_request.body.is_empty();
         self.agent_request.clear();
+        if context_changed {
+            self.mark_checkpoint_context_dirty();
+        }
         self.agent_result.start(packet_id.clone());
         self.focus = WorkspaceFocus::Agent;
         self.set_workflow_section(MedicalWorkflowSection::AgentInbox);
@@ -6620,7 +6659,7 @@ impl WorkspaceDashboard {
         let document_id = document.id.clone();
         let artifact_number = index + 1;
         let label = document_context_label(document);
-        match action {
+        let context_changed = match action {
             ArtifactSelectionAction::Select => {
                 let inserted = self.selected_artifact_ids.insert(document_id.clone());
                 self.status = if inserted {
@@ -6628,6 +6667,7 @@ impl WorkspaceDashboard {
                 } else {
                     format!("File reference {artifact_number} already included: {label}.")
                 };
+                inserted
             }
             ArtifactSelectionAction::Deselect => {
                 let removed = self.selected_artifact_ids.remove(&document_id);
@@ -6636,6 +6676,7 @@ impl WorkspaceDashboard {
                 } else {
                     format!("File reference {artifact_number} already excluded: {label}.")
                 };
+                removed
             }
             ArtifactSelectionAction::Toggle => {
                 if self.selected_artifact_ids.remove(&document_id) {
@@ -6644,6 +6685,7 @@ impl WorkspaceDashboard {
                     self.selected_artifact_ids.insert(document_id.clone());
                     self.status = format!("Included file reference {artifact_number}: {label}.");
                 }
+                true
             }
             ArtifactSelectionAction::Inspect => {
                 self.inspected_artifact_id = Some(document_id.clone());
@@ -6658,7 +6700,11 @@ impl WorkspaceDashboard {
                     compact_preview(&document.local_path, 48),
                     compact_preview(&document.notes, 48)
                 );
+                false
             }
+        };
+        if context_changed {
+            self.mark_checkpoint_context_dirty();
         }
         self.stale_context_notice = None;
         self.set_patient_file_tree_index_for_document_id(&document_id);
@@ -6920,6 +6966,7 @@ impl WorkspaceDashboard {
             self.selected_artifact_ids.insert(document_id);
             self.status = format!("Included: {title}.");
         }
+        self.mark_checkpoint_context_dirty();
         self.stale_context_notice = None;
     }
 
@@ -7126,7 +7173,7 @@ impl WorkspaceDashboard {
         let derivative_id = derivative.id.clone();
         let derivative_number = index + 1;
         let label = derivative_context_label(derivative);
-        match action {
+        let context_changed = match action {
             DerivativeSelectionAction::Select => {
                 let inserted = self.selected_derivative_ids.insert(derivative_id);
                 self.status = if inserted {
@@ -7134,6 +7181,7 @@ impl WorkspaceDashboard {
                 } else {
                     format!("Reviewed text {derivative_number} already included: {label}.")
                 };
+                inserted
             }
             DerivativeSelectionAction::Deselect => {
                 let removed = self.selected_derivative_ids.remove(&derivative_id);
@@ -7142,6 +7190,7 @@ impl WorkspaceDashboard {
                 } else {
                     format!("Reviewed text {derivative_number} already excluded: {label}.")
                 };
+                removed
             }
             DerivativeSelectionAction::Toggle => {
                 if self.selected_derivative_ids.remove(&derivative_id) {
@@ -7150,6 +7199,7 @@ impl WorkspaceDashboard {
                     self.selected_derivative_ids.insert(derivative_id);
                     self.status = format!("Included reviewed text {derivative_number}: {label}.");
                 }
+                true
             }
             DerivativeSelectionAction::Inspect => {
                 self.inspected_derivative_id = Some(derivative_id.clone());
@@ -7162,7 +7212,11 @@ impl WorkspaceDashboard {
                     "Inspecting reviewed text {derivative_number} ({state}): {}",
                     compact_preview(&label, 96)
                 );
+                false
             }
+        };
+        if context_changed {
+            self.mark_checkpoint_context_dirty();
         }
         self.stale_context_notice = None;
         self.focus = WorkspaceFocus::Workflow;
@@ -7264,7 +7318,7 @@ impl WorkspaceDashboard {
         let clip_id = clip.id.clone();
         let clip_number = index + 1;
         let label = clip_context_label(clip);
-        match action {
+        let context_changed = match action {
             ClipSelectionAction::Select => {
                 let inserted = self.selected_clip_ids.insert(clip_id);
                 self.status = if inserted {
@@ -7272,6 +7326,7 @@ impl WorkspaceDashboard {
                 } else {
                     format!("Clip {clip_number} already included: {label}.")
                 };
+                inserted
             }
             ClipSelectionAction::Deselect => {
                 let removed = self.selected_clip_ids.remove(&clip_id);
@@ -7280,6 +7335,7 @@ impl WorkspaceDashboard {
                 } else {
                     format!("Clip {clip_number} already excluded: {label}.")
                 };
+                removed
             }
             ClipSelectionAction::Toggle => {
                 if self.selected_clip_ids.remove(&clip_id) {
@@ -7288,6 +7344,7 @@ impl WorkspaceDashboard {
                     self.selected_clip_ids.insert(clip_id);
                     self.status = format!("Included clip {clip_number}: {label}.");
                 }
+                true
             }
             ClipSelectionAction::Inspect => {
                 self.inspected_clip_id = Some(clip_id.clone());
@@ -7300,7 +7357,11 @@ impl WorkspaceDashboard {
                     "Inspecting clip {clip_number} ({state}): {}",
                     compact_preview(&label, 96)
                 );
+                false
             }
+        };
+        if context_changed {
+            self.mark_checkpoint_context_dirty();
         }
         self.stale_context_notice = None;
         self.focus = WorkspaceFocus::Workflow;
@@ -8766,6 +8827,9 @@ impl WorkspaceDashboard {
         let pruned_derivatives =
             prune_selected_ids(&mut self.selected_derivative_ids, derivative_ids);
         let pruned_clips = prune_selected_ids(&mut self.selected_clip_ids, clip_ids);
+        if pruned_artifacts + pruned_derivatives + pruned_clips > 0 {
+            self.mark_checkpoint_context_dirty();
+        }
         self.stale_context_notice =
             stale_context_recovery_notice(pruned_artifacts, pruned_derivatives, pruned_clips);
         if let Some(notice) = &self.stale_context_notice {
@@ -9907,11 +9971,14 @@ impl WorkspaceDashboard {
         if self.agent_request.is_active() {
             match key_event.code {
                 KeyCode::Backspace => {
-                    self.agent_request.body.pop();
+                    if self.agent_request.body.pop().is_some() {
+                        self.mark_checkpoint_context_dirty();
+                    }
                     self.status = "Local agent instructions draft.".to_string();
                 }
                 KeyCode::Enter => {
                     self.agent_request.body.push('\n');
+                    self.mark_checkpoint_context_dirty();
                     self.status = "Local agent instructions draft.".to_string();
                 }
                 KeyCode::PageUp => {
@@ -9927,6 +9994,7 @@ impl WorkspaceDashboard {
                 }
                 KeyCode::Char(c) => {
                     self.agent_request.body.push(c);
+                    self.mark_checkpoint_context_dirty();
                     self.status = "Local agent instructions draft.".to_string();
                 }
                 _ => {}
@@ -10243,6 +10311,12 @@ impl WorkspaceDashboard {
         }
         self.dirty = true;
         self.status = "Unsaved changes.".to_string();
+    }
+
+    fn mark_checkpoint_context_dirty(&mut self) {
+        if self.profile == WorkspaceProfile::Medical {
+            self.draft_coordinator.context_edit();
+        }
     }
 
     fn chart_changeset_input_is_frozen(&self) -> bool {
@@ -15476,6 +15550,20 @@ impl WorkspaceDashboard {
         &self.draft_client.display_name
     }
 
+    pub(crate) fn submit_patient_search_for_tests(
+        &mut self,
+        query: &str,
+    ) -> WorkspaceDashboardAction {
+        self.open_patient_search();
+        self.patient_search_query = Some(query.to_string());
+        self.patient_search_selection_index = 0;
+        self.handle_patient_search_key_event(KeyEvent::from(KeyCode::Enter))
+    }
+
+    pub(crate) fn patient_search_is_open_for_tests(&self) -> bool {
+        self.patient_search_query.is_some()
+    }
+
     pub(crate) fn note_title_for_tests(&self) -> &str {
         &self.draft_note.title
     }
@@ -15525,6 +15613,17 @@ impl WorkspaceDashboard {
         self.draft_document.notes = notes.to_string();
         self.focus = WorkspaceFocus::Workflow;
         self.mark_dirty();
+    }
+
+    pub(crate) fn set_new_document_draft_for_tests(
+        &mut self,
+        kind: &str,
+        title: &str,
+        local_path: &str,
+        notes: &str,
+    ) {
+        self.draft_document = DocumentDraft::default();
+        self.set_document_draft_for_tests(kind, title, local_path, notes);
     }
 
     pub(crate) fn document_title_for_tests(&self) -> Option<&str> {
@@ -15582,6 +15681,14 @@ impl WorkspaceDashboard {
         self.draft_client.id.as_deref()
     }
 
+    pub(crate) fn client_version_for_tests(&self) -> Option<&str> {
+        let client_id = self.draft_client.id.as_deref()?;
+        self.clients
+            .iter()
+            .find(|client| client.id == client_id)
+            .map(|client| client.version.as_str())
+    }
+
     pub(crate) fn checkpoint_client_id_for_tests(&self) -> Option<&str> {
         self.draft_coordinator.active_client_id_for_tests()
     }
@@ -15592,6 +15699,30 @@ impl WorkspaceDashboard {
 
     pub(crate) fn draft_session_creation_key_for_tests(&self) -> Option<&str> {
         self.draft_coordinator.session_creation_key_for_tests()
+    }
+
+    pub(crate) fn set_agent_request_for_tests(&mut self, body: &str) {
+        self.agent_request.active = true;
+        self.agent_request.body = body.to_string();
+        self.mark_checkpoint_context_dirty();
+    }
+
+    pub(crate) fn set_addendum_draft_for_tests(&mut self, body: &str) {
+        self.addendum_draft.active = true;
+        self.addendum_draft.body = body.to_string();
+    }
+
+    pub(crate) fn set_agent_result_draft_for_tests(&mut self, body: &str) {
+        self.agent_result.active = true;
+        self.agent_result.body = body.to_string();
+    }
+
+    pub(crate) fn selected_context_counts_for_tests(&self) -> (usize, usize, usize) {
+        (
+            self.selected_artifact_ids.len(),
+            self.selected_derivative_ids.len(),
+            self.selected_clip_ids.len(),
+        )
     }
 
     pub(crate) fn client_index_for_display_name_for_tests(
@@ -19500,21 +19631,24 @@ mod tests {
     }
 
     #[test]
-    fn medical_checkpoint_detects_unsaved_agent_editor_before_generation_short_circuit() {
+    fn medical_agent_request_is_checkpoint_supported_context() {
         let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
-        dashboard.agent_request.start();
-        dashboard.agent_request.body = "Draft agent instruction".to_string();
-
-        assert!(!dashboard.draft_coordinator.has_uncheckpointed_edits());
-        assert!(dashboard.has_unsaved_unsupported_checkpoint_editor());
-
-        dashboard.status =
-            "Local checkpoints currently cover patient and note fields only; save or clear the open file, safety, job, addendum, or agent draft."
-                .to_string();
-        insta::assert_snapshot!(
-            "medical_workspace_checkpoint_unavailable_120x32",
-            render_dashboard_lines_at(&dashboard, 120, 32)
+        assert_eq!(
+            dashboard.execute_workspace_command(":agent request"),
+            WorkspaceDashboardAction::Consumed
         );
+        for character in "Draft agent instruction".chars() {
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Char(character)));
+        }
+
+        assert!(dashboard.draft_coordinator.has_uncheckpointed_edits());
+        assert!(
+            dashboard
+                .draft_coordinator
+                .has_uncheckpointed_context_edits()
+        );
+        assert!(dashboard.has_unsent_checkpoint_context());
+        assert!(!dashboard.has_unsaved_unsupported_checkpoint_editor());
     }
 
     #[test]
@@ -19532,6 +19666,32 @@ mod tests {
         let rendered = render_dashboard_lines_at(&dashboard, 120, 32);
         assert!(!rendered.contains(creation_key));
         insta::assert_snapshot!("medical_workspace_checkpoint_retry_120x32", rendered);
+    }
+
+    #[test]
+    fn medical_checkpoint_scope_block_reason_stays_visible_in_compact_footer() {
+        let mut dashboard = medical_recursive_base_dashboard();
+        dashboard
+            .draft_coordinator
+            .set_session_creation_key_for_tests("compact-footer-retry-key");
+        dashboard.set_checkpoint_scope_change_blocked_status("switching patients");
+
+        assert!(dashboard.draft_checkpoint_status_requires_attention());
+        let rendered = render_dashboard_lines_at(&dashboard, 80, 20);
+        assert!(rendered.contains("Status: Wait for"));
+        insta::assert_snapshot!("medical_workspace_checkpoint_scope_blocked_80x20", rendered);
+    }
+
+    #[test]
+    fn medical_failed_patient_selection_stays_visible_in_compact_footer() {
+        let mut dashboard = medical_recursive_base_dashboard();
+        dashboard.status =
+            "Selected patient could not open; current patient is unchanged.".to_string();
+
+        assert!(dashboard.draft_checkpoint_status_requires_attention());
+        let rendered = render_dashboard_lines_at(&dashboard, 80, 20);
+        assert!(rendered.contains("Status: Selected patient could not open"));
+        insta::assert_snapshot!("medical_workspace_patient_selection_failed_80x20", rendered);
     }
 
     #[test]
@@ -20339,6 +20499,11 @@ mod tests {
             "Local draft checkpoint failed; canonical chart unchanged. Retry after idle.",
             "Local draft checkpoints are unavailable through a remote app-server.",
             "Canonical chart saved; local draft checkpoint is still saving; draft session remains open.",
+            "Wait for the local draft checkpoint retry before switching patients.",
+            "Canonical chart saved; wait for the local draft session to close before switching patients.",
+            "Wait for the local draft checkpoint before switching patients.",
+            "Save before switching patients; close the current draft session first.",
+            "Selected patient could not open; current patient is unchanged.",
         ] {
             dashboard.status = status.to_string();
             assert!(

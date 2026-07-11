@@ -1,0 +1,24 @@
+---
+source: tui/src/workspace_dashboard.rs
+expression: rendered
+---
+Medical Workspace
+Zones: [Explorer] > Patient Chart > Agent Work  Focus: Directory
+┌Patient Directory─────────────────────────────────────────────────────────────┐
+│Local search: /                                                               │
+│0 active patients; local only                                                 │
+│No saved patients yet.                                                        │
+│New patient: :patient new                                                     │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+Focus: Directory | Status: Selected patient could not open; current patient is …

@@ -4,6 +4,10 @@
 //! draft session. It never writes canonical chart data; callers provide a
 //! schema-versioned JSON snapshot when a checkpoint is due.
 
+mod trigger;
+
+pub(crate) use trigger::WorkspaceDraftCheckpointTrigger;
+
 use crate::app_server_session::AppServerSession;
 use codex_app_server_protocol::WorkspaceDraftCheckpoint;
 use codex_app_server_protocol::WorkspaceDraftCheckpointCreateParams;
@@ -22,31 +26,6 @@ const CHECKPOINT_POLL_DELAY: Duration = Duration::from_millis(100);
 const CHECKPOINT_CLOSE_RETRY_DELAY: Duration = Duration::from_secs(1);
 pub(crate) const CHECKPOINT_BOUNDARY_WAIT: Duration = Duration::from_secs(1);
 const CHECKPOINT_ACTOR: &str = "medical workspace TUI";
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum WorkspaceDraftCheckpointTrigger {
-    IdleTyping,
-    FocusChange,
-    ExplicitSave,
-    Close,
-    Handoff,
-}
-
-impl WorkspaceDraftCheckpointTrigger {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::IdleTyping => "idle_typing",
-            Self::FocusChange => "focus_change",
-            Self::ExplicitSave => "explicit_save",
-            Self::Close => "workspace_close",
-            Self::Handoff => "agent_handoff",
-        }
-    }
-
-    pub(crate) fn forces_checkpoint(self) -> bool {
-        matches!(self, Self::Handoff)
-    }
-}
 
 #[derive(Debug, Clone)]
 pub(crate) struct WorkspaceDraftCheckpointInput {
@@ -68,6 +47,7 @@ pub(crate) enum WorkspaceDraftCheckpointOutcome {
 struct WorkspaceDraftCheckpointInFlight {
     client_id: String,
     generation: u64,
+    context_generation: u64,
     task: tokio::task::JoinHandle<Result<WorkspaceDraftCheckpointCreateResponse>>,
 }
 
@@ -79,6 +59,9 @@ pub(crate) struct WorkspaceDraftCoordinator {
     last_confirmed_checkpoint: Option<WorkspaceDraftCheckpoint>,
     edit_generation: u64,
     saved_generation: u64,
+    context_generation: u64,
+    saved_context_generation: u64,
+    submitted_context_generation: u64,
     debounce_deadline: Option<Instant>,
     focus_checkpoint_requested: bool,
     in_flight: Option<WorkspaceDraftCheckpointInFlight>,
@@ -101,6 +84,9 @@ impl Clone for WorkspaceDraftCoordinator {
             last_confirmed_checkpoint: self.last_confirmed_checkpoint.clone(),
             edit_generation: self.edit_generation,
             saved_generation: self.saved_generation,
+            context_generation: self.context_generation,
+            saved_context_generation: self.saved_context_generation,
+            submitted_context_generation: self.submitted_context_generation,
             debounce_deadline,
             focus_checkpoint_requested: self.focus_checkpoint_requested,
             in_flight: None,
@@ -120,6 +106,11 @@ impl WorkspaceDraftCoordinator {
 
     pub(crate) fn note_edit(&mut self) {
         self.note_edit_at(Instant::now());
+    }
+
+    pub(crate) fn context_edit(&mut self) {
+        self.note_edit_at(Instant::now());
+        self.context_generation = self.context_generation.wrapping_add(1);
     }
 
     pub(crate) fn request_focus_checkpoint(&mut self) {
@@ -180,7 +171,7 @@ impl WorkspaceDraftCoordinator {
         self.session_id.is_some() && self.last_confirmed_checkpoint.is_some()
     }
 
-    pub(crate) fn has_pending_session_creation(&self) -> bool {
+    pub(crate) fn has_unresolved_session_creation_retry(&self) -> bool {
         self.session_id.is_none() && self.session_creation_key.is_some()
     }
 
@@ -224,10 +215,18 @@ impl WorkspaceDraftCoordinator {
         self.debounce_deadline = None;
     }
 
-    pub(crate) fn acknowledge_canonical_only_save(&mut self) {
+    pub(crate) fn generation(&self) -> u64 {
+        self.edit_generation
+    }
+
+    pub(crate) fn acknowledge_canonical_only_save_through(&mut self, generation: u64) {
         debug_assert!(self.in_flight.is_none());
-        self.saved_generation = self.edit_generation;
-        self.debounce_deadline = None;
+        self.saved_generation = generation;
+        if self.has_uncheckpointed_edits() {
+            self.debounce_deadline = Some(Instant::now() + CHECKPOINT_IDLE_DELAY);
+        } else {
+            self.debounce_deadline = None;
+        }
     }
 
     pub(crate) async fn checkpoint(
@@ -243,6 +242,7 @@ impl WorkspaceDraftCoordinator {
         }
         self.bind_client_for_checkpoint(&input.client_id)?;
         let generation = self.edit_generation;
+        let context_generation = self.context_generation;
         let client_id = input.client_id.clone();
         let (session_id, session_creation_key) = self.checkpoint_session_identity();
         let task = app_server.spawn_workspace_draft_checkpoint_create(
@@ -261,6 +261,7 @@ impl WorkspaceDraftCoordinator {
         self.in_flight = Some(WorkspaceDraftCheckpointInFlight {
             client_id,
             generation,
+            context_generation,
             task,
         });
         self.debounce_deadline = None;
@@ -300,6 +301,7 @@ impl WorkspaceDraftCoordinator {
                 self.session_creation_key = None;
                 self.last_confirmed_checkpoint = Some(response.checkpoint.clone());
                 self.saved_generation = in_flight.generation;
+                self.saved_context_generation = in_flight.context_generation;
                 if !self.has_uncheckpointed_edits() {
                     self.debounce_deadline = None;
                 } else if self.debounce_deadline.is_none() {
@@ -334,12 +336,26 @@ impl WorkspaceDraftCoordinator {
         self.last_confirmed_checkpoint = None;
         self.canonical_save_pending_close = false;
         self.saved_generation = self.edit_generation;
+        self.saved_context_generation = self.context_generation;
+        self.submitted_context_generation = self.context_generation;
         self.debounce_deadline = None;
         Ok(true)
     }
 
     pub(crate) fn has_uncheckpointed_edits(&self) -> bool {
         self.edit_generation != self.saved_generation
+    }
+
+    pub(crate) fn has_uncheckpointed_context_edits(&self) -> bool {
+        self.context_generation != self.saved_context_generation
+    }
+
+    pub(crate) fn has_unsubmitted_context_edits(&self) -> bool {
+        self.context_generation != self.submitted_context_generation
+    }
+
+    pub(crate) fn mark_context_submitted(&mut self) {
+        self.submitted_context_generation = self.context_generation;
     }
 
     #[cfg(test)]
@@ -450,6 +466,9 @@ impl WorkspaceDraftCoordinator {
         self.last_confirmed_checkpoint = None;
         self.edit_generation = 0;
         self.saved_generation = 0;
+        self.context_generation = 0;
+        self.saved_context_generation = 0;
+        self.submitted_context_generation = 0;
         self.debounce_deadline = None;
         self.focus_checkpoint_requested = false;
         self.in_flight = None;

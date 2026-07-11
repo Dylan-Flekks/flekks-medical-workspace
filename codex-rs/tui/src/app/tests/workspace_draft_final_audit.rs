@@ -36,9 +36,20 @@ fn workspace_dashboard_failed_patient_selection_is_atomic_and_retryable() -> Res
             Some(jordan_id.as_str())
         );
 
+        let selection_action = dashboard.submit_patient_search_for_tests("Riley Patient");
+        let WorkspaceDashboardAction::SelectClient(selected_index) = selection_action else {
+            panic!("patient search should request the selected chart");
+        };
+        assert_eq!(selected_index, riley_index);
+        assert!(!dashboard.patient_search_is_open_for_tests());
+        assert_eq!(
+            dashboard.draft_checkpoint_status_for_tests(),
+            "Opening selected patient chart."
+        );
+
         app_server.fail_next_workspace_document_list_for_tests();
         let error = dashboard
-            .select_client(&mut app_server, riley_index)
+            .select_client(&mut app_server, selected_index)
             .await
             .expect_err("mid-reload document failure should abort patient selection");
         assert!(
@@ -54,6 +65,11 @@ fn workspace_dashboard_failed_patient_selection_is_atomic_and_retryable() -> Res
             dashboard.checkpoint_client_id_for_tests(),
             Some(jordan_id.as_str())
         );
+        assert!(!dashboard.patient_search_is_open_for_tests());
+        assert_eq!(
+            dashboard.draft_checkpoint_status_for_tests(),
+            "Selected patient could not open; current patient is unchanged."
+        );
 
         dashboard
             .select_client(&mut app_server, riley_index)
@@ -64,6 +80,10 @@ fn workspace_dashboard_failed_patient_selection_is_atomic_and_retryable() -> Res
         assert_eq!(
             dashboard.checkpoint_client_id_for_tests(),
             dashboard.client_id_for_tests()
+        );
+        assert_eq!(
+            dashboard.draft_checkpoint_status_for_tests(),
+            "Selected patient chart opened and active."
         );
         app_server.shutdown().await?;
         Ok(())
