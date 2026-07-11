@@ -28,6 +28,7 @@ mod turn;
 mod windows_sandbox;
 mod workspace;
 mod workspace_chart_commit;
+mod workspace_drafts;
 
 pub use account::*;
 pub use apps::*;
@@ -58,6 +59,7 @@ pub use turn::*;
 pub use windows_sandbox::*;
 pub use workspace::*;
 pub use workspace_chart_commit::*;
+pub use workspace_drafts::*;
 
 #[cfg(test)]
 mod tests;
