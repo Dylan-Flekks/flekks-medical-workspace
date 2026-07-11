@@ -176,6 +176,7 @@ fn snapshot_dashboard() -> WorkspaceDashboard {
     .collect();
     dashboard.selected_derivative_ids = [" derivative-a ".to_string()].into_iter().collect();
     dashboard.selected_clip_ids = ["clip-a".to_string()].into_iter().collect();
+    dashboard.draft_coordinator.context_edit();
     dashboard
 }
 
@@ -193,6 +194,7 @@ fn v2_snapshot_is_deterministic_id_only_and_encounter_consistent() {
     assert_eq!(first.draft, second.draft);
     assert_eq!(first.encounter_id.as_deref(), Some("encounter-1"));
     assert_eq!(first.draft["schemaVersion"], 2);
+    assert_eq!(first.draft["contextSubmitted"], false);
     assert_eq!(first.draft["activeEncounterId"], "encounter-1");
     assert_eq!(
         first.draft["agentRequestBody"],
@@ -247,6 +249,52 @@ fn legacy_v1_snapshot_still_decodes() {
         decode_workspace_draft_snapshot(legacy),
         Ok(DecodedWorkspaceDraftSnapshot::V1(_))
     ));
+}
+
+#[test]
+fn old_v2_without_context_submission_marker_decodes_conservatively() {
+    let dashboard = snapshot_dashboard();
+    let mut draft = dashboard
+        .draft_checkpoint_input()
+        .expect("valid V2 snapshot")
+        .draft;
+    draft
+        .as_object_mut()
+        .expect("V2 object")
+        .remove("contextSubmitted");
+
+    let DecodedWorkspaceDraftSnapshot::V2(decoded) =
+        decode_workspace_draft_snapshot(draft).expect("backward-compatible V2 snapshot")
+    else {
+        panic!("expected V2 snapshot");
+    };
+    assert!(!decoded.context_submitted);
+}
+
+#[test]
+fn v2_submission_marker_distinguishes_unsent_selection_from_handoff_state() {
+    let mut dashboard = snapshot_dashboard();
+    dashboard.agent_request.body.clear();
+
+    let unsent = dashboard
+        .draft_checkpoint_input()
+        .expect("selection-only V2 snapshot");
+    assert_eq!(unsent.draft["agentRequestBody"], "");
+    assert_eq!(unsent.draft["contextSubmitted"], false);
+    assert_eq!(
+        unsent.draft["selectedArtifactIds"],
+        serde_json::json!(["artifact-a", "artifact-b"])
+    );
+
+    dashboard.draft_coordinator.mark_context_submitted();
+    let submitted = dashboard
+        .draft_checkpoint_input()
+        .expect("post-handoff V2 snapshot");
+    assert_eq!(submitted.draft["contextSubmitted"], true);
+    assert_eq!(
+        submitted.draft["selectedArtifactIds"],
+        unsent.draft["selectedArtifactIds"]
+    );
 }
 
 #[test]

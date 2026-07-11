@@ -1,4 +1,134 @@
 use super::*;
+use codex_app_server_protocol::WorkspaceDraftSession;
+use codex_app_server_protocol::WorkspaceDraftSessionStatus;
+
+fn recovered_session() -> WorkspaceDraftSession {
+    let checkpoint = WorkspaceDraftCheckpoint {
+        id: "checkpoint-recovered".to_string(),
+        session_id: "session-recovered".to_string(),
+        client_id: "client-recovered".to_string(),
+        encounter_id: Some("encounter-recovered".to_string()),
+        note_id: Some("note-recovered".to_string()),
+        base_note_revision: Some(3),
+        schema_version: 2,
+        revision: 4,
+        draft: serde_json::json!({"schemaVersion": 2}),
+        content_sha256: "a".repeat(64),
+        trigger: "focus_change".to_string(),
+        actor: "test clinician".to_string(),
+        created_at: 1,
+    };
+    WorkspaceDraftSession {
+        id: checkpoint.session_id.clone(),
+        client_id: checkpoint.client_id.clone(),
+        status: WorkspaceDraftSessionStatus::Active,
+        current_revision: checkpoint.revision,
+        current_checkpoint: checkpoint,
+        created_by: "test clinician".to_string(),
+        created_at: 1,
+        updated_at: 2,
+        closed_at: None,
+    }
+}
+
+fn assert_recovery_adoption_rejected_unchanged(mut coordinator: WorkspaceDraftCoordinator) {
+    let before = format!("{coordinator:?}");
+    let _error = coordinator
+        .adopt_recovered_session(
+            &recovered_session(),
+            RecoveredContextSubmission::Unsubmitted,
+        )
+        .expect_err("unsafe coordinator state must reject adoption");
+    assert_eq!(format!("{coordinator:?}"), before);
+}
+
+#[test]
+fn recovered_session_adoption_seeds_exact_checkpoint_and_context_state() {
+    let session = recovered_session();
+    for (submission, expected_unsubmitted) in [
+        (RecoveredContextSubmission::Empty, false),
+        (RecoveredContextSubmission::Submitted, false),
+        (RecoveredContextSubmission::Unsubmitted, true),
+    ] {
+        let mut coordinator = WorkspaceDraftCoordinator::default();
+        coordinator
+            .adopt_recovered_session(&session, submission)
+            .expect("clean coordinator should adopt recovered session");
+
+        assert_eq!(
+            coordinator.active_client_id.as_deref(),
+            Some("client-recovered")
+        );
+        assert_eq!(coordinator.session_id.as_deref(), Some("session-recovered"));
+        assert_eq!(
+            coordinator
+                .last_confirmed_checkpoint
+                .as_ref()
+                .map(|checkpoint| (&checkpoint.id, checkpoint.revision)),
+            Some((&"checkpoint-recovered".to_string(), 4))
+        );
+        assert!(!coordinator.has_uncheckpointed_edits());
+        assert_eq!(
+            coordinator.has_unsubmitted_context_edits(),
+            expected_unsubmitted
+        );
+    }
+}
+
+#[test]
+fn recovered_session_adoption_rejects_unsafe_owned_or_dirty_state_atomically() {
+    assert_recovery_adoption_rejected_unchanged(WorkspaceDraftCoordinator {
+        session_id: Some("already-owned".to_string()),
+        ..WorkspaceDraftCoordinator::default()
+    });
+    assert_recovery_adoption_rejected_unchanged(WorkspaceDraftCoordinator {
+        session_creation_key: Some("pending-create".to_string()),
+        ..WorkspaceDraftCoordinator::default()
+    });
+    assert_recovery_adoption_rejected_unchanged(WorkspaceDraftCoordinator {
+        last_confirmed_checkpoint: Some(recovered_session().current_checkpoint),
+        ..WorkspaceDraftCoordinator::default()
+    });
+    assert_recovery_adoption_rejected_unchanged(WorkspaceDraftCoordinator {
+        canonical_save_pending_close: true,
+        ..WorkspaceDraftCoordinator::default()
+    });
+    assert_recovery_adoption_rejected_unchanged(WorkspaceDraftCoordinator {
+        edit_generation: 1,
+        saved_generation: 0,
+        ..WorkspaceDraftCoordinator::default()
+    });
+}
+
+#[tokio::test]
+async fn recovered_session_adoption_rejects_in_flight_checkpoint_without_detaching_it() {
+    let task = tokio::spawn(async {
+        std::future::pending::<Result<WorkspaceDraftCheckpointCreateResponse>>().await
+    });
+    let mut coordinator = WorkspaceDraftCoordinator {
+        in_flight: Some(WorkspaceDraftCheckpointInFlight {
+            client_id: "client-recovered".to_string(),
+            generation: 1,
+            context_generation: 0,
+            task,
+        }),
+        ..WorkspaceDraftCoordinator::default()
+    };
+
+    let _error = coordinator
+        .adopt_recovered_session(
+            &recovered_session(),
+            RecoveredContextSubmission::Unsubmitted,
+        )
+        .expect_err("in-flight checkpoint must reject adoption");
+    assert!(coordinator.has_in_flight_checkpoint());
+    coordinator
+        .in_flight
+        .take()
+        .expect("rejected adoption retains task")
+        .task
+        .abort();
+}
 
 #[test]
 fn newer_edit_generation_postpones_idle_checkpoint() {

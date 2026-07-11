@@ -285,11 +285,20 @@ pub(crate) struct AppServerSession {
     #[cfg(test)]
     fail_next_workspace_document_list: bool,
     #[cfg(test)]
+    fail_next_workspace_note_signature_list: bool,
+    #[cfg(test)]
     hold_next_workspace_draft_checkpoint: Option<Arc<tokio::sync::Semaphore>>,
     #[cfg(test)]
     fail_next_workspace_draft_checkpoint_after_response: bool,
     #[cfg(test)]
     workspace_draft_checkpoint_requests: Vec<WorkspaceDraftCheckpointCreateParams>,
+    #[cfg(test)]
+    workspace_draft_session_list_requests: Vec<WorkspaceDraftSessionListParams>,
+    #[cfg(test)]
+    hold_next_workspace_draft_session_close:
+        Option<(Arc<tokio::sync::Semaphore>, Arc<tokio::sync::Semaphore>)>,
+    #[cfg(test)]
+    fail_next_workspace_draft_session_close_after_response: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -338,11 +347,19 @@ impl AppServerSession {
             #[cfg(test)]
             fail_next_workspace_document_list: false,
             #[cfg(test)]
+            fail_next_workspace_note_signature_list: false,
+            #[cfg(test)]
             hold_next_workspace_draft_checkpoint: None,
             #[cfg(test)]
             fail_next_workspace_draft_checkpoint_after_response: false,
             #[cfg(test)]
             workspace_draft_checkpoint_requests: Vec::new(),
+            #[cfg(test)]
+            workspace_draft_session_list_requests: Vec::new(),
+            #[cfg(test)]
+            hold_next_workspace_draft_session_close: None,
+            #[cfg(test)]
+            fail_next_workspace_draft_session_close_after_response: false,
         }
     }
 
@@ -370,6 +387,11 @@ impl AppServerSession {
     }
 
     #[cfg(test)]
+    pub(crate) fn fail_next_workspace_note_signature_list_for_tests(&mut self) {
+        self.fail_next_workspace_note_signature_list = true;
+    }
+
+    #[cfg(test)]
     pub(crate) fn hold_next_workspace_draft_checkpoint_for_tests(
         &mut self,
     ) -> Arc<tokio::sync::Semaphore> {
@@ -388,6 +410,28 @@ impl AppServerSession {
         &self,
     ) -> &[WorkspaceDraftCheckpointCreateParams] {
         &self.workspace_draft_checkpoint_requests
+    }
+
+    #[cfg(test)]
+    pub(crate) fn workspace_draft_session_list_requests_for_tests(
+        &self,
+    ) -> &[WorkspaceDraftSessionListParams] {
+        &self.workspace_draft_session_list_requests
+    }
+
+    #[cfg(test)]
+    pub(crate) fn hold_next_workspace_draft_session_close_for_tests(
+        &mut self,
+    ) -> (Arc<tokio::sync::Semaphore>, Arc<tokio::sync::Semaphore>) {
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let reached = Arc::new(tokio::sync::Semaphore::new(0));
+        self.hold_next_workspace_draft_session_close = Some((gate.clone(), reached.clone()));
+        (gate, reached)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_next_workspace_draft_session_close_after_response_for_tests(&mut self) {
+        self.fail_next_workspace_draft_session_close_after_response = true;
     }
 
     pub(crate) fn uses_embedded_app_server(&self) -> bool {
@@ -994,6 +1038,9 @@ impl AppServerSession {
         &mut self,
         params: WorkspaceDraftSessionListParams,
     ) -> Result<WorkspaceDraftSessionListResponse> {
+        #[cfg(test)]
+        self.workspace_draft_session_list_requests
+            .push(params.clone());
         let request_id = self.next_request_id();
         self.client
             .request_typed(ClientRequest::WorkspaceDraftSessionList { request_id, params })
@@ -1017,11 +1064,29 @@ impl AppServerSession {
         &mut self,
         params: WorkspaceDraftSessionCloseParams,
     ) -> Result<WorkspaceDraftSessionCloseResponse> {
+        #[cfg(test)]
+        if let Some((gate, reached)) = self.hold_next_workspace_draft_session_close.take() {
+            reached.add_permits(1);
+            gate.acquire()
+                .await
+                .map_err(|error| {
+                    color_eyre::eyre::eyre!("workspace draft close test gate closed: {error}")
+                })?
+                .forget();
+        }
         let request_id = self.next_request_id();
-        self.client
+        let response = self
+            .client
             .request_typed(ClientRequest::WorkspaceDraftSessionClose { request_id, params })
             .await
-            .wrap_err("workspace/draft/session/close failed in TUI")
+            .wrap_err("workspace/draft/session/close failed in TUI")?;
+        #[cfg(test)]
+        if std::mem::take(&mut self.fail_next_workspace_draft_session_close_after_response) {
+            color_eyre::eyre::bail!(
+                "injected lost workspace draft session close response after persistence"
+            );
+        }
+        Ok(response)
     }
 
     pub(crate) async fn workspace_note_list(
@@ -1065,6 +1130,10 @@ impl AppServerSession {
         &mut self,
         note_id: String,
     ) -> Result<WorkspaceNoteSignatureListResponse> {
+        #[cfg(test)]
+        if std::mem::take(&mut self.fail_next_workspace_note_signature_list) {
+            color_eyre::eyre::bail!("injected workspace/note/signature/list failure");
+        }
         let request_id = self.next_request_id();
         self.client
             .request_typed(ClientRequest::WorkspaceNoteSignatureList {
