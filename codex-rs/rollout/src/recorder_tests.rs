@@ -118,6 +118,7 @@ async fn state_db_init_backfills_before_returning() -> anyhow::Result<()> {
             memory_mode: None,
             history_mode: Default::default(),
             multi_agent_version: None,
+            model_tool_mode: Default::default(),
             context_window: None,
         },
         git: None,
@@ -440,6 +441,7 @@ async fn recorder_materializes_on_flush_with_pending_items() -> std::io::Result<
             "test_originator".to_string(),
             BaseInstructions::default(),
             Vec::new(),
+            Default::default(),
         )
         .with_session_id(session_id)
         .with_history_mode(ThreadHistoryMode::Paginated)
@@ -535,6 +537,7 @@ async fn persist_reports_filesystem_error_and_retries_buffered_items() -> std::i
             "test_originator".to_string(),
             BaseInstructions::default(),
             Vec::new(),
+            Default::default(),
         ),
     )
     .await?;
@@ -1233,6 +1236,7 @@ async fn resume_candidate_matches_cwd_reads_latest_turn_context() -> std::io::Re
             comp_hash: None,
             personality: None,
             collaboration_mode: None,
+            model_tool_mode: Default::default(),
             multi_agent_version: None,
             multi_agent_mode: None,
             realtime_active: None,

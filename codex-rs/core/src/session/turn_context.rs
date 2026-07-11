@@ -7,6 +7,7 @@ use codex_model_provider::SharedModelProvider;
 use codex_model_provider::create_model_provider;
 use codex_protocol::SessionId;
 use codex_protocol::ThreadId;
+use codex_protocol::config_types::ModelToolMode;
 use codex_protocol::models::AdditionalPermissionProfile;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::protocol::ErrorEvent;
@@ -129,6 +130,7 @@ pub struct TurnContext {
     pub(crate) collaboration_mode: CollaborationMode,
     pub(crate) multi_agent_version: MultiAgentVersion,
     pub(crate) personality: Option<Personality>,
+    pub(crate) model_tool_mode: ModelToolMode,
     pub(crate) approval_policy: Constrained<AskForApproval>,
     pub(crate) permission_profile: PermissionProfile,
     pub(crate) network: Option<NetworkProxy>,
@@ -282,6 +284,7 @@ impl TurnContext {
             collaboration_mode,
             multi_agent_version: self.multi_agent_version,
             personality: self.personality,
+            model_tool_mode: self.model_tool_mode,
             approval_policy: self.approval_policy.clone(),
             permission_profile: self.permission_profile.clone(),
             network: self.network.clone(),
@@ -378,6 +381,7 @@ impl TurnContext {
             comp_hash: self.model_info.comp_hash.clone(),
             personality: self.personality,
             collaboration_mode: Some(self.collaboration_mode.clone()),
+            model_tool_mode: self.model_tool_mode,
             multi_agent_version: Some(self.multi_agent_version),
             multi_agent_mode: super::multi_agents::effective_multi_agent_mode(self),
             realtime_active: Some(self.realtime_active),
@@ -562,6 +566,7 @@ impl Session {
             collaboration_mode: session_configuration.collaboration_mode.clone(),
             multi_agent_version,
             personality: session_configuration.personality,
+            model_tool_mode: session_configuration.model_tool_mode,
             approval_policy: session_configuration.approval_policy.clone(),
             permission_profile: session_configuration.permission_profile(),
             network,

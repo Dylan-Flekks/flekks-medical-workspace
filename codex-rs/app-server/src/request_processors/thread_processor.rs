@@ -2,6 +2,7 @@ use super::*;
 use crate::error_code::method_not_found;
 use codex_app_server_protocol::SelectedCapabilityRoot;
 use codex_extension_api::ExtensionDataInit;
+use codex_protocol::config_types::ModelToolMode;
 use codex_protocol::config_types::MultiAgentMode;
 use codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_DANGER_FULL_ACCESS;
 use codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_WORKSPACE;
@@ -951,6 +952,7 @@ impl ThreadRequestProcessor {
             service_name,
             base_instructions,
             developer_instructions,
+            model_tool_mode,
             dynamic_tools,
             selected_capability_roots,
             mock_experimental_field: _mock_experimental_field,
@@ -1021,6 +1023,7 @@ impl ThreadRequestProcessor {
                 service_name,
                 allow_provider_model_fallback,
                 experimental_raw_events,
+                model_tool_mode,
                 request_trace,
                 initial_config_warnings,
             )
@@ -1098,6 +1101,7 @@ impl ThreadRequestProcessor {
         service_name: Option<String>,
         allow_provider_model_fallback: bool,
         experimental_raw_events: bool,
+        model_tool_mode: Option<ModelToolMode>,
         request_trace: Option<W3cTraceContext>,
         initial_config_warnings: Arc<Vec<ConfigWarningNotification>>,
     ) -> Result<(), JSONRPCErrorError> {
@@ -1206,6 +1210,9 @@ impl ThreadRequestProcessor {
             })
             .sum();
         let mut thread_extension_init = ExtensionDataInit::new();
+        if let Some(model_tool_mode) = model_tool_mode {
+            thread_extension_init.insert(model_tool_mode);
+        }
         if !selected_capability_roots.is_empty() {
             thread_extension_init.insert(selected_capability_roots);
         }
@@ -1338,6 +1345,7 @@ impl ThreadRequestProcessor {
             sandbox,
             active_permission_profile,
             reasoning_effort: config_snapshot.reasoning_effort,
+            model_tool_mode: config_snapshot.model_tool_mode,
             multi_agent_mode: MultiAgentMode::ExplicitRequestOnly,
         };
         let notif = thread_started_notification(thread);
@@ -2939,6 +2947,7 @@ impl ThreadRequestProcessor {
                     sandbox,
                     active_permission_profile,
                     reasoning_effort: session_configured.reasoning_effort,
+                    model_tool_mode: config_snapshot.model_tool_mode,
                     multi_agent_mode: MultiAgentMode::ExplicitRequestOnly,
                     initial_turns_page,
                 };
@@ -3676,6 +3685,7 @@ impl ThreadRequestProcessor {
             sandbox,
             active_permission_profile,
             reasoning_effort: session_configured.reasoning_effort,
+            model_tool_mode: config_snapshot.model_tool_mode,
             multi_agent_mode: MultiAgentMode::ExplicitRequestOnly,
         };
 

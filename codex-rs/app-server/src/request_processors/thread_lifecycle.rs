@@ -630,6 +630,7 @@ pub(super) async fn handle_pending_thread_resume_request(
         active_permission_profile,
         workspace_roots,
         reasoning_effort,
+        model_tool_mode,
         originator,
         ..
     } = config_snapshot;
@@ -653,6 +654,7 @@ pub(super) async fn handle_pending_thread_resume_request(
         sandbox,
         active_permission_profile,
         reasoning_effort,
+        model_tool_mode,
         multi_agent_mode: MultiAgentMode::ExplicitRequestOnly,
         initial_turns_page,
     };

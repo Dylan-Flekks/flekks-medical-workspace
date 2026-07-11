@@ -338,6 +338,7 @@ use codex_otel::SessionTelemetry;
 use codex_otel::THREAD_STARTED_METRIC;
 use codex_otel::TelemetryAuthMode;
 use codex_protocol::config_types::CollaborationMode;
+use codex_protocol::config_types::ModelToolMode;
 use codex_protocol::config_types::Personality;
 use codex_protocol::config_types::ReasoningSummary as ReasoningSummaryConfig;
 use codex_protocol::config_types::WindowsSandboxLevel;
@@ -608,6 +609,11 @@ impl Codex {
         let history_mode = conversation_history.get_history_mode(
             requested_history_mode.unwrap_or_else(|| thread_store.default_history_mode()),
         );
+        let model_tool_mode = thread_extension_init
+            .get::<ModelToolMode>()
+            .map(|mode| *mode)
+            .or_else(|| conversation_history.get_latest_model_tool_mode())
+            .unwrap_or_default();
         config
             .validate_multi_agent_v2_config()
             .map_err(|err| CodexErr::InvalidRequest(err.to_string()))?;
@@ -648,6 +654,7 @@ impl Codex {
             service_tier,
             developer_instructions: config.developer_instructions.clone(),
             personality: config.personality,
+            model_tool_mode,
             base_instructions,
             compact_prompt: config.compact_prompt.clone(),
             approval_policy: config.permissions.approval_policy.clone(),

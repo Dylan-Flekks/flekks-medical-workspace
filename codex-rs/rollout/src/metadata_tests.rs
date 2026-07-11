@@ -54,6 +54,7 @@ async fn extract_metadata_from_rollout_uses_session_meta() {
         memory_mode: None,
         history_mode: ThreadHistoryMode::Paginated,
         multi_agent_version: None,
+        model_tool_mode: Default::default(),
         context_window: None,
     };
     let session_meta_line = SessionMetaLine {
@@ -148,6 +149,7 @@ async fn extract_metadata_from_rollout_returns_latest_memory_mode() {
         memory_mode: None,
         history_mode: Default::default(),
         multi_agent_version: None,
+        model_tool_mode: Default::default(),
         context_window: None,
     };
     let polluted_meta = SessionMeta {
@@ -419,6 +421,7 @@ fn write_rollout_in_sessions_with_cwd(
         memory_mode: None,
         history_mode: Default::default(),
         multi_agent_version: None,
+        model_tool_mode: Default::default(),
         context_window: None,
     };
     let session_meta_line = SessionMetaLine {

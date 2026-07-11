@@ -131,6 +131,7 @@ mod tests {
                     dynamic_tools: Vec::new(),
                     selected_capability_roots: Vec::new(),
                     multi_agent_version: None,
+                    model_tool_mode: Default::default(),
                     history_mode: ThreadHistoryMode::Legacy,
                     initial_window_id: uuid::Uuid::now_v7().to_string(),
                     metadata: ThreadPersistenceMetadata {
@@ -326,6 +327,7 @@ mod tests {
             dynamic_tools: Vec::new(),
             selected_capability_roots: Vec::new(),
             multi_agent_version: None,
+            model_tool_mode: Default::default(),
             history_mode,
             initial_window_id: uuid::Uuid::now_v7().to_string(),
             metadata: thread_metadata(),
@@ -443,6 +445,7 @@ impl InMemoryThreadStore {
                 .then_some("disabled".to_string()),
             history_mode: params.history_mode,
             multi_agent_version: params.multi_agent_version,
+            model_tool_mode: params.model_tool_mode,
             context_window: Some(SessionContextWindow::new(params.initial_window_id.clone())),
             ..SessionMeta::default()
         };

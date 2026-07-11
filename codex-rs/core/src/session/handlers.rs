@@ -136,6 +136,7 @@ async fn thread_settings_update(
         service_tier,
         collaboration_mode,
         personality,
+        model_tool_mode,
     } = thread_settings;
     let collaboration_mode = match collaboration_mode {
         Some(collaboration_mode) => collaboration_mode,
@@ -163,6 +164,7 @@ async fn thread_settings_update(
         reasoning_summary: summary,
         service_tier,
         personality,
+        model_tool_mode,
         ..Default::default()
     }
 }
@@ -187,6 +189,7 @@ async fn thread_settings_applied_event(sess: &Session) -> EventMsg {
             reasoning_summary: snapshot.reasoning_summary,
             personality: snapshot.personality,
             collaboration_mode: snapshot.collaboration_mode,
+            model_tool_mode: snapshot.model_tool_mode,
         },
     })
 }
@@ -207,6 +210,39 @@ pub(super) async fn user_input_or_turn_inner(
     else {
         unreachable!();
     };
+    if thread_settings.model_tool_mode.is_some()
+        && sess.conversation.running_state().await.is_some()
+    {
+        sess.send_event_raw(Event {
+            id: sub_id,
+            msg: EventMsg::Error(ErrorEvent {
+                message: "modelToolMode cannot be changed while a realtime conversation is active"
+                    .to_string(),
+                codex_error_info: Some(CodexErrorInfo::BadRequest),
+            }),
+        })
+        .await;
+        return;
+    }
+    if thread_settings.model_tool_mode.is_some()
+        && sess
+            .active_turn
+            .lock()
+            .await
+            .as_ref()
+            .and_then(|active_turn| active_turn.task.as_ref())
+            .is_some()
+    {
+        sess.send_event_raw(Event {
+            id: sub_id,
+            msg: EventMsg::Error(ErrorEvent {
+                message: "modelToolMode cannot be changed while a turn is active".to_string(),
+                codex_error_info: Some(CodexErrorInfo::BadRequest),
+            }),
+        })
+        .await;
+        return;
+    }
     let emit_thread_settings_applied = thread_settings != ThreadSettingsOverrides::default();
     let mut updates = if emit_thread_settings_applied {
         thread_settings_update(sess, thread_settings).await
@@ -732,8 +768,17 @@ pub(super) async fn submission_loop(
                     false
                 }
                 Op::RealtimeConversationStart(params) => {
-                    if let Err(err) =
-                        handle_realtime_conversation_start(&sess, sub.id.clone(), params).await
+                    let model_tool_mode = {
+                        let state = sess.state.lock().await;
+                        state.session_configuration.model_tool_mode
+                    };
+                    if let Err(err) = handle_realtime_conversation_start(
+                        &sess,
+                        sub.id.clone(),
+                        params,
+                        model_tool_mode,
+                    )
+                    .await
                     {
                         sess.send_event_raw(Event {
                             id: sub.id.clone(),

@@ -1,4 +1,5 @@
 use super::*;
+use codex_protocol::config_types::ModelToolMode;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::FunctionCallOutputContentItem;
 use codex_protocol::protocol::AdditionalContextEntry as CoreAdditionalContextEntry;
@@ -118,6 +119,7 @@ struct ThreadSettingsBuildParams {
     summary: Option<ReasoningSummary>,
     collaboration_mode: Option<CollaborationMode>,
     personality: Option<Personality>,
+    model_tool_mode: Option<ModelToolMode>,
 }
 
 impl TurnRequestProcessor {
@@ -514,6 +516,7 @@ impl TurnRequestProcessor {
                     summary: params.summary,
                     collaboration_mode: params.collaboration_mode,
                     personality: params.personality,
+                    model_tool_mode: params.model_tool_mode,
                 },
             )
             .await?;
@@ -620,6 +623,7 @@ impl TurnRequestProcessor {
             summary,
             collaboration_mode,
             personality,
+            model_tool_mode,
         } = params;
 
         if sandbox_policy.is_some() && permissions.is_some() {
@@ -652,7 +656,8 @@ impl TurnRequestProcessor {
             || effort.is_some()
             || summary.is_some()
             || collaboration_mode.is_some()
-            || personality.is_some();
+            || personality.is_some()
+            || model_tool_mode.is_some();
 
         let runtime_workspace_roots =
             runtime_workspace_roots_request.map(resolve_runtime_workspace_roots);
@@ -729,6 +734,7 @@ impl TurnRequestProcessor {
                     service_tier: service_tier.clone(),
                     collaboration_mode: collaboration_mode.clone(),
                     personality,
+                    model_tool_mode,
                 })
                 .await
                 .map_err(|err| {
@@ -752,6 +758,7 @@ impl TurnRequestProcessor {
             service_tier,
             collaboration_mode,
             personality,
+            model_tool_mode,
         })
     }
 
@@ -782,6 +789,7 @@ impl TurnRequestProcessor {
                     summary: params.summary,
                     collaboration_mode: params.collaboration_mode,
                     personality: params.personality,
+                    model_tool_mode: None,
                 },
             )
             .await?;

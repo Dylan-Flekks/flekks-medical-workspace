@@ -23,6 +23,7 @@ use crate::capabilities::SelectedCapabilityRoot;
 use crate::config_types::ApprovalsReviewer;
 use crate::config_types::CollaborationMode;
 use crate::config_types::ModeKind;
+use crate::config_types::ModelToolMode;
 use crate::config_types::MultiAgentMode;
 use crate::config_types::Personality;
 use crate::config_types::ReasoningSummary as ReasoningSummaryConfig;
@@ -504,6 +505,9 @@ pub struct ThreadSettingsOverrides {
 
     /// Updated personality preference.
     pub personality: Option<Personality>,
+
+    /// Updated model tool availability for future turns.
+    pub model_tool_mode: Option<ModelToolMode>,
 }
 
 /// Source classification for client-supplied context.
@@ -2019,6 +2023,8 @@ pub struct ThreadSettingsSnapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub personality: Option<Personality>,
     pub collaboration_mode: CollaborationMode,
+    #[serde(default)]
+    pub model_tool_mode: ModelToolMode,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq, Eq, JsonSchema, TS)]
@@ -2656,6 +2662,27 @@ impl InitialHistory {
             .and_then(|turn_context| turn_context.multi_agent_mode.clone())
     }
 
+    pub fn get_latest_model_tool_mode(&self) -> Option<ModelToolMode> {
+        let items = match self {
+            InitialHistory::New | InitialHistory::Cleared => return None,
+            InitialHistory::Resumed(resumed) => &resumed.history,
+            InitialHistory::Forked(items) => items,
+        };
+        items.iter().rev().find_map(|item| match item {
+            RolloutItem::TurnContext(turn_context) => Some(turn_context.model_tool_mode),
+            RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(event)) => {
+                Some(event.thread_settings.model_tool_mode)
+            }
+            RolloutItem::SessionMeta(session_meta) => Some(session_meta.meta.model_tool_mode),
+            RolloutItem::ResponseItem(_)
+            | RolloutItem::InterAgentCommunication(_)
+            | RolloutItem::InterAgentCommunicationMetadata { .. }
+            | RolloutItem::Compacted(_)
+            | RolloutItem::WorldState(_)
+            | RolloutItem::EventMsg(_) => None,
+        })
+    }
+
     pub fn get_resumed_session_sources(&self) -> Option<(SessionSource, Option<ThreadSource>)> {
         let meta = self.get_resumed_session_meta()?;
         Some((meta.source.clone(), meta.thread_source.clone()))
@@ -3064,6 +3091,10 @@ pub struct SessionMeta {
     pub history_mode: ThreadHistoryMode,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub multi_agent_version: Option<MultiAgentVersion>,
+    /// Initial model tool availability for this thread. Later sticky overrides are
+    /// recovered from turn contexts or thread-settings events.
+    #[serde(default, skip_serializing_if = "is_default_model_tool_mode")]
+    pub model_tool_mode: ModelToolMode,
     /// Initial context-window identity for consumers that tail rollout JSONL before compaction.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_window: Option<SessionContextWindow>,
@@ -3093,6 +3124,7 @@ impl Default for SessionMeta {
             memory_mode: None,
             history_mode: ThreadHistoryMode::default(),
             multi_agent_version: None,
+            model_tool_mode: ModelToolMode::Default,
             context_window: None,
         }
     }
@@ -3243,6 +3275,9 @@ pub struct TurnContextItem {
     pub personality: Option<Personality>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub collaboration_mode: Option<CollaborationMode>,
+    /// Effective tool availability used for this turn.
+    #[serde(default, skip_serializing_if = "is_default_model_tool_mode")]
+    pub model_tool_mode: ModelToolMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub multi_agent_version: Option<MultiAgentVersion>,
     /// Effective model-visible mode used as the durable context-diff baseline.
@@ -3257,6 +3292,11 @@ pub struct TurnContextItem {
     // read by context reconstruction and should be removed in a future schema
     // cleanup.
     pub summary: ReasoningSummaryConfig,
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)] // serde skip predicates receive references.
+fn is_default_model_tool_mode(mode: &ModelToolMode) -> bool {
+    *mode == ModelToolMode::Default
 }
 
 impl TurnContextItem {
@@ -5998,6 +6038,7 @@ mod tests {
             comp_hash: None,
             personality: None,
             collaboration_mode: None,
+            model_tool_mode: Default::default(),
             multi_agent_version: None,
             multi_agent_mode: None,
             realtime_active: None,
@@ -6005,7 +6046,7 @@ mod tests {
             summary: ReasoningSummaryConfig::Auto,
         };
 
-        let value = serde_json::to_value(item)?;
+        let value = serde_json::to_value(&item)?;
         assert_eq!(
             value["network"],
             json!({
@@ -6027,6 +6068,38 @@ mod tests {
             })
         );
         assert_eq!(value["summary"], json!("auto"));
+        assert!(value.get("model_tool_mode").is_none());
+
+        let mut disabled_item = item;
+        disabled_item.model_tool_mode = ModelToolMode::Disabled;
+        assert_eq!(
+            InitialHistory::Forked(vec![RolloutItem::TurnContext(disabled_item)])
+                .get_latest_model_tool_mode(),
+            Some(ModelToolMode::Disabled)
+        );
+
+        let mut session_meta = SessionMeta::default();
+        assert!(
+            serde_json::to_value(&session_meta)?
+                .get("model_tool_mode")
+                .is_none()
+        );
+        session_meta.model_tool_mode = ModelToolMode::Disabled;
+        assert_eq!(
+            serde_json::to_value(&session_meta)?["model_tool_mode"],
+            json!("disabled")
+        );
+        assert_eq!(
+            InitialHistory::Forked(vec![RolloutItem::SessionMeta(SessionMetaLine {
+                meta: session_meta,
+                git: None,
+            })])
+            .get_latest_model_tool_mode(),
+            Some(ModelToolMode::Disabled)
+        );
+
+        let decoded: TurnContextItem = serde_json::from_value(value)?;
+        assert_eq!(decoded.model_tool_mode, ModelToolMode::Default);
         Ok(())
     }
 

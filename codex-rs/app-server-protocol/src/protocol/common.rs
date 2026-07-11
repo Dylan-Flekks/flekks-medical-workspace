@@ -2944,6 +2944,7 @@ mod tests {
                 sandbox: v2::SandboxPolicy::DangerFullAccess,
                 active_permission_profile: None,
                 reasoning_effort: None,
+                model_tool_mode: Default::default(),
                 multi_agent_mode: MultiAgentMode::ExplicitRequestOnly,
             },
         };
@@ -2995,6 +2996,7 @@ mod tests {
                     },
                     "activePermissionProfile": null,
                     "reasoningEffort": null,
+                    "modelToolMode": "default",
                     "multiAgentMode": "explicitRequestOnly"
                 }
             }),
@@ -4021,6 +4023,7 @@ mod tests {
                             developer_instructions: None,
                         },
                     },
+                    model_tool_mode: Default::default(),
                     multi_agent_mode: Default::default(),
                     personality: None,
                 },

@@ -4,6 +4,7 @@ use super::SandboxPolicy;
 use super::Turn;
 use codex_experimental_api_macros::ExperimentalApi;
 use codex_protocol::config_types::CollaborationMode;
+use codex_protocol::config_types::ModelToolMode;
 use codex_protocol::config_types::MultiAgentMode;
 use codex_protocol::config_types::Personality;
 use codex_protocol::config_types::ReasoningSummary;
@@ -141,6 +142,11 @@ pub struct TurnStartParams {
     /// this turn.
     #[ts(optional = nullable)]
     pub output_schema: Option<JsonValue>,
+
+    /// Disable every model-visible and executable tool for this and subsequent regular sampling turns.
+    #[experimental("turn/start.modelToolMode")]
+    #[ts(optional = nullable)]
+    pub model_tool_mode: Option<ModelToolMode>,
 
     /// EXPERIMENTAL - Set a pre-set collaboration mode.
     /// Takes precedence over model, reasoning_effort, and developer instructions if set.

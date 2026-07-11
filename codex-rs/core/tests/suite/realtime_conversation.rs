@@ -6,6 +6,7 @@ use codex_core::test_support::auth_manager_from_auth;
 use codex_login::CodexAuth;
 use codex_login::OPENAI_API_KEY_ENV_VAR;
 use codex_protocol::ThreadId;
+use codex_protocol::config_types::ModelToolMode;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::CodexErrorInfo;
@@ -26,6 +27,7 @@ use codex_protocol::protocol::RealtimeOutputModality;
 use codex_protocol::protocol::RealtimeVoice;
 use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::SessionSource;
+use codex_protocol::protocol::ThreadSettingsOverrides;
 use codex_protocol::user_input::UserInput;
 use core_test_support::responses;
 use core_test_support::responses::WebSocketConnectionConfig;
@@ -412,6 +414,90 @@ async fn conversation_start_audio_text_close_round_trip() -> Result<()> {
         Some("requested" | "transport_closed")
     ));
 
+    server.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn model_tool_mode_change_is_rejected_while_realtime_is_active() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_websocket_server_with_headers(vec![
+        WebSocketConnectionConfig {
+            requests: vec![],
+            response_headers: Vec::new(),
+            accept_delay: None,
+            close_after_requests: true,
+        },
+        WebSocketConnectionConfig {
+            requests: vec![vec![json!({
+                "type": "session.updated",
+                "session": { "id": "sess-active", "instructions": "backend prompt" }
+            })]],
+            response_headers: Vec::new(),
+            accept_delay: None,
+            close_after_requests: false,
+        },
+    ])
+    .await;
+
+    let mut builder = test_codex();
+    let test = builder.build_with_websocket_server(&server).await?;
+    assert!(
+        server
+            .wait_for_handshakes(/*expected*/ 1, Duration::from_secs(2))
+            .await
+    );
+    test.codex
+        .submit(Op::RealtimeConversationStart(ConversationStartParams {
+            client_managed_handoffs: false,
+            flush_transcript_tail_on_session_end: false,
+            codex_responses_as_items: false,
+            codex_response_item_prefix: None,
+            codex_response_handoff_prefix: None,
+            model: None,
+            output_modality: RealtimeOutputModality::Audio,
+            include_startup_context: true,
+            prompt: Some(Some("backend prompt".to_string())),
+            realtime_session_id: None,
+            transport: None,
+            version: None,
+            voice: None,
+        }))
+        .await?;
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::RealtimeConversationStarted(_))
+    })
+    .await;
+
+    test.codex
+        .submit(Op::UserInput {
+            items: vec![UserInput::Text {
+                text: "disable tools".to_string(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+            responsesapi_client_metadata: None,
+            additional_context: Default::default(),
+            thread_settings: ThreadSettingsOverrides {
+                model_tool_mode: Some(ModelToolMode::Disabled),
+                ..Default::default()
+            },
+        })
+        .await?;
+
+    let EventMsg::Error(error) =
+        wait_for_event(&test.codex, |event| matches!(event, EventMsg::Error(_))).await
+    else {
+        unreachable!("predicate guarantees an error event");
+    };
+    assert_eq!(
+        error.message,
+        "modelToolMode cannot be changed while a realtime conversation is active"
+    );
+    assert_eq!(error.codex_error_info, Some(CodexErrorInfo::BadRequest));
+
+    test.codex.submit(Op::RealtimeConversationClose).await?;
     server.shutdown().await;
     Ok(())
 }

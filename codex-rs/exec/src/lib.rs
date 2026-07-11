@@ -913,6 +913,7 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
                         summary: None,
                         personality: None,
                         output_schema,
+                        model_tool_mode: None,
                         collaboration_mode: None,
                         multi_agent_mode: None,
                     },

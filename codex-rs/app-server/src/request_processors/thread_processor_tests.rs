@@ -769,6 +769,7 @@ mod thread_processor_behavior_tests {
             reasoning_effort: None,
             reasoning_summary: None,
             personality: None,
+            model_tool_mode: Default::default(),
             collaboration_mode: CollaborationMode {
                 mode: ModeKind::Default,
                 settings: Settings {

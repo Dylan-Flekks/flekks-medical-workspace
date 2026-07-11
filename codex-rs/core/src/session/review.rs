@@ -133,6 +133,7 @@ pub(super) async fn spawn_review_thread(
         collaboration_mode: parent_turn_context.collaboration_mode.clone(),
         multi_agent_version: MultiAgentVersion::Disabled,
         personality: parent_turn_context.personality,
+        model_tool_mode: parent_turn_context.model_tool_mode,
         approval_policy: parent_turn_context.approval_policy.clone(),
         permission_profile: parent_turn_context.permission_profile(),
         network: parent_turn_context.network.clone(),

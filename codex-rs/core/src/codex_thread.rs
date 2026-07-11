@@ -10,6 +10,7 @@ use codex_otel::SessionTelemetry;
 use codex_protocol::ThreadId;
 use codex_protocol::config_types::ApprovalsReviewer;
 use codex_protocol::config_types::CollaborationMode;
+use codex_protocol::config_types::ModelToolMode;
 use codex_protocol::config_types::Personality;
 use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::config_types::WindowsSandboxLevel;
@@ -73,6 +74,7 @@ pub struct ThreadConfigSnapshot {
     pub reasoning_effort: Option<ReasoningEffort>,
     pub reasoning_summary: Option<ReasoningSummary>,
     pub personality: Option<Personality>,
+    pub model_tool_mode: ModelToolMode,
     pub collaboration_mode: CollaborationMode,
     pub session_source: SessionSource,
     pub history_mode: ThreadHistoryMode,
@@ -157,6 +159,7 @@ pub struct CodexThreadSettingsOverrides {
     pub service_tier: Option<Option<String>>,
     pub collaboration_mode: Option<CollaborationMode>,
     pub personality: Option<Personality>,
+    pub model_tool_mode: Option<ModelToolMode>,
 }
 
 pub struct CodexThread {
@@ -383,6 +386,7 @@ impl CodexThread {
             service_tier,
             collaboration_mode,
             personality,
+            model_tool_mode,
         } = overrides;
         let collaboration_mode = if let Some(collaboration_mode) = collaboration_mode {
             collaboration_mode
@@ -408,6 +412,7 @@ impl CodexThread {
             reasoning_summary: summary,
             service_tier,
             personality,
+            model_tool_mode,
             ..Default::default()
         }
     }
