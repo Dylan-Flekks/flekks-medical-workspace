@@ -4880,6 +4880,68 @@
       ],
       "type": "string"
     },
+    "WorkspaceGuideRunFinishOutcome": {
+      "oneOf": [
+        {
+          "properties": {
+            "result": true,
+            "type": {
+              "enum": [
+                "completed"
+              ],
+              "title": "CompletedWorkspaceGuideRunFinishOutcomeType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "result",
+            "type"
+          ],
+          "title": "CompletedWorkspaceGuideRunFinishOutcome",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "errorSummary": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "failed"
+              ],
+              "title": "FailedWorkspaceGuideRunFinishOutcomeType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "errorSummary",
+            "type"
+          ],
+          "title": "FailedWorkspaceGuideRunFinishOutcome",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "reason": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "canceled"
+              ],
+              "title": "CanceledWorkspaceGuideRunFinishOutcomeType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "reason",
+            "type"
+          ],
+          "title": "CanceledWorkspaceGuideRunFinishOutcome",
+          "type": "object"
+        }
+      ]
+    },
     "WorkspaceTaskPriority": {
       "enum": [
         "low",
