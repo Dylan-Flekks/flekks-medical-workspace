@@ -83,6 +83,7 @@ mod workspace_chart_commit_sql;
 mod workspace_chart_commit_validate;
 mod workspace_chart_commit_versions;
 mod workspace_drafts;
+mod workspace_guides;
 
 pub use external_agent_config_imports::ExternalAgentConfigImportDetailsRecord;
 pub use external_agent_config_imports::ExternalAgentConfigImportFailureRecord;

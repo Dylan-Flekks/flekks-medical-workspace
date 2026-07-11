@@ -9,7 +9,6 @@ mod workspace;
 mod workspace_agent;
 mod workspace_chart_commit;
 mod workspace_drafts;
-#[allow(dead_code)] // Consumed by the guide lifecycle runtime in the follow-up slice.
 mod workspace_guides;
 mod workspace_record_version;
 
@@ -151,5 +150,4 @@ pub(crate) use workspace_agent::WorkspaceNoteProposalDecisionRow;
 pub(crate) use workspace_drafts::WorkspaceDraftCheckpointRow;
 pub(crate) use workspace_drafts::WorkspaceDraftSessionRow;
 pub(crate) use workspace_drafts::WorkspaceDraftSessionSnapshotRow;
-#[allow(unused_imports)] // Consumed by the guide lifecycle runtime in the follow-up slice.
 pub(crate) use workspace_guides::WorkspaceGuideRunRow;
