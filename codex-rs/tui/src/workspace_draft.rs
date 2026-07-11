@@ -14,6 +14,7 @@ use color_eyre::eyre::Result;
 use serde_json::Value;
 use std::time::Duration;
 use std::time::Instant;
+use uuid::Uuid;
 
 const CHECKPOINT_IDLE_DELAY: Duration = Duration::from_millis(900);
 const CHECKPOINT_RETRY_DELAY: Duration = Duration::from_secs(5);
@@ -67,7 +68,6 @@ pub(crate) enum WorkspaceDraftCheckpointOutcome {
 struct WorkspaceDraftCheckpointInFlight {
     client_id: String,
     generation: u64,
-    started_without_session: bool,
     task: tokio::task::JoinHandle<Result<WorkspaceDraftCheckpointCreateResponse>>,
 }
 
@@ -75,6 +75,7 @@ struct WorkspaceDraftCheckpointInFlight {
 pub(crate) struct WorkspaceDraftCoordinator {
     active_client_id: Option<String>,
     session_id: Option<String>,
+    session_creation_key: Option<String>,
     last_confirmed_checkpoint: Option<WorkspaceDraftCheckpoint>,
     edit_generation: u64,
     saved_generation: u64,
@@ -82,12 +83,13 @@ pub(crate) struct WorkspaceDraftCoordinator {
     focus_checkpoint_requested: bool,
     in_flight: Option<WorkspaceDraftCheckpointInFlight>,
     canonical_save_pending_close: bool,
-    first_session_retry_blocked: bool,
 }
 
 impl Clone for WorkspaceDraftCoordinator {
     fn clone(&self) -> Self {
-        let debounce_deadline = if self.in_flight.is_some() && self.has_uncheckpointed_edits() {
+        let debounce_deadline = if self.in_flight.is_some()
+            && (self.has_uncheckpointed_edits() || self.session_creation_key.is_some())
+        {
             Some(Instant::now())
         } else {
             self.debounce_deadline
@@ -95,6 +97,7 @@ impl Clone for WorkspaceDraftCoordinator {
         Self {
             active_client_id: self.active_client_id.clone(),
             session_id: self.session_id.clone(),
+            session_creation_key: self.session_creation_key.clone(),
             last_confirmed_checkpoint: self.last_confirmed_checkpoint.clone(),
             edit_generation: self.edit_generation,
             saved_generation: self.saved_generation,
@@ -102,7 +105,6 @@ impl Clone for WorkspaceDraftCoordinator {
             focus_checkpoint_requested: self.focus_checkpoint_requested,
             in_flight: None,
             canonical_save_pending_close: self.canonical_save_pending_close,
-            first_session_retry_blocked: self.first_session_retry_blocked,
         }
     }
 }
@@ -145,10 +147,7 @@ impl WorkspaceDraftCoordinator {
         if self.in_flight.is_some() {
             return Some(CHECKPOINT_POLL_DELAY);
         }
-        if self.first_session_retry_blocked {
-            return None;
-        }
-        if self.has_uncheckpointed_edits() {
+        if self.has_uncheckpointed_edits() || self.session_creation_key.is_some() {
             return self
                 .debounce_deadline
                 .map(|deadline| deadline.saturating_duration_since(now));
@@ -166,7 +165,7 @@ impl WorkspaceDraftCoordinator {
             && self
                 .debounce_deadline
                 .is_some_and(|deadline| deadline <= now)
-            && self.has_uncheckpointed_edits()
+            && (self.has_uncheckpointed_edits() || self.session_creation_key.is_some())
     }
 
     pub(crate) fn has_in_flight_checkpoint(&self) -> bool {
@@ -181,8 +180,8 @@ impl WorkspaceDraftCoordinator {
         self.session_id.is_some() && self.last_confirmed_checkpoint.is_some()
     }
 
-    pub(crate) fn first_session_retry_is_blocked(&self) -> bool {
-        self.first_session_retry_blocked
+    pub(crate) fn has_pending_session_creation(&self) -> bool {
+        self.session_id.is_none() && self.session_creation_key.is_some()
     }
 
     pub(crate) fn mark_canonical_save_pending_close(&mut self) {
@@ -192,7 +191,7 @@ impl WorkspaceDraftCoordinator {
     pub(crate) fn scope_change_is_blocked(&self) -> bool {
         self.in_flight.is_some()
             || self.canonical_save_pending_close
-            || self.first_session_retry_blocked
+            || self.session_creation_key.is_some()
             || self.has_uncheckpointed_edits()
             || self.session_id.is_some()
     }
@@ -200,7 +199,7 @@ impl WorkspaceDraftCoordinator {
     pub(crate) fn can_clear_dashboard(&self) -> bool {
         self.in_flight.is_none()
             && !self.canonical_save_pending_close
-            && !self.first_session_retry_blocked
+            && self.session_creation_key.is_none()
     }
 
     pub(crate) fn prepare_client_scope(&mut self, client_id: &str) -> bool {
@@ -217,6 +216,7 @@ impl WorkspaceDraftCoordinator {
     pub(crate) fn should_checkpoint(&self, trigger: WorkspaceDraftCheckpointTrigger) -> bool {
         trigger.forces_checkpoint()
             || self.has_uncheckpointed_edits()
+            || self.session_creation_key.is_some()
             || self.canonical_save_pending_close && !self.has_confirmed_session()
     }
 
@@ -242,17 +242,13 @@ impl WorkspaceDraftCoordinator {
             return Ok(WorkspaceDraftCheckpointOutcome::AlreadyCurrent);
         }
         self.bind_client_for_checkpoint(&input.client_id)?;
-        if self.first_session_retry_blocked {
-            color_eyre::eyre::bail!(
-                "the first draft checkpoint outcome is unknown; retry is blocked to avoid creating a duplicate active session"
-            );
-        }
         let generation = self.edit_generation;
         let client_id = input.client_id.clone();
-        let started_without_session = self.session_id.is_none();
+        let (session_id, session_creation_key) = self.checkpoint_session_identity();
         let task = app_server.spawn_workspace_draft_checkpoint_create(
             WorkspaceDraftCheckpointCreateParams {
-                session_id: self.session_id.clone(),
+                session_id,
+                session_creation_key,
                 client_id: input.client_id,
                 encounter_id: input.encounter_id,
                 note_id: input.note_id,
@@ -265,7 +261,6 @@ impl WorkspaceDraftCoordinator {
         self.in_flight = Some(WorkspaceDraftCheckpointInFlight {
             client_id,
             generation,
-            started_without_session,
             task,
         });
         self.debounce_deadline = None;
@@ -282,7 +277,7 @@ impl WorkspaceDraftCoordinator {
         let result = match tokio::time::timeout(wait, &mut in_flight.task).await {
             Ok(Ok(result)) => result,
             Ok(Err(error)) => {
-                self.record_checkpoint_failure(&in_flight);
+                self.record_checkpoint_failure();
                 return Err(color_eyre::eyre::eyre!(
                     "workspace draft checkpoint task failed to complete: {error}"
                 ));
@@ -295,15 +290,15 @@ impl WorkspaceDraftCoordinator {
         match result {
             Ok(response) => {
                 if response.checkpoint.client_id != in_flight.client_id {
-                    self.record_checkpoint_failure(&in_flight);
+                    self.record_checkpoint_failure();
                     color_eyre::eyre::bail!(
                         "workspace draft checkpoint response changed patient scope"
                     );
                 }
                 self.active_client_id = Some(in_flight.client_id);
                 self.session_id = Some(response.checkpoint.session_id.clone());
+                self.session_creation_key = None;
                 self.last_confirmed_checkpoint = Some(response.checkpoint.clone());
-                self.first_session_retry_blocked = false;
                 self.saved_generation = in_flight.generation;
                 if !self.has_uncheckpointed_edits() {
                     self.debounce_deadline = None;
@@ -315,7 +310,7 @@ impl WorkspaceDraftCoordinator {
                 })
             }
             Err(error) => {
-                self.record_checkpoint_failure(&in_flight);
+                self.record_checkpoint_failure();
                 Err(error)
             }
         }
@@ -335,9 +330,9 @@ impl WorkspaceDraftCoordinator {
         };
         app_server.workspace_draft_session_close(params).await?;
         self.session_id = None;
+        self.session_creation_key = None;
         self.last_confirmed_checkpoint = None;
         self.canonical_save_pending_close = false;
-        self.first_session_retry_blocked = false;
         self.saved_generation = self.edit_generation;
         self.debounce_deadline = None;
         Ok(true)
@@ -350,6 +345,21 @@ impl WorkspaceDraftCoordinator {
     #[cfg(test)]
     pub(crate) fn active_client_id_for_tests(&self) -> Option<&str> {
         self.active_client_id.as_deref()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn session_id_for_tests(&self) -> Option<&str> {
+        self.session_id.as_deref()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn session_creation_key_for_tests(&self) -> Option<&str> {
+        self.session_creation_key.as_deref()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_session_creation_key_for_tests(&mut self, key: &str) {
+        self.session_creation_key = Some(key.to_string());
     }
 
     #[cfg(test)]
@@ -378,6 +388,19 @@ impl WorkspaceDraftCoordinator {
             Some(_) => {
                 self.reset_for_client(client_id);
                 Ok(())
+            }
+        }
+    }
+
+    fn checkpoint_session_identity(&mut self) -> (Option<String>, Option<String>) {
+        match self.session_id.as_ref() {
+            Some(session_id) => (Some(session_id.clone()), None),
+            None => {
+                let session_creation_key = self
+                    .session_creation_key
+                    .get_or_insert_with(|| Uuid::new_v4().to_string())
+                    .clone();
+                (None, Some(session_creation_key))
             }
         }
     }
@@ -416,18 +439,14 @@ impl WorkspaceDraftCoordinator {
         }))
     }
 
-    fn record_checkpoint_failure(&mut self, in_flight: &WorkspaceDraftCheckpointInFlight) {
-        if in_flight.started_without_session {
-            self.first_session_retry_blocked = true;
-            self.debounce_deadline = None;
-        } else {
-            self.debounce_deadline = Some(Instant::now() + CHECKPOINT_RETRY_DELAY);
-        }
+    fn record_checkpoint_failure(&mut self) {
+        self.debounce_deadline = Some(Instant::now() + CHECKPOINT_RETRY_DELAY);
     }
 
     fn reset_for_client(&mut self, client_id: &str) {
         self.active_client_id = Some(client_id.to_string());
         self.session_id = None;
+        self.session_creation_key = None;
         self.last_confirmed_checkpoint = None;
         self.edit_generation = 0;
         self.saved_generation = 0;
@@ -435,7 +454,6 @@ impl WorkspaceDraftCoordinator {
         self.focus_checkpoint_requested = false;
         self.in_flight = None;
         self.canonical_save_pending_close = false;
-        self.first_session_retry_blocked = false;
     }
 }
 

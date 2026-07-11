@@ -5,6 +5,7 @@ mod plugin_catalog;
 mod session_summary;
 mod startup;
 mod workspace_draft_final_audit;
+mod workspace_draft_idempotency;
 
 use super::*;
 use crate::app_backtrack::BacktrackSelection;
@@ -7043,7 +7044,8 @@ fn workspace_dashboard_checkpoints_rpc_draft_without_mutating_canonical_note() -
             .to_string();
         let sessions = app_server
             .workspace_draft_session_list(WorkspaceDraftSessionListParams {
-                client_id: patient_id,
+                client_id: Some(patient_id),
+                all_clients: false,
                 include_closed: false,
                 cursor: None,
                 limit: Some(10),
@@ -7104,7 +7106,8 @@ fn medical_checkpoint_rejects_remote_session_before_sending_snapshot() -> Result
         app_server.set_thread_params_mode_for_tests(ThreadParamsMode::Embedded);
         let sessions = app_server
             .workspace_draft_session_list(WorkspaceDraftSessionListParams {
-                client_id: patient_id,
+                client_id: Some(patient_id),
+                all_clients: false,
                 include_closed: true,
                 cursor: None,
                 limit: Some(10),
@@ -7245,7 +7248,8 @@ fn medical_unsupported_only_canonical_save_remains_available() -> Result<()> {
         );
         let sessions = app_server
             .workspace_draft_session_list(WorkspaceDraftSessionListParams {
-                client_id,
+                client_id: Some(client_id),
+                all_clients: false,
                 include_closed: true,
                 cursor: None,
                 limit: Some(10),
@@ -7288,7 +7292,8 @@ fn medical_first_canonical_save_bootstraps_and_closes_draft_checkpoint() -> Resu
             .to_string();
         let sessions = app_server
             .workspace_draft_session_list(WorkspaceDraftSessionListParams {
-                client_id,
+                client_id: Some(client_id),
+                all_clients: false,
                 include_closed: true,
                 cursor: None,
                 limit: Some(10),

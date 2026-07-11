@@ -109,10 +109,6 @@ impl WorkspaceDashboard {
         true
     }
 
-    pub(crate) fn first_session_checkpoint_retry_is_blocked(&self) -> bool {
-        self.draft_coordinator.first_session_retry_is_blocked()
-    }
-
     pub(crate) fn draft_checkpoint_blocks_scope_change(&self) -> bool {
         self.draft_coordinator.scope_change_is_blocked()
     }
@@ -122,10 +118,8 @@ impl WorkspaceDashboard {
     }
 
     pub(crate) fn set_checkpoint_scope_change_blocked_status(&mut self, target: &str) {
-        self.status = if self.draft_coordinator.first_session_retry_is_blocked() {
-            format!(
-                "Local draft checkpoint outcome is unknown; safe recovery is required before {target}."
-            )
+        self.status = if self.draft_coordinator.has_pending_session_creation() {
+            format!("Wait for the local draft checkpoint retry before {target}.")
         } else if self.draft_coordinator.canonical_save_pending_close() {
             format!(
                 "Canonical chart saved; wait for the local draft session to close before {target}."
@@ -146,9 +140,6 @@ impl WorkspaceDashboard {
         self.status
             .starts_with("Local draft checkpoint is still saving")
             || self.status.starts_with("Local draft checkpoint failed")
-            || self
-                .status
-                .starts_with("Local draft checkpoint outcome is unknown")
             || self
                 .status
                 .starts_with("Local draft checkpoints are unavailable")
@@ -172,7 +163,7 @@ impl WorkspaceDashboard {
             }
         }
         if self.draft_coordinator.canonical_save_pending_close()
-            && !self.draft_coordinator.first_session_retry_is_blocked()
+            && self.draft_coordinator.has_confirmed_session()
             && !self.draft_coordinator.has_in_flight_checkpoint()
             && !self.draft_coordinator.has_uncheckpointed_edits()
         {
@@ -365,18 +356,6 @@ impl WorkspaceDashboard {
     }
 
     fn set_checkpoint_failure_status(&mut self, error: &color_eyre::Report) {
-        if self.draft_coordinator.first_session_retry_is_blocked() {
-            self.status = if self.draft_coordinator.canonical_save_pending_close() {
-                format!(
-                    "Canonical chart saved; local draft checkpoint outcome is unknown; automatic retry is blocked to avoid a duplicate session, and the draft session remains open: {error}"
-                )
-            } else {
-                format!(
-                    "Local draft checkpoint outcome is unknown; automatic retry is blocked to avoid a duplicate active session: {error}"
-                )
-            };
-            return;
-        }
         self.status = if self.draft_coordinator.canonical_save_pending_close() {
             format!(
                 "Canonical chart saved; local draft checkpoint failed; draft session remains open and will retry: {error}"

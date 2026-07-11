@@ -15586,6 +15586,14 @@ impl WorkspaceDashboard {
         self.draft_coordinator.active_client_id_for_tests()
     }
 
+    pub(crate) fn draft_session_id_for_tests(&self) -> Option<&str> {
+        self.draft_coordinator.session_id_for_tests()
+    }
+
+    pub(crate) fn draft_session_creation_key_for_tests(&self) -> Option<&str> {
+        self.draft_coordinator.session_creation_key_for_tests()
+    }
+
     pub(crate) fn client_index_for_display_name_for_tests(
         &self,
         display_name: &str,
@@ -19510,17 +19518,20 @@ mod tests {
     }
 
     #[test]
-    fn medical_unknown_first_checkpoint_status_stays_visibly_blocked() {
+    fn medical_first_checkpoint_retry_status_does_not_expose_creation_key() {
         let mut dashboard = medical_recursive_base_dashboard();
+        let creation_key = "a785f627-b393-43bf-b733-b6db1296fce7";
+        dashboard
+            .draft_coordinator
+            .set_session_creation_key_for_tests(creation_key);
         dashboard.status =
-            "Canonical chart saved; local draft checkpoint outcome is unknown; automatic retry is blocked to avoid a duplicate session, and the draft session remains open."
+            "Canonical chart saved; local draft checkpoint failed; draft session remains open and will retry."
                 .to_string();
 
         assert!(dashboard.draft_checkpoint_status_requires_attention());
-        insta::assert_snapshot!(
-            "medical_workspace_checkpoint_recovery_required_120x32",
-            render_dashboard_lines_at(&dashboard, 120, 32)
-        );
+        let rendered = render_dashboard_lines_at(&dashboard, 120, 32);
+        assert!(!rendered.contains(creation_key));
+        insta::assert_snapshot!("medical_workspace_checkpoint_retry_120x32", rendered);
     }
 
     #[test]

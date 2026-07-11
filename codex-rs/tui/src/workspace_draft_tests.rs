@@ -47,12 +47,12 @@ async fn pending_checkpoint_timeout_keeps_generation_and_task_for_later_poll() {
     });
     let mut coordinator = WorkspaceDraftCoordinator {
         active_client_id: Some("client-1".to_string()),
+        session_creation_key: Some("pending-first-session-key".to_string()),
         edit_generation: 3,
         saved_generation: 2,
         in_flight: Some(WorkspaceDraftCheckpointInFlight {
             client_id: "client-1".to_string(),
             generation: 3,
-            started_without_session: false,
             task,
         }),
         ..WorkspaceDraftCoordinator::default()
@@ -65,6 +65,10 @@ async fn pending_checkpoint_timeout_keeps_generation_and_task_for_later_poll() {
 
     assert_eq!(outcome, WorkspaceDraftCheckpointOutcome::Pending);
     assert_eq!(coordinator.saved_generation, 2);
+    assert_eq!(
+        coordinator.session_creation_key.as_deref(),
+        Some("pending-first-session-key")
+    );
     assert!(coordinator.has_in_flight_checkpoint());
     coordinator
         .in_flight
@@ -75,7 +79,7 @@ async fn pending_checkpoint_timeout_keeps_generation_and_task_for_later_poll() {
 }
 
 #[tokio::test]
-async fn first_client_checkpoint_failure_preserves_edits_and_blocks_unsafe_retry() {
+async fn first_client_checkpoint_failure_preserves_key_and_schedules_safe_retry() {
     let mut coordinator = WorkspaceDraftCoordinator {
         edit_generation: 3,
         saved_generation: 2,
@@ -97,22 +101,25 @@ async fn first_client_checkpoint_failure_preserves_edits_and_blocks_unsafe_retry
     coordinator.in_flight = Some(WorkspaceDraftCheckpointInFlight {
         client_id: "client-1".to_string(),
         generation: 3,
-        started_without_session: true,
         task,
     });
+    coordinator.session_creation_key = Some("stable-first-session-key".to_string());
 
     let _error = coordinator
         .poll_in_flight_checkpoint(Duration::from_secs(1))
         .await
-        .expect_err("unknown first-session persistence must fail closed");
+        .expect_err("unknown first-session persistence must remain retryable");
 
     assert_eq!(coordinator.edit_generation, 3);
     assert_eq!(coordinator.saved_generation, 2);
     assert!(coordinator.has_uncheckpointed_edits());
     assert!(coordinator.should_checkpoint(WorkspaceDraftCheckpointTrigger::ExplicitSave));
     assert!(coordinator.should_checkpoint(WorkspaceDraftCheckpointTrigger::Close));
-    assert!(coordinator.first_session_retry_is_blocked());
-    assert_eq!(coordinator.pending_delay(), None);
+    assert_eq!(
+        coordinator.session_creation_key.as_deref(),
+        Some("stable-first-session-key")
+    );
+    assert!(coordinator.pending_delay().is_some());
 }
 
 #[tokio::test]
@@ -127,7 +134,6 @@ async fn in_flight_checkpoint_blocks_scope_change_and_clear_without_detaching_ta
         in_flight: Some(WorkspaceDraftCheckpointInFlight {
             client_id: "client-1".to_string(),
             generation: 4,
-            started_without_session: false,
             task,
         }),
         ..WorkspaceDraftCoordinator::default()
@@ -160,7 +166,6 @@ async fn canonical_saved_pending_checkpoint_remains_owned_and_retry_scheduled() 
         in_flight: Some(WorkspaceDraftCheckpointInFlight {
             client_id: "client-1".to_string(),
             generation: 2,
-            started_without_session: false,
             task,
         }),
         canonical_save_pending_close: true,
@@ -185,6 +190,40 @@ async fn canonical_saved_pending_checkpoint_remains_owned_and_retry_scheduled() 
         .expect("pending continuation must retain owned task")
         .task
         .abort();
+}
+
+#[test]
+fn session_creation_key_is_stable_until_scope_reset() {
+    let mut coordinator = WorkspaceDraftCoordinator::default();
+    coordinator.reset_for_client("client-1");
+
+    let (first_session_id, first_key) = coordinator.checkpoint_session_identity();
+    let (retry_session_id, retry_key) = coordinator.checkpoint_session_identity();
+
+    assert_eq!(first_session_id, None);
+    assert_eq!(retry_session_id, None);
+    assert_eq!(retry_key, first_key);
+    let first_key = first_key.expect("first request should receive a creation key");
+    assert!(!first_key.is_empty());
+    assert!(coordinator.should_checkpoint(WorkspaceDraftCheckpointTrigger::FocusChange));
+    assert!(!coordinator.can_clear_dashboard());
+    assert!(!coordinator.prepare_client_scope("client-2"));
+    coordinator.debounce_deadline = Some(Instant::now());
+    assert!(coordinator.idle_checkpoint_is_due());
+
+    coordinator.reset_for_client("client-2");
+    let (next_session_id, next_key) = coordinator.checkpoint_session_identity();
+    assert_eq!(next_session_id, None);
+    let next_key = next_key.expect("new scope should receive a creation key");
+    assert!(!next_key.is_empty());
+    assert_ne!(next_key, first_key);
+
+    coordinator.session_id = Some("session-2".to_string());
+    coordinator.session_creation_key = None;
+    assert_eq!(
+        coordinator.checkpoint_session_identity(),
+        (Some("session-2".to_string()), None)
+    );
 }
 
 #[test]

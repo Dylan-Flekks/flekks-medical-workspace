@@ -99,7 +99,8 @@ fn medical_generation_zero_new_patient_save_bootstraps_local_checkpoint() -> Res
             .to_string();
         let sessions = app_server
             .workspace_draft_session_list(WorkspaceDraftSessionListParams {
-                client_id,
+                client_id: Some(client_id),
+                all_clients: false,
                 include_closed: true,
                 cursor: None,
                 limit: Some(10),
@@ -194,11 +195,32 @@ fn medical_bootstrap_pending_checkpoint_continues_and_closes_on_idle() -> Result
                 .draft_checkpoint_status_for_tests()
                 .contains("still saving")
         );
+        let pending_request = app_server
+            .workspace_draft_checkpoint_requests_for_tests()
+            .first()
+            .expect("pending first request should be captured");
+        let pending_key = pending_request
+            .session_creation_key
+            .as_deref()
+            .expect("first request should carry a creation key");
+        assert!(!pending_key.is_empty());
+        assert!(pending_request.session_id.is_none());
+        assert_eq!(
+            dashboard.draft_session_creation_key_for_tests(),
+            Some(pending_key)
+        );
+        assert!(
+            !dashboard
+                .draft_checkpoint_status_for_tests()
+                .contains(pending_key),
+            "creation key must not leak into the status footer"
+        );
         assert!(!dashboard.can_clear_dashboard_checkpoint_safely());
         assert!(
             app_server
                 .workspace_draft_session_list(WorkspaceDraftSessionListParams {
-                    client_id: client_id.clone(),
+                    client_id: Some(client_id.clone()),
+                    all_clients: false,
                     include_closed: true,
                     cursor: None,
                     limit: Some(10),
@@ -226,7 +248,8 @@ fn medical_bootstrap_pending_checkpoint_continues_and_closes_on_idle() -> Result
 
         let sessions = app_server
             .workspace_draft_session_list(WorkspaceDraftSessionListParams {
-                client_id,
+                client_id: Some(client_id),
+                all_clients: false,
                 include_closed: true,
                 cursor: None,
                 limit: Some(10),
@@ -237,65 +260,13 @@ fn medical_bootstrap_pending_checkpoint_continues_and_closes_on_idle() -> Result
             sessions.data[0].status,
             codex_app_server_protocol::WorkspaceDraftSessionStatus::Closed
         );
-        app_server.shutdown().await?;
-        Ok(())
-    }))
-}
-
-#[test]
-fn medical_bootstrap_unknown_first_checkpoint_error_stays_blocked_without_retry() -> Result<()> {
-    run_workspace_dashboard_runtime_test(Box::pin(async {
-        let mut app = make_test_app().await;
-        let codex_home = tempdir()?;
-        app.config.codex_home = codex_home.path().to_path_buf().abs();
-        app.config.sqlite_home = codex_home.path().to_path_buf();
-        let mut app_server =
-            Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
-        let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
-        dashboard.load(&mut app_server).await?;
-        dashboard.set_context_for_tests(
-            "Blocked Bootstrap Patient",
-            "Daily note",
-            "Canonical save succeeds before an unknown first checkpoint outcome.",
-        );
-        app.workspace_dashboard = Some(dashboard);
-        app.workspace_dashboard_visible = true;
-        let checkpoint_gate = app_server.hold_next_workspace_draft_checkpoint_for_tests();
-        checkpoint_gate.close();
-
-        app.save_workspace_with_checkpoint(&mut app_server).await;
-
-        let dashboard = app
-            .workspace_dashboard
-            .as_ref()
-            .expect("unknown checkpoint outcome must retain the dashboard");
-        let client_id = dashboard
-            .client_id_for_tests()
-            .expect("canonical bootstrap should already be saved")
-            .to_string();
-        let blocked_status = dashboard.draft_checkpoint_status_for_tests().to_string();
-        assert!(blocked_status.contains("outcome is unknown"));
-        assert!(blocked_status.contains("automatic retry is blocked"));
-        assert!(!dashboard.can_clear_dashboard_checkpoint_safely());
-        assert_eq!(dashboard.draft_checkpoint_pending_delay(), None);
-
-        app.checkpoint_idle_workspace_draft(&mut app_server).await;
-        assert_eq!(
+        assert!(
             app.workspace_dashboard
                 .as_ref()
-                .expect("idle tick must retain blocked draft")
-                .draft_checkpoint_status_for_tests(),
-            blocked_status
+                .expect("closed checkpoint should retain the dashboard")
+                .draft_session_creation_key_for_tests()
+                .is_none()
         );
-        let sessions = app_server
-            .workspace_draft_session_list(WorkspaceDraftSessionListParams {
-                client_id,
-                include_closed: true,
-                cursor: None,
-                limit: Some(10),
-            })
-            .await?;
-        assert!(sessions.data.is_empty());
         app_server.shutdown().await?;
         Ok(())
     }))
@@ -344,7 +315,8 @@ fn medical_existing_session_close_failure_arms_retry_and_clear_protection() -> R
         );
         let sessions = app_server
             .workspace_draft_session_list(WorkspaceDraftSessionListParams {
-                client_id,
+                client_id: Some(client_id),
+                all_clients: false,
                 include_closed: true,
                 cursor: None,
                 limit: Some(10),

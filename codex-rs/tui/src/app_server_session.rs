@@ -282,6 +282,10 @@ pub(crate) struct AppServerSession {
     fail_next_workspace_document_list: bool,
     #[cfg(test)]
     hold_next_workspace_draft_checkpoint: Option<Arc<tokio::sync::Semaphore>>,
+    #[cfg(test)]
+    fail_next_workspace_draft_checkpoint_after_response: bool,
+    #[cfg(test)]
+    workspace_draft_checkpoint_requests: Vec<WorkspaceDraftCheckpointCreateParams>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -331,6 +335,10 @@ impl AppServerSession {
             fail_next_workspace_document_list: false,
             #[cfg(test)]
             hold_next_workspace_draft_checkpoint: None,
+            #[cfg(test)]
+            fail_next_workspace_draft_checkpoint_after_response: false,
+            #[cfg(test)]
+            workspace_draft_checkpoint_requests: Vec::new(),
         }
     }
 
@@ -364,6 +372,18 @@ impl AppServerSession {
         let gate = Arc::new(tokio::sync::Semaphore::new(0));
         self.hold_next_workspace_draft_checkpoint = Some(gate.clone());
         gate
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_next_workspace_draft_checkpoint_after_response_for_tests(&mut self) {
+        self.fail_next_workspace_draft_checkpoint_after_response = true;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn workspace_draft_checkpoint_requests_for_tests(
+        &self,
+    ) -> &[WorkspaceDraftCheckpointCreateParams] {
+        &self.workspace_draft_checkpoint_requests
     }
 
     pub(crate) fn uses_embedded_app_server(&self) -> bool {
@@ -932,7 +952,13 @@ impl AppServerSession {
         let request_id = self.next_request_id();
         let request_handle = self.request_handle();
         #[cfg(test)]
+        self.workspace_draft_checkpoint_requests
+            .push(params.clone());
+        #[cfg(test)]
         let checkpoint_gate = self.hold_next_workspace_draft_checkpoint.take();
+        #[cfg(test)]
+        let fail_after_response =
+            std::mem::take(&mut self.fail_next_workspace_draft_checkpoint_after_response);
         tokio::spawn(async move {
             #[cfg(test)]
             if let Some(gate) = checkpoint_gate {
@@ -945,10 +971,17 @@ impl AppServerSession {
                     })?
                     .forget();
             }
-            request_handle
+            let response = request_handle
                 .request_typed(ClientRequest::WorkspaceDraftCheckpointCreate { request_id, params })
                 .await
-                .wrap_err("workspace/draft/checkpoint/create failed in TUI")
+                .wrap_err("workspace/draft/checkpoint/create failed in TUI")?;
+            #[cfg(test)]
+            if fail_after_response {
+                color_eyre::eyre::bail!(
+                    "injected lost workspace draft checkpoint response after persistence"
+                );
+            }
+            Ok(response)
         })
     }
 

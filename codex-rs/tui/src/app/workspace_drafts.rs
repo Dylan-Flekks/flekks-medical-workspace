@@ -42,17 +42,9 @@ impl App {
             Ok(())
         };
         if let Err(error) = result {
-            let retry_blocked = self
-                .workspace_dashboard
-                .as_ref()
-                .is_some_and(WorkspaceDashboard::first_session_checkpoint_retry_is_blocked);
-            self.chat_widget.add_error_message(if retry_blocked {
-                format!(
-                    "Local draft checkpoint continuation is blocked pending safe first-session recovery: {error}"
-                )
-            } else {
-                format!("Local draft checkpoint continuation failed and will retry: {error}")
-            });
+            self.chat_widget.add_error_message(format!(
+                "Local draft checkpoint continuation failed and will retry: {error}"
+            ));
         }
     }
 
@@ -189,17 +181,8 @@ impl App {
                     return;
                 }
                 Err(error) => {
-                    let retry_blocked = self
-                        .workspace_dashboard
-                        .as_ref()
-                        .is_some_and(WorkspaceDashboard::first_session_checkpoint_retry_is_blocked);
                     self.chat_widget.add_error_message(format!(
-                        "Canonical chart saved, but its first local draft checkpoint failed; the draft session remains open and {}: {error}",
-                        if retry_blocked {
-                            "automatic retry is blocked pending safe recovery"
-                        } else {
-                            "will retry"
-                        }
+                        "Canonical chart saved, but its first local draft checkpoint failed; the draft session remains open and will retry safely: {error}"
                     ));
                     return;
                 }

@@ -1,6 +1,6 @@
 ---
 source: tui/src/workspace_dashboard.rs
-expression: "render_dashboard_lines_at(&dashboard, 120, 32)"
+expression: rendered
 ---
 Medical Workspace
 Patient: Jordan Patient  DOB: blank  MRN: blank  Contact: Missing contact  Coverage: Missing coverage  Encounter: No
@@ -33,4 +33,4 @@ Patient: Jordan Patient  DOB: blank  MRN: blank  Contact: Missing contact  Cover
 │                            ││                                                                                        │
 │                            ││Intake Checklist                                                                        │
 └────────────────────────────┘└────────────────────────────────────────────────────────────────────────────────────────┘
-Focus: Directory | Status: Canonical chart saved; local draft checkpoint outcome is unknown; automatic retry is blocked…
+Focus: Directory | Status: Canonical chart saved; local draft checkpoint failed; draft session remains open and will re…
