@@ -109,6 +109,8 @@ use codex_app_server_protocol::WorkspaceTaskUpsertResponse;
 mod chart_commit;
 #[path = "workspace_draft_processor.rs"]
 mod drafts;
+#[path = "workspace_guide_processor.rs"]
+mod guides;
 
 const AGENT_VISIBLE_PACKET_SAFETY_CONSTRAINTS: &[&str] = &[
     "use only the stored context packet envelope",

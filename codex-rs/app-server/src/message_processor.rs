@@ -1191,6 +1191,15 @@ impl MessageProcessor {
             ClientRequest::WorkspaceDraftSessionClose { params, .. } => {
                 self.workspace_processor.draft_session_close(params).await
             }
+            ClientRequest::WorkspaceGuideRunStart { params, .. } => {
+                self.workspace_processor.guide_run_start(params).await
+            }
+            ClientRequest::WorkspaceGuideRunFinish { params, .. } => {
+                self.workspace_processor.guide_run_finish(params).await
+            }
+            ClientRequest::WorkspaceGuideRunList { params, .. } => {
+                self.workspace_processor.guide_run_list(params).await
+            }
             ClientRequest::WorkspaceContextPacketList { params, .. } => {
                 self.workspace_processor.context_packet_list(params).await
             }

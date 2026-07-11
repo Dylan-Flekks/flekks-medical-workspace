@@ -2,6 +2,8 @@ use super::*;
 use crate::StateRuntime;
 use crate::runtime::test_support::unique_temp_dir;
 use pretty_assertions::assert_eq;
+use sha2::Digest;
+use sha2::Sha256;
 
 async fn fixture() -> (
     std::sync::Arc<StateRuntime>,
@@ -182,7 +184,8 @@ async fn workspace_guide_run_lifecycle_is_bounded_exact_stale_and_noncanonical()
     assert_eq!(error.kind(), "validation");
     assert!(error.to_string().contains("path-bearing key"));
     let mut oversized = input;
-    oversized.request_json = serde_json::json!({"text": "x".repeat(MAX_REQUEST_BYTES)}).to_string();
+    oversized.request_json =
+        serde_json::json!({"text": "x".repeat(envelopes::MAX_REQUEST_BYTES)}).to_string();
     assert!(begin_error(&runtime, oversized).await.contains("exceeds"));
     let second = checkpoint(&runtime, &client, Some(first.session_id.clone()), "Second").await;
     let completion = finish(

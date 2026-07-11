@@ -5,13 +5,14 @@ use crate::model::WorkspaceGuideRunRow;
 use crate::model::datetime_to_epoch_millis;
 use chrono::Utc;
 use serde_json::Value;
-use sha2::Digest;
-use sha2::Sha256;
 use sqlx::Sqlite;
 use uuid::Uuid;
 
 use self::checkpoint::checkpoint_binding;
 use self::checkpoint::validate_checkpoint;
+use self::envelopes::GUIDE_SCHEMA_VERSION;
+use self::envelopes::request_envelope;
+use self::envelopes::terminal_envelope;
 use self::errors::GuideResult;
 use self::errors::active_run_conflict;
 use self::errors::idempotency_conflict;
@@ -19,13 +20,15 @@ use self::errors::required;
 use self::errors::storage;
 use self::errors::terminal_conflict;
 use self::errors::validation;
+use self::input_validation::normalized_optional;
+use self::input_validation::validate_finish_metadata;
+use self::input_validation::validate_start;
 
 mod checkpoint;
+mod envelopes;
 mod errors;
-
-const GUIDE_SCHEMA_VERSION: i64 = 1;
-const MAX_REQUEST_BYTES: usize = 32 * 1024;
-const MAX_TERMINAL_BYTES: usize = 16 * 1024;
+#[path = "workspace_guides/validation.rs"]
+mod input_validation;
 
 macro_rules! guide_run_query {
     ($suffix:literal) => {
@@ -184,12 +187,7 @@ INSERT INTO workspace_guide_runs (
         input: crate::WorkspaceGuideRunFinish,
     ) -> GuideResult<crate::WorkspaceGuideRun> {
         required("run id", &input.run_id)?;
-        required("actor", &input.actor)?;
-        let thread_id = normalized_optional(input.source_thread_id.as_deref());
-        let turn_id = normalized_optional(input.source_turn_id.as_deref());
-        if thread_id.is_some() != turn_id.is_some() {
-            return validation("workspace guide source thread and turn must be supplied together");
-        }
+        let (thread_id, turn_id) = validate_finish_metadata(&input)?;
         let (status, terminal, terminal_hash) = terminal_envelope(&input.outcome)?;
         if status == crate::WorkspaceGuideRunStatus::Completed && thread_id.is_none() {
             return validation("completed workspace guide runs require source thread and turn ids");
@@ -297,7 +295,7 @@ INSERT INTO workspace_guide_runs (
         .bind(filter.cursor_created_at_ms)
         .bind(filter.cursor_created_at_ms)
         .bind(cursor_id)
-        .bind(i64::from(filter.limit.unwrap_or(20).clamp(1, 100)))
+        .bind(i64::from(filter.limit.unwrap_or(20).clamp(1, 200)))
         .fetch_all(self.pool.as_ref())
         .await?;
         Ok(rows
@@ -305,21 +303,6 @@ INSERT INTO workspace_guide_runs (
             .map(|row| row.try_into_model(false))
             .collect::<anyhow::Result<Vec<_>>>()?)
     }
-}
-
-fn validate_start(input: &crate::WorkspaceGuideRunStart) -> GuideResult<()> {
-    required("client id", &input.client_id)?;
-    required("session id", &input.session_id)?;
-    required("source checkpoint id", &input.source_checkpoint_id)?;
-    required("idempotency key", &input.idempotency_key)?;
-    required("trigger", &input.trigger)?;
-    required("actor", &input.actor)?;
-    required("provider", &input.provider)?;
-    required("model", &input.model)?;
-    if input.source_checkpoint_revision < 1 {
-        return validation("workspace guide source checkpoint revision must be positive");
-    }
-    Ok(())
 }
 
 fn validate_finish_identity(
@@ -338,98 +321,18 @@ fn validate_finish_identity(
     Ok(())
 }
 
-fn request_envelope(
-    run_id: &str,
-    input: &crate::WorkspaceGuideRunStart,
-    request: Value,
-) -> GuideResult<(String, String)> {
-    let value = serde_json::json!({
-        "schemaVersion": GUIDE_SCHEMA_VERSION,
-        "kind": "workspaceGuide",
-        "guideRunId": run_id,
-        "sourceCheckpoint": {
-            "clientId": input.client_id.trim(),
-            "sessionId": input.session_id.trim(),
-            "id": input.source_checkpoint_id.trim(),
-            "revision": input.source_checkpoint_revision,
-            "contentSha256": input.source_checkpoint_sha256.trim(),
-        },
-        "safety": {
-            "readOnly": true,
-            "canonicalChartWrites": false,
-            "modelToolMode": "disabled",
-        },
-        "request": request,
-    });
-    normalize_envelope("request", value, MAX_REQUEST_BYTES)
-}
-
-fn terminal_envelope(
-    outcome: &crate::WorkspaceGuideRunOutcome,
-) -> GuideResult<(crate::WorkspaceGuideRunStatus, String, String)> {
-    let (status, value) = match outcome {
-        crate::WorkspaceGuideRunOutcome::Completed { result_json } => {
-            let result: Value = serde_json::from_str(result_json.trim()).map_err(|error| {
-                crate::WorkspaceGuideError::Validation {
-                    message: format!("workspace guide result must be valid JSON: {error}"),
-                }
-            })?;
-            if !result.is_object() || result.get("schemaVersion").and_then(Value::as_i64) != Some(1)
-            {
-                return validation("workspace guide result must be a schemaVersion 1 JSON object");
-            }
-            (
-                crate::WorkspaceGuideRunStatus::Completed,
-                serde_json::json!({"schemaVersion": 1, "type": "completed", "result": result}),
-            )
-        }
-        crate::WorkspaceGuideRunOutcome::Failed { error_summary } => {
-            required("failure summary", error_summary)?;
-            (
-                crate::WorkspaceGuideRunStatus::Failed,
-                serde_json::json!({"schemaVersion": 1, "type": "failed", "errorSummary": error_summary.trim()}),
-            )
-        }
-        crate::WorkspaceGuideRunOutcome::Canceled { reason } => {
-            required("cancellation reason", reason)?;
-            (
-                crate::WorkspaceGuideRunStatus::Canceled,
-                serde_json::json!({"schemaVersion": 1, "type": "canceled", "reason": reason.trim()}),
-            )
-        }
-    };
-    let (json, hash) = normalize_envelope("terminal", value, MAX_TERMINAL_BYTES)?;
-    Ok((status, json, hash))
-}
-
-fn normalize_envelope(
-    label: &str,
-    value: Value,
-    max_bytes: usize,
-) -> GuideResult<(String, String)> {
-    validate_agent_visible_json(&format!("guide {label} envelope"), &value).map_err(|error| {
-        crate::WorkspaceGuideError::Validation {
-            message: error.to_string(),
-        }
-    })?;
-    let json = serde_json::to_string(&value)?;
-    if json.len() > max_bytes {
-        return validation(format!(
-            "workspace guide {label} envelope exceeds the {max_bytes} byte limit"
-        ));
-    }
-    let hash = format!("{:x}", Sha256::digest(json.as_bytes()));
-    Ok((json, hash))
-}
-
 async fn run_by_id(
     tx: &mut sqlx::Transaction<'_, Sqlite>,
     id: &str,
 ) -> anyhow::Result<Option<WorkspaceGuideRunRow>> {
-    Ok(sqlx::query_as(guide_run_query!(" WHERE run.id = ?"))
+    let row: Option<WorkspaceGuideRunRow> = sqlx::query_as(guide_run_query!(" WHERE run.id = ?"))
         .bind(id)
         .fetch_optional(&mut **tx)
-        .await?)
+        .await?;
+    if let Some(row) = row.as_ref() {
+        row.verify_envelope_integrity()?;
+    }
+    Ok(row)
 }
 
 async fn run_by_key(
@@ -437,19 +340,23 @@ async fn run_by_key(
     session_id: &str,
     key: &str,
 ) -> anyhow::Result<Option<WorkspaceGuideRunRow>> {
-    Ok(sqlx::query_as(guide_run_query!(
+    let row: Option<WorkspaceGuideRunRow> = sqlx::query_as(guide_run_query!(
         " WHERE run.session_id = ? AND run.idempotency_key = ?"
     ))
     .bind(session_id.trim())
     .bind(key.trim())
     .fetch_optional(&mut **tx)
-    .await?)
-}
-
-fn normalized_optional(value: Option<&str>) -> Option<&str> {
-    value.map(str::trim).filter(|value| !value.is_empty())
+    .await?;
+    if let Some(row) = row.as_ref() {
+        row.verify_envelope_integrity()?;
+    }
+    Ok(row)
 }
 
 #[cfg(test)]
 #[path = "workspace_guides_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "workspace_guides_limits_tests.rs"]
+mod limits_tests;
