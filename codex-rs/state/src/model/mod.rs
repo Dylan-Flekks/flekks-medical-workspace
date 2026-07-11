@@ -7,6 +7,8 @@ mod thread_goal;
 mod thread_metadata;
 mod workspace;
 mod workspace_agent;
+mod workspace_chart_commit;
+mod workspace_record_version;
 
 pub use agent_job::AgentJob;
 pub use agent_job::AgentJobCreateParams;
@@ -94,6 +96,12 @@ pub use workspace_agent::WorkspaceNoteProposalDecision;
 pub use workspace_agent::WorkspaceNoteProposalDecisionKind;
 pub use workspace_agent::WorkspaceNoteProposalResolution;
 pub use workspace_agent::WorkspaceNoteProposalResolve;
+pub use workspace_chart_commit::WorkspaceChartCommitError;
+pub use workspace_chart_commit::WorkspaceChartCommitRequest;
+pub use workspace_chart_commit::WorkspaceChartCommitResult;
+pub use workspace_chart_commit::WorkspaceChartEntityKind;
+pub use workspace_chart_commit::WorkspaceChartExpectedVersions;
+pub use workspace_chart_commit::WorkspaceChartNoteChange;
 
 pub(crate) use agent_job::AgentJobItemRow;
 pub(crate) use agent_job::AgentJobRow;
