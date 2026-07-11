@@ -1,5 +1,7 @@
 use chrono::DateTime;
 use chrono::Utc;
+use sha2::Digest;
+use sha2::Sha256;
 
 use super::epoch_millis_to_datetime;
 
@@ -61,6 +63,29 @@ pub struct WorkspaceGuideRun {
     pub terminal_at: Option<DateTime<Utc>>,
     pub is_stale: bool,
     pub replayed: bool,
+}
+
+impl WorkspaceGuideRun {
+    /// Recomputes persisted envelope hashes so API mappings fail closed on storage corruption.
+    pub fn verify_envelope_integrity(&self) -> anyhow::Result<()> {
+        verify_envelope_hash(
+            "request",
+            &self.request_envelope_json,
+            &self.request_envelope_sha256,
+        )?;
+        match (
+            self.terminal_envelope_json.as_deref(),
+            self.terminal_envelope_sha256.as_deref(),
+        ) {
+            (Some(json), Some(hash)) => verify_envelope_hash("terminal", json, hash)?,
+            (None, None) => {}
+            _ => anyhow::bail!(
+                "workspace guide run `{}` stored incomplete terminal envelope integrity data",
+                self.id
+            ),
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -202,8 +227,29 @@ pub(crate) struct WorkspaceGuideRunRow {
 }
 
 impl WorkspaceGuideRunRow {
+    pub(crate) fn verify_envelope_integrity(&self) -> anyhow::Result<()> {
+        verify_envelope_hash(
+            "request",
+            &self.request_envelope_json,
+            &self.request_envelope_sha256,
+        )?;
+        match (
+            self.terminal_envelope_json.as_deref(),
+            self.terminal_envelope_sha256.as_deref(),
+        ) {
+            (Some(json), Some(hash)) => verify_envelope_hash("terminal", json, hash)?,
+            (None, None) => {}
+            _ => anyhow::bail!(
+                "workspace guide run `{}` stored incomplete terminal envelope integrity data",
+                self.id
+            ),
+        }
+        Ok(())
+    }
+
     pub(crate) fn try_into_model(self, replayed: bool) -> anyhow::Result<WorkspaceGuideRun> {
-        Ok(WorkspaceGuideRun {
+        self.verify_envelope_integrity()?;
+        let run = WorkspaceGuideRun {
             id: self.id,
             client_id: self.client_id,
             session_id: self.session_id,
@@ -234,6 +280,16 @@ impl WorkspaceGuideRunRow {
                 .transpose()?,
             is_stale: self.is_stale != 0,
             replayed,
-        })
+        };
+        run.verify_envelope_integrity()?;
+        Ok(run)
     }
+}
+
+fn verify_envelope_hash(label: &str, json: &str, expected_hash: &str) -> anyhow::Result<()> {
+    let actual_hash = format!("{:x}", Sha256::digest(json.as_bytes()));
+    if actual_hash != expected_hash {
+        anyhow::bail!("workspace guide stored {label} envelope SHA-256 mismatch");
+    }
+    Ok(())
 }
