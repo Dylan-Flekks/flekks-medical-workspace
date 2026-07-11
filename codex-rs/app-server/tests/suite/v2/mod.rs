@@ -87,3 +87,5 @@ mod turn_start_zsh_fork;
 mod turn_steer;
 mod web_search;
 mod windows_sandbox_setup;
+mod workspace_chart_commit;
+mod workspace_chart_commit_adversarial;

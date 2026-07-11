@@ -8,6 +8,7 @@ use ts_rs::TS;
 #[ts(export_to = "v2/")]
 pub struct WorkspaceClient {
     pub id: String,
+    pub version: String,
     pub display_name: String,
     pub preferred_name: Option<String>,
     pub date_of_birth: Option<String>,
@@ -123,6 +124,7 @@ pub struct WorkspaceClientArchiveResponse {
 #[ts(export_to = "v2/")]
 pub struct WorkspaceDocument {
     pub id: String,
+    pub version: String,
     pub client_id: String,
     pub encounter_id: Option<String>,
     pub title: String,
@@ -289,6 +291,7 @@ pub struct WorkspaceDocumentArchiveResponse {
 #[ts(export_to = "v2/")]
 pub struct WorkspacePatientSafetyItem {
     pub id: String,
+    pub version: String,
     pub client_id: String,
     pub category: String,
     pub name: String,
@@ -366,6 +369,7 @@ pub struct WorkspacePatientSafetyItemArchiveResponse {
 #[ts(export_to = "v2/")]
 pub struct WorkspaceArtifactDerivative {
     pub id: String,
+    pub version: String,
     pub document_id: String,
     pub client_id: String,
     pub encounter_id: Option<String>,
@@ -458,6 +462,7 @@ pub struct WorkspaceArtifactDerivativeStatusUpdateResponse {
 #[ts(export_to = "v2/")]
 pub struct WorkspaceContextClip {
     pub id: String,
+    pub version: String,
     pub derivative_id: String,
     pub document_id: String,
     pub client_id: String,
@@ -577,6 +582,7 @@ pub enum WorkspaceTaskPriority {
 #[ts(export_to = "v2/")]
 pub struct WorkspaceTask {
     pub id: String,
+    pub version: String,
     pub client_id: String,
     pub encounter_id: Option<String>,
     pub note_id: Option<String>,
@@ -683,6 +689,7 @@ pub struct WorkspaceTaskStatusUpdateResponse {
 #[ts(export_to = "v2/")]
 pub struct WorkspaceEncounter {
     pub id: String,
+    pub version: String,
     pub client_id: String,
     pub kind: String,
     pub title: String,
