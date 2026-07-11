@@ -702,6 +702,30 @@ client_request_definitions! {
         serialization: global_shared_read("workspace"),
         response: v2::WorkspaceContextGetResponse,
     },
+    #[experimental("workspace/draft/checkpoint/create")]
+    WorkspaceDraftCheckpointCreate => "workspace/draft/checkpoint/create" {
+        params: v2::WorkspaceDraftCheckpointCreateParams,
+        serialization: global("workspace"),
+        response: v2::WorkspaceDraftCheckpointCreateResponse,
+    },
+    #[experimental("workspace/draft/checkpoint/list")]
+    WorkspaceDraftCheckpointList => "workspace/draft/checkpoint/list" {
+        params: v2::WorkspaceDraftCheckpointListParams,
+        serialization: global_shared_read("workspace"),
+        response: v2::WorkspaceDraftCheckpointListResponse,
+    },
+    #[experimental("workspace/draft/session/list")]
+    WorkspaceDraftSessionList => "workspace/draft/session/list" {
+        params: v2::WorkspaceDraftSessionListParams,
+        serialization: global_shared_read("workspace"),
+        response: v2::WorkspaceDraftSessionListResponse,
+    },
+    #[experimental("workspace/draft/session/close")]
+    WorkspaceDraftSessionClose => "workspace/draft/session/close" {
+        params: v2::WorkspaceDraftSessionCloseParams,
+        serialization: global("workspace"),
+        response: v2::WorkspaceDraftSessionCloseResponse,
+    },
     #[experimental("workspace/context/packet/list")]
     WorkspaceContextPacketList => "workspace/context/packet/list" {
         params: v2::WorkspaceContextPacketListParams,
@@ -2920,6 +2944,7 @@ mod tests {
                 sandbox: v2::SandboxPolicy::DangerFullAccess,
                 active_permission_profile: None,
                 reasoning_effort: None,
+                model_tool_mode: Default::default(),
                 multi_agent_mode: MultiAgentMode::ExplicitRequestOnly,
             },
         };
@@ -2971,6 +2996,7 @@ mod tests {
                     },
                     "activePermissionProfile": null,
                     "reasoningEffort": null,
+                    "modelToolMode": "default",
                     "multiAgentMode": "explicitRequestOnly"
                 }
             }),
@@ -3997,6 +4023,7 @@ mod tests {
                             developer_instructions: None,
                         },
                     },
+                    model_tool_mode: Default::default(),
                     multi_agent_mode: Default::default(),
                     personality: None,
                 },

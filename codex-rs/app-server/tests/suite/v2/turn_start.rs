@@ -44,9 +44,14 @@ use codex_app_server_protocol::TextElement;
 use codex_app_server_protocol::ThreadDeleteParams;
 use codex_app_server_protocol::ThreadDeleteResponse;
 use codex_app_server_protocol::ThreadDeletedNotification;
+use codex_app_server_protocol::ThreadForkParams;
+use codex_app_server_protocol::ThreadForkResponse;
 use codex_app_server_protocol::ThreadItem;
 use codex_app_server_protocol::ThreadLoadedListParams;
 use codex_app_server_protocol::ThreadLoadedListResponse;
+use codex_app_server_protocol::ThreadResumeParams;
+use codex_app_server_protocol::ThreadResumeResponse;
+use codex_app_server_protocol::ThreadSettingsUpdatedNotification;
 use codex_app_server_protocol::ThreadSource;
 use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::ThreadStartResponse;
@@ -65,6 +70,7 @@ use codex_features::FEATURES;
 use codex_features::Feature;
 use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::config_types::ModeKind;
+use codex_protocol::config_types::ModelToolMode;
 use codex_protocol::config_types::MultiAgentMode;
 use codex_protocol::config_types::Personality;
 use codex_protocol::config_types::ReasoningSummary;
@@ -74,6 +80,7 @@ use codex_protocol::models::ImageDetail;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::MULTI_AGENT_MODE_OPEN_TAG;
 use codex_protocol::user_input::MAX_USER_INPUT_TEXT_CHARS;
+use codex_rollout::read_session_meta_line;
 use codex_utils_absolute_path::test_support::PathExt;
 use core_test_support::responses;
 use core_test_support::skip_if_no_network;
@@ -2521,6 +2528,7 @@ async fn turn_start_updates_sandbox_and_cwd_between_turns_v2() -> Result<()> {
             service_tier: None,
             personality: None,
             output_schema: None,
+            model_tool_mode: None,
             collaboration_mode: None,
             multi_agent_mode: None,
         })
@@ -2561,6 +2569,7 @@ async fn turn_start_updates_sandbox_and_cwd_between_turns_v2() -> Result<()> {
             service_tier: None,
             personality: None,
             output_schema: None,
+            model_tool_mode: None,
             collaboration_mode: None,
             multi_agent_mode: None,
         })
@@ -4501,6 +4510,230 @@ async fn turn_start_with_elevated_override_does_not_persist_project_trust() -> R
     let config_toml = std::fs::read_to_string(codex_home.path().join("config.toml"))?;
     assert!(!config_toml.contains("trust_level = \"trusted\""));
     assert!(!config_toml.contains(&workspace.path().display().to_string()));
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn model_tool_mode_is_sticky_and_reported_by_settings() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = create_mock_responses_server_sequence_unchecked(vec![
+        create_final_assistant_message_sse_response("prewarmed")?,
+        create_final_assistant_message_sse_response("disabled")?,
+        create_final_assistant_message_sse_response("enabled")?,
+    ])
+    .await;
+    let codex_home = TempDir::new()?;
+    create_config_toml(
+        codex_home.path(),
+        &server.uri(),
+        "never",
+        &BTreeMap::default(),
+    )?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build()
+        .await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+
+    let start_request = mcp
+        .send_thread_start_request_with_auto_env(ThreadStartParams {
+            model: Some("mock-model".to_string()),
+            model_tool_mode: Some(ModelToolMode::Disabled),
+            ..Default::default()
+        })
+        .await?;
+    let start_response: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(start_request)),
+    )
+    .await??;
+    let ThreadStartResponse {
+        thread,
+        model_tool_mode,
+        ..
+    } = to_response::<ThreadStartResponse>(start_response)?;
+    assert_eq!(model_tool_mode, ModelToolMode::Disabled);
+
+    let disabled_turn_request = mcp
+        .send_turn_start_request(TurnStartParams {
+            thread_id: thread.id.clone(),
+            input: vec![V2UserInput::Text {
+                text: "analyze".to_string(),
+                text_elements: Vec::new(),
+            }],
+            ..Default::default()
+        })
+        .await?;
+    timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(disabled_turn_request)),
+    )
+    .await??;
+    timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_notification_message("turn/completed"),
+    )
+    .await??;
+
+    let enabled_turn_request = mcp
+        .send_turn_start_request(TurnStartParams {
+            thread_id: thread.id,
+            input: vec![V2UserInput::Text {
+                text: "analyze again".to_string(),
+                text_elements: Vec::new(),
+            }],
+            model_tool_mode: Some(ModelToolMode::Default),
+            ..Default::default()
+        })
+        .await?;
+    timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(enabled_turn_request)),
+    )
+    .await??;
+    let settings_notification: JSONRPCNotification = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_notification_message("thread/settings/updated"),
+    )
+    .await??;
+    let settings: ThreadSettingsUpdatedNotification = serde_json::from_value(
+        settings_notification
+            .params
+            .context("thread/settings/updated should include params")?,
+    )?;
+    assert_eq!(
+        settings.thread_settings.model_tool_mode,
+        ModelToolMode::Default
+    );
+    timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_notification_message("turn/completed"),
+    )
+    .await??;
+
+    let requests = server
+        .received_requests()
+        .await
+        .context("failed to read model requests")?;
+    let response_bodies = requests
+        .iter()
+        .filter(|request| request.url.path().ends_with("/responses"))
+        .map(wiremock::Request::body_json::<Value>)
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let [.., disabled_body, enabled_body] = response_bodies.as_slice() else {
+        anyhow::bail!("expected at least two model requests");
+    };
+    assert_eq!(disabled_body["tools"], json!([]));
+    assert!(
+        enabled_body["tools"]
+            .as_array()
+            .is_some_and(|tools| !tools.is_empty())
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn model_tool_mode_is_inherited_by_fork_and_persists_after_a_turn() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    let codex_home = TempDir::new()?;
+    create_config_toml(
+        codex_home.path(),
+        &server.uri(),
+        "never",
+        &BTreeMap::default(),
+    )?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build()
+        .await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+
+    let start_request = mcp
+        .send_thread_start_request_with_auto_env(ThreadStartParams {
+            model: Some("mock-model".to_string()),
+            model_tool_mode: Some(ModelToolMode::Disabled),
+            ..Default::default()
+        })
+        .await?;
+    let start_response: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(start_request)),
+    )
+    .await??;
+    let ThreadStartResponse { thread, .. } = to_response::<ThreadStartResponse>(start_response)?;
+    let source_rollout_path = thread
+        .path
+        .clone()
+        .context("thread should have a rollout path")?;
+    let source_thread_id = thread.id;
+
+    let materialize_request = mcp
+        .send_turn_start_request(TurnStartParams {
+            thread_id: source_thread_id.clone(),
+            input: vec![V2UserInput::Text {
+                text: "materialize source".to_string(),
+                text_elements: Vec::new(),
+            }],
+            ..Default::default()
+        })
+        .await?;
+    timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(materialize_request)),
+    )
+    .await??;
+    timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_notification_message("turn/completed"),
+    )
+    .await??;
+    assert_eq!(
+        read_session_meta_line(&source_rollout_path)
+            .await?
+            .meta
+            .model_tool_mode,
+        ModelToolMode::Disabled
+    );
+
+    let fork_request = mcp
+        .send_thread_fork_request(ThreadForkParams {
+            thread_id: source_thread_id.clone(),
+            ..Default::default()
+        })
+        .await?;
+    let fork_response: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(fork_request)),
+    )
+    .await??;
+    let fork = to_response::<ThreadForkResponse>(fork_response)?;
+    assert_eq!(fork.model_tool_mode, ModelToolMode::Disabled);
+
+    drop(mcp);
+
+    let mut resumed_mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build()
+        .await?;
+    timeout(DEFAULT_READ_TIMEOUT, resumed_mcp.initialize()).await??;
+    let resume_request = resumed_mcp
+        .send_thread_resume_request(ThreadResumeParams {
+            thread_id: source_thread_id,
+            ..Default::default()
+        })
+        .await?;
+    let resume_response: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        resumed_mcp.read_stream_until_response_message(RequestId::Integer(resume_request)),
+    )
+    .await??;
+    let resumed = to_response::<ThreadResumeResponse>(resume_response)?;
+    assert_eq!(resumed.model_tool_mode, ModelToolMode::Disabled);
 
     Ok(())
 }

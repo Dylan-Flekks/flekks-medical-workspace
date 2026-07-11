@@ -191,6 +191,7 @@ async fn find_locates_rollout_file_written_by_recorder() -> std::io::Result<()> 
             "test_originator".to_string(),
             BaseInstructions::default(),
             Vec::new(),
+            Default::default(),
         ),
     )
     .await?;

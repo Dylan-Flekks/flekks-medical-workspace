@@ -223,6 +223,7 @@ impl ExternalAgentSessionImporter {
             dynamic_tools: Vec::new(),
             selected_capability_roots: Vec::new(),
             multi_agent_version: Some(MultiAgentVersion::V1),
+            model_tool_mode: Default::default(),
             history_mode: ThreadHistoryMode::Legacy,
             initial_window_id: uuid::Uuid::now_v7().to_string(),
             metadata: ThreadPersistenceMetadata {

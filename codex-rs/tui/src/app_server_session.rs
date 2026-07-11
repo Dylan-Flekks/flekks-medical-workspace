@@ -1366,6 +1366,7 @@ impl AppServerSession {
                     summary,
                     personality,
                     output_schema,
+                    model_tool_mode: None,
                     collaboration_mode,
                     multi_agent_mode: None,
                 },
@@ -2964,6 +2965,7 @@ mod tests {
                 .into(),
             active_permission_profile: None,
             reasoning_effort: None,
+            model_tool_mode: Default::default(),
             multi_agent_mode: Default::default(),
             initial_turns_page: None,
         };

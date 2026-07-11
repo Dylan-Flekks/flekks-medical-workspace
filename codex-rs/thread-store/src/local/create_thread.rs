@@ -38,6 +38,7 @@ pub(super) async fn create_thread(
             params.originator,
             params.base_instructions,
             params.dynamic_tools,
+            params.model_tool_mode,
         )
         .with_session_id(params.session_id)
         .with_selected_capability_roots(params.selected_capability_roots)

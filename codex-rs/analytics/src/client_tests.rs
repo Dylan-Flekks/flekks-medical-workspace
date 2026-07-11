@@ -316,6 +316,7 @@ fn sample_thread_start_response() -> ClientResponsePayload {
         sandbox: AppServerSandboxPolicy::DangerFullAccess,
         active_permission_profile: None,
         reasoning_effort: None,
+        model_tool_mode: Default::default(),
         multi_agent_mode: Default::default(),
     })
 }
@@ -334,6 +335,7 @@ fn sample_thread_resume_response() -> ClientResponsePayload {
         sandbox: AppServerSandboxPolicy::DangerFullAccess,
         active_permission_profile: None,
         reasoning_effort: None,
+        model_tool_mode: Default::default(),
         multi_agent_mode: Default::default(),
         initial_turns_page: None,
     })
@@ -353,6 +355,7 @@ fn sample_thread_fork_response() -> ClientResponsePayload {
         sandbox: AppServerSandboxPolicy::DangerFullAccess,
         active_permission_profile: None,
         reasoning_effort: None,
+        model_tool_mode: Default::default(),
         multi_agent_mode: Default::default(),
     })
 }

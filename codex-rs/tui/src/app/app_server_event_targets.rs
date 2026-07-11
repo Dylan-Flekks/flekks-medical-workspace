@@ -233,6 +233,7 @@ mod tests {
                     developer_instructions: None,
                 },
             },
+            model_tool_mode: Default::default(),
             multi_agent_mode: Default::default(),
             personality: None,
         }

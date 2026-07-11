@@ -78,6 +78,19 @@ pub enum Verbosity {
     High,
 }
 
+/// Controls whether a regular model sampling turn may discover or call tools.
+#[derive(
+    Debug, Serialize, Deserialize, Default, Clone, Copy, PartialEq, Eq, Display, JsonSchema, TS,
+)]
+#[serde(rename_all = "camelCase")]
+#[strum(serialize_all = "camelCase")]
+#[ts(rename_all = "camelCase")]
+pub enum ModelToolMode {
+    #[default]
+    Default,
+    Disabled,
+}
+
 #[derive(
     Deserialize, Debug, Clone, Copy, PartialEq, Default, Serialize, Display, JsonSchema, TS,
 )]
