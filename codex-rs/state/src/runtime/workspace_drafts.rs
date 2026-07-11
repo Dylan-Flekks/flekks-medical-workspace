@@ -98,5 +98,9 @@ mod tests;
 mod idempotency_tests;
 
 #[cfg(test)]
+#[path = "workspace_draft_schema_v2_tests.rs"]
+mod schema_v2_tests;
+
+#[cfg(test)]
 #[path = "workspace_draft_global_list_tests.rs"]
 mod global_list_tests;
