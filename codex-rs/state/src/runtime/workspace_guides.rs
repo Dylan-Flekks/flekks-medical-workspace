@@ -10,6 +10,19 @@ use sha2::Sha256;
 use sqlx::Sqlite;
 use uuid::Uuid;
 
+use self::checkpoint::checkpoint_binding;
+use self::checkpoint::validate_checkpoint;
+use self::errors::GuideResult;
+use self::errors::active_run_conflict;
+use self::errors::idempotency_conflict;
+use self::errors::required;
+use self::errors::storage;
+use self::errors::terminal_conflict;
+use self::errors::validation;
+
+mod checkpoint;
+mod errors;
+
 const GUIDE_SCHEMA_VERSION: i64 = 1;
 const MAX_REQUEST_BYTES: usize = 32 * 1024;
 const MAX_TERMINAL_BYTES: usize = 16 * 1024;
@@ -19,9 +32,11 @@ macro_rules! guide_run_query {
         concat!(
             "SELECT run.id, run.client_id, run.session_id, run.source_checkpoint_id, ",
             "run.source_checkpoint_revision, run.source_checkpoint_sha256, ",
+            "source.encounter_id, source.note_id, ",
             "run.request_schema_version, run.request_envelope_json, ",
             "run.request_envelope_sha256, run.idempotency_key, run.trigger, run.actor, ",
-            "run.provider, run.model, run.status, run.source_thread_id, run.source_turn_id, ",
+            "run.provider, run.model, run.model_tool_mode, run.status, ",
+            "run.source_thread_id, run.source_turn_id, ",
             "run.terminal_envelope_json, run.terminal_envelope_sha256, ",
             "run.created_at_ms, run.updated_at_ms, run.terminal_at_ms, ",
             "CASE WHEN current.id = run.source_checkpoint_id ",
@@ -30,6 +45,9 @@ macro_rules! guide_run_query {
             "THEN 0 ELSE 1 END AS is_stale ",
             "FROM workspace_guide_runs AS run ",
             "JOIN workspace_draft_sessions AS session ON session.id = run.session_id ",
+            "JOIN workspace_draft_checkpoints AS source ",
+            "ON source.id = run.source_checkpoint_id AND source.session_id = run.session_id ",
+            "AND source.client_id = run.client_id ",
             "JOIN workspace_draft_checkpoints AS current ",
             "ON current.session_id = session.id AND current.revision = session.current_revision",
             $suffix
@@ -41,15 +59,21 @@ impl WorkspaceStore {
     pub async fn start_guide_run(
         &self,
         input: crate::WorkspaceGuideRunStart,
-    ) -> anyhow::Result<crate::WorkspaceGuideRun> {
+    ) -> GuideResult<crate::WorkspaceGuideRun> {
         validate_start(&input)?;
         let request: Value = serde_json::from_str(input.request_json.trim()).map_err(|error| {
-            anyhow::anyhow!("workspace guide request must be valid JSON: {error}")
+            crate::WorkspaceGuideError::Validation {
+                message: format!("workspace guide request must be valid JSON: {error}"),
+            }
         })?;
         if !request.is_object() {
             return validation("workspace guide request must be a JSON object");
         }
-        validate_agent_visible_json("guide request", &request)?;
+        validate_agent_visible_json("guide request", &request).map_err(|error| {
+            crate::WorkspaceGuideError::Validation {
+                message: error.to_string(),
+            }
+        })?;
 
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         if let Some(existing) =
@@ -67,22 +91,22 @@ impl WorkspaceStore {
                 || existing.provider != input.provider.trim()
                 || existing.model != input.model.trim()
             {
-                return conflict(format!(
+                return idempotency_conflict(format!(
                     "workspace guide idempotency key `{}` was reused with different content",
                     input.idempotency_key.trim()
                 ));
             }
             tx.rollback().await?;
-            return existing.try_into_model(true);
+            return Ok(existing.try_into_model(true)?);
         }
 
         let checkpoint = checkpoint_binding(&mut tx, input.source_checkpoint_id.trim())
             .await?
-            .ok_or_else(|| {
-                anyhow::anyhow!(
+            .ok_or_else(|| crate::WorkspaceGuideError::Validation {
+                message: format!(
                     "workspace guide checkpoint `{}` was not found",
-                    input.source_checkpoint_id.trim()
-                )
+                    input.source_checkpoint_id.trim(),
+                ),
             })?;
         validate_checkpoint(&input, &checkpoint)?;
         if let Some(active_id) = sqlx::query_scalar::<_, String>(
@@ -92,7 +116,7 @@ impl WorkspaceStore {
         .fetch_optional(&mut *tx)
         .await?
         {
-            return conflict(format!(
+            return active_run_conflict(format!(
                 "workspace guide session `{}` already has active run `{active_id}`",
                 input.session_id.trim()
             ));
@@ -139,6 +163,8 @@ INSERT INTO workspace_guide_runs (
                 actor_kind: "human".to_string(),
                 source: "workspace_guide".to_string(),
                 client_id: Some(input.client_id.trim().to_string()),
+                encounter_id: checkpoint.encounter_id.clone(),
+                note_id: checkpoint.note_id.clone(),
                 success: true,
                 summary: "workspace guide run started".to_string(),
                 ..Default::default()
@@ -148,15 +174,15 @@ INSERT INTO workspace_guide_runs (
         .await?;
         let row = run_by_id(&mut tx, &id)
             .await?
-            .ok_or_else(|| anyhow::anyhow!("inserted workspace guide run was not found"))?;
+            .ok_or_else(|| storage("inserted workspace guide run was not found"))?;
         tx.commit().await?;
-        row.try_into_model(false)
+        Ok(row.try_into_model(false)?)
     }
 
     pub async fn finish_guide_run(
         &self,
         input: crate::WorkspaceGuideRunFinish,
-    ) -> anyhow::Result<crate::WorkspaceGuideRun> {
+    ) -> GuideResult<crate::WorkspaceGuideRun> {
         required("run id", &input.run_id)?;
         required("actor", &input.actor)?;
         let thread_id = normalized_optional(input.source_thread_id.as_deref());
@@ -173,11 +199,11 @@ INSERT INTO workspace_guide_runs (
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let existing = run_by_id(&mut tx, input.run_id.trim())
             .await?
-            .ok_or_else(|| {
-                anyhow::anyhow!(
+            .ok_or_else(|| crate::WorkspaceGuideError::Validation {
+                message: format!(
                     "workspace guide run `{}` was not found",
-                    input.run_id.trim()
-                )
+                    input.run_id.trim(),
+                ),
             })?;
         validate_finish_identity(&existing, &input)?;
         if existing.status != crate::WorkspaceGuideRunStatus::Running.as_str() {
@@ -188,9 +214,9 @@ INSERT INTO workspace_guide_runs (
                 && existing.terminal_envelope_sha256.as_deref() == Some(terminal_hash.as_str())
             {
                 tx.rollback().await?;
-                return existing.try_into_model(true);
+                return Ok(existing.try_into_model(true)?);
             }
-            return conflict(format!(
+            return terminal_conflict(format!(
                 "workspace guide run `{}` already finished with different terminal content",
                 existing.id
             ));
@@ -210,11 +236,14 @@ INSERT INTO workspace_guide_runs (
         .execute(&mut *tx)
         .await?;
         if updated.rows_affected() != 1 {
-            return conflict(format!(
+            return terminal_conflict(format!(
                 "workspace guide run `{}` terminal update raced",
                 existing.id
             ));
         }
+        let checkpoint = checkpoint_binding(&mut tx, &existing.source_checkpoint_id)
+            .await?
+            .ok_or_else(|| storage("workspace guide source checkpoint disappeared"))?;
         insert_audit_event(
             &mut tx,
             crate::WorkspaceAuditEventCreate {
@@ -225,6 +254,8 @@ INSERT INTO workspace_guide_runs (
                 actor_kind: "agent".to_string(),
                 source: "workspace_guide".to_string(),
                 client_id: Some(existing.client_id),
+                encounter_id: checkpoint.encounter_id,
+                note_id: checkpoint.note_id,
                 source_thread_id: thread_id.map(str::to_string),
                 source_turn_id: turn_id.map(str::to_string),
                 success: status != crate::WorkspaceGuideRunStatus::Failed,
@@ -236,85 +267,47 @@ INSERT INTO workspace_guide_runs (
         .await?;
         let row = run_by_id(&mut tx, input.run_id.trim())
             .await?
-            .ok_or_else(|| anyhow::anyhow!("finished workspace guide run was not found"))?;
+            .ok_or_else(|| storage("finished workspace guide run was not found"))?;
         tx.commit().await?;
-        row.try_into_model(false)
+        Ok(row.try_into_model(false)?)
     }
 
     pub async fn list_guide_runs(
         &self,
         filter: crate::WorkspaceGuideRunFilter,
-    ) -> anyhow::Result<Vec<crate::WorkspaceGuideRun>> {
+    ) -> GuideResult<Vec<crate::WorkspaceGuideRun>> {
         let client_id = required("client id", &filter.client_id)?;
         let session_id = normalized_optional(filter.session_id.as_deref());
+        let cursor_id = normalized_optional(filter.cursor_id.as_deref());
+        if filter.cursor_created_at_ms.is_some() != cursor_id.is_some() {
+            return validation(
+                "workspace guide cursor requires both created time and guide run id",
+            );
+        }
         let rows = sqlx::query_as::<_, WorkspaceGuideRunRow>(guide_run_query!(
-            " WHERE run.client_id = ? AND (? IS NULL OR run.session_id = ?) ORDER BY run.created_at_ms DESC, run.id DESC LIMIT ?"
+            " WHERE run.client_id = ? AND (? IS NULL OR run.session_id = ?) \
+             AND (? IS NULL OR run.created_at_ms < ? \
+                  OR (run.created_at_ms = ? AND run.id < ?)) \
+             ORDER BY run.created_at_ms DESC, run.id DESC LIMIT ?"
         ))
-            .bind(client_id)
-            .bind(session_id)
-            .bind(session_id)
-            .bind(i64::from(filter.limit.unwrap_or(20).clamp(1, 100)))
-            .fetch_all(self.pool.as_ref())
-            .await?;
-        rows.into_iter()
+        .bind(client_id)
+        .bind(session_id)
+        .bind(session_id)
+        .bind(filter.cursor_created_at_ms)
+        .bind(filter.cursor_created_at_ms)
+        .bind(filter.cursor_created_at_ms)
+        .bind(cursor_id)
+        .bind(i64::from(filter.limit.unwrap_or(20).clamp(1, 100)))
+        .fetch_all(self.pool.as_ref())
+        .await?;
+        Ok(rows
+            .into_iter()
             .map(|row| row.try_into_model(false))
-            .collect()
+            .collect::<anyhow::Result<Vec<_>>>()?)
     }
 }
 
-#[derive(sqlx::FromRow)]
-struct CheckpointBinding {
-    client_id: String,
-    session_id: String,
-    revision: i64,
-    content_sha256: String,
-    session_status: String,
-    current_id: String,
-}
-
-async fn checkpoint_binding(
-    tx: &mut sqlx::Transaction<'_, Sqlite>,
-    id: &str,
-) -> anyhow::Result<Option<CheckpointBinding>> {
-    Ok(sqlx::query_as(
-        r#"
-SELECT checkpoint.client_id, checkpoint.session_id, checkpoint.revision,
-       checkpoint.content_sha256, session.status AS session_status,
-       current.id AS current_id
-FROM workspace_draft_checkpoints AS checkpoint
-JOIN workspace_draft_sessions AS session ON session.id = checkpoint.session_id
-JOIN workspace_draft_checkpoints AS current
-  ON current.session_id = session.id AND current.revision = session.current_revision
-JOIN workspace_clients AS client ON client.id = checkpoint.client_id
-WHERE checkpoint.id = ? AND client.archived_at_ms IS NULL
-        "#,
-    )
-    .bind(id)
-    .fetch_optional(&mut **tx)
-    .await?)
-}
-
-fn validate_checkpoint(
-    input: &crate::WorkspaceGuideRunStart,
-    checkpoint: &CheckpointBinding,
-) -> anyhow::Result<()> {
-    if checkpoint.client_id != input.client_id.trim()
-        || checkpoint.session_id != input.session_id.trim()
-        || checkpoint.revision != input.source_checkpoint_revision
-        || checkpoint.content_sha256 != input.source_checkpoint_sha256.trim()
-    {
-        return validation("workspace guide source checkpoint identity does not match");
-    }
-    if checkpoint.session_status != "active" {
-        return validation("workspace guide runs require an active draft session");
-    }
-    if checkpoint.current_id != input.source_checkpoint_id.trim() {
-        return conflict("workspace guide source checkpoint is no longer current");
-    }
-    Ok(())
-}
-
-fn validate_start(input: &crate::WorkspaceGuideRunStart) -> anyhow::Result<()> {
+fn validate_start(input: &crate::WorkspaceGuideRunStart) -> GuideResult<()> {
     required("client id", &input.client_id)?;
     required("session id", &input.session_id)?;
     required("source checkpoint id", &input.source_checkpoint_id)?;
@@ -332,7 +325,7 @@ fn validate_start(input: &crate::WorkspaceGuideRunStart) -> anyhow::Result<()> {
 fn validate_finish_identity(
     run: &WorkspaceGuideRunRow,
     input: &crate::WorkspaceGuideRunFinish,
-) -> anyhow::Result<()> {
+) -> GuideResult<()> {
     if run.client_id != input.client_id.trim()
         || run.session_id != input.session_id.trim()
         || run.source_checkpoint_id != input.source_checkpoint_id.trim()
@@ -349,7 +342,7 @@ fn request_envelope(
     run_id: &str,
     input: &crate::WorkspaceGuideRunStart,
     request: Value,
-) -> anyhow::Result<(String, String)> {
+) -> GuideResult<(String, String)> {
     let value = serde_json::json!({
         "schemaVersion": GUIDE_SCHEMA_VERSION,
         "kind": "workspaceGuide",
@@ -373,11 +366,13 @@ fn request_envelope(
 
 fn terminal_envelope(
     outcome: &crate::WorkspaceGuideRunOutcome,
-) -> anyhow::Result<(crate::WorkspaceGuideRunStatus, String, String)> {
+) -> GuideResult<(crate::WorkspaceGuideRunStatus, String, String)> {
     let (status, value) = match outcome {
         crate::WorkspaceGuideRunOutcome::Completed { result_json } => {
             let result: Value = serde_json::from_str(result_json.trim()).map_err(|error| {
-                anyhow::anyhow!("workspace guide result must be valid JSON: {error}")
+                crate::WorkspaceGuideError::Validation {
+                    message: format!("workspace guide result must be valid JSON: {error}"),
+                }
             })?;
             if !result.is_object() || result.get("schemaVersion").and_then(Value::as_i64) != Some(1)
             {
@@ -411,8 +406,12 @@ fn normalize_envelope(
     label: &str,
     value: Value,
     max_bytes: usize,
-) -> anyhow::Result<(String, String)> {
-    validate_agent_visible_json(&format!("guide {label} envelope"), &value)?;
+) -> GuideResult<(String, String)> {
+    validate_agent_visible_json(&format!("guide {label} envelope"), &value).map_err(|error| {
+        crate::WorkspaceGuideError::Validation {
+            message: error.to_string(),
+        }
+    })?;
     let json = serde_json::to_string(&value)?;
     if json.len() > max_bytes {
         return validation(format!(
@@ -447,24 +446,8 @@ async fn run_by_key(
     .await?)
 }
 
-fn required<'a>(label: &str, value: &'a str) -> anyhow::Result<&'a str> {
-    let value = value.trim();
-    if value.is_empty() {
-        return validation(format!("workspace guide {label} must not be empty"));
-    }
-    Ok(value)
-}
-
 fn normalized_optional(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|value| !value.is_empty())
-}
-
-fn validation<T>(message: impl Into<String>) -> anyhow::Result<T> {
-    Err(anyhow::anyhow!(message.into()))
-}
-
-fn conflict<T>(message: impl Into<String>) -> anyhow::Result<T> {
-    Err(anyhow::anyhow!(message.into()))
 }
 
 #[cfg(test)]

@@ -108,6 +108,17 @@ async fn begin_error(runtime: &StateRuntime, input: crate::WorkspaceGuideRunStar
         .to_string()
 }
 
+async fn begin_typed_error(
+    runtime: &StateRuntime,
+    input: crate::WorkspaceGuideRunStart,
+) -> crate::WorkspaceGuideError {
+    runtime
+        .workspace()
+        .start_guide_run(input)
+        .await
+        .unwrap_err()
+}
+
 #[tokio::test]
 async fn workspace_guide_run_lifecycle_is_bounded_exact_stale_and_noncanonical() {
     let (runtime, client, first) = fixture().await;
@@ -123,6 +134,9 @@ async fn workspace_guide_run_lifecycle_is_bounded_exact_stale_and_noncanonical()
     assert_eq!(envelope["sourceCheckpoint"]["id"], first.id);
     assert_eq!(envelope["sourceCheckpoint"]["revision"], 1);
     assert_eq!(envelope["safety"]["modelToolMode"], "disabled");
+    assert_eq!(run.model_tool_mode, "disabled");
+    assert_eq!(run.note_id.as_deref(), Some("draft-note"));
+    assert_eq!(run.encounter_id, None);
     assert_eq!(run.status, crate::WorkspaceGuideRunStatus::Running);
     assert_eq!(
         (
@@ -141,11 +155,9 @@ async fn workspace_guide_run_lifecycle_is_bounded_exact_stale_and_noncanonical()
     assert_eq!(replay.id, run.id);
     let mut changed = input.clone();
     changed.request_json = r#"{"focus":"different"}"#.to_string();
-    assert!(
-        begin_error(&runtime, changed)
-            .await
-            .contains("different content")
-    );
+    let error = begin_typed_error(&runtime, changed).await;
+    assert_eq!(error.kind(), "idempotencyConflict");
+    assert!(error.to_string().contains("different content"));
     let mut changed = input.clone();
     changed.model = "different-model".to_string();
     assert!(
@@ -153,24 +165,22 @@ async fn workspace_guide_run_lifecycle_is_bounded_exact_stale_and_noncanonical()
             .await
             .contains("different content")
     );
-    assert!(
-        begin_error(&runtime, start(&client, &first, "other-key", r#"{"x":1}"#))
-            .await
-            .contains("already has active run")
-    );
-    assert!(
-        begin_error(
-            &runtime,
-            start(
-                &client,
-                &first,
-                "path-key",
-                r#"{"sourcePath":"/tmp/private"}"#
-            ),
-        )
-        .await
-        .contains("path-bearing key")
-    );
+    let error =
+        begin_typed_error(&runtime, start(&client, &first, "other-key", r#"{"x":1}"#)).await;
+    assert_eq!(error.kind(), "activeRunConflict");
+    assert!(error.to_string().contains("already has active run"));
+    let error = begin_typed_error(
+        &runtime,
+        start(
+            &client,
+            &first,
+            "path-key",
+            r#"{"sourcePath":"/tmp/private"}"#,
+        ),
+    )
+    .await;
+    assert_eq!(error.kind(), "validation");
+    assert!(error.to_string().contains("path-bearing key"));
     let mut oversized = input;
     oversized.request_json = serde_json::json!({"text": "x".repeat(MAX_REQUEST_BYTES)}).to_string();
     assert!(begin_error(&runtime, oversized).await.contains("exceeds"));
@@ -200,23 +210,20 @@ async fn workspace_guide_run_lifecycle_is_bounded_exact_stale_and_noncanonical()
     assert!(end(&runtime, completion.clone()).await.replayed);
     let mut changed = completion;
     changed.source_turn_id = Some("different-turn".to_string());
-    assert!(
-        runtime
-            .workspace()
-            .finish_guide_run(changed)
-            .await
-            .unwrap_err()
-            .to_string()
-            .contains("different terminal content")
-    );
-    assert!(
-        begin_error(
-            &runtime,
-            start(&client, &first, "stale", r#"{"revision":1}"#),
-        )
+    let error = runtime
+        .workspace()
+        .finish_guide_run(changed)
         .await
-        .contains("no longer current")
-    );
+        .unwrap_err();
+    assert_eq!(error.kind(), "terminalConflict");
+    assert!(error.to_string().contains("different terminal content"));
+    let error = begin_typed_error(
+        &runtime,
+        start(&client, &first, "stale", r#"{"revision":1}"#),
+    )
+    .await;
+    assert_eq!(error.kind(), "staleCheckpoint");
+    assert!(error.to_string().contains("no longer current"));
 
     for (key, outcome, without_source) in [
         (
@@ -276,6 +283,41 @@ async fn workspace_guide_run_lifecycle_is_bounded_exact_stale_and_noncanonical()
         ]
     );
 
+    let first_page = runtime
+        .workspace()
+        .list_guide_runs(crate::WorkspaceGuideRunFilter {
+            client_id: history[0].client_id.clone(),
+            session_id: Some(history[0].session_id.clone()),
+            limit: Some(1),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let next_page = runtime
+        .workspace()
+        .list_guide_runs(crate::WorkspaceGuideRunFilter {
+            client_id: history[0].client_id.clone(),
+            session_id: Some(history[0].session_id.clone()),
+            cursor_created_at_ms: Some(first_page[0].created_at.timestamp_millis()),
+            cursor_id: Some(first_page[0].id.clone()),
+            limit: Some(1),
+        })
+        .await
+        .unwrap();
+    assert_eq!(first_page.len(), 1);
+    assert_eq!(next_page.len(), 1);
+    assert_ne!(first_page[0].id, next_page[0].id);
+    let cursor_error = runtime
+        .workspace()
+        .list_guide_runs(crate::WorkspaceGuideRunFilter {
+            client_id: history[0].client_id.clone(),
+            cursor_created_at_ms: Some(first_page[0].created_at.timestamp_millis()),
+            ..Default::default()
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(cursor_error.kind(), "validation");
+
     let canonical_writes: i64 = sqlx::query_scalar(
         "SELECT (SELECT COUNT(*) FROM workspace_notes) + (SELECT COUNT(*) FROM workspace_context_packets) + (SELECT COUNT(*) FROM workspace_agent_results) + (SELECT COUNT(*) FROM workspace_note_proposals)",
     )
@@ -284,7 +326,7 @@ async fn workspace_guide_run_lifecycle_is_bounded_exact_stale_and_noncanonical()
     .unwrap();
     assert_eq!(canonical_writes, 0);
     let audit_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM workspace_audit_events WHERE entity_type = 'guide_run'",
+        "SELECT COUNT(*) FROM workspace_audit_events WHERE entity_type = 'guide_run' AND note_id = 'draft-note'",
     )
     .fetch_one(runtime.workspace().pool.as_ref())
     .await
