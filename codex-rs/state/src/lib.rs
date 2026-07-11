@@ -106,6 +106,7 @@ pub use model::WorkspaceDraftSessionSnapshot;
 pub use model::WorkspaceDraftSessionTerminalStatus;
 pub use model::WorkspaceEncounter;
 pub use model::WorkspaceEncounterUpsert;
+pub use model::WorkspaceGuideError;
 pub use model::WorkspaceGuideRun;
 pub use model::WorkspaceGuideRunFilter;
 pub use model::WorkspaceGuideRunFinish;

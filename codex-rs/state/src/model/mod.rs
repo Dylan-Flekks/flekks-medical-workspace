@@ -114,6 +114,7 @@ pub use workspace_drafts::WorkspaceDraftSessionClose;
 pub use workspace_drafts::WorkspaceDraftSessionFilter;
 pub use workspace_drafts::WorkspaceDraftSessionSnapshot;
 pub use workspace_drafts::WorkspaceDraftSessionTerminalStatus;
+pub use workspace_guides::WorkspaceGuideError;
 pub use workspace_guides::WorkspaceGuideRun;
 pub use workspace_guides::WorkspaceGuideRunFilter;
 pub use workspace_guides::WorkspaceGuideRunFinish;
