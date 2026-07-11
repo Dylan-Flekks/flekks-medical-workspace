@@ -33,4 +33,4 @@ Patient: No patient selected  DOB: blank  MRN: blank  Contact: Missing contact  
 │                            ││                                                                                        │
 │                            ││Intake Checklist                                                                        │
 └────────────────────────────┘└────────────────────────────────────────────────────────────────────────────────────────┘
-Focus: Directory | Mode: Navigate | Keys: ↑/↓ patient  Enter open  / search  Tab/⇧Tab pane | Next: Search/open patient
+Focus: Directory | Mode: Navigate | Keys: ↑/↓ patient  Enter open  / search  Tab/⇧Tab pane  Ctrl-P commands

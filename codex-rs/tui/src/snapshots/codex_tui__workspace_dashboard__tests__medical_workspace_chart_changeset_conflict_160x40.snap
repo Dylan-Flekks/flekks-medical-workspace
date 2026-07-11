@@ -21,7 +21,7 @@ Patient: Jordan Patient  DOB: blank  MRN: blank  Contact: Missing contact  Cover
 │Patient Notes                   │┌Note Body─────────────────────────────────────────────────────────────────────┐│  Commit key: stable-conflict-key           │
 │  Medical Notes                 ││Unsaved clinician draft.                                                      ││                                            │
 │> daily  1970-01-01  Visit note ││                                                                              ││  ● Ctrl-S refreshes canonical data and     │
-│[draft]                         ││                                                                              ││preserves the draft                         │
+│[unsaved] [draft]               ││                                                                              ││preserves the draft                         │
 │                                ││                                                                              ││  Human draft stays in the center; canonical│
 │                                ││                                                                              ││DB changes only after commit success.       │
 │                                ││                                                                              ││                                            │

@@ -9,19 +9,19 @@ Patient: Jordan Patient  DOB: blank  MRN: blank  Contact: Missing contact  Cover
 │Local search: /             ││Display: Jordan Patient                                             │
 │0 active patients; local    ││Preferred:                                                          │
 │only     ┌Commands──────────────────────────────────────────────────────────────────────┐         │
-│No saved │Search commands  :proposal                                                    │         │
-│New patie│Enter run   Esc close   ↑/↓ move                                              │         │
+│No saved │Search commands  :                                                            │         │
+│New patie│Ctrl-P Commands anywhere  Enter run  Esc close  ↑/↓                           │         │
 │         │                                                                              │         │
-│         │> Select next proposal                                    :proposal next off  │         │
-└─────────│Accept proposal                                       :proposal accept off    │─────────┘
-┌Patient N│Decline proposal                                     :proposal decline off    │─────────┐
-│Patient N│Make note proposal from returned work        :agent result to proposal off    │         │
-│  New not│Jump to proposals                                      :workflow proposals    │─────────┘
-│  No pati│                                                                              │─────────┐
-│:note new│Disabled: No pending proposals for the active note.                           │         │
-└─────────│                                                                              │         │
-┌Uploaded │                                                                              │         │
-│Uploaded │                                                                              │─────────┘
+│         │Recommended now                                                               │         │
+└─────────│> Search patients                                        :patient search [/]  │─────────┘
+┌Patient N│Open patient list                                                :patients    │─────────┐
+│Patient N│Open patient demographics                                    :demographics    │         │
+│  Visit n│Common actions                                                                │─────────┘
+│  Working│New note                                                     :note new [n]    │─────────┐
+│saves it │Save chart workspace                                        :save [Ctrl-S]    │         │
+└─────────│Agent bridge                                                                  │         │
+┌Uploaded │Review Packet                                               :agent preview    │         │
+│Uploaded │… 104 more                                                                    │─────────┘
 │No files │                                                                              │─────────┐
 │Paste/dro└──────────────────────────────────────────────────────────────────────────────┘         │
 │                            ││Next                                                                │
@@ -29,4 +29,4 @@ Patient: Jordan Patient  DOB: blank  MRN: blank  Contact: Missing contact  Cover
 │                            ││                                                                    │
 │                            ││Intake Checklist                                                    │
 └────────────────────────────┘└────────────────────────────────────────────────────────────────────┘
-Mode: Commands | Keys: ↑/↓ command  Enter run  Esc close | :proposal
+Mode: Commands | Keys: ↑/↓ command  Enter run  Esc close | :

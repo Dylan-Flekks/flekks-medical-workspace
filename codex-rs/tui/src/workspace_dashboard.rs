@@ -3643,6 +3643,13 @@ impl WorkspaceDashboard {
 
         if key_event.modifiers.contains(KeyModifiers::CONTROL) {
             match key_event.code {
+                KeyCode::Char(c)
+                    if self.profile == WorkspaceProfile::Medical
+                        && c.eq_ignore_ascii_case(&'p') =>
+                {
+                    self.open_command_palette();
+                    return WorkspaceDashboardAction::Consumed;
+                }
                 KeyCode::Char(c) if c.eq_ignore_ascii_case(&'s') => {
                     return WorkspaceDashboardAction::Save;
                 }
@@ -10572,7 +10579,7 @@ impl WorkspaceDashboard {
             WorkspaceFocus::Agent => match self.workflow_section {
                 MedicalWorkflowSection::AgentRequest => "type local instructions".to_string(),
                 MedicalWorkflowSection::ContextPacket => "Ctrl-G sends packet".to_string(),
-                MedicalWorkflowSection::AgentInbox => "review returned work".to_string(),
+                MedicalWorkflowSection::AgentInbox => "Open Agent Review".to_string(),
                 _ => "r input | p packet | i returned".to_string(),
             },
             WorkspaceFocus::Workflow => {
@@ -10689,9 +10696,18 @@ impl WorkspaceDashboard {
 
     fn command_palette_lines_for_area(&self, width: u16, height: u16) -> Vec<Line<'static>> {
         let command_input = self.command_input.as_deref().unwrap_or_default();
-        let matches = self.command_palette_actions();
+        let sections = self.command_palette_sections();
+        let matches = sections
+            .iter()
+            .flat_map(|(_, actions)| actions.iter().copied())
+            .collect::<Vec<_>>();
         let selected_index = self.selected_command_index(matches.len());
         let inner_width = width.saturating_sub(4) as usize;
+        let shortcut_help = if self.profile == WorkspaceProfile::Medical {
+            "Ctrl-P Commands anywhere  Enter run  Esc close  ↑/↓"
+        } else {
+            "Enter run   Esc close   ↑/↓ move"
+        };
         let mut lines = vec![
             Line::from(vec![
                 Span::styled("Search commands  ", Style::default().fg(Color::DarkGray)),
@@ -10699,7 +10715,7 @@ impl WorkspaceDashboard {
                 Span::raw(command_input.to_string()),
             ]),
             Line::from(Span::styled(
-                "Enter run   Esc close   ↑/↓ move",
+                shortcut_help,
                 Style::default().fg(Color::DarkGray),
             )),
             Line::from(""),
@@ -10713,30 +10729,73 @@ impl WorkspaceDashboard {
             return lines;
         }
 
+        enum PaletteRow<'a> {
+            Section(&'a str),
+            Action {
+                index: usize,
+                action: &'static WorkspaceActionDef,
+            },
+        }
+
+        let mut action_index = 0;
+        let mut rows = Vec::new();
+        for (title, actions) in &sections {
+            if self.profile == WorkspaceProfile::Medical {
+                rows.push(PaletteRow::Section(title));
+            }
+            for action in actions {
+                rows.push(PaletteRow::Action {
+                    index: action_index,
+                    action,
+                });
+                action_index += 1;
+            }
+        }
+        let selected_row = rows
+            .iter()
+            .position(|row| {
+                matches!(
+                    row,
+                    PaletteRow::Action { index, .. } if *index == selected_index
+                )
+            })
+            .unwrap_or_default();
         let visible_rows = height.saturating_sub(7).max(3) as usize;
-        let start = if selected_index >= visible_rows {
-            selected_index + 1 - visible_rows
+        let mut start = if selected_row >= visible_rows {
+            selected_row + 1 - visible_rows
         } else {
             0
         };
-        let end = (start + visible_rows).min(matches.len());
+        if let Some(section_start) = rows[..=selected_row]
+            .iter()
+            .rposition(|row| matches!(row, PaletteRow::Section(_)))
+            && selected_row + 1 - section_start <= visible_rows
+        {
+            start = section_start;
+        }
+        let end = (start + visible_rows).min(rows.len());
         if start > 0 {
             lines.push(Line::from(Span::styled(
                 format!("… {start} earlier"),
                 Style::default().fg(Color::DarkGray),
             )));
         }
-        for (index, action) in matches[start..end].iter().enumerate() {
-            let absolute_index = start + index;
-            lines.push(self.command_palette_action_line(
-                action,
-                absolute_index == selected_index,
-                inner_width,
-            ));
+        for row in &rows[start..end] {
+            match row {
+                PaletteRow::Section(title) => lines.push(Line::from(Span::styled(
+                    (*title).to_string(),
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::BOLD),
+                ))),
+                PaletteRow::Action { index, action } => lines.push(
+                    self.command_palette_action_line(action, *index == selected_index, inner_width),
+                ),
+            }
         }
-        if end < matches.len() {
+        if end < rows.len() {
             lines.push(Line::from(Span::styled(
-                format!("… {} more", matches.len() - end),
+                format!("… {} more", rows.len() - end),
                 Style::default().fg(Color::DarkGray),
             )));
         }
@@ -10835,14 +10894,31 @@ impl WorkspaceDashboard {
                 .collect::<Vec<_>>();
             if !current_scope_actions.is_empty() {
                 used.extend(current_scope_actions.iter().map(|action| action.id));
-                sections.push(("Quick actions now".to_string(), current_scope_actions));
+                sections.push(("Recommended now".to_string(), current_scope_actions));
+            }
+
+            let common_actions = [
+                WorkspaceActionId::PatientSearch,
+                WorkspaceActionId::NoteNew,
+                WorkspaceActionId::Save,
+            ]
+            .into_iter()
+            .filter(|action_id| !used.contains(action_id))
+            .filter_map(workspace_action_by_id)
+            .filter(|action| {
+                action.applies_to(self.profile) && command_action_matches_filter(action, filter)
+            })
+            .collect::<Vec<_>>();
+            if !common_actions.is_empty() {
+                used.extend(common_actions.iter().map(|action| action.id));
+                sections.push(("Common actions".to_string(), common_actions));
             }
 
             let bridge_actions = [
-                WorkspaceActionId::AgentRequest,
                 WorkspaceActionId::AgentPreview,
                 WorkspaceActionId::Handoff,
                 WorkspaceActionId::AgentInbox,
+                WorkspaceActionId::AgentRequest,
                 WorkspaceActionId::ScopeLast,
             ]
             .into_iter()
@@ -10859,16 +10935,22 @@ impl WorkspaceDashboard {
         }
 
         for group in WorkspaceActionGroup::ALL {
-            let group_actions = WORKSPACE_ACTIONS
-                .iter()
-                .filter(|action| !used.contains(&action.id))
-                .filter(|action| {
-                    action.group == group
-                        && action.applies_to(self.profile)
-                        && command_action_matches_filter(action, filter)
-                })
-                .collect::<Vec<_>>();
+            let mut group_actions = Vec::new();
+            for action in WORKSPACE_ACTIONS.iter().filter(|action| {
+                action.group == group
+                    && action.applies_to(self.profile)
+                    && command_action_matches_filter(action, filter)
+            }) {
+                if !used.contains(&action.id)
+                    && !group_actions
+                        .iter()
+                        .any(|existing: &&WorkspaceActionDef| existing.id == action.id)
+                {
+                    group_actions.push(action);
+                }
+            }
             if !group_actions.is_empty() {
+                used.extend(group_actions.iter().map(|action| action.id));
                 sections.push((group.title().to_string(), group_actions));
             }
         }
@@ -11189,6 +11271,7 @@ impl WorkspaceDashboard {
 
     fn render_medical_notes(&self, area: Rect, buf: &mut Buffer) {
         let mut lines = Vec::new();
+        let active_draft_label = self.medical_note_tree_draft_label();
         lines.push(Line::from(Span::styled(
             "Patient Notes",
             Style::default()
@@ -11197,11 +11280,16 @@ impl WorkspaceDashboard {
         )));
         if self.notes.is_empty() {
             lines.push(selected_line(
-                "New note",
+                active_draft_label.as_deref().unwrap_or("New note"),
                 self.focus == WorkspaceFocus::Notes,
             ));
+            let guidance = if active_draft_label.is_some() {
+                "  Working draft; Ctrl-S saves it to the chart."
+            } else {
+                "  No patient notes yet. Use :note new."
+            };
             lines.push(Line::from(Span::styled(
-                "  No patient notes yet. Use :note new.",
+                guidance,
                 Style::default().fg(Color::DarkGray),
             )));
             lines.push(Line::from(Span::styled(
@@ -11226,23 +11314,25 @@ impl WorkspaceDashboard {
                         .add_modifier(Modifier::BOLD),
                 )));
                 for (index, note) in group_notes {
-                    let marker = if index == self.note_index && self.draft_note.id.is_some() {
-                        "> "
+                    let active = index == self.note_index && self.draft_note.id.is_some();
+                    let marker = if active { "> " } else { "  " };
+                    let title = if active {
+                        active_draft_label.as_deref().unwrap_or(note.title.as_str())
                     } else {
-                        "  "
+                        note.title.as_str()
                     };
                     lines.push(Line::from(format!(
                         "{marker}{}  {}  {} [{}]",
                         compact_preview(&note.kind, 16),
                         epoch_seconds_date_label(note.created_at),
-                        compact_preview(&note.title, 28),
+                        compact_preview(title, 38),
                         note_status_readable_label(&note.status),
                     )));
                 }
             }
             if self.draft_note.id.is_none() {
                 lines.push(selected_line(
-                    "New note",
+                    active_draft_label.as_deref().unwrap_or("New note"),
                     self.note_index >= self.notes.len(),
                 ));
             }
@@ -11254,6 +11344,31 @@ impl WorkspaceDashboard {
             Paragraph::new(lines).wrap(Wrap { trim: false }),
             buf,
         );
+    }
+
+    fn medical_note_tree_draft_label(&self) -> Option<String> {
+        if self.draft_note.is_locked() {
+            return None;
+        }
+
+        let changed = if let Some(note_id) = self.draft_note.id.as_deref() {
+            let canonical = self.notes.iter().find(|note| note.id == note_id)?;
+            if matches!(canonical.status.trim(), "signed" | "addended" | "locked") {
+                return None;
+            }
+            canonical.title != self.effective_note_title()
+                || canonical.body != self.draft_note.body
+                || canonical.status != self.draft_note.status_label()
+                || canonical.encounter_id != self.draft_note.encounter_id
+        } else {
+            self.draft_note.should_save()
+        };
+        changed.then(|| {
+            format!(
+                "{} [unsaved]",
+                compact_preview(self.effective_note_title(), 28)
+            )
+        })
     }
 
     fn patient_admin_editor_lines(&self, mode: PatientAdminEditMode) -> Vec<Line<'static>> {
@@ -18214,6 +18329,79 @@ mod tests {
     }
 
     #[test]
+    fn medical_ctrl_p_opens_commands_from_every_pane_without_editing_text() {
+        for focus in [
+            WorkspaceFocus::Clients,
+            WorkspaceFocus::Notes,
+            WorkspaceFocus::PatientFiles,
+            WorkspaceFocus::Demographics,
+            WorkspaceFocus::NoteTitle,
+            WorkspaceFocus::NoteBody,
+            WorkspaceFocus::Workflow,
+            WorkspaceFocus::Agent,
+        ] {
+            let mut dashboard = medical_recursive_base_dashboard();
+            dashboard.focus = focus;
+            let title_before = dashboard.draft_note.title.clone();
+            let body_before = dashboard.draft_note.body.clone();
+
+            assert_eq!(
+                dashboard
+                    .handle_key_event(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL,)),
+                WorkspaceDashboardAction::Consumed,
+                "Ctrl-P should open Commands from {focus:?}"
+            );
+
+            assert_eq!(dashboard.command_input.as_deref(), Some(""));
+            assert_eq!(dashboard.draft_note.title, title_before);
+            assert_eq!(dashboard.draft_note.body, body_before);
+        }
+
+        let mut medical_editor = medical_recursive_base_dashboard();
+        medical_editor.focus = WorkspaceFocus::NoteBody;
+        press_consumed(&mut medical_editor, KeyCode::Char(':'));
+        assert!(medical_editor.command_input.is_none());
+        assert!(medical_editor.draft_note.body.ends_with(':'));
+    }
+
+    #[test]
+    fn medical_patient_notes_tree_tracks_editable_draft_titles_without_mutating_canonical() {
+        let note = test_note("note-1", "Canonical daily note", "daily", "draft", 1);
+        let mut dashboard = WorkspaceDashboard {
+            notes: vec![note.clone()],
+            note_index: 0,
+            draft_note: NoteDraft::from_note(&note),
+            focus: WorkspaceFocus::NoteTitle,
+            ..WorkspaceDashboard::new(WorkspaceProfile::Medical)
+        };
+
+        assert!(!medical_notes_pane_text(&dashboard).contains("[unsaved]"));
+        type_text(&mut dashboard, " revised");
+        let rendered = medical_notes_pane_text(&dashboard);
+        assert!(rendered.contains("Canonical daily note revised [unsaved]"));
+        assert_eq!(dashboard.notes[0].title, "Canonical daily note");
+
+        let mut new_note = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+        assert!(medical_notes_pane_text(&new_note).contains("New note"));
+        assert!(!medical_notes_pane_text(&new_note).contains("[unsaved]"));
+        new_note.focus = WorkspaceFocus::NoteBody;
+        type_text(&mut new_note, "Body-only draft");
+        assert!(medical_notes_pane_text(&new_note).contains("Untitled note [unsaved]"));
+
+        let signed = test_note("note-signed", "Signed canonical", "daily", "signed", 1);
+        let mut locked = WorkspaceDashboard {
+            notes: vec![signed.clone()],
+            draft_note: NoteDraft::from_note(&signed),
+            ..WorkspaceDashboard::new(WorkspaceProfile::Medical)
+        };
+        locked.draft_note.title = "Attempted replacement".to_string();
+        let locked_rendered = medical_notes_pane_text(&locked);
+        assert!(locked_rendered.contains("Signed canonical"));
+        assert!(!locked_rendered.contains("Attempted replacement"));
+        assert!(!locked_rendered.contains("[unsaved]"));
+    }
+
+    #[test]
     fn unsaved_client_edits_block_client_switch() {
         let mut dashboard = WorkspaceDashboard {
             clients: vec![
@@ -19896,6 +20084,10 @@ mod tests {
                     footer.contains("Tab/⇧Tab pane"),
                     "pane navigation missing for {focus:?} at width {width}: {footer}"
                 );
+                assert!(
+                    footer.contains("Ctrl-P commands"),
+                    "global Commands shortcut missing for {focus:?} at width {width}: {footer}"
+                );
             }
         }
 
@@ -20079,18 +20271,21 @@ mod tests {
     }
 
     #[test]
-    fn medical_command_palette_is_compact_and_single_row() {
+    fn medical_command_palette_shows_prioritized_sections_and_compact_rows() {
         let mut dashboard = medical_recursive_base_dashboard();
         dashboard.open_command_palette();
-        dashboard.command_input = Some("patient".to_string());
 
         let lines = dashboard.command_palette_lines_for_area(88, 18);
         let plain = lines.iter().map(line_plain_text).collect::<Vec<_>>();
         assert!(plain.iter().any(|line| line.contains("Search commands")));
         assert!(
-            plain.iter().any(|line| line.contains(":patient"))
-                || plain.iter().any(|line| line.contains(":demographics"))
+            plain
+                .iter()
+                .any(|line| line.contains("Ctrl-P Commands anywhere"))
         );
+        assert!(plain.iter().any(|line| line == "Recommended now"));
+        assert!(plain.iter().any(|line| line == "Common actions"));
+        assert!(plain.iter().any(|line| line == "Agent bridge"));
         assert!(
             plain.len() <= 18,
             "palette should fit the fixed overlay instead of growing into a report:\n{}",
@@ -20103,11 +20298,25 @@ mod tests {
                 plain.join("\n")
             );
         }
-        assert!(
-            !plain.iter().any(|line| line == "Quick actions now"),
-            "section headings should not dominate the compact command picker:\n{}",
-            plain.join("\n")
-        );
+
+        let actions = dashboard.command_palette_actions();
+        for action_id in [
+            WorkspaceActionId::PatientSearch,
+            WorkspaceActionId::NoteNew,
+            WorkspaceActionId::Save,
+            WorkspaceActionId::AgentPreview,
+            WorkspaceActionId::Handoff,
+            WorkspaceActionId::AgentInbox,
+        ] {
+            assert_eq!(
+                actions
+                    .iter()
+                    .filter(|action| action.id == action_id)
+                    .count(),
+                1,
+                "prioritized action {action_id:?} should appear exactly once"
+            );
+        }
     }
 
     #[test]
@@ -24403,10 +24612,7 @@ mod tests {
         };
         dashboard.set_context_for_tests("Jordan Patient", "Visit note", "Human-entered note body.");
         dashboard.set_record_dates_for_tests("2026-01-01", "2026-06-09");
-        dashboard.handle_key_event(KeyEvent::from(KeyCode::Char(':')));
-        for c in "proposal".chars() {
-            dashboard.handle_key_event(KeyEvent::from(KeyCode::Char(c)));
-        }
+        dashboard.handle_key_event(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL));
 
         for (width, height) in [(160, 40), (120, 32), (100, 28), (80, 20), (50, 10)] {
             insta::assert_snapshot!(
@@ -27204,6 +27410,13 @@ mod tests {
 
     fn render_dashboard_lines(dashboard: &WorkspaceDashboard) -> String {
         render_dashboard_lines_at(dashboard, 160, 32)
+    }
+
+    fn medical_notes_pane_text(dashboard: &WorkspaceDashboard) -> String {
+        let area = Rect::new(0, 0, 80, 20);
+        let mut buf = Buffer::empty(area);
+        dashboard.render_medical_notes(area, &mut buf);
+        buffer_text(&buf, area)
     }
 
     fn render_dashboard_lines_at(
