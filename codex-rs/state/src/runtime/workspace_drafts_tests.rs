@@ -75,6 +75,16 @@ fn close_input(
     }
 }
 
+fn session_filter(client_id: String) -> crate::WorkspaceDraftSessionFilter {
+    crate::WorkspaceDraftSessionFilter {
+        scope: crate::WorkspaceDraftSessionScope::Client(client_id),
+        include_closed: false,
+        cursor_updated_at_ms: None,
+        cursor_id: None,
+        limit: None,
+    }
+}
+
 #[tokio::test]
 async fn workspace_drafts_checkpoint_is_normalized_idempotent_and_revisioned() {
     let (runtime, client) = fixture().await;
@@ -149,10 +159,7 @@ async fn workspace_drafts_checkpoint_is_normalized_idempotent_and_revisioned() {
 
     let sessions = runtime
         .workspace()
-        .list_draft_sessions(crate::WorkspaceDraftSessionFilter {
-            client_id: client.id.clone(),
-            ..Default::default()
-        })
+        .list_draft_sessions(session_filter(client.id.clone()))
         .await
         .expect("draft sessions should list");
     assert_eq!(sessions[0].session.current_revision, 1);
@@ -211,9 +218,11 @@ async fn workspace_draft_session_cursor_is_stable_for_equal_timestamps() {
     let first_page = runtime
         .workspace()
         .list_draft_sessions(crate::WorkspaceDraftSessionFilter {
-            client_id: client.id.clone(),
+            scope: crate::WorkspaceDraftSessionScope::Client(client.id.clone()),
+            include_closed: false,
+            cursor_updated_at_ms: None,
+            cursor_id: None,
             limit: Some(1),
-            ..Default::default()
         })
         .await
         .expect("first session page should list");
@@ -222,11 +231,11 @@ async fn workspace_draft_session_cursor_is_stable_for_equal_timestamps() {
     let second_page = runtime
         .workspace()
         .list_draft_sessions(crate::WorkspaceDraftSessionFilter {
-            client_id: client.id.clone(),
+            scope: crate::WorkspaceDraftSessionScope::Client(client.id.clone()),
+            include_closed: false,
             cursor_updated_at_ms: Some(cursor.updated_at.timestamp_millis()),
             cursor_id: Some(cursor.id.clone()),
             limit: Some(1),
-            ..Default::default()
         })
         .await
         .expect("second session page should list");
@@ -256,10 +265,7 @@ async fn workspace_draft_session_cursor_is_stable_for_equal_timestamps() {
         .expect("test checkpoint scope should change");
     let scoped = runtime
         .workspace()
-        .list_draft_sessions(crate::WorkspaceDraftSessionFilter {
-            client_id: client.id,
-            ..Default::default()
-        })
+        .list_draft_sessions(session_filter(client.id))
         .await
         .expect("patient-scoped sessions should list");
     assert_eq!(scoped.len(), 1);
@@ -349,10 +355,7 @@ async fn workspace_drafts_discard_is_durable_idempotent_and_client_scoped() {
     assert!(
         runtime
             .workspace()
-            .list_draft_sessions(crate::WorkspaceDraftSessionFilter {
-                client_id: client.id.clone(),
-                ..Default::default()
-            })
+            .list_draft_sessions(session_filter(client.id.clone()))
             .await
             .expect("active sessions should list")
             .is_empty()
@@ -409,10 +412,7 @@ async fn workspace_draft_close_rejects_stale_current_checkpoint_provenance() {
     );
     let active = runtime
         .workspace()
-        .list_draft_sessions(crate::WorkspaceDraftSessionFilter {
-            client_id: client.id.clone(),
-            ..Default::default()
-        })
+        .list_draft_sessions(session_filter(client.id.clone()))
         .await
         .expect("newer active session should remain available");
     assert_eq!(active[0].current_checkpoint, newer);

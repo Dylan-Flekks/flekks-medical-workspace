@@ -91,7 +91,10 @@ pub(super) async fn workspace_context_packet_row_by_id(
     let row = sqlx::query(
         r#"
 SELECT
-    id, client_id, encounter_id, note_id, human_request,
+    id, client_id, encounter_id, note_id,
+    source_draft_session_id, source_draft_checkpoint_id,
+    source_draft_checkpoint_revision, source_draft_checkpoint_sha256,
+    human_request,
     selected_artifact_ids_json, selected_derivative_ids_json, selected_clip_ids_json,
     artifact_summary, derivative_summary, clip_summary, chart_context_summary,
     context_envelope_json, context_envelope_sha256, clinician_actor,

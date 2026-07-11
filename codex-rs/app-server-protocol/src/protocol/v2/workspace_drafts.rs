@@ -71,6 +71,8 @@ pub struct WorkspaceDraftSession {
 pub struct WorkspaceDraftCheckpointCreateParams {
     #[ts(optional = nullable)]
     pub session_id: Option<String>,
+    #[ts(optional = nullable)]
+    pub session_creation_key: Option<String>,
     pub client_id: String,
     #[ts(optional = nullable)]
     pub encounter_id: Option<String>,
@@ -116,7 +118,10 @@ pub struct WorkspaceDraftCheckpointListResponse {
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
 pub struct WorkspaceDraftSessionListParams {
-    pub client_id: String,
+    #[ts(optional = nullable)]
+    pub client_id: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub all_clients: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub include_closed: bool,
     #[ts(optional = nullable)]
@@ -157,3 +162,7 @@ pub struct WorkspaceDraftSessionCloseParams {
 pub struct WorkspaceDraftSessionCloseResponse {
     pub session: WorkspaceDraftSession,
 }
+
+#[cfg(test)]
+#[path = "workspace_drafts_tests.rs"]
+mod tests;

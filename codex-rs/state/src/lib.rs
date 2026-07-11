@@ -102,6 +102,7 @@ pub use model::WorkspaceDraftError;
 pub use model::WorkspaceDraftSession;
 pub use model::WorkspaceDraftSessionClose;
 pub use model::WorkspaceDraftSessionFilter;
+pub use model::WorkspaceDraftSessionScope;
 pub use model::WorkspaceDraftSessionSnapshot;
 pub use model::WorkspaceDraftSessionTerminalStatus;
 pub use model::WorkspaceEncounter;

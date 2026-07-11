@@ -43,6 +43,7 @@ pub struct WorkspaceDraftSessionSnapshot {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WorkspaceDraftCheckpointCreate {
     pub session_id: Option<String>,
+    pub session_creation_key: Option<String>,
     pub client_id: String,
     pub encounter_id: Option<String>,
     pub note_id: Option<String>,
@@ -60,9 +61,15 @@ pub struct WorkspaceDraftCheckpointFilter {
     pub limit: Option<u32>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorkspaceDraftSessionScope {
+    Client(String),
+    AllActiveClients,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceDraftSessionFilter {
-    pub client_id: String,
+    pub scope: WorkspaceDraftSessionScope,
     pub include_closed: bool,
     pub cursor_updated_at_ms: Option<i64>,
     pub cursor_id: Option<String>,
