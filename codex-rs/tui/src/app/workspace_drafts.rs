@@ -32,6 +32,32 @@ impl App {
         }
     }
 
+    pub(super) async fn discard_workspace_recovery(&mut self, app_server: &mut AppServerSession) {
+        let result = if let Some(dashboard) = self.workspace_dashboard.as_mut() {
+            dashboard.discard_pending_draft(app_server).await
+        } else {
+            Ok(())
+        };
+        if let Err(error) = result {
+            self.chat_widget.add_error_message(format!(
+                "Failed to discard workspace draft checkpoint: {error}"
+            ));
+        }
+    }
+
+    pub(super) async fn restore_workspace_recovery(&mut self, app_server: &mut AppServerSession) {
+        let result = if let Some(dashboard) = self.workspace_dashboard.as_mut() {
+            dashboard.restore_pending_draft(app_server).await
+        } else {
+            Ok(())
+        };
+        if let Err(error) = result {
+            self.chat_widget.add_error_message(format!(
+                "Failed to restore workspace draft checkpoint: {error}"
+            ));
+        }
+    }
+
     pub(super) fn schedule_workspace_draft_checkpoint(&self, tui: &tui::Tui) {
         if let Some(delay) = self
             .workspace_dashboard

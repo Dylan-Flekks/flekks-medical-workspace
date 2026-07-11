@@ -907,7 +907,6 @@ impl AppServerSession {
             .wrap_err("workspace/draft/checkpoint/create failed in TUI")
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) async fn workspace_draft_session_list(
         &mut self,
         params: WorkspaceDraftSessionListParams,

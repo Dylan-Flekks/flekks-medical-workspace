@@ -7,8 +7,10 @@
 use crate::app_server_session::AppServerSession;
 use codex_app_server_protocol::WorkspaceDraftCheckpoint;
 use codex_app_server_protocol::WorkspaceDraftCheckpointCreateParams;
+use codex_app_server_protocol::WorkspaceDraftSession;
 use codex_app_server_protocol::WorkspaceDraftSessionCloseParams;
 use codex_app_server_protocol::WorkspaceDraftSessionCloseStatus;
+use codex_app_server_protocol::WorkspaceDraftSessionListParams;
 use color_eyre::eyre::Result;
 use serde_json::Value;
 use std::time::Duration;
@@ -66,6 +68,7 @@ pub(crate) struct WorkspaceDraftCoordinator {
     saved_generation: u64,
     debounce_deadline: Option<Instant>,
     focus_checkpoint_requested: bool,
+    recovery: Option<WorkspaceDraftSession>,
 }
 
 impl WorkspaceDraftCoordinator {
@@ -156,6 +159,57 @@ impl WorkspaceDraftCoordinator {
         }
     }
 
+    pub(crate) async fn detect_recovery(
+        &mut self,
+        app_server: &mut AppServerSession,
+        client_id: &str,
+    ) -> Result<()> {
+        self.reset_for_client(client_id);
+        let response = app_server
+            .workspace_draft_session_list(WorkspaceDraftSessionListParams {
+                client_id: client_id.to_string(),
+                include_closed: false,
+                cursor: None,
+                limit: Some(20),
+            })
+            .await?;
+        self.recovery = response.data.into_iter().next();
+        Ok(())
+    }
+
+    pub(crate) fn pending_recovery(&self) -> Option<&WorkspaceDraftSession> {
+        self.recovery.as_ref()
+    }
+
+    pub(crate) fn accept_recovery(&mut self) -> Option<WorkspaceDraftSession> {
+        let recovery = self.recovery.take()?;
+        self.session_id = Some(recovery.id.clone());
+        self.saved_generation = self.edit_generation;
+        self.debounce_deadline = None;
+        Some(recovery)
+    }
+
+    pub(crate) async fn discard_recovery(
+        &mut self,
+        app_server: &mut AppServerSession,
+    ) -> Result<bool> {
+        let Some(recovery) = self.recovery.as_ref() else {
+            return Ok(false);
+        };
+        app_server
+            .workspace_draft_session_close(WorkspaceDraftSessionCloseParams {
+                session_id: recovery.id.clone(),
+                client_id: recovery.client_id.clone(),
+                status: WorkspaceDraftSessionCloseStatus::Discarded,
+                actor: CHECKPOINT_ACTOR.to_string(),
+                reason: "clinician discarded recovery prompt".to_string(),
+            })
+            .await?;
+        self.recovery = None;
+        self.session_id = None;
+        Ok(true)
+    }
+
     pub(crate) async fn close_after_canonical_save(
         &mut self,
         app_server: &mut AppServerSession,
@@ -175,6 +229,7 @@ impl WorkspaceDraftCoordinator {
             })
             .await?;
         self.session_id = None;
+        self.recovery = None;
         self.saved_generation = self.edit_generation;
         self.debounce_deadline = None;
         Ok(true)
@@ -191,6 +246,13 @@ impl WorkspaceDraftCoordinator {
         self.saved_generation = 0;
         self.debounce_deadline = None;
         self.focus_checkpoint_requested = false;
+        self.recovery = None;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_recovery_for_tests(&mut self, recovery: WorkspaceDraftSession) {
+        self.active_client_id = Some(recovery.client_id.clone());
+        self.recovery = Some(recovery);
     }
 }
 
