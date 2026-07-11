@@ -211,6 +211,7 @@ macro_rules! client_request_definitions {
     ) => {
         /// Request from the client to the server.
         #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+        #[allow(clippy::large_enum_variant)]
         #[serde(tag = "method", rename_all = "camelCase")]
         pub enum ClientRequest {
             $(
@@ -574,6 +575,12 @@ client_request_definitions! {
         params: v2::WorkspaceClientArchiveParams,
         serialization: global("workspace"),
         response: v2::WorkspaceClientArchiveResponse,
+    },
+    #[experimental("workspace/chart/commit")]
+    WorkspaceChartCommit => "workspace/chart/commit" {
+        params: v2::WorkspaceChartCommitParams,
+        serialization: global("workspace"),
+        response: v2::WorkspaceChartCommitResponse,
     },
     #[experimental("workspace/document/list")]
     WorkspaceDocumentList => "workspace/document/list" {

@@ -1100,6 +1100,9 @@ impl MessageProcessor {
             ClientRequest::WorkspaceClientArchive { params, .. } => {
                 self.workspace_processor.client_archive(params).await
             }
+            ClientRequest::WorkspaceChartCommit { params, .. } => {
+                self.workspace_processor.chart_commit(params).await
+            }
             ClientRequest::WorkspaceDocumentList { params, .. } => {
                 self.workspace_processor.document_list(params).await
             }

@@ -4,4 +4,4 @@
 import type { WorkspaceTaskPriority } from "./WorkspaceTaskPriority";
 import type { WorkspaceTaskStatus } from "./WorkspaceTaskStatus";
 
-export type WorkspaceTask = { id: string, clientId: string, encounterId: string | null, noteId: string | null, documentId: string | null, title: string, details: string, kind: string, status: WorkspaceTaskStatus, priority: WorkspaceTaskPriority, dueDate: string | null, assignedTo: string | null, completedAt: number | null, archivedAt: number | null, createdAt: number, updatedAt: number, };
+export type WorkspaceTask = { id: string, version: string, clientId: string, encounterId: string | null, noteId: string | null, documentId: string | null, title: string, details: string, kind: string, status: WorkspaceTaskStatus, priority: WorkspaceTaskPriority, dueDate: string | null, assignedTo: string | null, completedAt: number | null, archivedAt: number | null, createdAt: number, updatedAt: number, };

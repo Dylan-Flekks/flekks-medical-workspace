@@ -19464,6 +19464,9 @@
         "updatedAt": {
           "format": "int64",
           "type": "integer"
+        },
+        "version": {
+          "type": "string"
         }
       },
       "required": [
@@ -19481,7 +19484,8 @@
         "tags",
         "timestampRange",
         "title",
-        "updatedAt"
+        "updatedAt",
+        "version"
       ],
       "type": "object"
     },
@@ -19732,6 +19736,9 @@
         "updatedAt": {
           "format": "int64",
           "type": "integer"
+        },
+        "version": {
+          "type": "string"
         }
       },
       "required": [
@@ -19739,7 +19746,8 @@
         "displayName",
         "id",
         "summary",
-        "updatedAt"
+        "updatedAt",
+        "version"
       ],
       "type": "object"
     },
@@ -19858,6 +19866,9 @@
         "updatedAt": {
           "format": "int64",
           "type": "integer"
+        },
+        "version": {
+          "type": "string"
         }
       },
       "required": [
@@ -19877,7 +19888,8 @@
         "tags",
         "timestampRange",
         "title",
-        "updatedAt"
+        "updatedAt",
+        "version"
       ],
       "type": "object"
     },
@@ -20202,6 +20214,9 @@
         },
         "vaultPath": {
           "type": "string"
+        },
+        "version": {
+          "type": "string"
         }
       },
       "required": [
@@ -20224,7 +20239,8 @@
         "thumbnailStatus",
         "title",
         "updatedAt",
-        "vaultPath"
+        "vaultPath",
+        "version"
       ],
       "type": "object"
     },
@@ -20273,6 +20289,9 @@
         "updatedAt": {
           "format": "int64",
           "type": "integer"
+        },
+        "version": {
+          "type": "string"
         }
       },
       "required": [
@@ -20282,7 +20301,8 @@
         "kind",
         "status",
         "title",
-        "updatedAt"
+        "updatedAt",
+        "version"
       ],
       "type": "object"
     },
@@ -20737,6 +20757,9 @@
         "updatedAt": {
           "format": "int64",
           "type": "integer"
+        },
+        "version": {
+          "type": "string"
         }
       },
       "required": [
@@ -20746,7 +20769,8 @@
         "id",
         "name",
         "notes",
-        "updatedAt"
+        "updatedAt",
+        "version"
       ],
       "type": "object"
     },
@@ -20867,6 +20891,9 @@
         "updatedAt": {
           "format": "int64",
           "type": "integer"
+        },
+        "version": {
+          "type": "string"
         }
       },
       "required": [
@@ -20878,7 +20905,8 @@
         "priority",
         "status",
         "title",
-        "updatedAt"
+        "updatedAt",
+        "version"
       ],
       "type": "object"
     },

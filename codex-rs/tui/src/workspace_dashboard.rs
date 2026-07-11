@@ -17583,6 +17583,7 @@ mod tests {
         dashboard.patient_safety_items = vec![
             WorkspacePatientSafetyItem {
                 id: "safety-allergy".to_string(),
+                version: "version-safety-allergy".to_string(),
                 client_id: "client-1".to_string(),
                 category: "allergy".to_string(),
                 name: "Peanut".to_string(),
@@ -17600,6 +17601,7 @@ mod tests {
             },
             WorkspacePatientSafetyItem {
                 id: "safety-medication".to_string(),
+                version: "version-safety-medication".to_string(),
                 client_id: "client-1".to_string(),
                 category: "medication".to_string(),
                 name: "Fakeformin".to_string(),
@@ -23110,6 +23112,7 @@ mod tests {
         dashboard.documents = vec![
             WorkspaceDocument {
                 id: "doc-1".to_string(),
+                version: "version-doc-1".to_string(),
                 client_id: "client-1".to_string(),
                 encounter_id: None,
                 title: "Outside MRI PDF".to_string(),
@@ -23141,6 +23144,7 @@ mod tests {
             },
             WorkspaceDocument {
                 id: "doc-2".to_string(),
+                version: "version-doc-2".to_string(),
                 client_id: "client-1".to_string(),
                 encounter_id: None,
                 title: "Gait analysis clip".to_string(),
@@ -23172,6 +23176,7 @@ mod tests {
             },
             WorkspaceDocument {
                 id: "doc-3".to_string(),
+                version: "version-doc-3".to_string(),
                 client_id: "client-1".to_string(),
                 encounter_id: None,
                 title: "June 837P claim batch".to_string(),
@@ -23203,6 +23208,7 @@ mod tests {
             },
             WorkspaceDocument {
                 id: "doc-4".to_string(),
+                version: "version-doc-4".to_string(),
                 client_id: "client-1".to_string(),
                 encounter_id: None,
                 title: "June 999 acknowledgment".to_string(),
@@ -23430,6 +23436,7 @@ mod tests {
         dashboard.documents = vec![
             WorkspaceDocument {
                 id: "doc-audio".to_string(),
+                version: "version-doc-audio".to_string(),
                 client_id: "client-1".to_string(),
                 encounter_id: None,
                 title: "Dictation audio".to_string(),
@@ -23461,6 +23468,7 @@ mod tests {
             },
             WorkspaceDocument {
                 id: "doc-999".to_string(),
+                version: "version-doc-999".to_string(),
                 client_id: "client-1".to_string(),
                 encounter_id: None,
                 title: "June 999 acknowledgment".to_string(),
@@ -23661,6 +23669,7 @@ mod tests {
         dashboard.draft_note.id = Some("note-1".to_string());
         dashboard.documents = vec![WorkspaceDocument {
             id: "doc-audio".to_string(),
+            version: "version-doc-audio".to_string(),
             client_id: "client-1".to_string(),
             encounter_id: None,
             title: "Dictation audio".to_string(),
@@ -24152,6 +24161,7 @@ mod tests {
     fn test_client(id: &str, display_name: &str) -> WorkspaceClient {
         WorkspaceClient {
             id: id.to_string(),
+            version: format!("version-{id}"),
             display_name: display_name.to_string(),
             preferred_name: None,
             date_of_birth: None,
@@ -24207,6 +24217,7 @@ mod tests {
     fn test_task(id: &str, title: &str, status: WorkspaceTaskStatus) -> WorkspaceTask {
         WorkspaceTask {
             id: id.to_string(),
+            version: format!("version-{id}"),
             client_id: "client-1".to_string(),
             encounter_id: Some("encounter-1".to_string()),
             note_id: Some("note-1".to_string()),
@@ -24248,6 +24259,7 @@ mod tests {
     ) -> WorkspaceDocument {
         WorkspaceDocument {
             id: id.to_string(),
+            version: format!("version-{id}"),
             client_id: params.client_id.clone(),
             encounter_id: params.encounter_id.clone(),
             title: params.title.clone(),
@@ -24282,6 +24294,7 @@ mod tests {
     fn test_document(id: &str, title: &str, kind: &str) -> WorkspaceDocument {
         WorkspaceDocument {
             id: id.to_string(),
+            version: format!("version-{id}"),
             client_id: "client-1".to_string(),
             encounter_id: Some("encounter-1".to_string()),
             title: title.to_string(),
@@ -24357,6 +24370,7 @@ mod tests {
     fn test_encounter(id: &str, client_id: &str, title: &str) -> WorkspaceEncounter {
         WorkspaceEncounter {
             id: id.to_string(),
+            version: format!("version-{id}"),
             client_id: client_id.to_string(),
             kind: "visit".to_string(),
             title: title.to_string(),
@@ -24463,6 +24477,7 @@ mod tests {
     ) -> WorkspaceArtifactDerivative {
         WorkspaceArtifactDerivative {
             id: id.to_string(),
+            version: format!("version-{id}"),
             document_id: document_id.to_string(),
             client_id: "client-1".to_string(),
             encounter_id: Some("encounter-1".to_string()),
@@ -24494,6 +24509,7 @@ mod tests {
     ) -> WorkspaceContextClip {
         WorkspaceContextClip {
             id: id.to_string(),
+            version: format!("version-{id}"),
             derivative_id: derivative_id.to_string(),
             document_id: document_id.to_string(),
             client_id: "client-1".to_string(),
@@ -25188,6 +25204,7 @@ mod tests {
         )];
         dashboard.patient_safety_items = vec![WorkspacePatientSafetyItem {
             id: "safety-1".to_string(),
+            version: "version-safety-1".to_string(),
             client_id: "client-1".to_string(),
             category: "allergy".to_string(),
             name: "Fake latex allergy".to_string(),

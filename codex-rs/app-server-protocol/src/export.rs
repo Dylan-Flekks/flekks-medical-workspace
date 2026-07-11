@@ -48,6 +48,10 @@ const EXPERIMENTAL_CLIENT_METHOD_DEPENDENCY_TYPES: &[&str] = &[
     "RemoteControlClient",
     "RemoteControlClientsListOrder",
     "ThreadBackgroundTerminal",
+    "WorkspaceChartCommitErrorData",
+    "WorkspaceChartEntityKind",
+    "WorkspaceChartExpectedVersions",
+    "WorkspaceChartNoteChange",
 ];
 const SPECIAL_DEFINITIONS: &[&str] = &[
     "ClientNotification",
@@ -122,6 +126,7 @@ pub fn generate_ts_with_options(
     ensure_dir(&v2_out_dir)?;
 
     ClientRequest::export_all_to(out_dir)?;
+    crate::WorkspaceChartCommitErrorData::export_all_to(out_dir)?;
     export_client_responses(out_dir)?;
     ClientNotification::export_all_to(out_dir)?;
 
@@ -210,6 +215,12 @@ pub fn generate_json_with_experimental(out_dir: &Path, experimental_api: bool) -
         |d| write_json_schema_with_return::<crate::JSONRPCError>(d, "JSONRPCError"),
         |d| write_json_schema_with_return::<crate::JSONRPCErrorError>(d, "JSONRPCErrorError"),
         |d| write_json_schema_with_return::<crate::ClientRequest>(d, "ClientRequest"),
+        |d| {
+            write_json_schema_with_return::<crate::WorkspaceChartCommitErrorData>(
+                d,
+                "v2::WorkspaceChartCommitErrorData",
+            )
+        },
         |d| write_json_schema_with_return::<crate::ServerRequest>(d, "ServerRequest"),
         |d| write_json_schema_with_return::<crate::ClientNotification>(d, "ClientNotification"),
         |d| write_json_schema_with_return::<crate::ServerNotification>(d, "ServerNotification"),
@@ -1306,6 +1317,16 @@ fn insert_definition(
         if existing == &schema {
             return Ok(());
         }
+        if schemas_match_ignoring_missing_identity_metadata(existing, &schema) {
+            let existing_has_title = existing.get("title").is_some();
+            let existing_has_schema = existing.get("$schema").is_some();
+            if (!existing_has_title && schema.get("title").is_some())
+                || (!existing_has_schema && schema.get("$schema").is_some())
+            {
+                definitions.insert(name, schema);
+            }
+            return Ok(());
+        }
 
         let existing_title = existing
             .get("title")
@@ -1322,6 +1343,27 @@ fn insert_definition(
 
     definitions.insert(name, schema);
     Ok(())
+}
+
+fn schemas_match_ignoring_missing_identity_metadata(left: &Value, right: &Value) -> bool {
+    let metadata_matches = ["title", "$schema"].into_iter().all(|key| {
+        let left = left.get(key);
+        let right = right.get(key);
+        left == right || left.is_none() || right.is_none()
+    });
+    if !metadata_matches {
+        return false;
+    }
+
+    let mut left = left.clone();
+    let mut right = right.clone();
+    for value in [&mut left, &mut right] {
+        if let Value::Object(object) = value {
+            object.remove("title");
+            object.remove("$schema");
+        }
+    }
+    left == right
 }
 
 fn write_json_schema_with_return<T>(out_dir: &Path, name: &str) -> Result<GeneratedSchema>
@@ -2113,6 +2155,51 @@ mod tests {
     use std::path::Path;
     use std::path::PathBuf;
     use uuid::Uuid;
+
+    #[test]
+    fn insert_definition_deduplicates_root_and_nested_schema_metadata() -> Result<()> {
+        let root = serde_json::json!({
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "title": "SharedParams",
+            "type": "object",
+            "properties": { "value": { "type": "string" } }
+        });
+        let nested = serde_json::json!({
+            "type": "object",
+            "properties": { "value": { "type": "string" } }
+        });
+
+        let mut root_first = Map::new();
+        insert_definition(
+            &mut root_first,
+            "SharedParams".to_string(),
+            root.clone(),
+            "test",
+        )?;
+        insert_definition(
+            &mut root_first,
+            "SharedParams".to_string(),
+            nested.clone(),
+            "test",
+        )?;
+        assert_eq!(root_first.get("SharedParams"), Some(&root));
+
+        let mut nested_first = Map::new();
+        insert_definition(
+            &mut nested_first,
+            "SharedParams".to_string(),
+            nested,
+            "test",
+        )?;
+        insert_definition(
+            &mut nested_first,
+            "SharedParams".to_string(),
+            root.clone(),
+            "test",
+        )?;
+        assert_eq!(nested_first.get("SharedParams"), Some(&root));
+        Ok(())
+    }
 
     #[test]
     fn generated_ts_optional_nullable_fields_only_in_params() -> Result<()> {

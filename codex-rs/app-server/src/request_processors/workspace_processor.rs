@@ -105,6 +105,9 @@ use codex_app_server_protocol::WorkspaceTaskSummary;
 use codex_app_server_protocol::WorkspaceTaskUpsertParams;
 use codex_app_server_protocol::WorkspaceTaskUpsertResponse;
 
+#[path = "workspace_chart_commit_processor.rs"]
+mod chart_commit;
+
 const AGENT_VISIBLE_PACKET_SAFETY_CONSTRAINTS: &[&str] = &[
     "use only the stored context packet envelope",
     "additional current workspace rows require an explicitly authorized run context read and are recorded as immutable source snapshots",
@@ -135,7 +138,7 @@ impl WorkspaceRequestProcessor {
             .map_err(|err| internal_error(format!("failed to list workspace clients: {err}")))?
             .into_iter()
             .map(api_workspace_client_from_state)
-            .collect();
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(Some(WorkspaceClientListResponse { clients }.into()))
     }
 
@@ -149,7 +152,8 @@ impl WorkspaceRequestProcessor {
             .get_client(&params.client_id)
             .await
             .map_err(|err| internal_error(format!("failed to read workspace client: {err}")))?
-            .map(api_workspace_client_from_state);
+            .map(api_workspace_client_from_state)
+            .transpose()?;
         Ok(Some(WorkspaceClientGetResponse { client }.into()))
     }
 
@@ -199,7 +203,7 @@ impl WorkspaceRequestProcessor {
             .map_err(|err| internal_error(format!("failed to save workspace client: {err}")))?;
         Ok(Some(
             WorkspaceClientUpsertResponse {
-                client: api_workspace_client_from_state(client),
+                client: api_workspace_client_from_state(client)?,
             }
             .into(),
         ))
@@ -230,7 +234,7 @@ impl WorkspaceRequestProcessor {
             .map_err(|err| internal_error(format!("failed to list workspace documents: {err}")))?
             .into_iter()
             .map(api_workspace_document_from_state)
-            .collect();
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(Some(WorkspaceDocumentListResponse { documents }.into()))
     }
 
@@ -252,7 +256,7 @@ impl WorkspaceRequestProcessor {
             })?
             .into_iter()
             .map(api_workspace_practice_library_item_from_state)
-            .collect();
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(Some(WorkspacePracticeLibraryListResponse { items }.into()))
     }
 
@@ -266,7 +270,8 @@ impl WorkspaceRequestProcessor {
             .get_document(&params.document_id)
             .await
             .map_err(|err| internal_error(format!("failed to read workspace document: {err}")))?
-            .map(api_workspace_document_from_state);
+            .map(api_workspace_document_from_state)
+            .transpose()?;
         Ok(Some(WorkspaceDocumentGetResponse { document }.into()))
     }
 
@@ -330,7 +335,7 @@ impl WorkspaceRequestProcessor {
             .map_err(|err| internal_error(format!("failed to save workspace document: {err}")))?;
         Ok(Some(
             WorkspaceDocumentUpsertResponse {
-                document: api_workspace_document_from_state(document),
+                document: api_workspace_document_from_state(document)?,
             }
             .into(),
         ))
@@ -370,7 +375,7 @@ impl WorkspaceRequestProcessor {
             })?
             .into_iter()
             .map(api_workspace_patient_safety_item_from_state)
-            .collect();
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(Some(
             WorkspacePatientSafetyItemListResponse { items }.into(),
         ))
@@ -415,7 +420,7 @@ impl WorkspaceRequestProcessor {
             })?;
         Ok(Some(
             WorkspacePatientSafetyItemUpsertResponse {
-                item: api_workspace_patient_safety_item_from_state(item),
+                item: api_workspace_patient_safety_item_from_state(item)?,
             }
             .into(),
         ))
@@ -464,7 +469,7 @@ impl WorkspaceRequestProcessor {
             })?
             .into_iter()
             .map(api_workspace_artifact_derivative_from_state)
-            .collect();
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(Some(
             WorkspaceArtifactDerivativeListResponse { derivatives }.into(),
         ))
@@ -532,7 +537,7 @@ impl WorkspaceRequestProcessor {
             })?;
         Ok(Some(
             WorkspaceArtifactDerivativeUpsertResponse {
-                derivative: api_workspace_artifact_derivative_from_state(derivative),
+                derivative: api_workspace_artifact_derivative_from_state(derivative)?,
             }
             .into(),
         ))
@@ -572,7 +577,8 @@ impl WorkspaceRequestProcessor {
                     "failed to update workspace artifact derivative: {err}"
                 ))
             })?
-            .map(api_workspace_artifact_derivative_from_state);
+            .map(api_workspace_artifact_derivative_from_state)
+            .transpose()?;
         Ok(Some(
             WorkspaceArtifactDerivativeStatusUpdateResponse { derivative }.into(),
         ))
@@ -598,7 +604,7 @@ impl WorkspaceRequestProcessor {
             })?
             .into_iter()
             .map(api_workspace_context_clip_from_state)
-            .collect();
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(Some(WorkspaceContextClipListResponse { clips }.into()))
     }
 
@@ -669,7 +675,7 @@ impl WorkspaceRequestProcessor {
             })?;
         Ok(Some(
             WorkspaceContextClipUpsertResponse {
-                clip: api_workspace_context_clip_from_state(clip),
+                clip: api_workspace_context_clip_from_state(clip)?,
             }
             .into(),
         ))
@@ -705,7 +711,8 @@ impl WorkspaceRequestProcessor {
             .map_err(|err| {
                 invalid_request(format!("failed to update workspace context clip: {err}"))
             })?
-            .map(api_workspace_context_clip_from_state);
+            .map(api_workspace_context_clip_from_state)
+            .transpose()?;
         Ok(Some(
             WorkspaceContextClipStatusUpdateResponse { clip }.into(),
         ))
@@ -723,7 +730,7 @@ impl WorkspaceRequestProcessor {
             .map_err(|err| internal_error(format!("failed to list workspace tasks: {err}")))?
             .into_iter()
             .map(api_workspace_task_from_state)
-            .collect();
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(Some(WorkspaceTaskListResponse { tasks }.into()))
     }
 
@@ -760,7 +767,7 @@ impl WorkspaceRequestProcessor {
             .map_err(|err| invalid_request(format!("failed to save workspace task: {err}")))?;
         Ok(Some(
             WorkspaceTaskUpsertResponse {
-                task: api_workspace_task_from_state(task),
+                task: api_workspace_task_from_state(task)?,
             }
             .into(),
         ))
@@ -789,7 +796,8 @@ impl WorkspaceRequestProcessor {
             .map_err(|err| {
                 invalid_request(format!("failed to update workspace task status: {err}"))
             })?
-            .map(api_workspace_task_from_state);
+            .map(api_workspace_task_from_state)
+            .transpose()?;
         Ok(Some(WorkspaceTaskStatusUpdateResponse { task }.into()))
     }
 
@@ -805,7 +813,7 @@ impl WorkspaceRequestProcessor {
             .map_err(|err| internal_error(format!("failed to list workspace encounters: {err}")))?
             .into_iter()
             .map(api_workspace_encounter_from_state)
-            .collect();
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(Some(WorkspaceEncounterListResponse { encounters }.into()))
     }
 
@@ -843,7 +851,7 @@ impl WorkspaceRequestProcessor {
             .map_err(|err| internal_error(format!("failed to save workspace encounter: {err}")))?;
         Ok(Some(
             WorkspaceEncounterUpsertResponse {
-                encounter: api_workspace_encounter_from_state(encounter),
+                encounter: api_workspace_encounter_from_state(encounter)?,
             }
             .into(),
         ))
@@ -911,7 +919,7 @@ impl WorkspaceRequestProcessor {
                 })?
                 .into_iter()
                 .map(api_workspace_document_from_state)
-                .collect()
+                .collect::<Result<Vec<_>, _>>()?
         } else {
             Vec::new()
         };
@@ -930,7 +938,7 @@ impl WorkspaceRequestProcessor {
         Ok(Some(
             WorkspaceContextGetResponse {
                 context: Some(WorkspaceContext {
-                    client: api_workspace_client_from_state(client),
+                    client: api_workspace_client_from_state(client)?,
                     active_note,
                     recent_notes,
                     documents,
@@ -1734,9 +1742,13 @@ impl WorkspaceRequestProcessor {
 
 fn api_workspace_client_from_state(
     value: codex_state::WorkspaceClient,
-) -> codex_app_server_protocol::WorkspaceClient {
-    codex_app_server_protocol::WorkspaceClient {
+) -> Result<codex_app_server_protocol::WorkspaceClient, JSONRPCErrorError> {
+    let version = value
+        .record_version()
+        .map_err(|err| internal_error(format!("failed to version workspace client: {err}")))?;
+    Ok(codex_app_server_protocol::WorkspaceClient {
         id: value.id,
+        version,
         display_name: value.display_name,
         preferred_name: value.preferred_name,
         date_of_birth: value.date_of_birth,
@@ -1764,14 +1776,18 @@ fn api_workspace_client_from_state(
         archived_at: value.archived_at.map(|value| value.timestamp()),
         created_at: value.created_at.timestamp(),
         updated_at: value.updated_at.timestamp(),
-    }
+    })
 }
 
 fn api_workspace_document_from_state(
     value: codex_state::WorkspaceDocument,
-) -> codex_app_server_protocol::WorkspaceDocument {
-    codex_app_server_protocol::WorkspaceDocument {
+) -> Result<codex_app_server_protocol::WorkspaceDocument, JSONRPCErrorError> {
+    let version = value
+        .record_version()
+        .map_err(|err| internal_error(format!("failed to version workspace document: {err}")))?;
+    Ok(codex_app_server_protocol::WorkspaceDocument {
         id: value.id,
+        version,
         client_id: value.client_id,
         encounter_id: value.encounter_id,
         title: value.title,
@@ -1800,14 +1816,20 @@ fn api_workspace_document_from_state(
         archived_at: value.archived_at.map(|value| value.timestamp()),
         created_at: value.created_at.timestamp(),
         updated_at: value.updated_at.timestamp(),
-    }
+    })
 }
 
 fn api_workspace_patient_safety_item_from_state(
     value: codex_state::WorkspacePatientSafetyItem,
-) -> codex_app_server_protocol::WorkspacePatientSafetyItem {
-    codex_app_server_protocol::WorkspacePatientSafetyItem {
+) -> Result<codex_app_server_protocol::WorkspacePatientSafetyItem, JSONRPCErrorError> {
+    let version = value.record_version().map_err(|err| {
+        internal_error(format!(
+            "failed to version workspace patient safety item: {err}"
+        ))
+    })?;
+    Ok(codex_app_server_protocol::WorkspacePatientSafetyItem {
         id: value.id,
+        version,
         client_id: value.client_id,
         category: value.category,
         name: value.name,
@@ -1822,14 +1844,14 @@ fn api_workspace_patient_safety_item_from_state(
         archived_at: value.archived_at.map(|value| value.timestamp()),
         created_at: value.created_at.timestamp(),
         updated_at: value.updated_at.timestamp(),
-    }
+    })
 }
 
 fn api_workspace_practice_library_item_from_state(
     value: codex_state::WorkspacePracticeLibraryItem,
-) -> WorkspacePracticeLibraryItem {
-    WorkspacePracticeLibraryItem {
-        document: api_workspace_document_from_state(value.document),
+) -> Result<WorkspacePracticeLibraryItem, JSONRPCErrorError> {
+    Ok(WorkspacePracticeLibraryItem {
+        document: api_workspace_document_from_state(value.document)?,
         owner_client_id: value.owner_client_id,
         owner_display_name: value.owner_display_name,
         linked_to_active_client: value.linked_to_active_client,
@@ -1837,14 +1859,20 @@ fn api_workspace_practice_library_item_from_state(
         scope_reason: value.scope_reason,
         reviewed_text_count: value.reviewed_text_count,
         clip_count: value.clip_count,
-    }
+    })
 }
 
 fn api_workspace_artifact_derivative_from_state(
     value: codex_state::WorkspaceArtifactDerivative,
-) -> codex_app_server_protocol::WorkspaceArtifactDerivative {
-    codex_app_server_protocol::WorkspaceArtifactDerivative {
+) -> Result<codex_app_server_protocol::WorkspaceArtifactDerivative, JSONRPCErrorError> {
+    let version = value.record_version().map_err(|err| {
+        internal_error(format!(
+            "failed to version workspace artifact derivative: {err}"
+        ))
+    })?;
+    Ok(codex_app_server_protocol::WorkspaceArtifactDerivative {
         id: value.id,
+        version,
         document_id: value.document_id,
         client_id: value.client_id,
         encounter_id: value.encounter_id,
@@ -1862,14 +1890,18 @@ fn api_workspace_artifact_derivative_from_state(
         archived_at: value.archived_at.map(|value| value.timestamp()),
         created_at: value.created_at.timestamp(),
         updated_at: value.updated_at.timestamp(),
-    }
+    })
 }
 
 fn api_workspace_context_clip_from_state(
     value: codex_state::WorkspaceContextClip,
-) -> codex_app_server_protocol::WorkspaceContextClip {
-    codex_app_server_protocol::WorkspaceContextClip {
+) -> Result<codex_app_server_protocol::WorkspaceContextClip, JSONRPCErrorError> {
+    let version = value.record_version().map_err(|err| {
+        internal_error(format!("failed to version workspace context clip: {err}"))
+    })?;
+    Ok(codex_app_server_protocol::WorkspaceContextClip {
         id: value.id,
+        version,
         derivative_id: value.derivative_id,
         document_id: value.document_id,
         client_id: value.client_id,
@@ -1889,14 +1921,18 @@ fn api_workspace_context_clip_from_state(
         archived_at: value.archived_at.map(|value| value.timestamp()),
         created_at: value.created_at.timestamp(),
         updated_at: value.updated_at.timestamp(),
-    }
+    })
 }
 
 fn api_workspace_task_from_state(
     value: codex_state::WorkspaceTask,
-) -> codex_app_server_protocol::WorkspaceTask {
-    codex_app_server_protocol::WorkspaceTask {
+) -> Result<codex_app_server_protocol::WorkspaceTask, JSONRPCErrorError> {
+    let version = value
+        .record_version()
+        .map_err(|err| internal_error(format!("failed to version workspace task: {err}")))?;
+    Ok(codex_app_server_protocol::WorkspaceTask {
         id: value.id,
+        version,
         client_id: value.client_id,
         encounter_id: value.encounter_id,
         note_id: value.note_id,
@@ -1912,7 +1948,7 @@ fn api_workspace_task_from_state(
         archived_at: value.archived_at.map(|value| value.timestamp()),
         created_at: value.created_at.timestamp(),
         updated_at: value.updated_at.timestamp(),
-    }
+    })
 }
 
 fn api_workspace_task_summary_from_state(
@@ -2018,9 +2054,13 @@ fn state_workspace_task_priority_from_api(
 
 fn api_workspace_encounter_from_state(
     value: codex_state::WorkspaceEncounter,
-) -> codex_app_server_protocol::WorkspaceEncounter {
-    codex_app_server_protocol::WorkspaceEncounter {
+) -> Result<codex_app_server_protocol::WorkspaceEncounter, JSONRPCErrorError> {
+    let version = value
+        .record_version()
+        .map_err(|err| internal_error(format!("failed to version workspace encounter: {err}")))?;
+    Ok(codex_app_server_protocol::WorkspaceEncounter {
         id: value.id,
+        version,
         client_id: value.client_id,
         kind: value.kind,
         title: value.title,
@@ -2030,7 +2070,7 @@ fn api_workspace_encounter_from_state(
         archived_at: value.archived_at.map(|value| value.timestamp()),
         created_at: value.created_at.timestamp(),
         updated_at: value.updated_at.timestamp(),
-    }
+    })
 }
 
 fn api_workspace_note_from_state(
