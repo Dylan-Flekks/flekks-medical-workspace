@@ -11,27 +11,27 @@ Patient: Jordan Patient  DOB: blank  MRN: blank  Contact: Missing contact  Cover
 │No saved patients yet.          ││DOB:                                                                          ││                                            │
 │New patient: :patient new       ││Sex/Gender:                                                                   ││Mode: > Input |   Packet |   Returned       │
 │               ┌Commands──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐afted          │
-│               │Search commands  :proposal                                                                                                    │ | 0 clips     │
-│               │Enter run   Esc close   ↑/↓ move                                                                                              │               │
+│               │Search commands  :                                                                                                            │ | 0 clips     │
+│               │Ctrl-P Commands anywhere  Enter run  Esc close  ↑/↓                                                                           │               │
 │               │                                                                                                                              │               │
-│               │> Select next proposal                                                                                    :proposal next off  │               │
-│               │Accept proposal                                                                                       :proposal accept off    │hen Ctrl-G     │
-└───────────────│Decline proposal                                                                                     :proposal decline off    │auto-apply.    │
-┌Patient Notes──│Make note proposal from returned work                                                        :agent result to proposal off    │               │
-│Patient Notes  │Jump to proposals                                                                                      :workflow proposals    │               │
-│  New note     │                                                                                                                              │               │
-│  No patient no│Disabled: No pending proposals for the active note.                                                                           │               │
-│:note new.     │                                                                                                                              │               │
-│  Medical, comm│                                                                                                                              │               │
-│admin notes app│                                                                                                                              │               │
-│               │                                                                                                                              │               │
-│               │                                                                                                                              │               │
-└───────────────│                                                                                                                              │               │
-┌Uploaded Docume│                                                                                                                              │               │
-│Uploaded Docume│                                                                                                                              │               │
-│No files yet   │                                                                                                                              │               │
-│Paste/drop JPG/│                                                                                                                              │               │
-│               │                                                                                                                              │               │
+│               │Recommended now                                                                                                               │               │
+│               │> Search patients                                                                                        :patient search [/]  │hen Ctrl-G     │
+└───────────────│Open patient list                                                                                                :patients    │auto-apply.    │
+┌Patient Notes──│Open patient demographics                                                                                    :demographics    │               │
+│Patient Notes  │Common actions                                                                                                                │               │
+│  Visit note [u│New note                                                                                                     :note new [n]    │               │
+│  Working draft│Save chart workspace                                                                                        :save [Ctrl-S]    │               │
+│to the chart.  │Agent bridge                                                                                                                  │               │
+│  Medical, comm│Review Packet                                                                                               :agent preview    │               │
+│admin notes app│Submit Medical Agent Plan                                                                                      :agent send    │               │
+│               │Open returned work review                                                                                     :agent inbox    │               │
+│               │Write agent instructions                                                                                    :agent request    │               │
+└───────────────│Open last scope                                                                                            :scope last off    │               │
+┌Uploaded Docume│Navigation                                                                                                                    │               │
+│Uploaded Docume│Show workspace actions                                                                                        :actions [?]    │               │
+│No files yet   │Focus note title                                                                                         :focus note title    │               │
+│Paste/drop JPG/│Focus note body                                                                                           :focus note body    │               │
+│               │… 96 more                                                                                                                     │               │
 │               │                                                                                                                              │               │
 │               └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘               │
 │                                ││                                                                              ││                                            │
@@ -41,4 +41,4 @@ Patient: Jordan Patient  DOB: blank  MRN: blank  Contact: Missing contact  Cover
 │                                ││                                                                              ││                                            │
 │                                ││                                                                              ││                                            │
 └────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────┘└────────────────────────────────────────────┘
-Mode: Commands | Keys: ↑/↓ command  Enter run  Esc close | :proposal
+Mode: Commands | Keys: ↑/↓ command  Enter run  Esc close | :

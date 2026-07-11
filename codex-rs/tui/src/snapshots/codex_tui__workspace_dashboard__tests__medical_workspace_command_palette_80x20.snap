@@ -3,22 +3,22 @@ source: tui/src/workspace_dashboard.rs
 expression: "render_dashboard_lines_at(&dashboard, width, height)"
 ---
 ┌Commands──────────────────────────────────────────────────────────────────────┐
-│Search commands  :proposal                                                    │
-│Enter run   Esc close   ↑/↓ move                                              │
+│Search commands  :                                                            │
+│Ctrl-P Commands anywhere  Enter run  Esc close  ↑/↓                           │
 │                                                                              │
-│> Select next proposal                                    :proposal next off  │
-│Accept proposal                                       :proposal accept off    │
-│Decline proposal                                     :proposal decline off    │
-│Make note proposal from returned work        :agent result to proposal off    │
-│Jump to proposals                                      :workflow proposals    │
-│                                                                              │
-│Disabled: No pending proposals for the active note.                           │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
+│Recommended now                                                               │
+│> Search patients                                        :patient search [/]  │
+│Open patient list                                                :patients    │
+│Open patient demographics                                    :demographics    │
+│Common actions                                                                │
+│New note                                                     :note new [n]    │
+│Save chart workspace                                        :save [Ctrl-S]    │
+│Agent bridge                                                                  │
+│Review Packet                                               :agent preview    │
+│Submit Medical Agent Plan                                      :agent send    │
+│Open returned work review                                     :agent inbox    │
+│Write agent instructions                                    :agent request    │
+│Open last scope                                            :scope last off    │
+│… 100 more                                                                    │
 │                                                                              │
 └──────────────────────────────────────────────────────────────────────────────┘

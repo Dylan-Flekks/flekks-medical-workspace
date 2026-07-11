@@ -53,6 +53,18 @@ cd flekks-medical-workspace
 just medical-workspace
 ```
 
+To update an existing clone to the latest public version:
+
+```bash
+cd flekks-medical-workspace
+git status --short
+git switch main
+git pull --ff-only origin main
+just medical-workspace
+```
+
+Commit or stash any local changes shown by `git status` before switching branches or pulling.
+
 When the TUI opens, run:
 
 ```text
@@ -63,6 +75,22 @@ The equivalent manual launch sequence is `cd codex-rs`, `cargo build -p codex-cl
 `stty cols 160 rows 45`, and `./target/debug/codex`.
 
 Use synthetic fixtures only. See [Development](docs/development.md) for focused tests and snapshot review.
+
+## Keyboard quick start
+
+The medical workspace keeps pane navigation separate from the action performed inside a pane:
+
+| Key | Medical workspace action |
+| --- | --- |
+| `Tab` / `Shift-Tab` | Move to the next or previous pane. |
+| Arrow keys | Move, scroll, or edit only inside the focused pane. |
+| `Ctrl-P` | Open Commands from any pane, including an active text editor. |
+| `:` | Open Commands from navigation and read-only panes; remains typable in medical text fields. |
+| `Ctrl-S` | Explicitly save the current human chart draft. |
+| `Ctrl-G` | Prepare the selected context for a handoff to the parent Codex agent. |
+| `?` | Show the workspace action reference when the focused pane is not consuming text. |
+
+The command palette leads with actions relevant to the focused pane, followed by common chart actions and the Agent bridge. While a clinician edits an unsigned note, its live title appears in Patient Notes with an `[unsaved]` marker; that marker is working-state feedback and does not imply a canonical chart revision.
 
 ## Project status and limitations
 

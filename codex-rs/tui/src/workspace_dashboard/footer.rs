@@ -32,21 +32,39 @@ impl MedicalKeyContext {
         match self {
             Self::PatientSearch => "↑/↓ patient  Enter open  Esc chart",
             Self::CommandPalette => "↑/↓ command  Enter run  Esc close",
-            Self::Directory => "↑/↓ patient  Enter open  / search  Tab/⇧Tab pane",
-            Self::PatientNotes => "↑/↓ note  Enter open  Tab/⇧Tab pane",
-            Self::Documents => "↑/↓ file  ←/→ fold  Enter detail  Space agent  Tab/⇧Tab pane",
-            Self::PatientField => "↑/↓ field  Enter next  Ctrl-S save  Tab/⇧Tab pane",
-            Self::NoteTitle => "↑/↓ stay  Type title  Enter body  Ctrl-S save  Tab/⇧Tab pane",
-            Self::NoteBody => "↑/↓ stay  Type note  Enter newline  Ctrl-S save  Tab/⇧Tab pane",
-            Self::LockedNote => "Read-only  :addendum  Tab/⇧Tab pane  Esc close",
-            Self::WorkflowEditor => "↑/↓ field  Enter next  Ctrl-S save  Tab/⇧Tab pane",
-            Self::CenterSections => "↑/↓ section  PgUp/PgDn scroll  Tab/⇧Tab pane",
-            Self::ProposalReview => "↑/↓ scroll  PgUp/PgDn page  Tab/⇧Tab pane",
-            Self::AgentTabs => "←/→ Agent tab  ↑/↓ scroll  r request  Tab/⇧Tab pane",
-            Self::AgentInput => "Type request  Ctrl-G send  Tab/⇧Tab pane  Esc chart",
-            Self::PacketReview => "Review packet  Ctrl-G send  r edit  Tab/⇧Tab pane",
-            Self::ReturnedWorkReview => "↑/↓ scroll  i inspect  r input  Tab/⇧Tab pane",
-            Self::ReturnedWorkDraft => "Type result  Ctrl-S save  Tab/⇧Tab pane",
+            Self::Directory => "↑/↓ patient  Enter open  / search  Tab/⇧Tab pane  Ctrl-P commands",
+            Self::PatientNotes => "↑/↓ note  Enter open  Tab/⇧Tab pane  Ctrl-P commands",
+            Self::Documents => {
+                "↑/↓ file  ←/→ fold  Enter detail  Space agent  Tab/⇧Tab pane  Ctrl-P commands"
+            }
+            Self::PatientField => {
+                "↑/↓ field  Enter next  Ctrl-S save  Tab/⇧Tab pane  Ctrl-P commands"
+            }
+            Self::NoteTitle => {
+                "↑/↓ stay  Type title  Enter body  Ctrl-S save  Tab/⇧Tab pane  Ctrl-P commands"
+            }
+            Self::NoteBody => {
+                "↑/↓ stay  Type note  Enter newline  Ctrl-S save  Tab/⇧Tab pane  Ctrl-P commands"
+            }
+            Self::LockedNote => "Read-only  :addendum  Tab/⇧Tab pane  Ctrl-P commands  Esc close",
+            Self::WorkflowEditor => {
+                "↑/↓ field  Enter next  Ctrl-S save  Tab/⇧Tab pane  Ctrl-P commands"
+            }
+            Self::CenterSections => "↑/↓ section  PgUp/PgDn scroll  Tab/⇧Tab pane  Ctrl-P commands",
+            Self::ProposalReview => "↑/↓ scroll  PgUp/PgDn page  Tab/⇧Tab pane  Ctrl-P commands",
+            Self::AgentTabs => {
+                "←/→ Agent tab  ↑/↓ scroll  r request  Tab/⇧Tab pane  Ctrl-P commands"
+            }
+            Self::AgentInput => {
+                "Type request  Ctrl-G send  Tab/⇧Tab pane  Ctrl-P commands  Esc chart"
+            }
+            Self::PacketReview => {
+                "Review packet  Ctrl-G send  r edit  Tab/⇧Tab pane  Ctrl-P commands"
+            }
+            Self::ReturnedWorkReview => {
+                "↑/↓ scroll  i inspect  r input  Tab/⇧Tab pane  Ctrl-P commands"
+            }
+            Self::ReturnedWorkDraft => "Type result  Ctrl-S save  Tab/⇧Tab pane  Ctrl-P commands",
             Self::ChartConflict => "Ctrl-S refresh  Esc/Ctrl-W close",
             Self::ChartRetry => "Ctrl-S retry exact save  Esc/Ctrl-W close",
             Self::ChartBlocked => "Esc/Ctrl-W discard and reload",
@@ -58,20 +76,22 @@ impl MedicalKeyContext {
         match self {
             Self::PatientSearch => "↑/↓ patient  Enter  Esc",
             Self::CommandPalette => "↑/↓ command  Enter  Esc",
-            Self::Directory => "↑/↓ patient  Enter  Tab/⇧Tab pane",
-            Self::PatientNotes => "↑/↓ note  Enter  Tab/⇧Tab pane",
-            Self::Documents => "↑/↓ file  ←/→ fold  Tab/⇧Tab pane",
-            Self::PatientField | Self::WorkflowEditor => "↑/↓ field  Ctrl-S  Tab/⇧Tab pane",
-            Self::NoteTitle => "↑/↓ stay  Enter body  Tab/⇧Tab pane",
-            Self::NoteBody => "↑/↓ stay  Enter newline  Tab/⇧Tab pane",
-            Self::LockedNote => "Read-only  Tab/⇧Tab pane  Esc",
-            Self::CenterSections => "↑/↓ section  PgUp/PgDn  Tab/⇧Tab pane",
-            Self::ProposalReview => "↑/↓ scroll  PgUp/PgDn  Tab/⇧Tab pane",
-            Self::AgentTabs => "←/→ tab  ↑/↓ scroll  Tab/⇧Tab pane",
-            Self::AgentInput => "Ctrl-G send  Tab/⇧Tab pane  Esc",
-            Self::PacketReview => "Ctrl-G send  r edit  Tab/⇧Tab pane",
-            Self::ReturnedWorkReview => "↑/↓ scroll  i inspect  Tab/⇧Tab pane",
-            Self::ReturnedWorkDraft => "Ctrl-S save  Tab/⇧Tab pane",
+            Self::Directory => "↑/↓ patient  Tab/⇧Tab pane  Ctrl-P commands",
+            Self::PatientNotes => "↑/↓ note  Tab/⇧Tab pane  Ctrl-P commands",
+            Self::Documents => "↑/↓ file  ←/→ fold  Tab/⇧Tab pane  Ctrl-P commands",
+            Self::PatientField | Self::WorkflowEditor => {
+                "↑/↓ field  Ctrl-S  Tab/⇧Tab pane  Ctrl-P commands"
+            }
+            Self::NoteTitle => "↑/↓ stay  Enter body  Tab/⇧Tab pane  Ctrl-P commands",
+            Self::NoteBody => "↑/↓ stay  Enter newline  Tab/⇧Tab pane  Ctrl-P commands",
+            Self::LockedNote => "Read-only  Tab/⇧Tab pane  Ctrl-P commands",
+            Self::CenterSections => "↑/↓ section  Tab/⇧Tab pane  Ctrl-P commands",
+            Self::ProposalReview => "↑/↓ scroll  Tab/⇧Tab pane  Ctrl-P commands",
+            Self::AgentTabs => "←/→ Agent tab  ↑/↓ scroll  Tab/⇧Tab pane  Ctrl-P commands",
+            Self::AgentInput => "Ctrl-G send  Tab/⇧Tab pane  Ctrl-P commands",
+            Self::PacketReview => "Ctrl-G send  Tab/⇧Tab pane  Ctrl-P commands",
+            Self::ReturnedWorkReview => "↑/↓ scroll  Tab/⇧Tab pane  Ctrl-P commands",
+            Self::ReturnedWorkDraft => "Ctrl-S save  Tab/⇧Tab pane  Ctrl-P commands",
             Self::ChartConflict => "Ctrl-S refresh  Esc/Ctrl-W close",
             Self::ChartRetry => "Ctrl-S retry  Esc/Ctrl-W close",
             Self::ChartBlocked => "Esc/Ctrl-W discard",
