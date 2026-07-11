@@ -1,4 +1,5 @@
 mod chart_changeset;
+mod footer;
 
 use crate::app_server_session::AppServerSession;
 use crate::clipboard_paste::normalize_pasted_path;
@@ -96,6 +97,10 @@ use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyEventKind;
 use crossterm::event::KeyModifiers;
+use footer::MedicalKeyContext;
+use footer::compose_legacy_footer;
+use footer::compose_medical_footer;
+use footer::compose_mode_footer;
 use image::GenericImageView;
 use image::imageops::FilterType;
 use ratatui::buffer::Buffer;
@@ -386,28 +391,6 @@ impl WorkspaceInputMode {
             Self::PacketReview => "Packet review",
             Self::ReturnedWorkReview => "Returned work",
             Self::ReturnedWorkDraft => "Returned draft",
-        }
-    }
-
-    fn hint(self) -> &'static str {
-        match self {
-            Self::Navigation => "Tab move  / search  : command  Esc close",
-            Self::PatientSearch => "Type query  Enter open  Esc chart",
-            Self::CommandPalette => "Type command  Enter run  Esc close",
-            Self::PatientField | Self::PatientAdminField => {
-                "Type value  Up/Down field  Ctrl-S save  Esc chart"
-            }
-            Self::NoteTitle => "Type title  Enter body  Ctrl-S save  Esc chart",
-            Self::NoteBody => "Type note  Enter newline  Ctrl-S save  Esc chart",
-            Self::LockedNote => "Read-only  :addendum start  Esc close",
-            Self::FileTree => "Arrows move  Enter detail  Space include  Esc close",
-            Self::CenterReadOnly => "Page scroll  : command  Tab move  Esc close",
-            Self::WorkflowEditor => "Type value  Up/Down field  Ctrl-S save  Esc guards draft",
-            Self::AgentRail => "Left/Right tabs  Page scroll  r starts request",
-            Self::AgentInput => "Type request  :context packet  Ctrl-G send  Esc chart",
-            Self::PacketReview => "Review packet  Ctrl-G send  r edit request",
-            Self::ReturnedWorkReview => "i inspect  r input  p packet  Esc close",
-            Self::ReturnedWorkDraft => "Paste/type result  Ctrl-S save  Esc guards draft",
         }
     }
 }
@@ -9736,8 +9719,18 @@ impl WorkspaceDashboard {
             return WorkspaceDashboardAction::Consumed;
         }
         match key_event.code {
-            KeyCode::Enter | KeyCode::Down => self.focus = WorkspaceFocus::NoteBody,
-            KeyCode::Up => self.focus = WorkspaceFocus::Notes,
+            KeyCode::Enter => self.focus = WorkspaceFocus::NoteBody,
+            KeyCode::Down if self.profile != WorkspaceProfile::Medical => {
+                self.focus = WorkspaceFocus::NoteBody;
+            }
+            KeyCode::Up if self.profile != WorkspaceProfile::Medical => {
+                self.focus = WorkspaceFocus::Notes;
+            }
+            KeyCode::Up | KeyCode::Down => {
+                self.status =
+                    "Note Title stays focused. Enter opens Note Body; Tab/Shift-Tab changes pane."
+                        .to_string();
+            }
             KeyCode::Backspace => {
                 self.draft_note.title.pop();
                 self.mark_dirty();
@@ -9761,8 +9754,15 @@ impl WorkspaceDashboard {
             return WorkspaceDashboardAction::Consumed;
         }
         match key_event.code {
-            KeyCode::Up if self.draft_note.body.is_empty() => {
-                self.focus = WorkspaceFocus::NoteTitle
+            KeyCode::Up
+                if self.profile != WorkspaceProfile::Medical && self.draft_note.body.is_empty() =>
+            {
+                self.focus = WorkspaceFocus::NoteTitle;
+            }
+            KeyCode::Up | KeyCode::Down if self.profile == WorkspaceProfile::Medical => {
+                self.status =
+                    "Note Body stays focused. This editor is end-anchored; Tab/Shift-Tab changes pane."
+                        .to_string();
             }
             KeyCode::Backspace => {
                 self.draft_note.body.pop();
@@ -10090,21 +10090,6 @@ impl WorkspaceDashboard {
             return WorkspaceDashboardAction::Consumed;
         }
         if !self.draft_document.is_active() {
-            if self.workflow_section == MedicalWorkflowSection::Visit {
-                match key_event.code {
-                    KeyCode::Down => {
-                        self.focus_patient_files_tree();
-                        return WorkspaceDashboardAction::Consumed;
-                    }
-                    KeyCode::Up | KeyCode::Home | KeyCode::End => {
-                        self.status =
-                            "Today's Visit is read-only. Use :demographics, :files, or :agent request."
-                                .to_string();
-                        return WorkspaceDashboardAction::Consumed;
-                    }
-                    _ => {}
-                }
-            }
             match key_event.code {
                 KeyCode::PageUp => {
                     self.scroll_center_work_area(-1, 8);
@@ -10349,28 +10334,46 @@ impl WorkspaceDashboard {
 
     fn status_line(&self, width: u16) -> Line<'static> {
         if let Some(patient_search_query) = &self.patient_search_query {
-            return Line::from(compose_footer_text(
-                &[
-                    "Mode: Patient search".to_string(),
-                    format!("/{patient_search_query}"),
-                    "Enter open".to_string(),
-                    "Esc chart".to_string(),
-                    "Up/Down move".to_string(),
-                ],
-                width,
-            ));
+            return if self.profile == WorkspaceProfile::Medical {
+                Line::from(compose_mode_footer(
+                    "Patient search",
+                    &format!("/{patient_search_query}"),
+                    MedicalKeyContext::PatientSearch,
+                    width,
+                ))
+            } else {
+                Line::from(compose_legacy_footer(
+                    &[
+                        "Mode: Patient search".to_string(),
+                        format!("/{patient_search_query}"),
+                        "Enter open".to_string(),
+                        "Esc chart".to_string(),
+                        "Up/Down move".to_string(),
+                    ],
+                    width,
+                ))
+            };
         }
         if let Some(command_input) = &self.command_input {
-            return Line::from(compose_footer_text(
-                &[
-                    "Mode: Commands".to_string(),
-                    format!(":{command_input}"),
-                    "Enter run".to_string(),
-                    "Esc close".to_string(),
-                    "Up/Down move".to_string(),
-                ],
-                width,
-            ));
+            return if self.profile == WorkspaceProfile::Medical {
+                Line::from(compose_mode_footer(
+                    "Commands",
+                    &format!(":{command_input}"),
+                    MedicalKeyContext::CommandPalette,
+                    width,
+                ))
+            } else {
+                Line::from(compose_legacy_footer(
+                    &[
+                        "Mode: Commands".to_string(),
+                        format!(":{command_input}"),
+                        "Enter run".to_string(),
+                        "Esc close".to_string(),
+                        "Up/Down move".to_string(),
+                    ],
+                    width,
+                ))
+            };
         }
         if self.profile == WorkspaceProfile::Medical {
             return Line::from(self.medical_footer_text(width));
@@ -10386,16 +10389,85 @@ impl WorkspaceDashboard {
 
     fn medical_footer_text(&self, width: u16) -> String {
         let input_mode = self.medical_input_mode();
-        compose_footer_text(
-            &[
-                format!("Focus: {}", self.medical_focus_footer_label()),
-                format!("Mode: {}", input_mode.label()),
-                format!("Next: {}", self.medical_footer_next_label()),
-                format!("Status: {}", self.status),
-                input_mode.hint().to_string(),
-            ],
+        compose_medical_footer(
+            self.medical_focus_footer_label(),
+            self.medical_footer_mode_label(input_mode),
+            self.medical_key_context(input_mode),
+            &self.medical_footer_next_label(),
+            &self.status,
             width,
         )
+    }
+
+    fn medical_footer_mode_label(&self, input_mode: WorkspaceInputMode) -> &'static str {
+        match self
+            .pending_chart_changeset
+            .as_ref()
+            .map(PendingChartChangeset::review_state)
+        {
+            Some(ChartChangesetReviewState::RetryableFailure { .. }) => "Exact-save retry",
+            Some(ChartChangesetReviewState::Conflict { .. }) => "Conflict recovery",
+            Some(ChartChangesetReviewState::MergeRequired { .. }) => "Manual merge",
+            Some(ChartChangesetReviewState::Blocked { .. }) => "Discard required",
+            Some(ChartChangesetReviewState::Ready) | None => input_mode.label(),
+        }
+    }
+
+    fn medical_key_context(&self, input_mode: WorkspaceInputMode) -> MedicalKeyContext {
+        if let Some(review_state) = self
+            .pending_chart_changeset
+            .as_ref()
+            .map(PendingChartChangeset::review_state)
+        {
+            match review_state {
+                ChartChangesetReviewState::RetryableFailure { .. } => {
+                    return MedicalKeyContext::ChartRetry;
+                }
+                ChartChangesetReviewState::Conflict { .. } => {
+                    return MedicalKeyContext::ChartConflict;
+                }
+                ChartChangesetReviewState::MergeRequired { .. } => {
+                    return MedicalKeyContext::ChartManualMerge;
+                }
+                ChartChangesetReviewState::Blocked { .. } => {
+                    return MedicalKeyContext::ChartBlocked;
+                }
+                ChartChangesetReviewState::Ready => {}
+            }
+        }
+        match input_mode {
+            WorkspaceInputMode::PatientSearch => MedicalKeyContext::PatientSearch,
+            WorkspaceInputMode::CommandPalette => MedicalKeyContext::CommandPalette,
+            WorkspaceInputMode::Navigation => match self.focus {
+                WorkspaceFocus::Clients => MedicalKeyContext::Directory,
+                WorkspaceFocus::Notes => MedicalKeyContext::PatientNotes,
+                WorkspaceFocus::Agent => MedicalKeyContext::AgentTabs,
+                WorkspaceFocus::Demographics
+                | WorkspaceFocus::NoteTitle
+                | WorkspaceFocus::NoteBody
+                | WorkspaceFocus::Workflow
+                | WorkspaceFocus::PatientFiles => MedicalKeyContext::CenterSections,
+            },
+            WorkspaceInputMode::PatientField | WorkspaceInputMode::PatientAdminField => {
+                MedicalKeyContext::PatientField
+            }
+            WorkspaceInputMode::NoteTitle => MedicalKeyContext::NoteTitle,
+            WorkspaceInputMode::NoteBody => MedicalKeyContext::NoteBody,
+            WorkspaceInputMode::LockedNote => MedicalKeyContext::LockedNote,
+            WorkspaceInputMode::FileTree => MedicalKeyContext::Documents,
+            WorkspaceInputMode::CenterReadOnly
+                if self.workflow_section == MedicalWorkflowSection::Proposals =>
+            {
+                MedicalKeyContext::ProposalReview
+            }
+            WorkspaceInputMode::CenterReadOnly => MedicalKeyContext::CenterSections,
+            WorkspaceInputMode::WorkflowEditor => MedicalKeyContext::WorkflowEditor,
+            WorkspaceInputMode::AgentRail => MedicalKeyContext::AgentTabs,
+            WorkspaceInputMode::AgentInput => MedicalKeyContext::AgentInput,
+            WorkspaceInputMode::PacketReview => MedicalKeyContext::PacketReview,
+            WorkspaceInputMode::ReturnedWorkReview => MedicalKeyContext::ReturnedWorkReview,
+            WorkspaceInputMode::ReturnedWorkDraft => MedicalKeyContext::ReturnedWorkDraft,
+        }
     }
 
     fn medical_input_mode(&self) -> WorkspaceInputMode {
@@ -10445,6 +10517,27 @@ impl WorkspaceDashboard {
     }
 
     fn medical_footer_next_label(&self) -> String {
+        if let Some(review_state) = self
+            .pending_chart_changeset
+            .as_ref()
+            .map(PendingChartChangeset::review_state)
+        {
+            match review_state {
+                ChartChangesetReviewState::RetryableFailure { .. } => {
+                    return "Retry exact chart save".to_string();
+                }
+                ChartChangesetReviewState::Conflict { .. } => {
+                    return "Refresh canonical chart".to_string();
+                }
+                ChartChangesetReviewState::MergeRequired { .. } => {
+                    return "Edit focused merge draft".to_string();
+                }
+                ChartChangesetReviewState::Blocked { .. } => {
+                    return "Discard and reopen".to_string();
+                }
+                ChartChangesetReviewState::Ready => {}
+            }
+        }
         match self.focus {
             WorkspaceFocus::Clients => "Search/open patient".to_string(),
             WorkspaceFocus::Notes => "Open selected chart item".to_string(),
@@ -10524,6 +10617,17 @@ impl WorkspaceDashboard {
             "?/Esc close   : command",
             Style::default().fg(Color::DarkGray),
         ))];
+        if self.profile == WorkspaceProfile::Medical {
+            lines.extend([
+                Line::from(""),
+                Line::from(Span::styled(
+                    "Keyboard navigation",
+                    Style::default().fg(Color::DarkGray),
+                )),
+                Line::from("  Tab/Shift-Tab changes pane"),
+                Line::from("  Arrow keys stay inside the focused pane"),
+            ]);
+        }
         for group in WorkspaceActionGroup::ALL {
             let mut group_lines = WORKSPACE_ACTIONS
                 .iter()
@@ -15681,47 +15785,6 @@ fn render_pane(
     paragraph.block(pane_block(title, active)).render(area, buf);
 }
 
-fn compose_footer_text(parts: &[String], width: u16) -> String {
-    let width = width as usize;
-    if width == 0 {
-        return String::new();
-    }
-    let mut parts = parts
-        .iter()
-        .filter(|part| !part.trim().is_empty())
-        .cloned()
-        .collect::<Vec<_>>();
-    if parts.is_empty() {
-        return String::new();
-    }
-
-    while parts.len() > 2 && joined_width(&parts) > width {
-        parts.pop();
-    }
-
-    if joined_width(&parts) > width {
-        let len = parts.len();
-        if len > 0 {
-            let prefix_width = joined_width(&parts[..len.saturating_sub(1)]);
-            let separator_width = if len > 1 { 3 } else { 0 };
-            let available = width.saturating_sub(prefix_width + separator_width).max(8);
-            let compact = compact_preview(&parts[len - 1], available);
-            parts[len - 1] = compact;
-        }
-    }
-
-    let joined = parts.join(" | ");
-    if joined.chars().count() > width {
-        compact_preview(&joined, width)
-    } else {
-        joined
-    }
-}
-
-fn joined_width(parts: &[String]) -> usize {
-    parts.iter().map(|part| part.chars().count()).sum::<usize>() + parts.len().saturating_sub(1) * 3
-}
-
 fn pane_block(title: &'static str, active: bool) -> Block<'static> {
     let border_style = if active {
         Style::default().fg(Color::Cyan)
@@ -19773,7 +19836,8 @@ mod tests {
         let agent_status = status_line_text(&dashboard);
         assert!(agent_status.contains("Focus: Agent"));
         assert!(agent_status.contains("Mode: Agent input"));
-        assert!(agent_status.contains("Status: Local agent instructions"));
+        assert!(agent_status.contains("Keys: Type request"));
+        assert!(agent_status.contains("Tab/⇧Tab pane"));
         assert!(!agent_status.contains("Work:"));
 
         press_consumed(&mut dashboard, KeyCode::Tab);
@@ -19796,6 +19860,93 @@ mod tests {
         press_consumed(&mut dashboard, KeyCode::Tab);
         assert_eq!(dashboard.focus, WorkspaceFocus::PatientFiles);
         assert!(status_line_text(&dashboard).contains("Focus: Documents"));
+    }
+
+    #[test]
+    fn medical_footer_prioritizes_explicit_contextual_keys_at_supported_widths() {
+        for (focus, expected_hint) in [
+            (WorkspaceFocus::Clients, "↑/↓ patient"),
+            (WorkspaceFocus::Notes, "↑/↓ note"),
+            (WorkspaceFocus::PatientFiles, "←/→ fold"),
+            (WorkspaceFocus::Demographics, "↑/↓ field"),
+            (WorkspaceFocus::NoteTitle, "↑/↓ stay"),
+            (WorkspaceFocus::NoteBody, "↑/↓ stay"),
+            (WorkspaceFocus::Workflow, "↑/↓ section"),
+            (WorkspaceFocus::Agent, "←/→ Agent tab"),
+        ] {
+            let mut dashboard = medical_recursive_files_dashboard();
+            dashboard.focus = focus;
+            dashboard.status =
+                "A deliberately long status that must yield to keyboard help.".to_string();
+            for width in [80, 100, 120, 160] {
+                let footer = line_plain_text(&dashboard.status_line(width));
+                assert!(
+                    footer.contains("Focus:"),
+                    "focus missing for {focus:?} at width {width}: {footer}"
+                );
+                assert!(
+                    footer.contains("Keys:"),
+                    "keys missing for {focus:?} at width {width}: {footer}"
+                );
+                assert!(
+                    footer.contains(expected_hint),
+                    "expected {expected_hint:?} for {focus:?} at width {width}: {footer}"
+                );
+                assert!(
+                    footer.contains("Tab/⇧Tab pane"),
+                    "pane navigation missing for {focus:?} at width {width}: {footer}"
+                );
+            }
+        }
+
+        let mut search = medical_recursive_files_dashboard();
+        search.patient_search_query = Some("Jordan".to_string());
+        let search_footer = line_plain_text(&search.status_line(80));
+        assert!(search_footer.contains("Keys: ↑/↓ patient"));
+        assert!(search_footer.contains("Enter"));
+
+        search.patient_search_query = Some("患者😀患者😀患者😀患者😀患者😀".to_string());
+        let wide_search_footer = line_plain_text(&search.status_line(80));
+        assert!(unicode_width::UnicodeWidthStr::width(wide_search_footer.as_str()) <= 80);
+
+        search.patient_search_query = None;
+        search.command_input = Some("proposal".to_string());
+        let command_footer = line_plain_text(&search.status_line(80));
+        assert!(command_footer.contains("Keys: ↑/↓ command"));
+        assert!(command_footer.contains("Enter"));
+    }
+
+    #[test]
+    fn medical_search_and_command_arrows_keep_the_underlying_pane() {
+        let mut search = medical_recursive_directory_dashboard();
+        search.focus = WorkspaceFocus::Clients;
+        search.open_patient_search();
+        type_text(&mut search, "Jordan");
+        let search_slot = search.current_medical_pane_slot();
+        for code in [KeyCode::Up, KeyCode::Down] {
+            assert_eq!(
+                search.handle_key_event(KeyEvent::from(code)),
+                WorkspaceDashboardAction::Consumed
+            );
+            assert_eq!(search.current_medical_pane_slot(), search_slot);
+        }
+        insta::assert_snapshot!(
+            "medical_workspace_patient_search_120x32",
+            render_dashboard_lines_at(&search, 120, 32)
+        );
+
+        let mut commands = medical_recursive_files_dashboard();
+        commands.focus = WorkspaceFocus::Demographics;
+        commands.open_command_palette();
+        type_text(&mut commands, "proposal");
+        let command_slot = commands.current_medical_pane_slot();
+        for code in [KeyCode::Up, KeyCode::Down] {
+            assert_eq!(
+                commands.handle_key_event(KeyEvent::from(code)),
+                WorkspaceDashboardAction::Consumed
+            );
+            assert_eq!(commands.current_medical_pane_slot(), command_slot);
+        }
     }
 
     #[test]
@@ -19855,6 +20006,20 @@ mod tests {
             WorkspaceDashboardAction::Consumed
         );
         assert!(!render_dashboard_lines(&dashboard).contains("Workspace Actions"));
+    }
+
+    #[test]
+    fn medical_action_overlay_explains_local_arrow_and_tab_navigation() {
+        let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+        assert_eq!(
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Char('?'))),
+            WorkspaceDashboardAction::Consumed
+        );
+
+        let rendered = render_dashboard_lines_at(&dashboard, 120, 32);
+        assert!(rendered.contains("Tab/Shift-Tab changes pane"));
+        assert!(rendered.contains("Arrow keys stay inside the focused pane"));
+        insta::assert_snapshot!("medical_workspace_keyboard_help_120x32", rendered);
     }
 
     #[test]
@@ -20328,7 +20493,7 @@ mod tests {
     }
 
     #[test]
-    fn workflow_arrow_keys_keep_chart_worklist_predictable_without_editors() {
+    fn workflow_arrow_keys_stay_inside_center_pane_without_editors() {
         let mut dashboard = WorkspaceDashboard {
             focus: WorkspaceFocus::Workflow,
             ..WorkspaceDashboard::new(WorkspaceProfile::Medical)
@@ -20339,20 +20504,19 @@ mod tests {
             dashboard.handle_key_event(KeyEvent::from(KeyCode::Down)),
             WorkspaceDashboardAction::Consumed
         );
-        assert_eq!(dashboard.workflow_section, MedicalWorkflowSection::Visit);
-        assert_eq!(dashboard.focus, WorkspaceFocus::PatientFiles);
-        assert!(dashboard.status.contains("Paste/drop a JPG/PDF path"));
+        assert_eq!(dashboard.workflow_section, MedicalWorkflowSection::Safety);
+        assert_eq!(dashboard.focus, WorkspaceFocus::Workflow);
+        assert_eq!(
+            dashboard.current_medical_pane_slot(),
+            MedicalPaneSlot::CenterWorkArea
+        );
 
-        dashboard.focus = WorkspaceFocus::Workflow;
         assert_eq!(
             dashboard.handle_key_event(KeyEvent::from(KeyCode::Up)),
             WorkspaceDashboardAction::Consumed
         );
         assert_eq!(dashboard.workflow_section, MedicalWorkflowSection::Visit);
-        assert_eq!(
-            dashboard.status,
-            "Today's Visit is read-only. Use :demographics, :files, or :agent request."
-        );
+        assert_eq!(dashboard.focus, WorkspaceFocus::Workflow);
     }
 
     #[test]
@@ -20394,6 +20558,133 @@ mod tests {
         );
         assert_eq!(dashboard.workflow_section, MedicalWorkflowSection::Visit);
         assert_eq!(dashboard.workflow_scroll, 0);
+    }
+
+    #[test]
+    fn medical_arrow_keys_never_change_the_focused_pane() {
+        for viewport in [
+            Rect::new(0, 0, 80, 20),
+            Rect::new(0, 0, 120, 32),
+            Rect::new(0, 0, 160, 45),
+        ] {
+            for focus in [
+                WorkspaceFocus::Clients,
+                WorkspaceFocus::Notes,
+                WorkspaceFocus::PatientFiles,
+                WorkspaceFocus::Demographics,
+                WorkspaceFocus::NoteTitle,
+                WorkspaceFocus::NoteBody,
+                WorkspaceFocus::Workflow,
+                WorkspaceFocus::Agent,
+            ] {
+                let mut dashboard = medical_recursive_files_dashboard();
+                dashboard.focus = focus;
+                let expected = dashboard.current_medical_pane_slot();
+                for code in [KeyCode::Up, KeyCode::Down, KeyCode::Left, KeyCode::Right] {
+                    assert_eq!(
+                        dashboard
+                            .handle_key_event_for_viewport(KeyEvent::from(code), Some(viewport),),
+                        WorkspaceDashboardAction::Consumed
+                    );
+                    assert_eq!(
+                        dashboard.current_medical_pane_slot(),
+                        expected,
+                        "{code:?} changed pane from {expected:?} with {focus:?} at {}x{}",
+                        viewport.width,
+                        viewport.height
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn note_editor_arrows_stay_local_and_enter_opens_the_body() {
+        let mut dashboard = WorkspaceDashboard {
+            focus: WorkspaceFocus::NoteTitle,
+            ..WorkspaceDashboard::new(WorkspaceProfile::Medical)
+        };
+
+        for code in [KeyCode::Up, KeyCode::Down] {
+            assert_eq!(
+                dashboard.handle_key_event(KeyEvent::from(code)),
+                WorkspaceDashboardAction::Consumed
+            );
+            assert_eq!(dashboard.focus, WorkspaceFocus::NoteTitle);
+            assert!(dashboard.status.contains("Note Title stays focused"));
+        }
+
+        assert_eq!(
+            dashboard.handle_key_event(KeyEvent::from(KeyCode::Enter)),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert_eq!(dashboard.focus, WorkspaceFocus::NoteBody);
+
+        for code in [KeyCode::Up, KeyCode::Down] {
+            assert_eq!(
+                dashboard.handle_key_event(KeyEvent::from(code)),
+                WorkspaceDashboardAction::Consumed
+            );
+            assert_eq!(dashboard.focus, WorkspaceFocus::NoteBody);
+            assert!(dashboard.status.contains("Note Body stays focused"));
+        }
+    }
+
+    #[test]
+    fn generic_workspace_keeps_legacy_note_arrows_and_command_footer() {
+        let mut dashboard = WorkspaceDashboard {
+            focus: WorkspaceFocus::NoteTitle,
+            ..WorkspaceDashboard::default()
+        };
+
+        press_consumed(&mut dashboard, KeyCode::Down);
+        assert_eq!(dashboard.focus, WorkspaceFocus::NoteBody);
+        press_consumed(&mut dashboard, KeyCode::Up);
+        assert_eq!(dashboard.focus, WorkspaceFocus::NoteTitle);
+        press_consumed(&mut dashboard, KeyCode::Up);
+        assert_eq!(dashboard.focus, WorkspaceFocus::Notes);
+
+        dashboard.command_input = Some("save".to_string());
+        let footer = line_plain_text(&dashboard.status_line(160));
+        assert!(footer.contains("Mode: Commands"));
+        assert!(footer.contains("Up/Down move"));
+        assert!(!footer.contains("Keys:"));
+        assert_eq!(
+            line_plain_text(&dashboard.status_line(50)),
+            "Mode: Commands | :save | Enter run | Esc close"
+        );
+    }
+
+    #[test]
+    fn repeated_arrows_stay_local_and_release_events_are_ignored() {
+        let mut dashboard = WorkspaceDashboard {
+            focus: WorkspaceFocus::NoteTitle,
+            status: "Initial status".to_string(),
+            ..WorkspaceDashboard::new(WorkspaceProfile::Medical)
+        };
+
+        assert_eq!(
+            dashboard.handle_key_event(KeyEvent::new_with_kind(
+                KeyCode::Down,
+                KeyModifiers::NONE,
+                KeyEventKind::Repeat,
+            )),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert_eq!(dashboard.focus, WorkspaceFocus::NoteTitle);
+        assert!(dashboard.status.contains("Note Title stays focused"));
+
+        let status = dashboard.status.clone();
+        assert_eq!(
+            dashboard.handle_key_event(KeyEvent::new_with_kind(
+                KeyCode::Up,
+                KeyModifiers::NONE,
+                KeyEventKind::Release,
+            )),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert_eq!(dashboard.focus, WorkspaceFocus::NoteTitle);
+        assert_eq!(dashboard.status, status);
     }
 
     #[test]
@@ -22580,7 +22871,12 @@ mod tests {
         let mut dashboard = medical_recursive_base_dashboard();
         for (command, scope, visible_scope, expected_action) in [
             (":scope patient", "Today's Visit", "Today's Visit", "Next:"),
-            (":scope files", "Uploaded Documents", "Documents", "Next:"),
+            (
+                ":scope files",
+                "Uploaded Documents",
+                "Documents",
+                "Paste/drop JPG/PDF",
+            ),
             (":scope packet", "Agent Work", "Agent Work", "Blocked:"),
             (":scope review", "Agent Review", "Returned", "Blocked:"),
             (
@@ -23871,6 +24167,11 @@ mod tests {
         pending.mark_retryable_failure("transport outcome unknown");
         dashboard.pending_chart_changeset = Some(pending);
         let body_before = dashboard.draft_note.body.clone();
+        let footer = line_plain_text(&dashboard.status_line(160));
+        assert!(footer.contains("Mode: Exact-save retry"));
+        assert!(footer.contains("Keys: Ctrl-S retry exact save"));
+        assert!(footer.contains("Next: Retry exact chart save"));
+        assert!(!footer.contains("Tab/⇧Tab pane"));
 
         assert_eq!(
             dashboard.handle_key_event(KeyEvent::from(KeyCode::Char('x'))),
@@ -23958,6 +24259,11 @@ mod tests {
                 .as_ref()
                 .is_some_and(PendingChartChangeset::needs_manual_merge)
         );
+        let footer = line_plain_text(&dashboard.status_line(160));
+        assert!(footer.contains("Mode: Manual merge"));
+        assert!(footer.contains("Keys: Edit focused draft"));
+        assert!(footer.contains("Next: Edit focused merge draft"));
+        assert!(!footer.contains("Tab/⇧Tab pane"));
         assert_eq!(
             dashboard.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL,)),
             WorkspaceDashboardAction::Consumed
@@ -24024,6 +24330,11 @@ mod tests {
                 .map(PendingChartChangeset::review_state),
             Some(ChartChangesetReviewState::Blocked { .. })
         ));
+        let footer = line_plain_text(&dashboard.status_line(160));
+        assert!(footer.contains("Mode: Discard required"));
+        assert!(footer.contains("Keys: Esc/Ctrl-W discard and reload"));
+        assert!(footer.contains("Next: Discard and reopen"));
+        assert!(!footer.contains("Tab/⇧Tab pane"));
 
         dashboard.focus = WorkspaceFocus::Agent;
         insta::assert_snapshot!(
@@ -24061,6 +24372,11 @@ mod tests {
             Some(WorkspaceChartEntityKind::Note),
         );
         dashboard.pending_chart_changeset = Some(pending);
+        let footer = line_plain_text(&dashboard.status_line(160));
+        assert!(footer.contains("Mode: Conflict recovery"));
+        assert!(footer.contains("Keys: Ctrl-S refresh"));
+        assert!(footer.contains("Next: Refresh canonical chart"));
+        assert!(!footer.contains("Tab/⇧Tab pane"));
 
         insta::assert_snapshot!(
             "medical_workspace_chart_changeset_conflict_160x40",

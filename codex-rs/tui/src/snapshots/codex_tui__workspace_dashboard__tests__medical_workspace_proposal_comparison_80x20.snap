@@ -21,4 +21,4 @@ Zones: Explorer > [Patient Chart] > Agent Work  Focus: Center
 │└─────────────────────────────────────┘└─────────────────────────────────────┘│
 │:proposal accept | :proposal decline | :proposal next  · read-only comparison │
 └──────────────────────────────────────────────────────────────────────────────┘
-Focus: Center | Mode: Read-only chart | Next: Accept proposal
+Focus: Center | Keys: ↑/↓ scroll  PgUp/PgDn page  Tab/⇧Tab pane
