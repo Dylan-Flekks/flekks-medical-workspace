@@ -58,6 +58,23 @@ async fn save(
         .expect("checkpoint should save")
 }
 
+fn close_input(
+    client: &crate::WorkspaceClient,
+    checkpoint: &crate::WorkspaceDraftCheckpoint,
+    status: crate::WorkspaceDraftSessionTerminalStatus,
+) -> crate::WorkspaceDraftSessionClose {
+    crate::WorkspaceDraftSessionClose {
+        session_id: checkpoint.session_id.clone(),
+        client_id: client.id.clone(),
+        status,
+        expected_current_checkpoint_id: Some(checkpoint.id.clone()),
+        expected_current_checkpoint_revision: Some(checkpoint.revision),
+        expected_current_checkpoint_sha256: Some(checkpoint.content_sha256.clone()),
+        actor: "Clinician Example".to_string(),
+        reason: "Dismiss recovered draft.".to_string(),
+    }
+}
+
 #[tokio::test]
 async fn workspace_drafts_checkpoint_is_normalized_idempotent_and_revisioned() {
     let (runtime, client) = fixture().await;
@@ -261,13 +278,22 @@ async fn workspace_drafts_discard_is_durable_idempotent_and_client_scoped() {
         .await
         .expect("other client should save");
     let checkpoint = save(&runtime, input(&client, None, "Discard me")).await;
-    let close = crate::WorkspaceDraftSessionClose {
-        session_id: checkpoint.session_id.clone(),
-        client_id: client.id.clone(),
-        status: crate::WorkspaceDraftSessionTerminalStatus::Discarded,
-        actor: "Clinician Example".to_string(),
-        reason: "Dismiss recovered draft.".to_string(),
-    };
+    let close = close_input(
+        &client,
+        &checkpoint,
+        crate::WorkspaceDraftSessionTerminalStatus::Discarded,
+    );
+    let mut partial = close.clone();
+    partial.expected_current_checkpoint_revision = None;
+    assert!(
+        runtime
+            .workspace()
+            .close_draft_session(partial)
+            .await
+            .expect_err("partial current checkpoint provenance should fail")
+            .to_string()
+            .contains("must be provided together")
+    );
     let mut wrong_client = close.clone();
     wrong_client.client_id = other.id;
     assert!(
@@ -304,10 +330,21 @@ async fn workspace_drafts_discard_is_durable_idempotent_and_client_scoped() {
     assert_eq!(
         runtime
             .workspace()
-            .close_draft_session(close)
+            .close_draft_session(close.clone())
             .await
             .expect("same discard should replay"),
         discarded
+    );
+    let mut stale_replay = close;
+    stale_replay.expected_current_checkpoint_id = Some("stale-checkpoint".to_string());
+    assert!(
+        runtime
+            .workspace()
+            .close_draft_session(stale_replay)
+            .await
+            .expect_err("same-status replay must still validate current checkpoint")
+            .to_string()
+            .contains("current checkpoint changed")
     );
     assert!(
         runtime
@@ -326,4 +363,85 @@ async fn workspace_drafts_discard_is_durable_idempotent_and_client_scoped() {
             .await
             .contains("cannot checkpoint")
     );
+}
+
+#[tokio::test]
+async fn workspace_draft_close_rejects_stale_current_checkpoint_provenance() {
+    let (runtime, client) = fixture().await;
+    let first = save(&runtime, input(&client, None, "First")).await;
+    let close = close_input(
+        &client,
+        &first,
+        crate::WorkspaceDraftSessionTerminalStatus::Closed,
+    );
+
+    let mut stale_id = close.clone();
+    stale_id.expected_current_checkpoint_id = Some("different-checkpoint".to_string());
+    let mut stale_revision = close.clone();
+    stale_revision.expected_current_checkpoint_revision = Some(first.revision + 1);
+    let mut stale_hash = close.clone();
+    stale_hash.expected_current_checkpoint_sha256 = Some("0".repeat(64));
+    for stale in [stale_id, stale_revision, stale_hash] {
+        assert!(
+            runtime
+                .workspace()
+                .close_draft_session(stale)
+                .await
+                .expect_err("stale current checkpoint provenance should fail")
+                .to_string()
+                .contains("current checkpoint changed")
+        );
+    }
+
+    let newer = save(
+        &runtime,
+        input(&client, Some(first.session_id.clone()), "Newer"),
+    )
+    .await;
+    assert!(
+        runtime
+            .workspace()
+            .close_draft_session(close)
+            .await
+            .expect_err("a concurrently newer checkpoint should block close")
+            .to_string()
+            .contains("current checkpoint changed")
+    );
+    let active = runtime
+        .workspace()
+        .list_draft_sessions(crate::WorkspaceDraftSessionFilter {
+            client_id: client.id.clone(),
+            ..Default::default()
+        })
+        .await
+        .expect("newer active session should remain available");
+    assert_eq!(active[0].current_checkpoint, newer);
+
+    let closed = runtime
+        .workspace()
+        .close_draft_session(close_input(
+            &client,
+            &newer,
+            crate::WorkspaceDraftSessionTerminalStatus::Closed,
+        ))
+        .await
+        .expect("exact newer checkpoint should close");
+    assert_eq!(closed.session.status, "closed");
+
+    let legacy = save(&runtime, input(&client, None, "Legacy")).await;
+    let legacy_closed = runtime
+        .workspace()
+        .close_draft_session(crate::WorkspaceDraftSessionClose {
+            session_id: legacy.session_id,
+            client_id: client.id,
+            status: crate::WorkspaceDraftSessionTerminalStatus::Closed,
+            expected_current_checkpoint_id: None,
+            expected_current_checkpoint_revision: None,
+            expected_current_checkpoint_sha256: None,
+            actor: "Legacy client".to_string(),
+            reason: "Legacy close without provenance.".to_string(),
+        })
+        .await
+        .expect("legacy close should remain supported");
+    assert_eq!(legacy_closed.session.status, "closed");
 }
