@@ -2857,7 +2857,7 @@ ORDER BY created_at_ms DESC
     ) -> anyhow::Result<crate::WorkspaceContextPacket> {
         let id = Uuid::new_v4().to_string();
         let now_ms = datetime_to_epoch_millis(Utc::now());
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         validate_packet_links(
             &mut tx,
             &input.client_id,
@@ -2912,6 +2912,22 @@ ORDER BY created_at_ms DESC
         } else {
             input.expected_output_kind.trim().to_string()
         };
+        if let Some(existing) = super::workspace_packet_checkpoint::validate_source_and_find_replay(
+            &mut tx,
+            &input,
+            super::workspace_packet_checkpoint::PacketReplayFields {
+                base_note_revision,
+                context_envelope_sha256: &context_envelope_sha256,
+                clinician_actor: &clinician_actor,
+                authorized_scope_json: &authorized_scope_json,
+                expected_output_kind: &expected_output_kind,
+            },
+        )
+        .await?
+        {
+            tx.rollback().await?;
+            return existing.try_into();
+        }
         let submitted_at_ms =
             matches!(status.as_str(), "submitted" | "sent" | "result_saved").then_some(now_ms);
         let canceled_at_ms = (status == "canceled").then_some(now_ms);
@@ -2922,6 +2938,10 @@ INSERT INTO workspace_context_packets (
     client_id,
     encounter_id,
     note_id,
+    source_draft_session_id,
+    source_draft_checkpoint_id,
+    source_draft_checkpoint_revision,
+    source_draft_checkpoint_sha256,
     human_request,
     selected_artifact_ids_json,
     selected_derivative_ids_json,
@@ -2942,12 +2962,16 @@ INSERT INTO workspace_context_packets (
     submitted_at_ms,
     canceled_at_ms,
     updated_at_ms
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 RETURNING
     id,
     client_id,
     encounter_id,
     note_id,
+    source_draft_session_id,
+    source_draft_checkpoint_id,
+    source_draft_checkpoint_revision,
+    source_draft_checkpoint_sha256,
     human_request,
     selected_artifact_ids_json,
     selected_derivative_ids_json,
@@ -2974,6 +2998,15 @@ RETURNING
         .bind(&input.client_id)
         .bind(&input.encounter_id)
         .bind(&input.note_id)
+        .bind(input.source_draft_session_id.as_deref().map(str::trim))
+        .bind(input.source_draft_checkpoint_id.as_deref().map(str::trim))
+        .bind(input.source_draft_checkpoint_revision)
+        .bind(
+            input
+                .source_draft_checkpoint_sha256
+                .as_deref()
+                .map(str::trim),
+        )
         .bind(&input.human_request)
         .bind(&input.selected_artifact_ids_json)
         .bind(&input.selected_derivative_ids_json)
@@ -2996,6 +3029,33 @@ RETURNING
         .bind(now_ms)
         .fetch_one(&mut *tx)
         .await?;
+        let (audit_summary, audit_metadata_json) = if let Some(checkpoint_id) =
+            input.source_draft_checkpoint_id.as_deref()
+        {
+            (
+                "checkpoint-bound context packet prepared".to_string(),
+                Some(
+                    serde_json::json!({
+                        "sourceDraftSessionId": input.source_draft_session_id,
+                        "sourceDraftCheckpointId": checkpoint_id,
+                        "sourceDraftCheckpointRevision": input.source_draft_checkpoint_revision,
+                        "sourceDraftCheckpointSha256": input.source_draft_checkpoint_sha256,
+                        "contextEnvelopeSha256": context_envelope_sha256,
+                    })
+                    .to_string(),
+                ),
+            )
+        } else {
+            (
+                input.chart_context_summary.clone(),
+                Some(format!(
+                    r#"{{"artifact_summary":"{}","derivative_summary":"{}","clip_summary":"{}","context_envelope":"present"}}"#,
+                    json_escape(&input.artifact_summary),
+                    json_escape(&input.derivative_summary),
+                    json_escape(&input.clip_summary)
+                )),
+            )
+        };
         insert_audit_event(
             &mut tx,
             crate::WorkspaceAuditEventCreate {
@@ -3009,13 +3069,8 @@ RETURNING
                 encounter_id: input.encounter_id,
                 note_id: input.note_id,
                 success: true,
-                summary: input.chart_context_summary,
-                metadata_json: Some(format!(
-                    r#"{{"artifact_summary":"{}","derivative_summary":"{}","clip_summary":"{}","context_envelope":"present"}}"#,
-                    json_escape(&input.artifact_summary),
-                    json_escape(&input.derivative_summary),
-                    json_escape(&input.clip_summary)
-                )),
+                summary: audit_summary,
+                metadata_json: audit_metadata_json,
                 ..Default::default()
             },
             now_ms,
@@ -3037,6 +3092,10 @@ SELECT
     client_id,
     encounter_id,
     note_id,
+    source_draft_session_id,
+    source_draft_checkpoint_id,
+    source_draft_checkpoint_revision,
+    source_draft_checkpoint_sha256,
     human_request,
     selected_artifact_ids_json,
     selected_derivative_ids_json,
@@ -3090,6 +3149,10 @@ SELECT
     client_id,
     encounter_id,
     note_id,
+    source_draft_session_id,
+    source_draft_checkpoint_id,
+    source_draft_checkpoint_revision,
+    source_draft_checkpoint_sha256,
     human_request,
     selected_artifact_ids_json,
     selected_derivative_ids_json,

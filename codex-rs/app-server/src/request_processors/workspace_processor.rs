@@ -1014,6 +1014,10 @@ impl WorkspaceRequestProcessor {
                 client_id: params.client_id,
                 encounter_id: empty_to_none(params.encounter_id),
                 note_id: empty_to_none(params.note_id),
+                source_draft_session_id: None,
+                source_draft_checkpoint_id: None,
+                source_draft_checkpoint_revision: None,
+                source_draft_checkpoint_sha256: None,
                 human_request: params.human_request.trim().to_string(),
                 selected_artifact_ids_json: if params.selected_artifact_ids_json.trim().is_empty() {
                     "[]".to_string()
