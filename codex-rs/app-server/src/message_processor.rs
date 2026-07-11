@@ -1177,6 +1177,20 @@ impl MessageProcessor {
             ClientRequest::WorkspaceContextGet { params, .. } => {
                 self.workspace_processor.context_get(params).await
             }
+            ClientRequest::WorkspaceDraftCheckpointCreate { params, .. } => {
+                self.workspace_processor
+                    .draft_checkpoint_create(params)
+                    .await
+            }
+            ClientRequest::WorkspaceDraftCheckpointList { params, .. } => {
+                self.workspace_processor.draft_checkpoint_list(params).await
+            }
+            ClientRequest::WorkspaceDraftSessionList { params, .. } => {
+                self.workspace_processor.draft_session_list(params).await
+            }
+            ClientRequest::WorkspaceDraftSessionClose { params, .. } => {
+                self.workspace_processor.draft_session_close(params).await
+            }
             ClientRequest::WorkspaceContextPacketList { params, .. } => {
                 self.workspace_processor.context_packet_list(params).await
             }
