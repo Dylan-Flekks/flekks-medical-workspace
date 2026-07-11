@@ -1,36 +1,36 @@
 ---
 source: tui/src/workspace_dashboard.rs
-expression: "render_dashboard_lines_at(&dashboard, width, height)"
+expression: "render_dashboard_lines_at(&search, 120, 32)"
 ---
 Medical Workspace
-Patient: Jordan Patient  DOB: blank  MRN: blank  Contact: Missing contact  Coverage: Missing coverage  Encounter: No
+Patient: Jordan Patient  DOB: 1980-01-02  MRN: MRN-123  Contact: Contact on file  Coverage: Coverage on file  Encounter:
  EXPLORER                      PATIENT CHART
 ┌Patient Directory───────────┐┌Patient Demographics────────────────────────────────────────────────────────────────────┐
-│Local search: /             ││Display: Jordan Patient                                                                 │
-│0 active patients; local    ││Preferred:                                                                              │
-│only                        ││DOB:                                                                                    │
-│No saved patients yet.      ││Sex/Gender:                                                                             │
-│New patient: :patient new   ││Patient ID / MRN:                                                                       │
-│                            ││Chart start: 2026-01-01                                                                 │
-│                            ││Chart end: 2026-06-09                                                                   │
+│Local search: /Jordan       ││Display: Jordan Patient                                                                 │
+│2 active patients; local    ││Preferred: JP                                                                           │
+│only                        ││DOB: 1980-01-02                                                                         │
+│Enter opens chart; search is││Sex/Gender:                                                                             │
+│not agent context.          ││Patient ID / MRN: MRN-123                                                               │
+│> Jordan Patient  1980-01-02││Chart start:                                                                            │
+│ MRN-123  active            ││Chart end:                                                                              │
 │                            │└────────────────────────────────────────────────────────────────────────────────────────┘
 └────────────────────────────┘┌Note Title──────────────────────────────────────────────────────────────────────────────┐
 ┌Patient Notes───────────────┐│Visit note                                                                              │
 │Patient Notes               │└────────────────────────────────────────────────────────────────────────────────────────┘
 │  New note                  │┌Note Body───────────────────────────────────────────────────────────────────────────────┐
-│  No patient notes yet. Use ││Assessment: improving gait tolerance.                                                   │
-│:note new.                  ││Plan: continue current program.                                                         │
+│  No patient notes yet. Use ││Fake human-entered visit note body.                                                     │
+│:note new.                  ││                                                                                        │
 │  Medical, communication,   ││                                                                                        │
 │and admin notes appear here.││                                                                                        │
 └────────────────────────────┘│                                                                                        │
 ┌Uploaded Documents──────────┐│                                                                                        │
 │Uploaded Documents          ││                                                                                        │
 │No files yet                │└────────────────────────────────────────────────────────────────────────────────────────┘
-│Paste/drop JPG/PDF. S...    │┌Agent Recommendation────────────────────────────────────────────────────────────────────┐
-│                            ││Pending Proposal Changeset                                                              │
-│                            ││Review state: READY · proposal base matches current r3                                  │
-│                            ││  Guard: note r3 · Reason: tighten wording                                              │
-│                            ││  Proposed: Assessment: gait tolerance improved with cueing. Plan: progress w...        │
-│                            ││  ● Tab to Agent Work for full text · :proposal accept | :proposal decline              │
+│Paste/drop JPG/PDF. S...    │┌Today's Visit───────────────────────────────────────────────────────────────────────────┐
+│                            ││Patient: Jordan Patient; note: Visit note                                               │
+│                            ││Next                                                                                    │
+│                            ││  ● Next: Open encounter                                                                │
+│                            ││                                                                                        │
+│                            ││Intake Checklist                                                                        │
 └────────────────────────────┘└────────────────────────────────────────────────────────────────────────────────────────┘
-Focus: Center | Mode: Read-only chart | Keys: ↑/↓ scroll  PgUp/PgDn page  Tab/⇧Tab pane | Next: Accept proposal
+Mode: Patient search | Keys: ↑/↓ patient  Enter open  Esc chart | /Jordan

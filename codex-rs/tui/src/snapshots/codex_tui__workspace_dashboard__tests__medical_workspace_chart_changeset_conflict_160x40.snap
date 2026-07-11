@@ -41,4 +41,4 @@ Patient: Jordan Patient  DOB: blank  MRN: blank  Contact: Missing contact  Cover
 │                                ││                                                                              ││                                            │
 │                                ││                                                                              ││                                            │
 └────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────┘└────────────────────────────────────────────┘
-Focus: Agent | Mode: Navigate | Next: r input | p packet | i returned | Status: Canonical chart changed; draft preserved.
+Focus: Agent | Mode: Conflict recovery | Keys: Ctrl-S refresh  Esc/Ctrl-W close | Next: Refresh canonical chart

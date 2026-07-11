@@ -1,0 +1,36 @@
+---
+source: tui/src/workspace_dashboard.rs
+expression: rendered
+---
+Medical Workspace
+Patient: No patient selected  DOB: blank  MRN: blank  Contact: Missing contact  Coverage: Missing coverage  Encounter:
+ EXPLORER                      PATIENT CHART
+┌Patient Dir┌Workspace Actions─────────────────────────────────────────────────────────────────────────────┐───────────┐
+│Local searc│?/Esc close   : command                                                                       │           │
+│0 active pa│                                                                                              │           │
+│only       │Keyboard navigation                                                                           │           │
+│No saved pa│  Tab/Shift-Tab changes pane                                                                  │           │
+│New patient│  Arrow keys stay inside the focused pane                                                     │           │
+│           │                                                                                              │           │
+│           │Navigation                                                                                    │           │
+│           │  Show workspace actions :actions [?]                                                         │───────────┘
+└───────────│  Focus note title :focus note title                                                          │───────────┐
+┌Patient Not│  Focus note body :focus note body                                                            │           │
+│Patient Not│  Focus clinical workspace :focus clinical workspace                                          │───────────┘
+│  New note │                                                                                              │───────────┐
+│  No patien│Records / Patients                                                                            │           │
+│:note new. │  Open patient list :patients                                                                 │           │
+│  Medical, │  Open patient demographics :demographics                                                     │           │
+│and admin n│  Edit patient demographics :demographics edit                                                │           │
+└───────────│  Edit emergency contact :emergency contact edit                                              │           │
+┌Uploaded Do│  Edit coverage :coverage edit                                                                │           │
+│Uploaded Do│  New patient :patient new [c]                                                                │           │
+│No files ye│                                                                                              │───────────┘
+│Paste/drop │Search                                                                                        │───────────┐
+│           │  Search patients :patient search [/]                                                         │           │
+│           │                                                                                              │           │
+│           └──────────────────────────────────────────────────────────────────────────────────────────────┘           │
+│                            ││                                                                                        │
+│                            ││Intake Checklist                                                                        │
+└────────────────────────────┘└────────────────────────────────────────────────────────────────────────────────────────┘
+Focus: Directory | Mode: Navigate | Keys: ↑/↓ patient  Enter open  / search  Tab/⇧Tab pane | Next: Search/open patient

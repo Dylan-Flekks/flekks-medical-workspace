@@ -33,4 +33,4 @@ Patient: Jordan Patient  DOB: blank  MRN: blank  Contact: Missing contact  Cover
 │                            ││                                                                                        │
 │                            ││Intake Checklist                                                                        │
 └────────────────────────────┘└────────────────────────────────────────────────────────────────────────────────────────┘
-Mode: Commands | :proposal | Enter run | Esc close | Up/Down move
+Mode: Commands | Keys: ↑/↓ command  Enter run  Esc close | :proposal

@@ -41,4 +41,4 @@ Patient: Jordan Patient  DOB: blank  MRN: blank  Contact: Missing contact  Cover
 │                                ││                                                                              ││                                            │
 │                                ││                                                                              ││                                            │
 └────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────┘└────────────────────────────────────────────┘
-Focus: Agent | Mode: Navigate | Next: r input | p packet | i returned
+Focus: Agent | Mode: Discard required | Keys: Esc/Ctrl-W discard and reload | Next: Discard and reopen
