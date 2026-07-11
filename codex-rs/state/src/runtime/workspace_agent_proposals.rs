@@ -16,7 +16,10 @@ impl WorkspaceStore {
         input: crate::WorkspaceNoteProposalResolve,
     ) -> anyhow::Result<Option<crate::WorkspaceNoteProposal>> {
         let now_ms = datetime_to_epoch_millis(Utc::now());
-        let mut tx = self.pool.begin().await?;
+        // Serialize proposal decisions before reading their terminal state so
+        // concurrent retries observe the canonical first decision instead of
+        // racing through the optimistic note update.
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let Some(proposal_row) =
             workspace_note_proposal_row_by_id(&mut tx, &input.proposal_id).await?
         else {
@@ -26,7 +29,10 @@ impl WorkspaceStore {
         let proposal: crate::WorkspaceNoteProposal =
             WorkspaceNoteProposalRow::try_from_row(&proposal_row)?.try_into()?;
         if proposal.status != crate::WorkspaceNoteProposalStatus::Pending {
+            let retry_result =
+                validate_resolved_proposal_retry(&mut tx, &proposal, &input.resolution).await;
             tx.rollback().await?;
+            retry_result?;
             return Ok(Some(proposal));
         }
 
@@ -224,6 +230,93 @@ ORDER BY created_at_ms ASC, rowid ASC
             })
             .collect()
     }
+}
+
+async fn validate_resolved_proposal_retry(
+    tx: &mut sqlx::Transaction<'_, Sqlite>,
+    proposal: &crate::WorkspaceNoteProposal,
+    resolution: &crate::WorkspaceNoteProposalResolution,
+) -> anyhow::Result<()> {
+    use crate::WorkspaceNoteProposalResolution;
+    use crate::WorkspaceNoteProposalStatus;
+
+    match (proposal.status, resolution) {
+        (WorkspaceNoteProposalStatus::Declined, WorkspaceNoteProposalResolution::Decline) => Ok(()),
+        (WorkspaceNoteProposalStatus::Accepted, WorkspaceNoteProposalResolution::Accept) => {
+            let decision = stored_acceptance_decision(tx, &proposal.id).await?;
+            if decision.decision_kind == crate::WorkspaceNoteProposalDecisionKind::AcceptedAll {
+                return Ok(());
+            }
+            anyhow::bail!(
+                "cannot retry unedited acceptance for workspace note proposal `{}` because the stored acceptance was edited",
+                proposal.id
+            );
+        }
+        (
+            WorkspaceNoteProposalStatus::Accepted,
+            WorkspaceNoteProposalResolution::AcceptEdited { body },
+        ) => {
+            if body.trim().is_empty() {
+                anyhow::bail!("edited workspace note proposal body must not be empty");
+            }
+            let decision = stored_acceptance_decision(tx, &proposal.id).await?;
+            if decision.decision_kind == crate::WorkspaceNoteProposalDecisionKind::AcceptedEdited
+                && decision.applied_text.as_deref() == Some(body.as_str())
+            {
+                return Ok(());
+            }
+            anyhow::bail!(
+                "cannot retry edited acceptance for workspace note proposal `{}` because the stored acceptance differs",
+                proposal.id
+            );
+        }
+        (WorkspaceNoteProposalStatus::Accepted, WorkspaceNoteProposalResolution::Decline) => {
+            anyhow::bail!(
+                "cannot decline workspace note proposal `{}` because it is already accepted",
+                proposal.id
+            );
+        }
+        (
+            WorkspaceNoteProposalStatus::Declined,
+            WorkspaceNoteProposalResolution::Accept
+            | WorkspaceNoteProposalResolution::AcceptEdited { .. },
+        ) => {
+            anyhow::bail!(
+                "cannot accept workspace note proposal `{}` because it is already declined",
+                proposal.id
+            );
+        }
+        (WorkspaceNoteProposalStatus::Pending, _) => {
+            anyhow::bail!("workspace note proposal `{}` is still pending", proposal.id);
+        }
+    }
+}
+
+async fn stored_acceptance_decision(
+    tx: &mut sqlx::Transaction<'_, Sqlite>,
+    proposal_id: &str,
+) -> anyhow::Result<crate::WorkspaceNoteProposalDecision> {
+    let row = sqlx::query(
+        r#"
+SELECT
+    id, proposal_id, agent_result_id, note_id, base_revision, decision_kind,
+    change_id, applied_text, applied_text_sha256, resulting_note_revision,
+    actor, reason, created_at_ms
+FROM workspace_note_proposal_decisions
+WHERE proposal_id = ? AND decision_kind IN ('accepted_all', 'accepted_edited')
+ORDER BY created_at_ms DESC, rowid DESC
+LIMIT 1
+        "#,
+    )
+    .bind(proposal_id)
+    .fetch_optional(&mut **tx)
+    .await?
+    .ok_or_else(|| {
+        anyhow::anyhow!(
+            "accepted workspace note proposal `{proposal_id}` has no stored acceptance decision"
+        )
+    })?;
+    WorkspaceNoteProposalDecisionRow::try_from_row(&row).and_then(TryInto::try_into)
 }
 
 struct AcceptedProposal<'a> {

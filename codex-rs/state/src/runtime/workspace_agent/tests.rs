@@ -491,6 +491,257 @@ async fn workspace_stale_agent_result_proposal_keeps_original_base_and_decisions
 }
 
 #[tokio::test]
+async fn workspace_note_proposal_same_resolution_retries_are_idempotent() {
+    let runtime = test_runtime().await;
+    let (_client, note) = seed_client_note(&runtime).await;
+    let accepted_proposal = runtime
+        .workspace()
+        .create_note_proposal(crate::WorkspaceNoteProposalCreate {
+            note_id: note.id.clone(),
+            base_revision: note.current_revision,
+            proposed_body: "Accepted proposal body.".to_string(),
+            summary: "Synthetic acceptance".to_string(),
+            ..Default::default()
+        })
+        .await
+        .expect("accepted proposal should save");
+    let accepted = runtime
+        .workspace()
+        .resolve_note_proposal(
+            &accepted_proposal.id,
+            /*accept*/ true,
+            "Clinician Example",
+        )
+        .await
+        .expect("proposal should accept")
+        .expect("proposal should exist");
+    let accepted_retry = runtime
+        .workspace()
+        .resolve_note_proposal(
+            &accepted_proposal.id,
+            /*accept*/ true,
+            "Clinician Example",
+        )
+        .await
+        .expect("matching acceptance retry should succeed")
+        .expect("proposal should exist");
+    assert_eq!(accepted_retry, accepted);
+    assert_eq!(
+        runtime
+            .workspace()
+            .list_note_proposal_decisions(&accepted_proposal.id)
+            .await
+            .expect("acceptance decisions should list")
+            .len(),
+        1
+    );
+
+    let accepted_note = runtime
+        .workspace()
+        .get_note(&note.id)
+        .await
+        .expect("accepted note should load")
+        .expect("accepted note should exist");
+    assert_eq!(accepted_note.current_revision, note.current_revision + 1);
+    let declined_proposal = runtime
+        .workspace()
+        .create_note_proposal(crate::WorkspaceNoteProposalCreate {
+            note_id: note.id,
+            base_revision: accepted_note.current_revision,
+            proposed_body: "Declined proposal body.".to_string(),
+            summary: "Synthetic decline".to_string(),
+            ..Default::default()
+        })
+        .await
+        .expect("declined proposal should save");
+    let declined = runtime
+        .workspace()
+        .resolve_note_proposal(
+            &declined_proposal.id,
+            /*accept*/ false,
+            "Clinician Example",
+        )
+        .await
+        .expect("proposal should decline")
+        .expect("proposal should exist");
+    let declined_retry = runtime
+        .workspace()
+        .resolve_note_proposal(
+            &declined_proposal.id,
+            /*accept*/ false,
+            "Clinician Example",
+        )
+        .await
+        .expect("matching decline retry should succeed")
+        .expect("proposal should exist");
+    assert_eq!(declined_retry, declined);
+    assert_eq!(
+        runtime
+            .workspace()
+            .list_note_proposal_decisions(&declined_proposal.id)
+            .await
+            .expect("decline decisions should list")
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn workspace_note_proposal_concurrent_accepts_converge_on_one_decision() {
+    let runtime = test_runtime().await;
+    let (_client, note) = seed_client_note(&runtime).await;
+    let proposal = runtime
+        .workspace()
+        .create_note_proposal(crate::WorkspaceNoteProposalCreate {
+            note_id: note.id.clone(),
+            base_revision: note.current_revision,
+            proposed_body: "Concurrently accepted proposal body.".to_string(),
+            summary: "Synthetic concurrent acceptance".to_string(),
+            ..Default::default()
+        })
+        .await
+        .expect("proposal should save");
+
+    let (first, second) = tokio::join!(
+        runtime.workspace().resolve_note_proposal(
+            &proposal.id,
+            /*accept*/ true,
+            "Clinician Example",
+        ),
+        runtime.workspace().resolve_note_proposal(
+            &proposal.id,
+            /*accept*/ true,
+            "Clinician Example",
+        ),
+    );
+    let first = first
+        .expect("first concurrent acceptance should succeed")
+        .expect("proposal should exist");
+    let second = second
+        .expect("second concurrent acceptance should succeed")
+        .expect("proposal should exist");
+    assert_eq!(first, second);
+    assert_eq!(first.status, crate::WorkspaceNoteProposalStatus::Accepted);
+
+    let updated_note = runtime
+        .workspace()
+        .get_note(&note.id)
+        .await
+        .expect("accepted note should load")
+        .expect("accepted note should exist");
+    assert_eq!(updated_note.current_revision, note.current_revision + 1);
+    assert_eq!(updated_note.body, "Concurrently accepted proposal body.");
+    let decisions = runtime
+        .workspace()
+        .list_note_proposal_decisions(&proposal.id)
+        .await
+        .expect("acceptance decisions should list");
+    assert_eq!(decisions.len(), 1);
+    assert_eq!(
+        decisions[0].decision_kind,
+        crate::WorkspaceNoteProposalDecisionKind::AcceptedAll
+    );
+    assert_eq!(
+        decisions[0].resulting_note_revision,
+        Some(note.current_revision + 1)
+    );
+}
+
+#[tokio::test]
+async fn workspace_note_proposal_contradictory_resolution_retries_fail_closed() {
+    let runtime = test_runtime().await;
+    let (_client, note) = seed_client_note(&runtime).await;
+    let declined_proposal = runtime
+        .workspace()
+        .create_note_proposal(crate::WorkspaceNoteProposalCreate {
+            note_id: note.id.clone(),
+            base_revision: note.current_revision,
+            proposed_body: "Declined proposal body.".to_string(),
+            summary: "Synthetic decline".to_string(),
+            ..Default::default()
+        })
+        .await
+        .expect("declined proposal should save");
+    runtime
+        .workspace()
+        .resolve_note_proposal(
+            &declined_proposal.id,
+            /*accept*/ false,
+            "Clinician Example",
+        )
+        .await
+        .expect("proposal should decline")
+        .expect("proposal should exist");
+    let accept_after_decline = runtime
+        .workspace()
+        .resolve_note_proposal(
+            &declined_proposal.id,
+            /*accept*/ true,
+            "Clinician Example",
+        )
+        .await
+        .expect_err("accept after decline must fail");
+    assert!(
+        accept_after_decline
+            .to_string()
+            .contains("already declined")
+    );
+
+    let accepted_proposal = runtime
+        .workspace()
+        .create_note_proposal(crate::WorkspaceNoteProposalCreate {
+            note_id: note.id,
+            base_revision: note.current_revision,
+            proposed_body: "Accepted proposal body.".to_string(),
+            summary: "Synthetic acceptance".to_string(),
+            ..Default::default()
+        })
+        .await
+        .expect("accepted proposal should save");
+    runtime
+        .workspace()
+        .resolve_note_proposal(
+            &accepted_proposal.id,
+            /*accept*/ true,
+            "Clinician Example",
+        )
+        .await
+        .expect("proposal should accept")
+        .expect("proposal should exist");
+    let edited_after_unedited_accept = runtime
+        .workspace()
+        .resolve_note_proposal_with(crate::WorkspaceNoteProposalResolve {
+            proposal_id: accepted_proposal.id.clone(),
+            resolution: crate::WorkspaceNoteProposalResolution::AcceptEdited {
+                body: "Edited after unedited acceptance.".to_string(),
+            },
+            actor: "Clinician Example".to_string(),
+            reason: "Contradictory retry.".to_string(),
+        })
+        .await
+        .expect_err("edited acceptance after unedited acceptance must fail");
+    assert!(
+        edited_after_unedited_accept
+            .to_string()
+            .contains("stored acceptance differs")
+    );
+    let decline_after_accept = runtime
+        .workspace()
+        .resolve_note_proposal(
+            &accepted_proposal.id,
+            /*accept*/ false,
+            "Clinician Example",
+        )
+        .await
+        .expect_err("decline after accept must fail");
+    assert!(
+        decline_after_accept
+            .to_string()
+            .contains("already accepted")
+    );
+}
+
+#[tokio::test]
 async fn workspace_edited_acceptance_records_exact_resulting_revision() {
     let runtime = test_runtime().await;
     let (_client, note) = seed_client_note(&runtime).await;
@@ -539,6 +790,56 @@ async fn workspace_edited_acceptance_records_exact_resulting_revision() {
     assert_eq!(
         decisions[0].applied_text.as_deref(),
         Some("Clinician-edited accepted body.")
+    );
+    let retried = runtime
+        .workspace()
+        .resolve_note_proposal_with(crate::WorkspaceNoteProposalResolve {
+            proposal_id: proposal.id.clone(),
+            resolution: crate::WorkspaceNoteProposalResolution::AcceptEdited {
+                body: "Clinician-edited accepted body.".to_string(),
+            },
+            actor: "Clinician Example".to_string(),
+            reason: "Retry after uncertain delivery.".to_string(),
+        })
+        .await
+        .expect("matching edited acceptance retry should succeed")
+        .expect("proposal should exist");
+    assert_eq!(retried, resolved);
+    let conflicting_retry = runtime
+        .workspace()
+        .resolve_note_proposal_with(crate::WorkspaceNoteProposalResolve {
+            proposal_id: proposal.id.clone(),
+            resolution: crate::WorkspaceNoteProposalResolution::AcceptEdited {
+                body: "Different edited body.".to_string(),
+            },
+            actor: "Clinician Example".to_string(),
+            reason: "Contradictory retry.".to_string(),
+        })
+        .await
+        .expect_err("different edited acceptance retry must fail");
+    assert!(
+        conflicting_retry
+            .to_string()
+            .contains("stored acceptance differs")
+    );
+    let unedited_retry = runtime
+        .workspace()
+        .resolve_note_proposal(&proposal.id, /*accept*/ true, "Clinician Example")
+        .await
+        .expect_err("unedited acceptance after edited acceptance must fail");
+    assert!(
+        unedited_retry
+            .to_string()
+            .contains("stored acceptance was edited")
+    );
+    assert_eq!(
+        runtime
+            .workspace()
+            .list_note_proposal_decisions(&proposal.id)
+            .await
+            .expect("retried decision should list")
+            .len(),
+        1
     );
 }
 

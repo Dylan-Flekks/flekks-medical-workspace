@@ -129,20 +129,20 @@ use codex_app_server_protocol::WorkspaceArtifactDerivativeListParams;
 use codex_app_server_protocol::WorkspaceArtifactDerivativeListResponse;
 use codex_app_server_protocol::WorkspaceArtifactDerivativeStatusUpdateParams;
 use codex_app_server_protocol::WorkspaceArtifactDerivativeStatusUpdateResponse;
-use codex_app_server_protocol::WorkspaceArtifactDerivativeUpsertParams;
-use codex_app_server_protocol::WorkspaceArtifactDerivativeUpsertResponse;
 use codex_app_server_protocol::WorkspaceAuditListParams;
 use codex_app_server_protocol::WorkspaceAuditListResponse;
+use codex_app_server_protocol::WorkspaceChartCommitParams;
+use codex_app_server_protocol::WorkspaceChartCommitResponse;
 use codex_app_server_protocol::WorkspaceClientListParams;
 use codex_app_server_protocol::WorkspaceClientListResponse;
+#[cfg(test)]
 use codex_app_server_protocol::WorkspaceClientUpsertParams;
+#[cfg(test)]
 use codex_app_server_protocol::WorkspaceClientUpsertResponse;
 use codex_app_server_protocol::WorkspaceContextClipListParams;
 use codex_app_server_protocol::WorkspaceContextClipListResponse;
 use codex_app_server_protocol::WorkspaceContextClipStatusUpdateParams;
 use codex_app_server_protocol::WorkspaceContextClipStatusUpdateResponse;
-use codex_app_server_protocol::WorkspaceContextClipUpsertParams;
-use codex_app_server_protocol::WorkspaceContextClipUpsertResponse;
 #[cfg(test)]
 use codex_app_server_protocol::WorkspaceContextGetParams;
 #[cfg(test)]
@@ -181,19 +181,21 @@ use codex_app_server_protocol::WorkspaceNoteSignParams;
 use codex_app_server_protocol::WorkspaceNoteSignResponse;
 use codex_app_server_protocol::WorkspaceNoteSignatureListParams;
 use codex_app_server_protocol::WorkspaceNoteSignatureListResponse;
+#[cfg(test)]
 use codex_app_server_protocol::WorkspaceNoteUpsertParams;
+#[cfg(test)]
 use codex_app_server_protocol::WorkspaceNoteUpsertResponse;
 use codex_app_server_protocol::WorkspacePatientSafetyItemListParams;
 use codex_app_server_protocol::WorkspacePatientSafetyItemListResponse;
-use codex_app_server_protocol::WorkspacePatientSafetyItemUpsertParams;
-use codex_app_server_protocol::WorkspacePatientSafetyItemUpsertResponse;
 use codex_app_server_protocol::WorkspacePracticeLibraryListParams;
 use codex_app_server_protocol::WorkspacePracticeLibraryListResponse;
 use codex_app_server_protocol::WorkspaceTaskListParams;
 use codex_app_server_protocol::WorkspaceTaskListResponse;
 use codex_app_server_protocol::WorkspaceTaskStatusUpdateParams;
 use codex_app_server_protocol::WorkspaceTaskStatusUpdateResponse;
+#[cfg(test)]
 use codex_app_server_protocol::WorkspaceTaskUpsertParams;
+#[cfg(test)]
 use codex_app_server_protocol::WorkspaceTaskUpsertResponse;
 use codex_otel::TelemetryAuthMode;
 use codex_protocol::ThreadId;
@@ -865,6 +867,7 @@ impl AppServerSession {
             .wrap_err("workspace/client/list failed in TUI")
     }
 
+    #[cfg(test)]
     pub(crate) async fn workspace_client_upsert(
         &mut self,
         params: WorkspaceClientUpsertParams,
@@ -874,6 +877,17 @@ impl AppServerSession {
             .request_typed(ClientRequest::WorkspaceClientUpsert { request_id, params })
             .await
             .wrap_err("workspace/client/upsert failed in TUI")
+    }
+
+    pub(crate) async fn workspace_chart_commit(
+        &mut self,
+        params: WorkspaceChartCommitParams,
+    ) -> Result<WorkspaceChartCommitResponse> {
+        let request_id = self.next_request_id();
+        self.client
+            .request_typed(ClientRequest::WorkspaceChartCommit { request_id, params })
+            .await
+            .wrap_err("workspace/chart/commit failed in TUI")
     }
 
     pub(crate) async fn workspace_note_list(
@@ -890,6 +904,7 @@ impl AppServerSession {
             .wrap_err("workspace/note/list failed in TUI")
     }
 
+    #[cfg(test)]
     pub(crate) async fn workspace_note_upsert(
         &mut self,
         params: WorkspaceNoteUpsertParams,
@@ -1085,17 +1100,6 @@ impl AppServerSession {
             .wrap_err("workspace/patient/safety/list failed in TUI")
     }
 
-    pub(crate) async fn workspace_patient_safety_item_upsert(
-        &mut self,
-        params: WorkspacePatientSafetyItemUpsertParams,
-    ) -> Result<WorkspacePatientSafetyItemUpsertResponse> {
-        let request_id = self.next_request_id();
-        self.client
-            .request_typed(ClientRequest::WorkspacePatientSafetyItemUpsert { request_id, params })
-            .await
-            .wrap_err("workspace/patient/safety/upsert failed in TUI")
-    }
-
     pub(crate) async fn workspace_artifact_derivative_list(
         &mut self,
         params: WorkspaceArtifactDerivativeListParams,
@@ -1105,17 +1109,6 @@ impl AppServerSession {
             .request_typed(ClientRequest::WorkspaceArtifactDerivativeList { request_id, params })
             .await
             .wrap_err("workspace/artifact/derivative/list failed in TUI")
-    }
-
-    pub(crate) async fn workspace_artifact_derivative_upsert(
-        &mut self,
-        params: WorkspaceArtifactDerivativeUpsertParams,
-    ) -> Result<WorkspaceArtifactDerivativeUpsertResponse> {
-        let request_id = self.next_request_id();
-        self.client
-            .request_typed(ClientRequest::WorkspaceArtifactDerivativeUpsert { request_id, params })
-            .await
-            .wrap_err("workspace/artifact/derivative/upsert failed in TUI")
     }
 
     pub(crate) async fn workspace_artifact_derivative_status_update(
@@ -1143,17 +1136,6 @@ impl AppServerSession {
             .wrap_err("workspace/context/clip/list failed in TUI")
     }
 
-    pub(crate) async fn workspace_context_clip_upsert(
-        &mut self,
-        params: WorkspaceContextClipUpsertParams,
-    ) -> Result<WorkspaceContextClipUpsertResponse> {
-        let request_id = self.next_request_id();
-        self.client
-            .request_typed(ClientRequest::WorkspaceContextClipUpsert { request_id, params })
-            .await
-            .wrap_err("workspace/context/clip/upsert failed in TUI")
-    }
-
     pub(crate) async fn workspace_context_clip_status_update(
         &mut self,
         params: WorkspaceContextClipStatusUpdateParams,
@@ -1179,6 +1161,7 @@ impl AppServerSession {
             .wrap_err("workspace/task/list failed in TUI")
     }
 
+    #[cfg(test)]
     pub(crate) async fn workspace_task_upsert(
         &mut self,
         params: WorkspaceTaskUpsertParams,
