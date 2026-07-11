@@ -219,6 +219,9 @@ impl WorkspaceRequestProcessor {
                 session_id,
                 client_id,
                 status,
+                expected_current_checkpoint_id: params.expected_current_checkpoint_id,
+                expected_current_checkpoint_revision: params.expected_current_checkpoint_revision,
+                expected_current_checkpoint_sha256: params.expected_current_checkpoint_sha256,
                 actor,
                 reason,
             })
