@@ -55,6 +55,7 @@ use crate::state_db;
 use crate::state_db::StateDbHandle;
 use codex_git_utils::collect_git_info;
 use codex_git_utils::get_git_repo_root;
+use codex_protocol::config_types::ModelToolMode;
 use codex_protocol::protocol::GitInfo as ProtocolGitInfo;
 use codex_protocol::protocol::InitialHistory;
 use codex_protocol::protocol::MultiAgentVersion;
@@ -99,6 +100,7 @@ pub enum RolloutRecorderParams {
         dynamic_tools: Vec<DynamicToolSpec>,
         selected_capability_roots: Vec<SelectedCapabilityRoot>,
         multi_agent_version: Option<MultiAgentVersion>,
+        model_tool_mode: ModelToolMode,
         history_mode: ThreadHistoryMode,
         initial_window_id: Option<String>,
     },
@@ -179,6 +181,7 @@ impl RolloutRecorderParams {
         originator: String,
         base_instructions: BaseInstructions,
         dynamic_tools: Vec<DynamicToolSpec>,
+        model_tool_mode: ModelToolMode,
     ) -> Self {
         Self::Create {
             session_id: conversation_id.into(),
@@ -192,6 +195,7 @@ impl RolloutRecorderParams {
             dynamic_tools,
             selected_capability_roots: Vec::new(),
             multi_agent_version: None,
+            model_tool_mode,
             history_mode: Default::default(),
             initial_window_id: None,
         }
@@ -768,6 +772,7 @@ impl RolloutRecorder {
                 dynamic_tools,
                 selected_capability_roots,
                 multi_agent_version,
+                model_tool_mode,
                 history_mode,
                 initial_window_id,
             } => {
@@ -809,6 +814,7 @@ impl RolloutRecorder {
                     memory_mode: (!config.generate_memories()).then_some("disabled".to_string()),
                     history_mode,
                     multi_agent_version,
+                    model_tool_mode,
                     context_window: initial_window_id.map(SessionContextWindow::new),
                 };
 

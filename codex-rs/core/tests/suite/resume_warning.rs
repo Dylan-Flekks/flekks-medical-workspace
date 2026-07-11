@@ -43,6 +43,7 @@ fn resume_history(
         comp_hash: None,
         personality: None,
         collaboration_mode: None,
+        model_tool_mode: Default::default(),
         multi_agent_version: None,
         multi_agent_mode: None,
         realtime_active: None,

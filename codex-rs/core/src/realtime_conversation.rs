@@ -29,6 +29,7 @@ use codex_login::default_client::default_headers;
 use codex_login::read_openai_api_key_from_env;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_protocol::auth::AuthMode;
+use codex_protocol::config_types::ModelToolMode;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result as CodexResult;
 use codex_protocol::models::MessagePhase;
@@ -700,7 +701,13 @@ pub(crate) async fn handle_start(
     sess: &Arc<Session>,
     sub_id: String,
     params: ConversationStartParams,
+    model_tool_mode: ModelToolMode,
 ) -> CodexResult<()> {
+    if model_tool_mode == ModelToolMode::Disabled {
+        return Err(CodexErr::InvalidRequest(
+            "realtime conversations are unavailable while model tool mode is disabled".to_string(),
+        ));
+    }
     let prepared_start = match prepare_realtime_start(sess, params).await {
         Ok(prepared_start) => prepared_start,
         Err(err) => {

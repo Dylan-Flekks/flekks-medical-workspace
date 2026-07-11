@@ -213,6 +213,7 @@ fn thread_resume_response_round_trips_initial_turns_page() {
         sandbox: SandboxPolicy::DangerFullAccess,
         active_permission_profile: None,
         reasoning_effort: None,
+        model_tool_mode: ModelToolMode::Default,
         multi_agent_mode: Default::default(),
         initial_turns_page: Some(TurnsPage {
             data: Vec::new(),
@@ -4083,6 +4084,7 @@ fn turn_start_params_preserve_explicit_null_service_tier() {
         effort: None,
         summary: None,
         output_schema: None,
+        model_tool_mode: None,
         collaboration_mode: None,
         multi_agent_mode: None,
         personality: None,
@@ -4295,6 +4297,45 @@ fn turn_start_params_treat_null_or_omitted_environments_as_default() {
     assert_eq!(
         crate::experimental_api::ExperimentalApi::experimental_reason(&omitted_environments),
         None
+    );
+}
+
+#[test]
+fn model_tool_mode_uses_camel_case_wire_values_and_is_experimental() {
+    let thread_start_experimental_fields = crate::experimental_api::experimental_fields()
+        .into_iter()
+        .filter(|field| field.type_name == "ThreadStartParams")
+        .map(|field| field.field_name)
+        .collect::<std::collections::HashSet<_>>();
+    assert!(thread_start_experimental_fields.contains("modelToolMode"));
+    assert!(thread_start_experimental_fields.contains("mockExperimentalField"));
+    let thread_fork_response_experimental_fields = crate::experimental_api::experimental_fields()
+        .into_iter()
+        .filter(|field| field.type_name == "ThreadForkResponse")
+        .map(|field| field.field_name)
+        .collect::<std::collections::HashSet<_>>();
+    assert!(thread_fork_response_experimental_fields.contains("modelToolMode"));
+
+    let thread: ThreadStartParams = serde_json::from_value(json!({
+        "modelToolMode": "disabled",
+    }))
+    .expect("thread params should deserialize");
+    assert_eq!(thread.model_tool_mode, Some(ModelToolMode::Disabled));
+    assert_eq!(
+        crate::experimental_api::ExperimentalApi::experimental_reason(&thread),
+        Some("thread/start.modelToolMode")
+    );
+
+    let turn: TurnStartParams = serde_json::from_value(json!({
+        "threadId": "thread_123",
+        "input": [],
+        "modelToolMode": "default",
+    }))
+    .expect("turn params should deserialize");
+    assert_eq!(turn.model_tool_mode, Some(ModelToolMode::Default));
+    assert_eq!(
+        crate::experimental_api::ExperimentalApi::experimental_reason(&turn),
+        Some("turn/start.modelToolMode")
     );
 }
 

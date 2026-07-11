@@ -82,6 +82,7 @@ use codex_features::Feature;
 use codex_git_utils::get_git_repo_root_with_fs;
 use codex_protocol::config_types::AutoCompactTokenLimitScope;
 use codex_protocol::config_types::ModeKind;
+use codex_protocol::config_types::ModelToolMode;
 use codex_protocol::config_types::ServiceTier;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result as CodexResult;
@@ -1220,6 +1221,12 @@ pub(crate) async fn built_tools(
     cancellation_token: &CancellationToken,
 ) -> CodexResult<Arc<ToolRouter>> {
     let turn_context = step_context.turn.as_ref();
+    if turn_context.model_tool_mode == ModelToolMode::Disabled {
+        return Ok(Arc::new(ToolRouter::from_parts(
+            crate::tools::registry::ToolRegistry::default(),
+            Vec::new(),
+        )));
+    }
     let mcp_connection_manager = step_context.mcp.manager();
     let has_mcp_servers = mcp_connection_manager.has_servers();
     let all_mcp_tools = step_context
@@ -1353,6 +1360,37 @@ pub(crate) async fn built_tools(
 struct SamplingRequestResult {
     needs_follow_up: bool,
     last_agent_message: Option<String>,
+}
+
+fn reject_tool_like_output_when_disabled(
+    turn_context: &TurnContext,
+    item: &ResponseItem,
+) -> CodexResult<()> {
+    let tool_like = match item {
+        ResponseItem::AdditionalTools { .. }
+        | ResponseItem::LocalShellCall { .. }
+        | ResponseItem::FunctionCall { .. }
+        | ResponseItem::ToolSearchCall { .. }
+        | ResponseItem::FunctionCallOutput { .. }
+        | ResponseItem::CustomToolCall { .. }
+        | ResponseItem::CustomToolCallOutput { .. }
+        | ResponseItem::ToolSearchOutput { .. }
+        | ResponseItem::WebSearchCall { .. }
+        | ResponseItem::ImageGenerationCall { .. }
+        | ResponseItem::CompactionTrigger {}
+        | ResponseItem::Other => true,
+        ResponseItem::Message { .. }
+        | ResponseItem::AgentMessage { .. }
+        | ResponseItem::Reasoning { .. }
+        | ResponseItem::Compaction { .. }
+        | ResponseItem::ContextCompaction { .. } => false,
+    };
+    if turn_context.model_tool_mode == ModelToolMode::Disabled && tool_like {
+        return Err(CodexErr::InvalidRequest(
+            "model returned a tool item while model tool mode is disabled".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 /// Ephemeral per-response state for streaming a single proposed plan.
@@ -2048,6 +2086,7 @@ async fn try_run_sampling_request(
                 if turn_context.item_ids_enabled() {
                     assign_missing_streamed_response_item_id(&mut item, active_item.as_ref());
                 }
+                reject_tool_like_output_when_disabled(&turn_context, &item)?;
                 if let Some((_, mut consumer)) = active_tool_argument_diff_consumer.take()
                     && let Ok(Some(event)) = consumer.finish()
                 {
@@ -2145,6 +2184,7 @@ async fn try_run_sampling_request(
                 if turn_context.item_ids_enabled() {
                     assign_missing_streamed_response_item_id(&mut item, /*active_item*/ None);
                 }
+                reject_tool_like_output_when_disabled(&turn_context, &item)?;
                 if let ResponseItem::CustomToolCall {
                     call_id,
                     name,

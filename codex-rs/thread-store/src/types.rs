@@ -6,6 +6,7 @@ use chrono::Utc;
 use codex_protocol::SessionId;
 use codex_protocol::ThreadId;
 use codex_protocol::capabilities::SelectedCapabilityRoot;
+use codex_protocol::config_types::ModelToolMode;
 use codex_protocol::dynamic_tools::DynamicToolSpec;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::PermissionProfile;
@@ -92,6 +93,9 @@ pub struct CreateThreadParams {
     pub selected_capability_roots: Vec<SelectedCapabilityRoot>,
     /// Multi-agent runtime selected when the thread was created.
     pub multi_agent_version: Option<MultiAgentVersion>,
+    /// Initial model tool availability selected when the thread was created.
+    #[serde(default)]
+    pub model_tool_mode: ModelToolMode,
     /// Persisted thread history contract selected when the thread was created.
     pub history_mode: ThreadHistoryMode,
     /// Initial context-window identity captured when the thread was created.

@@ -12862,6 +12862,14 @@
         ],
         "type": "object"
       },
+      "ModelToolMode": {
+        "description": "Controls whether a regular model sampling turn may discover or call tools.",
+        "enum": [
+          "default",
+          "disabled"
+        ],
+        "type": "string"
+      },
       "ModelUpgradeInfo": {
         "properties": {
           "migrationMarkdown": {

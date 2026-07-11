@@ -11,6 +11,7 @@ use codex_extension_api::ExtensionDataInit;
 use codex_login::auth::AgentIdentityAuthPolicy;
 use codex_protocol::SessionId;
 use codex_protocol::capabilities::SelectedCapabilityRoot;
+use codex_protocol::config_types::ModelToolMode;
 use codex_protocol::config_types::SERVICE_TIER_DEFAULT_REQUEST_VALUE;
 use codex_protocol::config_types::ServiceTier;
 use codex_protocol::permissions::FileSystemPath;
@@ -61,6 +62,9 @@ pub(crate) struct SessionConfiguration {
 
     /// Personality preference for the model.
     pub(super) personality: Option<Personality>,
+
+    /// Whether regular sampling turns may expose or execute model tools.
+    pub(super) model_tool_mode: ModelToolMode,
 
     /// Base instructions for the session.
     pub(super) base_instructions: String,
@@ -192,6 +196,7 @@ impl SessionConfiguration {
             reasoning_effort: self.collaboration_mode.reasoning_effort(),
             reasoning_summary: self.model_reasoning_summary,
             personality: self.personality,
+            model_tool_mode: self.model_tool_mode,
             collaboration_mode: self.collaboration_mode.clone(),
             session_source: self.session_source.clone(),
             history_mode: self.history_mode,
@@ -249,6 +254,9 @@ impl SessionConfiguration {
         }
         if let Some(personality) = updates.personality {
             next_configuration.personality = Some(personality);
+        }
+        if let Some(model_tool_mode) = updates.model_tool_mode {
+            next_configuration.model_tool_mode = model_tool_mode;
         }
         if let Some(approval_policy) = updates.approval_policy {
             next_configuration.approval_policy.set(approval_policy)?;
@@ -429,6 +437,7 @@ pub(crate) struct SessionSettingsUpdate {
     pub(crate) service_tier: Option<Option<String>>,
     pub(crate) final_output_json_schema: Option<Option<Value>>,
     pub(crate) personality: Option<Personality>,
+    pub(crate) model_tool_mode: Option<ModelToolMode>,
     pub(crate) app_server_client_name: Option<String>,
     pub(crate) app_server_client_version: Option<String>,
 }
@@ -602,6 +611,7 @@ impl Session {
                             dynamic_tools: session_configuration.dynamic_tools.clone(),
                             selected_capability_roots: selected_capability_roots.clone(),
                             multi_agent_version: initial_multi_agent_version,
+                            model_tool_mode: session_configuration.model_tool_mode,
                             history_mode: session_configuration.history_mode,
                             initial_window_id: initial_auto_compact_window_ids
                                 .window_id

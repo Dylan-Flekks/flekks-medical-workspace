@@ -15,6 +15,7 @@ use codex_experimental_api_macros::ExperimentalApi;
 pub use codex_protocol::capabilities::CapabilityRootLocation;
 pub use codex_protocol::capabilities::SelectedCapabilityRoot;
 use codex_protocol::config_types::CollaborationMode;
+pub use codex_protocol::config_types::ModelToolMode;
 use codex_protocol::config_types::MultiAgentMode;
 use codex_protocol::config_types::Personality;
 use codex_protocol::config_types::ReasoningSummary;
@@ -98,6 +99,10 @@ pub struct ThreadStartParams {
     pub base_instructions: Option<String>,
     #[ts(optional = nullable)]
     pub developer_instructions: Option<String>,
+    /// Disable every model-visible and executable tool for regular sampling turns on this thread.
+    #[experimental("thread/start.modelToolMode")]
+    #[ts(optional = nullable)]
+    pub model_tool_mode: Option<ModelToolMode>,
     #[ts(optional = nullable)]
     pub personality: Option<Personality>,
     /// @deprecated Ignored. Use Ultra reasoning effort for proactive multi-agent behavior.
@@ -194,6 +199,10 @@ pub struct ThreadStartResponse {
     #[serde(default)]
     pub active_permission_profile: Option<ActivePermissionProfile>,
     pub reasoning_effort: Option<ReasoningEffort>,
+    /// Effective tool availability for regular sampling turns on this thread.
+    #[experimental("thread/start.modelToolMode")]
+    #[serde(default)]
+    pub model_tool_mode: ModelToolMode,
     /// @deprecated Always `explicitRequestOnly`. Use `reasoningEffort` for Ultra behavior.
     #[experimental("thread/start.multiAgentMode")]
     #[serde(default)]
@@ -287,6 +296,10 @@ pub struct ThreadSettings {
     pub effort: Option<ReasoningEffort>,
     pub summary: Option<ReasoningSummary>,
     pub collaboration_mode: CollaborationMode,
+    /// Effective tool availability for subsequent regular sampling turns.
+    #[experimental("thread/settings.modelToolMode")]
+    #[serde(default)]
+    pub model_tool_mode: ModelToolMode,
     /// @deprecated Always `explicitRequestOnly`. Use `effort` for Ultra behavior.
     #[experimental("thread/settings.multiAgentMode")]
     #[serde(default)]
@@ -427,6 +440,10 @@ pub struct ThreadResumeResponse {
     #[serde(default)]
     pub active_permission_profile: Option<ActivePermissionProfile>,
     pub reasoning_effort: Option<ReasoningEffort>,
+    /// Effective tool availability restored for regular sampling turns on this thread.
+    #[experimental("thread/resume.modelToolMode")]
+    #[serde(default)]
+    pub model_tool_mode: ModelToolMode,
     /// @deprecated Always `explicitRequestOnly`. Use `reasoningEffort` for Ultra behavior.
     #[experimental("thread/resume.multiAgentMode")]
     #[serde(default)]
@@ -593,6 +610,10 @@ pub struct ThreadForkResponse {
     #[serde(default)]
     pub active_permission_profile: Option<ActivePermissionProfile>,
     pub reasoning_effort: Option<ReasoningEffort>,
+    /// Effective tool availability inherited by regular sampling turns on the fork.
+    #[experimental("thread/fork.modelToolMode")]
+    #[serde(default)]
+    pub model_tool_mode: ModelToolMode,
     /// @deprecated Always `explicitRequestOnly`. Use `reasoningEffort` for Ultra behavior.
     #[experimental("thread/fork.multiAgentMode")]
     #[serde(default)]

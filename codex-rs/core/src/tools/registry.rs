@@ -319,6 +319,7 @@ impl CoreToolRuntime for ExposureOverride {
     }
 }
 
+#[derive(Default)]
 pub struct ToolRegistry {
     tools: HashMap<ToolName, Arc<dyn CoreToolRuntime>>,
 }
@@ -344,7 +345,7 @@ impl ToolRegistry {
 
     #[cfg(test)]
     pub(crate) fn empty_for_test() -> Self {
-        Self::new(HashMap::new())
+        Self::default()
     }
 
     #[cfg(test)]
