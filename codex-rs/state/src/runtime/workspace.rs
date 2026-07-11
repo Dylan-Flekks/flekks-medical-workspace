@@ -2904,7 +2904,7 @@ ORDER BY created_at_ms DESC
             if !value.is_object() {
                 anyhow::bail!("workspace context packet authorized scope must be a JSON object");
             }
-            validate_agent_visible_json("authorized scope", &value)?;
+            validate_agent_visible_json("context packet authorized scope", &value)?;
             input.authorized_scope_json.trim().to_string()
         };
         let expected_output_kind = if input.expected_output_kind.trim().is_empty() {
@@ -3824,7 +3824,7 @@ fn validate_packet_context_envelope(
             "workspace context packet envelope must not contain path-bearing key `{path_key}`"
         );
     }
-    validate_agent_visible_json("envelope", &envelope)?;
+    validate_agent_visible_json("context packet envelope", &envelope)?;
     let assembly_version = envelope
         .get("assemblyVersion")
         .and_then(serde_json::Value::as_str)
@@ -3930,16 +3930,15 @@ fn forbidden_packet_path_key(value: &serde_json::Value) -> Option<&str> {
     }
 }
 
-fn validate_agent_visible_json(label: &str, value: &serde_json::Value) -> anyhow::Result<()> {
+pub(super) fn validate_agent_visible_json(
+    label: &str,
+    value: &serde_json::Value,
+) -> anyhow::Result<()> {
     if let Some(path_key) = forbidden_packet_path_key(value) {
-        anyhow::bail!(
-            "workspace context packet {label} must not contain path-bearing key `{path_key}`"
-        );
+        anyhow::bail!("workspace {label} must not contain path-bearing key `{path_key}`");
     }
     if contains_absolute_path_value(value) {
-        anyhow::bail!(
-            "workspace context packet {label} must not contain absolute filesystem path values"
-        );
+        anyhow::bail!("workspace {label} must not contain absolute filesystem path values");
     }
     Ok(())
 }
