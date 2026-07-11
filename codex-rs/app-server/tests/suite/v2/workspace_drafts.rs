@@ -405,7 +405,7 @@ async fn workspace_draft_close_fails_closed_for_partial_or_stale_checkpoint_prov
     Ok(())
 }
 
-async fn server() -> Result<(TempDir, TestAppServer)> {
+pub(super) async fn server() -> Result<(TempDir, TestAppServer)> {
     let codex_home = TempDir::new()?;
     create_config_toml(codex_home.path())?;
     let mut server = TestAppServer::builder()
@@ -417,7 +417,10 @@ async fn server() -> Result<(TempDir, TestAppServer)> {
     Ok((codex_home, server))
 }
 
-async fn create_client(server: &mut TestAppServer, display_name: &str) -> Result<String> {
+pub(super) async fn create_client(
+    server: &mut TestAppServer,
+    display_name: &str,
+) -> Result<String> {
     let response: WorkspaceClientUpsertResponse = request(
         server,
         "workspace/client/upsert",
@@ -427,7 +430,7 @@ async fn create_client(server: &mut TestAppServer, display_name: &str) -> Result
     Ok(response.client.id)
 }
 
-async fn create_checkpoint(
+pub(super) async fn create_checkpoint(
     server: &mut TestAppServer,
     params: Value,
 ) -> Result<WorkspaceDraftCheckpointCreateResponse> {
@@ -459,11 +462,11 @@ fn close_params(client_id: &str, checkpoint: &WorkspaceDraftCheckpoint, status: 
     })
 }
 
-fn draft(title: &str) -> Value {
+pub(super) fn draft(title: &str) -> Value {
     json!({"schemaVersion": 1, "note": {"title": title}})
 }
 
-async fn request<T: DeserializeOwned>(
+pub(super) async fn request<T: DeserializeOwned>(
     server: &mut TestAppServer,
     method: &str,
     params: Value,
@@ -477,7 +480,7 @@ async fn request<T: DeserializeOwned>(
     to_response(response)
 }
 
-async fn request_error(
+pub(super) async fn request_error(
     server: &mut TestAppServer,
     method: &str,
     params: Value,

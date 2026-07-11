@@ -89,4 +89,5 @@ mod web_search;
 mod windows_sandbox_setup;
 mod workspace_chart_commit;
 mod workspace_chart_commit_adversarial;
+mod workspace_draft_global_list;
 mod workspace_drafts;

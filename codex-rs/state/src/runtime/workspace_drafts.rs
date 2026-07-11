@@ -1,7 +1,6 @@
 use super::workspace::WorkspaceStore;
 use crate::model::WorkspaceDraftCheckpointRow;
 use crate::model::WorkspaceDraftSessionRow;
-use crate::model::WorkspaceDraftSessionSnapshotRow;
 use crate::model::datetime_to_epoch_millis;
 use chrono::Utc;
 use serde_json::Value;
@@ -12,6 +11,9 @@ use uuid::Uuid;
 
 const DRAFT_SCHEMA_VERSION: i64 = 1;
 const MAX_NORMALIZED_DRAFT_BYTES: usize = 1024 * 1024;
+
+#[path = "workspace_drafts/session_list.rs"]
+mod session_list;
 
 impl WorkspaceStore {
     pub async fn create_draft_checkpoint(
@@ -135,68 +137,6 @@ RETURNING id, session_id, client_id, encounter_id, note_id, base_note_revision,
         .await?;
         tx.commit().await?;
         Ok(checkpoint.try_into_model(false)?)
-    }
-
-    pub async fn list_draft_sessions(
-        &self,
-        filter: crate::WorkspaceDraftSessionFilter,
-    ) -> anyhow::Result<Vec<crate::WorkspaceDraftSessionSnapshot>> {
-        let client_id = required("draft session client id", &filter.client_id)?;
-        let limit = filter.limit.unwrap_or(50).clamp(1, 200);
-        let cursor_id = normalize_optional(filter.cursor_id.as_deref());
-        if filter.cursor_updated_at_ms.is_some() != cursor_id.is_some() {
-            anyhow::bail!(
-                "workspace draft session cursor requires both updated time and session id"
-            );
-        }
-        let rows = sqlx::query_as::<_, WorkspaceDraftSessionSnapshotRow>(
-            r#"
-SELECT
-    session.id AS session_id,
-    session.client_id AS session_client_id,
-    session.status AS session_status,
-    session.current_revision AS session_current_revision,
-    session.created_by AS session_created_by,
-    session.created_at_ms AS session_created_at_ms,
-    session.updated_at_ms AS session_updated_at_ms,
-    session.closed_at_ms AS session_closed_at_ms,
-    checkpoint.id AS checkpoint_id,
-    checkpoint.session_id AS checkpoint_session_id,
-    checkpoint.client_id AS checkpoint_client_id,
-    checkpoint.encounter_id AS checkpoint_encounter_id,
-    checkpoint.note_id AS checkpoint_note_id,
-    checkpoint.base_note_revision AS checkpoint_base_note_revision,
-    checkpoint.schema_version AS checkpoint_schema_version,
-    checkpoint.revision AS checkpoint_revision,
-    checkpoint.draft_json AS checkpoint_draft_json,
-    checkpoint.content_sha256 AS checkpoint_content_sha256,
-    checkpoint.trigger AS checkpoint_trigger,
-    checkpoint.actor AS checkpoint_actor,
-    checkpoint.created_at_ms AS checkpoint_created_at_ms
-FROM workspace_draft_sessions AS session
-JOIN workspace_draft_checkpoints AS checkpoint
-  ON checkpoint.session_id = session.id
- AND checkpoint.revision = session.current_revision
- AND checkpoint.client_id = session.client_id
-WHERE session.client_id = ? AND (? OR session.status = 'active')
-  AND (
-    ? IS NULL OR session.updated_at_ms < ?
-    OR (session.updated_at_ms = ? AND session.id < ?)
-  )
-ORDER BY session.updated_at_ms DESC, session.id DESC
-LIMIT ?
-            "#,
-        )
-        .bind(client_id)
-        .bind(filter.include_closed)
-        .bind(filter.cursor_updated_at_ms)
-        .bind(filter.cursor_updated_at_ms)
-        .bind(filter.cursor_updated_at_ms)
-        .bind(cursor_id)
-        .bind(i64::from(limit))
-        .fetch_all(self.pool.as_ref())
-        .await?;
-        rows.into_iter().map(TryInto::try_into).collect()
     }
 
     pub async fn list_draft_checkpoints(
@@ -380,3 +320,7 @@ fn normalized_owned(value: Option<&str>) -> Option<String> {
 #[cfg(test)]
 #[path = "workspace_drafts_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "workspace_draft_global_list_tests.rs"]
+mod global_list_tests;
