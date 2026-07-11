@@ -4,6 +4,24 @@ use serde_json::json;
 use std::fs;
 
 #[test]
+fn draft_checkpoint_create_decodes_session_creation_key_on_the_wire() {
+    let params: WorkspaceDraftCheckpointCreateParams = serde_json::from_value(json!({
+        "sessionCreationKey": " first-save-1 ",
+        "clientId": "patient-1",
+        "draft": {"schemaVersion": 1},
+        "trigger": "explicitSave",
+        "actor": "Clinician Example",
+    }))
+    .expect("session creation key should decode");
+
+    assert_eq!(params.session_id, None);
+    assert_eq!(
+        params.session_creation_key.as_deref(),
+        Some(" first-save-1 ")
+    );
+}
+
+#[test]
 fn draft_session_list_preserves_patient_scope_and_requires_explicit_global_wire_intent() {
     let patient: WorkspaceDraftSessionListParams = serde_json::from_value(json!({
         "clientId": "patient-1",
@@ -54,4 +72,5 @@ fn stable_schema_filters_global_draft_discovery_and_experimental_schema_exposes_
         .expect("experimental client request schema should read");
     assert!(experimental.contains("workspace/draft/session/list"));
     assert!(experimental.contains("allClients"));
+    assert!(experimental.contains("sessionCreationKey"));
 }

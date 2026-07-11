@@ -20,6 +20,7 @@ use serde::de::DeserializeOwned;
 const DEFAULT_DRAFT_PAGE_LIMIT: u32 = 50;
 const MAX_DRAFT_PAGE_LIMIT: u32 = 100;
 const GLOBAL_DRAFT_PAGE_LIMIT: u32 = 1;
+const MAX_DRAFT_SESSION_CREATION_KEY_BYTES: usize = 256;
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -38,6 +39,23 @@ impl WorkspaceRequestProcessor {
             .session_id
             .map(|value| required_draft_text("sessionId", value))
             .transpose()?;
+        let session_creation_key = params
+            .session_creation_key
+            .map(|value| required_draft_text("sessionCreationKey", value))
+            .transpose()?;
+        if session_id.is_some() && session_creation_key.is_some() {
+            return Err(invalid_request(
+                "workspace draft checkpoint create accepts either sessionId or sessionCreationKey, not both",
+            ));
+        }
+        if session_creation_key
+            .as_ref()
+            .is_some_and(|key| key.len() > MAX_DRAFT_SESSION_CREATION_KEY_BYTES)
+        {
+            return Err(invalid_request(format!(
+                "workspace draft sessionCreationKey must not exceed {MAX_DRAFT_SESSION_CREATION_KEY_BYTES} bytes"
+            )));
+        }
         let trigger = required_draft_text("trigger", params.trigger)?;
         let actor = required_draft_text("actor", params.actor)?;
         if params
@@ -66,6 +84,7 @@ impl WorkspaceRequestProcessor {
             .workspace()
             .create_draft_checkpoint(codex_state::WorkspaceDraftCheckpointCreate {
                 session_id,
+                session_creation_key,
                 client_id,
                 encounter_id: empty_to_none(params.encounter_id),
                 note_id: empty_to_none(params.note_id),

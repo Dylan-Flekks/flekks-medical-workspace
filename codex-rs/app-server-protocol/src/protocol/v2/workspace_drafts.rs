@@ -71,6 +71,8 @@ pub struct WorkspaceDraftSession {
 pub struct WorkspaceDraftCheckpointCreateParams {
     #[ts(optional = nullable)]
     pub session_id: Option<String>,
+    #[ts(optional = nullable)]
+    pub session_creation_key: Option<String>,
     pub client_id: String,
     #[ts(optional = nullable)]
     pub encounter_id: Option<String>,
