@@ -106,9 +106,11 @@ pub use workspace_chart_commit::WorkspaceChartNoteChange;
 pub use workspace_drafts::WorkspaceDraftCheckpoint;
 pub use workspace_drafts::WorkspaceDraftCheckpointCreate;
 pub use workspace_drafts::WorkspaceDraftCheckpointFilter;
+pub use workspace_drafts::WorkspaceDraftError;
 pub use workspace_drafts::WorkspaceDraftSession;
 pub use workspace_drafts::WorkspaceDraftSessionClose;
 pub use workspace_drafts::WorkspaceDraftSessionFilter;
+pub use workspace_drafts::WorkspaceDraftSessionSnapshot;
 pub use workspace_drafts::WorkspaceDraftSessionTerminalStatus;
 
 pub(crate) use agent_job::AgentJobItemRow;
@@ -139,3 +141,4 @@ pub(crate) use workspace_agent::WorkspaceAgentRunSourceRow;
 pub(crate) use workspace_agent::WorkspaceNoteProposalDecisionRow;
 pub(crate) use workspace_drafts::WorkspaceDraftCheckpointRow;
 pub(crate) use workspace_drafts::WorkspaceDraftSessionRow;
+pub(crate) use workspace_drafts::WorkspaceDraftSessionSnapshotRow;
