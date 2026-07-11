@@ -3447,7 +3447,7 @@ WHERE id = ?
     }
 }
 
-async fn upsert_client_admin_metadata(
+pub(super) async fn upsert_client_admin_metadata(
     tx: &mut sqlx::Transaction<'_, Sqlite>,
     client_id: &str,
     input: &crate::WorkspaceClientUpsert,

@@ -2,12 +2,14 @@ use anyhow::Result;
 use anyhow::anyhow;
 use chrono::DateTime;
 use chrono::Utc;
+use serde::Deserialize;
+use serde::Serialize;
 use sqlx::Row;
 use sqlx::sqlite::SqliteRow;
 
 use super::epoch_millis_to_datetime;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceClient {
     pub id: String,
     pub display_name: String,
@@ -39,7 +41,7 @@ pub struct WorkspaceClient {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceClientUpsert {
     pub id: Option<String>,
     pub display_name: String,
@@ -68,7 +70,7 @@ pub struct WorkspaceClientUpsert {
     pub coverage_notes: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceDocument {
     pub id: String,
     pub client_id: String,
@@ -120,7 +122,7 @@ pub struct WorkspacePracticeLibraryFilter {
     pub limit: Option<u32>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceDocumentUpsert {
     pub id: Option<String>,
     pub client_id: String,
@@ -150,7 +152,7 @@ pub struct WorkspaceDocumentUpsert {
     pub imported_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspacePatientSafetyItem {
     pub id: String,
     pub client_id: String,
@@ -169,7 +171,7 @@ pub struct WorkspacePatientSafetyItem {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspacePatientSafetyItemUpsert {
     pub id: Option<String>,
     pub client_id: String,
@@ -185,7 +187,7 @@ pub struct WorkspacePatientSafetyItemUpsert {
     pub notes: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceArtifactDerivative {
     pub id: String,
     pub document_id: String,
@@ -207,7 +209,7 @@ pub struct WorkspaceArtifactDerivative {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceArtifactDerivativeUpsert {
     pub id: Option<String>,
     pub document_id: String,
@@ -242,7 +244,7 @@ pub struct WorkspaceArtifactDerivativeFilter {
     pub limit: Option<u32>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceContextClip {
     pub id: String,
     pub derivative_id: String,
@@ -266,7 +268,7 @@ pub struct WorkspaceContextClip {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceContextClipUpsert {
     pub id: Option<String>,
     pub derivative_id: String,
@@ -304,7 +306,8 @@ pub struct WorkspaceContextClipFilter {
     pub limit: Option<u32>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum WorkspaceTaskStatus {
     Open,
     InProgress,
@@ -344,7 +347,8 @@ impl TryFrom<&str> for WorkspaceTaskStatus {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum WorkspaceTaskPriority {
     Low,
     Normal,
@@ -377,7 +381,7 @@ impl TryFrom<&str> for WorkspaceTaskPriority {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceTask {
     pub id: String,
     pub client_id: String,
@@ -397,7 +401,7 @@ pub struct WorkspaceTask {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceTaskUpsert {
     pub id: Option<String>,
     pub client_id: String,
@@ -442,7 +446,7 @@ pub struct WorkspaceTaskStatusUpdate {
     pub actor: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceEncounter {
     pub id: String,
     pub client_id: String,
@@ -456,7 +460,7 @@ pub struct WorkspaceEncounter {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceEncounterUpsert {
     pub id: Option<String>,
     pub client_id: String,
@@ -467,7 +471,7 @@ pub struct WorkspaceEncounterUpsert {
     pub ended_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceNote {
     pub id: String,
     pub client_id: String,
@@ -482,7 +486,7 @@ pub struct WorkspaceNote {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceNoteUpsert {
     pub id: Option<String>,
     pub client_id: String,
