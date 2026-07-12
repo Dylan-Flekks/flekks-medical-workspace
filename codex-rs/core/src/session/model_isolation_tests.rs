@@ -20,6 +20,7 @@ fn creation<'a>(
 ) -> IsolatedThreadCreation<'a> {
     IsolatedThreadCreation {
         config,
+        allow_provider_model_fallback: false,
         initial_history: history,
         session_source,
         forked_from_thread_id_present: false,
@@ -27,6 +28,9 @@ fn creation<'a>(
         thread_source: None,
         dynamic_tools: &[],
         inherited_environments: None,
+        inherited_exec_policy_present: false,
+        user_shell_override_present: false,
+        requested_history_mode_present: false,
         environment_selections: &[],
         thread_extension_init: extension_init,
     }
@@ -82,6 +86,7 @@ async fn isolated_creation_requires_fresh_ephemeral_empty_thread_state() {
         .expect("build test config");
     config.ephemeral = true;
     config.workspace_roots.clear();
+    config.model = Some("test-model".to_string());
     let history = InitialHistory::New;
     let session_source = SessionSource::Mcp;
     let extension_init = ExtensionDataInit::default();
@@ -141,27 +146,27 @@ fn isolated_input_is_one_nonempty_plain_text_item_bounded_by_utf8_bytes() {
     let exact = "é".repeat(MAX_ISOLATED_INPUT_BYTES / 2);
     assert_eq!(exact.len(), MAX_ISOLATED_INPUT_BYTES);
     assert!(
-        validate_single_text_input(&[UserInput::Text {
+        validate_user_input(&[UserInput::Text {
             text: exact.clone(),
             text_elements: Vec::new(),
         }])
         .is_ok()
     );
     assert!(
-        validate_single_text_input(&[UserInput::Text {
+        validate_user_input(&[UserInput::Text {
             text: format!("{exact}x"),
             text_elements: Vec::new(),
         }])
         .is_err()
     );
     assert!(
-        validate_single_text_input(&[UserInput::Text {
+        validate_user_input(&[UserInput::Text {
             text: "   ".to_string(),
             text_elements: Vec::new(),
         }])
         .is_err()
     );
-    assert!(validate_single_text_input(&[]).is_err());
+    assert!(validate_user_input(&[]).is_err());
 }
 
 #[test]
@@ -255,6 +260,7 @@ fn isolated_output_is_one_bounded_schema_valid_assistant_message() {
     for invalid in [
         assistant("not json"),
         assistant(r#"{"hint":"missing steps"}"#),
+        assistant(r#"{"hint":"one","hint":"two","steps":[]}"#),
         assistant_parts(vec![
             ContentItem::OutputText {
                 text: r#"{"hint":"Save first","#.to_string(),

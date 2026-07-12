@@ -43,6 +43,7 @@ use codex_models_manager::manager::RefreshStrategy;
 use codex_models_manager::manager::SharedModelsManager;
 use codex_protocol::ThreadId;
 use codex_protocol::config_types::CollaborationModeMask;
+use codex_protocol::config_types::ModelToolMode;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result as CodexResult;
 use codex_protocol::openai_models::ModelPreset;
@@ -1560,9 +1561,21 @@ impl ThreadManagerState {
                 threads.remove(&resumed.conversation_id);
             }
         }
-        let user_instructions = self
-            .user_instructions_for_spawn(&session_source, parent_thread_id, forked_from_thread_id)
-            .await;
+        let requested_model_tool_mode = thread_extension_init
+            .get::<ModelToolMode>()
+            .map(|mode| *mode)
+            .or_else(|| initial_history.get_latest_model_tool_mode())
+            .unwrap_or_default();
+        let user_instructions = if requested_model_tool_mode.is_isolated() {
+            LoadedUserInstructions::default()
+        } else {
+            self.user_instructions_for_spawn(
+                &session_source,
+                parent_thread_id,
+                forked_from_thread_id,
+            )
+            .await
+        };
         let parent_rollout_thread_trace = self
             .parent_rollout_thread_trace_for_source(&session_source, &initial_history)
             .await;
