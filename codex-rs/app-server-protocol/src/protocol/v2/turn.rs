@@ -35,6 +35,27 @@ pub enum TurnStatus {
     InProgress,
 }
 
+/// Model capability modes that may be selected after thread creation.
+///
+/// `isolated` is intentionally absent because that mode is creation-only and
+/// immutable for the lifetime of its bounded thread.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase", export_to = "v2/")]
+pub enum TurnModelToolMode {
+    Default,
+    Disabled,
+}
+
+impl From<TurnModelToolMode> for ModelToolMode {
+    fn from(value: TurnModelToolMode) -> Self {
+        match value {
+            TurnModelToolMode::Default => Self::Default,
+            TurnModelToolMode::Disabled => Self::Disabled,
+        }
+    }
+}
+
 // Turn APIs
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS, ExperimentalApi)]
 #[serde(rename_all = "camelCase")]
@@ -146,7 +167,7 @@ pub struct TurnStartParams {
     /// Disable every model-visible and executable tool for this and subsequent regular sampling turns.
     #[experimental("turn/start.modelToolMode")]
     #[ts(optional = nullable)]
-    pub model_tool_mode: Option<ModelToolMode>,
+    pub model_tool_mode: Option<TurnModelToolMode>,
 
     /// EXPERIMENTAL - Set a pre-set collaboration mode.
     /// Takes precedence over model, reasoning_effort, and developer instructions if set.

@@ -4584,7 +4584,7 @@ async fn model_tool_mode_is_sticky_and_reported_by_settings() -> Result<()> {
                 text: "analyze again".to_string(),
                 text_elements: Vec::new(),
             }],
-            model_tool_mode: Some(ModelToolMode::Default),
+            model_tool_mode: Some(codex_app_server_protocol::TurnModelToolMode::Default),
             ..Default::default()
         })
         .await?;
