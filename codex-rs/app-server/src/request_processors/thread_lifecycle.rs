@@ -1,4 +1,11 @@
+mod isolated_listener;
+mod unload;
+
+pub(super) use isolated_listener::ensure_isolated_conversation_listener;
+pub(super) use unload::*;
+
 use super::*;
+use codex_file_watcher::WatchRegistration;
 use codex_protocol::config_types::MultiAgentMode;
 
 pub(super) const THREAD_UNLOADING_DELAY: Duration = Duration::from_secs(30 * 60);
@@ -120,26 +127,71 @@ impl UnloadingState {
     }
 }
 
-pub(super) enum ThreadShutdownResult {
-    Complete,
-    SubmitFailed,
-    TimedOut,
-}
-
 pub(super) enum EnsureConversationListenerResult {
     Attached,
     ConnectionClosed,
+}
+
+enum ListenerSetup {
+    Standard,
+    Isolated {
+        config_snapshot: Box<ThreadConfigSnapshot>,
+        owner_connection: ConnectionId,
+    },
+}
+
+async fn subscription_access_for_listener_setup(
+    conversation_id: ThreadId,
+    conversation: &CodexThread,
+    setup: &ListenerSetup,
+) -> Result<ThreadSubscriptionAccess, JSONRPCErrorError> {
+    let isolated = conversation
+        .config_snapshot()
+        .await
+        .model_tool_mode
+        .is_isolated();
+    match setup {
+        ListenerSetup::Standard if isolated => Err(invalid_request(format!(
+            "thread not found: {conversation_id}"
+        ))),
+        ListenerSetup::Standard => Ok(ThreadSubscriptionAccess::Standard),
+        ListenerSetup::Isolated {
+            config_snapshot, ..
+        } if isolated && config_snapshot.model_tool_mode.is_isolated() => {
+            Ok(ThreadSubscriptionAccess::IsolatedOwner)
+        }
+        ListenerSetup::Isolated { .. } => Err(internal_error(
+            "isolated listener requires an isolated thread snapshot",
+        )),
+    }
+}
+
+pub(super) async fn ensure_conversation_listener(
+    listener_task_context: ListenerTaskContext,
+    conversation_id: ThreadId,
+    connection_id: ConnectionId,
+    raw_events_enabled: bool,
+) -> Result<EnsureConversationListenerResult, JSONRPCErrorError> {
+    ensure_conversation_listener_with_setup(
+        listener_task_context,
+        conversation_id,
+        connection_id,
+        raw_events_enabled,
+        ListenerSetup::Standard,
+    )
+    .await
 }
 
 #[expect(
     clippy::await_holding_invalid_type,
     reason = "listener subscription must be serialized against pending unloads"
 )]
-pub(super) async fn ensure_conversation_listener(
+async fn ensure_conversation_listener_with_setup(
     listener_task_context: ListenerTaskContext,
     conversation_id: ThreadId,
     connection_id: ConnectionId,
     raw_events_enabled: bool,
+    setup: ListenerSetup,
 ) -> Result<EnsureConversationListenerResult, JSONRPCErrorError> {
     let conversation = match listener_task_context
         .thread_manager
@@ -153,6 +205,9 @@ pub(super) async fn ensure_conversation_listener(
             )));
         }
     };
+    let subscription_access =
+        subscription_access_for_listener_setup(conversation_id, conversation.as_ref(), &setup)
+            .await?;
     let thread_state = {
         let pending_thread_unloads = listener_task_context.pending_thread_unloads.lock().await;
         if pending_thread_unloads.contains(&conversation_id) {
@@ -162,18 +217,24 @@ pub(super) async fn ensure_conversation_listener(
         }
         let Some(thread_state) = listener_task_context
             .thread_state_manager
-            .try_ensure_connection_subscribed(conversation_id, connection_id, raw_events_enabled)
+            .try_ensure_connection_subscribed(
+                conversation_id,
+                connection_id,
+                raw_events_enabled,
+                subscription_access,
+            )
             .await
         else {
             return Ok(EnsureConversationListenerResult::ConnectionClosed);
         };
         thread_state
     };
-    if let Err(error) = ensure_listener_task_running(
+    if let Err(error) = ensure_listener_task_running_with_setup(
         listener_task_context.clone(),
         conversation_id,
         conversation,
         thread_state,
+        setup,
     )
     .await
     {
@@ -216,6 +277,27 @@ pub(super) async fn ensure_listener_task_running(
     conversation: Arc<CodexThread>,
     thread_state: Arc<Mutex<ThreadState>>,
 ) -> Result<(), JSONRPCErrorError> {
+    ensure_listener_task_running_with_setup(
+        listener_task_context,
+        conversation_id,
+        conversation,
+        thread_state,
+        ListenerSetup::Standard,
+    )
+    .await
+}
+
+async fn ensure_listener_task_running_with_setup(
+    listener_task_context: ListenerTaskContext,
+    conversation_id: ThreadId,
+    conversation: Arc<CodexThread>,
+    thread_state: Arc<Mutex<ThreadState>>,
+    setup: ListenerSetup,
+) -> Result<(), JSONRPCErrorError> {
+    subscription_access_for_listener_setup(conversation_id, conversation.as_ref(), &setup).await?;
+    if thread_state.lock().await.listener_matches(&conversation) {
+        return Ok(());
+    }
     let (cancel_tx, mut cancel_rx) = oneshot::channel();
     let Some(mut unloading_state) = UnloadingState::new(
         &listener_task_context,
@@ -228,18 +310,33 @@ pub(super) async fn ensure_listener_task_running(
             "thread {conversation_id} is closing; retry after the thread is closed"
         )));
     };
-    let config = conversation.config().await;
-    let environments = conversation.environment_selections().await;
-    let watch_registration = listener_task_context
-        .skills_watcher
-        .register_thread_config(
-            config.as_ref(),
-            listener_task_context.thread_manager.as_ref(),
-            &environments,
-        )
-        .await;
-    let thread_settings_baseline =
-        thread_settings_from_config_snapshot(&conversation.config_snapshot().await);
+    let (watch_registration, thread_settings_baseline, closed_notification_connection) = match setup
+    {
+        ListenerSetup::Standard => {
+            let config = conversation.config().await;
+            let environments = conversation.environment_selections().await;
+            let watch_registration = listener_task_context
+                .skills_watcher
+                .register_thread_config(
+                    config.as_ref(),
+                    listener_task_context.thread_manager.as_ref(),
+                    &environments,
+                )
+                .await;
+            let thread_settings_baseline =
+                thread_settings_from_config_snapshot(&conversation.config_snapshot().await);
+            (watch_registration, thread_settings_baseline, None)
+        }
+        ListenerSetup::Isolated {
+            config_snapshot,
+            owner_connection,
+        } => (
+            WatchRegistration::default(),
+            thread_settings_from_config_snapshot(config_snapshot.as_ref()),
+            Some(owner_connection),
+        ),
+    };
+    let isolated_listener = closed_notification_connection.is_some();
     let (mut listener_command_rx, listener_generation) = {
         let mut thread_state = thread_state.lock().await;
         if thread_state.listener_matches(&conversation) {
@@ -322,11 +419,19 @@ pub(super) async fn ensure_listener_task_running(
                     let subscribed_connection_ids = thread_state_manager
                         .subscribed_connection_ids(conversation_id)
                         .await;
-                    let thread_outgoing = ThreadScopedOutgoingMessageSender::new(
-                        outgoing_for_task.clone(),
-                        subscribed_connection_ids,
-                        conversation_id,
-                    );
+                    let thread_outgoing = if isolated_listener {
+                        ThreadScopedOutgoingMessageSender::new_isolated(
+                            outgoing_for_task.clone(),
+                            subscribed_connection_ids,
+                            conversation_id,
+                        )
+                    } else {
+                        ThreadScopedOutgoingMessageSender::new(
+                            outgoing_for_task.clone(),
+                            subscribed_connection_ids,
+                            conversation_id,
+                        )
+                    };
 
                     apply_bespoke_event_handling(
                         event.clone(),
@@ -370,6 +475,7 @@ pub(super) async fn ensure_listener_task_running(
                         thread_watch_manager.clone(),
                         conversation_id,
                         conversation.clone(),
+                        closed_notification_connection,
                     )
                     .await;
                     break;
@@ -377,73 +483,23 @@ pub(super) async fn ensure_listener_task_running(
             }
         }
 
-        let mut thread_state = thread_state.lock().await;
-        if thread_state.listener_generation == listener_generation {
-            thread_state_manager.unregister_listener_command_tx(conversation_id);
-            thread_state.clear_listener();
+        let listener_was_current = {
+            let mut thread_state = thread_state.lock().await;
+            if thread_state.listener_generation == listener_generation {
+                thread_state_manager.unregister_listener_command_tx(conversation_id);
+                thread_state.clear_listener();
+                true
+            } else {
+                false
+            }
+        };
+        if listener_was_current {
+            thread_watch_manager
+                .note_status_listener_closed(&conversation_id.to_string())
+                .await;
         }
     });
     Ok(())
-}
-
-pub(super) async fn wait_for_thread_shutdown(thread: &Arc<CodexThread>) -> ThreadShutdownResult {
-    match tokio::time::timeout(Duration::from_secs(10), thread.shutdown_and_wait()).await {
-        Ok(Ok(())) => ThreadShutdownResult::Complete,
-        Ok(Err(_)) => ThreadShutdownResult::SubmitFailed,
-        Err(_) => ThreadShutdownResult::TimedOut,
-    }
-}
-
-pub(super) async fn unload_thread_without_subscribers(
-    thread_manager: Arc<ThreadManager>,
-    outgoing: Arc<OutgoingMessageSender>,
-    pending_thread_unloads: Arc<Mutex<HashSet<ThreadId>>>,
-    thread_state_manager: ThreadStateManager,
-    thread_watch_manager: ThreadWatchManager,
-    thread_id: ThreadId,
-    thread: Arc<CodexThread>,
-) {
-    info!("thread {thread_id} has no subscribers and is idle; shutting down");
-
-    // Any pending app-server -> client requests for this thread can no longer be
-    // answered; cancel their callbacks before shutdown/unload.
-    outgoing
-        .cancel_requests_for_thread(thread_id, /*error*/ None)
-        .await;
-    thread_state_manager.remove_thread_state(thread_id).await;
-
-    tokio::spawn(async move {
-        match wait_for_thread_shutdown(&thread).await {
-            ThreadShutdownResult::Complete => {
-                if thread_manager.remove_thread(&thread_id).await.is_none() {
-                    info!("thread {thread_id} was already removed before teardown finalized");
-                    thread_watch_manager
-                        .remove_thread(&thread_id.to_string())
-                        .await;
-                    pending_thread_unloads.lock().await.remove(&thread_id);
-                    return;
-                }
-                thread_watch_manager
-                    .remove_thread(&thread_id.to_string())
-                    .await;
-                let notification = ThreadClosedNotification {
-                    thread_id: thread_id.to_string(),
-                };
-                outgoing
-                    .send_server_notification(ServerNotification::ThreadClosed(notification))
-                    .await;
-                pending_thread_unloads.lock().await.remove(&thread_id);
-            }
-            ThreadShutdownResult::SubmitFailed => {
-                pending_thread_unloads.lock().await.remove(&thread_id);
-                warn!("failed to submit Shutdown to thread {thread_id}");
-            }
-            ThreadShutdownResult::TimedOut => {
-                pending_thread_unloads.lock().await.remove(&thread_id);
-                warn!("thread {thread_id} shutdown timed out; leaving thread loaded");
-            }
-        }
-    });
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -27,6 +27,7 @@ mod fs;
 mod hooks_list;
 mod imagegen_extension;
 mod initialize;
+mod isolated_model_mode;
 mod marketplace_add;
 mod marketplace_remove;
 mod marketplace_upgrade;

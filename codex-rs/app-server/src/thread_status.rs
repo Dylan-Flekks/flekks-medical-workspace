@@ -1,3 +1,4 @@
+use crate::outgoing_message::ConnectionId;
 #[cfg(test)]
 use crate::outgoing_message::OutgoingEnvelope;
 #[cfg(test)]
@@ -103,10 +104,77 @@ impl ThreadWatchManager {
         .await;
     }
 
+    pub(crate) async fn upsert_isolated_thread_silently(
+        &self,
+        thread: Thread,
+        connection_id: ConnectionId,
+    ) -> bool {
+        let mut state = self.state.lock().await;
+        let Some(route) = state.status_notification_route_by_thread_id.get(&thread.id) else {
+            return false;
+        };
+        if route.connection_id != connection_id || route.thread_removed {
+            return false;
+        }
+        state.upsert_thread(thread.id, /*emit_notification*/ false);
+        let running_turn_count = state
+            .runtime_by_thread_id
+            .values()
+            .filter(|runtime| runtime.running)
+            .count();
+        drop(state);
+        let _ = self.running_turn_count_tx.send(running_turn_count);
+        true
+    }
+
+    pub(crate) async fn route_status_notifications_to_connection(
+        &self,
+        thread_id: &str,
+        connection_id: ConnectionId,
+    ) -> bool {
+        let mut state = self.state.lock().await;
+        match state
+            .status_notification_route_by_thread_id
+            .entry(thread_id.to_string())
+        {
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(StatusNotificationRoute {
+                    connection_id,
+                    listener_closed: false,
+                    thread_removed: false,
+                });
+                true
+            }
+            std::collections::hash_map::Entry::Occupied(entry) => {
+                entry.get().connection_id == connection_id
+            }
+        }
+    }
+
+    pub(crate) async fn note_status_listener_closed(&self, thread_id: &str) {
+        let mut state = self.state.lock().await;
+        let should_remove = state
+            .status_notification_route_by_thread_id
+            .get_mut(thread_id)
+            .is_some_and(|route| {
+                route.listener_closed = true;
+                route.thread_removed
+            });
+        if should_remove {
+            state
+                .status_notification_route_by_thread_id
+                .remove(thread_id);
+        }
+    }
+
     pub(crate) async fn remove_thread(&self, thread_id: &str) {
         let thread_id = thread_id.to_string();
-        self.mutate_and_publish(move |state| state.remove_thread(&thread_id))
-            .await;
+        let route_to_mark_removed = thread_id.clone();
+        self.mutate_and_publish_with_route_cleanup(
+            move |state| state.remove_thread(&thread_id),
+            Some(route_to_mark_removed),
+        )
+        .await;
     }
 
     pub(crate) async fn loaded_status_for_thread(&self, thread_id: &str) -> ThreadStatus {
@@ -222,24 +290,61 @@ impl ThreadWatchManager {
     where
         F: FnOnce(&mut ThreadWatchState) -> Option<ThreadStatusChangedNotification>,
     {
-        let (notification, running_turn_count) = {
+        self.mutate_and_publish_with_route_cleanup(mutate, /*route_to_mark_removed*/ None)
+            .await;
+    }
+
+    async fn mutate_and_publish_with_route_cleanup<F>(
+        &self,
+        mutate: F,
+        route_to_mark_removed: Option<String>,
+    ) where
+        F: FnOnce(&mut ThreadWatchState) -> Option<ThreadStatusChangedNotification>,
+    {
+        let (notification, routed_connection, running_turn_count) = {
             let mut state = self.state.lock().await;
             let notification = mutate(&mut state);
+            let routed_connection = notification.as_ref().and_then(|notification| {
+                state
+                    .status_notification_route_by_thread_id
+                    .get(&notification.thread_id)
+                    .map(|route| route.connection_id)
+            });
+            if let Some(thread_id) = route_to_mark_removed {
+                let should_remove = state
+                    .status_notification_route_by_thread_id
+                    .get_mut(&thread_id)
+                    .is_some_and(|route| {
+                        route.thread_removed = true;
+                        route.listener_closed
+                    });
+                if should_remove {
+                    state
+                        .status_notification_route_by_thread_id
+                        .remove(&thread_id);
+                }
+            }
             let running_turn_count = state
                 .runtime_by_thread_id
                 .values()
                 .filter(|runtime| runtime.running)
                 .count();
-            (notification, running_turn_count)
+            (notification, routed_connection, running_turn_count)
         };
         let _ = self.running_turn_count_tx.send(running_turn_count);
 
         if let Some(notification) = notification
             && let Some(outgoing) = &self.outgoing
         {
-            outgoing
-                .send_server_notification(ServerNotification::ThreadStatusChanged(notification))
-                .await;
+            let notification = ServerNotification::ThreadStatusChanged(notification);
+            match routed_connection {
+                Some(connection_id) => {
+                    outgoing
+                        .send_server_notification_to_connections(&[connection_id], notification)
+                        .await;
+                }
+                None => outgoing.send_server_notification(notification).await,
+            }
         }
     }
 
@@ -255,9 +360,11 @@ impl ThreadWatchManager {
         thread_id: String,
         guard_type: ThreadWatchActiveGuardType,
     ) {
-        self.update_runtime_for_thread(&thread_id, move |runtime| {
-            let counter = Self::pending_counter(runtime, guard_type);
-            *counter = counter.saturating_sub(1);
+        self.mutate_and_publish(move |state| {
+            state.update_existing_runtime(&thread_id, move |runtime| {
+                let counter = Self::pending_counter(runtime, guard_type);
+                *counter = counter.saturating_sub(1);
+            })
         })
         .await;
     }
@@ -302,6 +409,14 @@ pub(crate) fn resolve_thread_status(
 struct ThreadWatchState {
     runtime_by_thread_id: HashMap<String, RuntimeFacts>,
     status_watcher_by_thread_id: HashMap<String, watch::Sender<ThreadStatus>>,
+    status_notification_route_by_thread_id: HashMap<String, StatusNotificationRoute>,
+}
+
+#[derive(Clone, Copy)]
+struct StatusNotificationRoute {
+    connection_id: ConnectionId,
+    listener_closed: bool,
+    thread_removed: bool,
 }
 
 impl ThreadWatchState {
@@ -346,12 +461,34 @@ impl ThreadWatchState {
     where
         F: FnOnce(&mut RuntimeFacts),
     {
+        if self
+            .status_notification_route_by_thread_id
+            .get(thread_id)
+            .is_some_and(|route| route.thread_removed)
+        {
+            return None;
+        }
         let previous_status = self.status_for(thread_id);
         let runtime = self
             .runtime_by_thread_id
             .entry(thread_id.to_string())
             .or_default();
         runtime.is_loaded = true;
+        mutate(runtime);
+        self.update_status_watcher_for_thread(thread_id);
+        self.status_changed_notification(thread_id.to_string(), previous_status)
+    }
+
+    fn update_existing_runtime<F>(
+        &mut self,
+        thread_id: &str,
+        mutate: F,
+    ) -> Option<ThreadStatusChangedNotification>
+    where
+        F: FnOnce(&mut RuntimeFacts),
+    {
+        let previous_status = self.status_for(thread_id);
+        let runtime = self.runtime_by_thread_id.get_mut(thread_id)?;
         mutate(runtime);
         self.update_status_watcher_for_thread(thread_id);
         self.status_changed_notification(thread_id.to_string(), previous_status)
@@ -801,6 +938,113 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn routed_status_changes_target_only_the_owner_and_suppress_late_updates() {
+        let (outgoing_tx, mut outgoing_rx) = mpsc::channel(8);
+        let manager = ThreadWatchManager::new_with_outgoing(Arc::new(OutgoingMessageSender::new(
+            outgoing_tx,
+            codex_analytics::AnalyticsEventsClient::disabled(),
+        )));
+        let owner = ConnectionId(7);
+        assert!(
+            manager
+                .route_status_notifications_to_connection(INTERACTIVE_THREAD_ID, owner)
+                .await
+        );
+        assert!(
+            manager
+                .upsert_isolated_thread_silently(
+                    test_thread(
+                        INTERACTIVE_THREAD_ID,
+                        codex_app_server_protocol::SessionSource::Cli,
+                    ),
+                    owner,
+                )
+                .await
+        );
+
+        manager.note_turn_started(INTERACTIVE_THREAD_ID).await;
+        assert_eq!(manager.running_turn_count().await, 1);
+        assert_eq!(
+            recv_routed_status_changed_notification(&mut outgoing_rx, owner).await,
+            ThreadStatusChangedNotification {
+                thread_id: INTERACTIVE_THREAD_ID.to_string(),
+                status: ThreadStatus::Active {
+                    active_flags: vec![],
+                },
+            }
+        );
+
+        manager
+            .note_turn_completed(INTERACTIVE_THREAD_ID, false)
+            .await;
+        assert_eq!(manager.running_turn_count().await, 0);
+        assert_eq!(
+            recv_routed_status_changed_notification(&mut outgoing_rx, owner).await,
+            ThreadStatusChangedNotification {
+                thread_id: INTERACTIVE_THREAD_ID.to_string(),
+                status: ThreadStatus::Idle,
+            }
+        );
+
+        let permission_guard = manager
+            .note_permission_requested(INTERACTIVE_THREAD_ID)
+            .await;
+        assert_eq!(
+            recv_routed_status_changed_notification(&mut outgoing_rx, owner).await,
+            ThreadStatusChangedNotification {
+                thread_id: INTERACTIVE_THREAD_ID.to_string(),
+                status: ThreadStatus::Active {
+                    active_flags: vec![ThreadActiveFlag::WaitingOnApproval],
+                },
+            }
+        );
+        manager.remove_thread(INTERACTIVE_THREAD_ID).await;
+        assert_eq!(
+            recv_routed_status_changed_notification(&mut outgoing_rx, owner).await,
+            ThreadStatusChangedNotification {
+                thread_id: INTERACTIVE_THREAD_ID.to_string(),
+                status: ThreadStatus::NotLoaded,
+            }
+        );
+
+        manager.note_turn_started(INTERACTIVE_THREAD_ID).await;
+        let late_permission_guard = manager
+            .note_permission_requested(INTERACTIVE_THREAD_ID)
+            .await;
+        assert_eq!(manager.running_turn_count().await, 0);
+        assert_eq!(
+            manager
+                .loaded_status_for_thread(INTERACTIVE_THREAD_ID)
+                .await,
+            ThreadStatus::NotLoaded
+        );
+        manager
+            .note_status_listener_closed(INTERACTIVE_THREAD_ID)
+            .await;
+        assert!(
+            !manager
+                .upsert_isolated_thread_silently(
+                    test_thread(
+                        INTERACTIVE_THREAD_ID,
+                        codex_app_server_protocol::SessionSource::Cli,
+                    ),
+                    owner,
+                )
+                .await
+        );
+        // A request guard can outlive the listener task. Its release must be a
+        // no-op after removal instead of recreating globally visible status.
+        drop(permission_guard);
+        drop(late_permission_guard);
+        assert!(
+            timeout(Duration::from_millis(100), outgoing_rx.recv())
+                .await
+                .is_err(),
+            "terminal isolated status updates must never fall back to broadcast"
+        );
+    }
+
+    #[tokio::test]
     async fn status_watchers_receive_only_their_thread_updates() {
         let manager = ThreadWatchManager::new();
         manager
@@ -877,6 +1121,32 @@ mod tests {
         let OutgoingEnvelope::Broadcast { message } = envelope else {
             panic!("expected broadcast notification");
         };
+        let OutgoingMessage::AppServerNotification(ServerNotification::ThreadStatusChanged(
+            notification,
+        )) = message
+        else {
+            panic!("expected thread/status/changed notification");
+        };
+        notification
+    }
+
+    async fn recv_routed_status_changed_notification(
+        outgoing_rx: &mut mpsc::Receiver<OutgoingEnvelope>,
+        expected_connection_id: ConnectionId,
+    ) -> ThreadStatusChangedNotification {
+        let envelope = timeout(Duration::from_secs(1), outgoing_rx.recv())
+            .await
+            .expect("timed out waiting for outgoing notification")
+            .expect("outgoing channel closed unexpectedly");
+        let OutgoingEnvelope::ToConnection {
+            connection_id,
+            message,
+            ..
+        } = envelope
+        else {
+            panic!("expected connection-routed notification");
+        };
+        assert_eq!(connection_id, expected_connection_id);
         let OutgoingMessage::AppServerNotification(ServerNotification::ThreadStatusChanged(
             notification,
         )) = message
