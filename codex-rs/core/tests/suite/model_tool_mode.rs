@@ -5,9 +5,11 @@ use std::time::Duration;
 use codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID;
 use codex_config::types::McpServerConfig;
 use codex_config::types::McpServerTransportConfig;
+use codex_core::StartThreadOptions;
 use codex_core::TryStartTurnIfIdleRejectionReason;
 use codex_core::config::CurrentTimeReminderConfig;
 use codex_core::test_support::EmptyUserInstructionsProvider;
+use codex_extension_api::ExtensionDataInit;
 use codex_features::CurrentTimeSource;
 use codex_features::Feature;
 use codex_protocol::config_types::ModelToolMode;
@@ -15,6 +17,7 @@ use codex_protocol::items::TurnItem;
 use codex_protocol::protocol::CodexErrorInfo;
 use codex_protocol::protocol::ConversationStartParams;
 use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::InitialHistory;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::RealtimeOutputModality;
 use codex_protocol::protocol::ThreadSettingsOverrides;
@@ -326,7 +329,8 @@ async fn isolated_mode_rejects_trace_and_client_ids_before_inference() -> anyhow
     let mut builder = test_codex().with_initial_model_tool_mode(ModelToolMode::Isolated);
     let test = builder.build(&server).await?;
 
-    test.codex
+    let trace_error = test
+        .codex
         .submit_with_trace(
             isolated_user_turn("deidentified packet"),
             Some(W3cTraceContext {
@@ -336,17 +340,20 @@ async fn isolated_mode_rejects_trace_and_client_ids_before_inference() -> anyhow
                 tracestate: None,
             }),
         )
-        .await?;
-    wait_for_event(&test.codex, |event| matches!(event, EventMsg::Error(_))).await;
+        .await
+        .expect_err("isolated trace carrier should fail before enqueue");
+    assert!(trace_error.to_string().contains("trace carriers"));
 
-    test.codex
+    let client_id_error = test
+        .codex
         .submit_user_input_with_client_user_message_id(
             isolated_user_turn("deidentified packet"),
             None,
             Some("client-message-id".to_string()),
         )
-        .await?;
-    wait_for_event(&test.codex, |event| matches!(event, EventMsg::Error(_))).await;
+        .await
+        .expect_err("isolated client message id should fail before enqueue");
+    assert!(client_id_error.to_string().contains("client message ids"));
 
     let responses_requests = server
         .received_requests()
@@ -417,6 +424,59 @@ async fn isolated_mode_rejects_fallback_model_metadata_before_inference() -> any
         .filter(|request| request.url.path().ends_with("/responses"))
         .count();
     assert_eq!(responses_requests, 0);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn isolated_thread_can_be_owned_before_core_publication() -> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let mut builder = test_codex().with_initial_model_tool_mode(ModelToolMode::Isolated);
+    let test = builder.build(&server).await?;
+    let mut thread_extension_init = ExtensionDataInit::new();
+    thread_extension_init.insert(ModelToolMode::Isolated);
+    let unpublished = test
+        .thread_manager
+        .start_isolated_thread_unpublished(StartThreadOptions {
+            config: test.config.clone(),
+            allow_provider_model_fallback: false,
+            initial_history: InitialHistory::New,
+            history_mode: None,
+            session_source: None,
+            thread_source: None,
+            dynamic_tools: Vec::new(),
+            metrics_service_name: None,
+            parent_trace: None,
+            environments: Vec::new(),
+            thread_extension_init,
+            supports_openai_form_elicitation: false,
+        })
+        .await?;
+
+    assert!(
+        test.thread_manager
+            .get_thread(unpublished.thread_id)
+            .await
+            .is_err()
+    );
+    assert!(
+        !test
+            .thread_manager
+            .list_thread_ids()
+            .await
+            .contains(&unpublished.thread_id)
+    );
+
+    test.thread_manager
+        .publish_isolated_thread(&unpublished)
+        .await?;
+    let published = test
+        .thread_manager
+        .get_thread(unpublished.thread_id)
+        .await?;
+    assert!(Arc::ptr_eq(&published, &unpublished.thread));
 
     Ok(())
 }

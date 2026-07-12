@@ -245,7 +245,7 @@ pub(super) async fn new(mut input: IsolatedSessionInit) -> anyhow::Result<Arc<Se
             thread_id,
             input.session_configuration.provider.clone(),
             input.config.http_client_factory(),
-        ),
+        )?,
         code_mode_service: crate::tools::code_mode::CodeModeService::new(
             input.code_mode_session_provider,
         ),
