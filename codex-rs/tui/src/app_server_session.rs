@@ -4,6 +4,7 @@
 //! request/response plumbing out of `App` and `ChatWidget`.
 
 mod fs;
+pub(crate) mod workspace_data_policy;
 
 use crate::bottom_pane::FeedbackAudience;
 use crate::legacy_core::config::Config;
@@ -270,6 +271,7 @@ pub(crate) struct AppServerSession {
     available_models: Vec<ModelPreset>,
     managed_new_thread_defaults: Option<NewThreadModelDefaults>,
     external_agent_config_import_completion_pending: AtomicBool,
+    workspace_synthetic_ready: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -315,6 +317,7 @@ impl AppServerSession {
             available_models: Vec::new(),
             managed_new_thread_defaults: None,
             external_agent_config_import_completion_pending: AtomicBool::new(false),
+            workspace_synthetic_ready: false,
         }
     }
 
@@ -872,6 +875,7 @@ impl AppServerSession {
         &mut self,
         params: WorkspaceClientUpsertParams,
     ) -> Result<WorkspaceClientUpsertResponse> {
+        self.ensure_synthetic_workspace().await?;
         let request_id = self.next_request_id();
         self.client
             .request_typed(ClientRequest::WorkspaceClientUpsert { request_id, params })
@@ -883,6 +887,7 @@ impl AppServerSession {
         &mut self,
         params: WorkspaceChartCommitParams,
     ) -> Result<WorkspaceChartCommitResponse> {
+        self.ensure_synthetic_workspace().await?;
         let request_id = self.next_request_id();
         self.client
             .request_typed(ClientRequest::WorkspaceChartCommit { request_id, params })
@@ -909,6 +914,7 @@ impl AppServerSession {
         &mut self,
         params: WorkspaceNoteUpsertParams,
     ) -> Result<WorkspaceNoteUpsertResponse> {
+        self.ensure_synthetic_workspace().await?;
         let request_id = self.next_request_id();
         self.client
             .request_typed(ClientRequest::WorkspaceNoteUpsert { request_id, params })
@@ -920,6 +926,7 @@ impl AppServerSession {
         &mut self,
         params: WorkspaceNoteSignParams,
     ) -> Result<WorkspaceNoteSignResponse> {
+        self.ensure_synthetic_workspace().await?;
         let request_id = self.next_request_id();
         self.client
             .request_typed(ClientRequest::WorkspaceNoteSign { request_id, params })
@@ -945,6 +952,7 @@ impl AppServerSession {
         &mut self,
         params: WorkspaceNoteAddendumCreateParams,
     ) -> Result<WorkspaceNoteAddendumCreateResponse> {
+        self.ensure_synthetic_workspace().await?;
         let request_id = self.next_request_id();
         self.client
             .request_typed(ClientRequest::WorkspaceNoteAddendumCreate { request_id, params })
@@ -984,6 +992,7 @@ impl AppServerSession {
         &mut self,
         params: WorkspaceNoteProposalCreateParams,
     ) -> Result<WorkspaceNoteProposalCreateResponse> {
+        self.ensure_synthetic_workspace().await?;
         let request_id = self.next_request_id();
         self.client
             .request_typed(ClientRequest::WorkspaceNoteProposalCreate { request_id, params })
@@ -995,6 +1004,7 @@ impl AppServerSession {
         &mut self,
         params: WorkspaceNoteProposalResolveParams,
     ) -> Result<WorkspaceNoteProposalResolveResponse> {
+        self.ensure_synthetic_workspace().await?;
         let request_id = self.next_request_id();
         self.client
             .request_typed(ClientRequest::WorkspaceNoteProposalResolve { request_id, params })
@@ -1032,6 +1042,7 @@ impl AppServerSession {
         &mut self,
         params: WorkspaceEncounterUpsertParams,
     ) -> Result<WorkspaceEncounterUpsertResponse> {
+        self.ensure_synthetic_workspace().await?;
         let request_id = self.next_request_id();
         self.client
             .request_typed(ClientRequest::WorkspaceEncounterUpsert { request_id, params })
@@ -1079,6 +1090,7 @@ impl AppServerSession {
         &mut self,
         params: WorkspaceDocumentUpsertParams,
     ) -> Result<WorkspaceDocumentUpsertResponse> {
+        self.ensure_synthetic_workspace().await?;
         let request_id = self.next_request_id();
         self.client
             .request_typed(ClientRequest::WorkspaceDocumentUpsert { request_id, params })
@@ -1115,6 +1127,7 @@ impl AppServerSession {
         &mut self,
         params: WorkspaceArtifactDerivativeStatusUpdateParams,
     ) -> Result<WorkspaceArtifactDerivativeStatusUpdateResponse> {
+        self.ensure_synthetic_workspace().await?;
         let request_id = self.next_request_id();
         self.client
             .request_typed(ClientRequest::WorkspaceArtifactDerivativeStatusUpdate {
@@ -1140,6 +1153,7 @@ impl AppServerSession {
         &mut self,
         params: WorkspaceContextClipStatusUpdateParams,
     ) -> Result<WorkspaceContextClipStatusUpdateResponse> {
+        self.ensure_synthetic_workspace().await?;
         let request_id = self.next_request_id();
         self.client
             .request_typed(ClientRequest::WorkspaceContextClipStatusUpdate { request_id, params })
@@ -1166,6 +1180,7 @@ impl AppServerSession {
         &mut self,
         params: WorkspaceTaskUpsertParams,
     ) -> Result<WorkspaceTaskUpsertResponse> {
+        self.ensure_synthetic_workspace().await?;
         let request_id = self.next_request_id();
         self.client
             .request_typed(ClientRequest::WorkspaceTaskUpsert { request_id, params })
@@ -1177,6 +1192,7 @@ impl AppServerSession {
         &mut self,
         params: WorkspaceTaskStatusUpdateParams,
     ) -> Result<WorkspaceTaskStatusUpdateResponse> {
+        self.ensure_synthetic_workspace().await?;
         let request_id = self.next_request_id();
         self.client
             .request_typed(ClientRequest::WorkspaceTaskStatusUpdate { request_id, params })
@@ -1199,6 +1215,7 @@ impl AppServerSession {
         &mut self,
         params: WorkspaceContextPacketCreateParams,
     ) -> Result<WorkspaceContextPacketCreateResponse> {
+        self.ensure_synthetic_workspace().await?;
         let request_id = self.next_request_id();
         self.client
             .request_typed(ClientRequest::WorkspaceContextPacketCreate { request_id, params })
@@ -1211,6 +1228,7 @@ impl AppServerSession {
         &mut self,
         params: WorkspaceContextPacketReplayParams,
     ) -> Result<WorkspaceContextPacketReplayResponse> {
+        self.ensure_synthetic_workspace().await?;
         let request_id = self.next_request_id();
         self.client
             .request_typed(ClientRequest::WorkspaceContextPacketReplay { request_id, params })
@@ -1223,6 +1241,7 @@ impl AppServerSession {
         &mut self,
         params: WorkspaceAgentRunStartParams,
     ) -> Result<WorkspaceAgentRunStartResponse> {
+        self.ensure_synthetic_workspace().await?;
         let request_id = self.next_request_id();
         self.client
             .request_typed(ClientRequest::WorkspaceAgentRunStart { request_id, params })
@@ -1293,6 +1312,7 @@ impl AppServerSession {
         &mut self,
         params: WorkspaceAgentResultCreateParams,
     ) -> Result<WorkspaceAgentResultCreateResponse> {
+        self.ensure_synthetic_workspace().await?;
         let request_id = self.next_request_id();
         self.client
             .request_typed(ClientRequest::WorkspaceAgentResultCreate { request_id, params })

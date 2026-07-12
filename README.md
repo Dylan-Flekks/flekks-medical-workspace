@@ -32,6 +32,7 @@ See [Agent proposal workflow](docs/agent-proposal-workflow.md) and [Architecture
 - Note revision history, local note locking, addenda, and stale-proposal checks.
 - Explicit packet selection for multimodal file metadata and human-reviewed excerpts.
 - Durable prepared packets, idempotent agent runs, immutable packet-source snapshots, review-pending results, revision-bound proposals, and append-only clinician decisions.
+- An immutable synthetic-workspace policy, dedicated private SQLite home, and TUI preflight before supported chart, packet, or agent-result mutations.
 - Patient-rooted atomic chart changesets with optimistic note revisions, opaque entity-version guards, durable idempotency receipts, exact-request retry, explicit note-only reconciliation, and fail-closed discard/reload for broader stale drafts.
 - A model-visible `workspace_context_read` tool restricted to a running packet ID and explicitly authorized visit-history or progress-note categories; returned note bodies are byte-bounded and local-path tokens are redacted before immutable snapshot hashing.
 - Automatic packet-id/hash turn binding and review-pending capture of the final agent answer with thread/turn provenance.
@@ -53,6 +54,22 @@ cd flekks-medical-workspace
 just medical-workspace
 ```
 
+By default, the launcher uses a dedicated workspace SQLite directory at
+`$HOME/.codex/flekks-medical-synthetic`, creates it with private permissions,
+and refuses to reuse the normal Codex state directory. To choose another
+location, supply an absolute path reserved only for synthetic medical
+workspace SQLite state:
+
+```bash
+FLEKKS_MEDICAL_WORKSPACE_SQLITE_HOME=/absolute/private/path just medical-workspace
+```
+
+The launcher does not copy records from existing Codex or medical-workspace
+databases, and it never auto-classifies a nonempty workspace database. Do not
+point the override at another Codex SQLite home. An unclassified nonempty
+database remains blocked from agent-visible workspace reads. Normal Codex
+configuration, authentication, logs, and rollouts still use `CODEX_HOME`.
+
 To update an existing clone to the latest public version:
 
 ```bash
@@ -71,8 +88,9 @@ When the TUI opens, run:
 /workspacemedical
 ```
 
-The equivalent manual launch sequence is `cd codex-rs`, `cargo build -p codex-cli`,
-`stty cols 160 rows 45`, and `./target/debug/codex`.
+Use `just medical-workspace` (or `scripts/run_medical_workspace.sh`) for the
+required synthetic-only launch configuration; a plain `cargo run` intentionally
+lacks authority to classify a new workspace database.
 
 Use synthetic fixtures only. See [Development](docs/development.md) for focused tests and snapshot review.
 
@@ -102,7 +120,7 @@ Known blockers include:
 - extension of the packet-authorized reader beyond visit history and progress notes;
 - partial per-change proposal review in both the app-server API and TUI; edited whole-proposal acceptance is state/API-ready;
 - startup reconciliation for a run abandoned by an abrupt process termination;
-- synthetic-workspace enforcement and secure storage design;
+- broader app-server mutation gating plus production encryption, authenticated identity, access control, retention, and secure-storage design;
 - authenticated clinician identity and production privacy controls.
 
 Matching model turns are captured automatically as review-pending Agent Work with thread/turn provenance. The explicit `:agent result save` path remains available as a clinician-attributed recovery import when a response was produced outside the bound harness turn.

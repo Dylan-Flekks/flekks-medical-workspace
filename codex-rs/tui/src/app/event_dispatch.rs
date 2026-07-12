@@ -21,6 +21,12 @@ impl App {
     ) -> Result<AppRunControl> {
         match event {
             AppEvent::OpenWorkspaceDashboard { profile } => {
+                if let Err(err) = app_server.ensure_synthetic_workspace().await {
+                    self.chat_widget
+                        .add_error_message(workspace_open_error_message(err));
+                    tui.frame_requester().schedule_frame();
+                    return Ok(AppRunControl::Continue);
+                }
                 let _ = tui.enter_workspace_alt_screen();
                 if self.workspace_dashboard.is_none() {
                     let mut dashboard = WorkspaceDashboard::new(profile);
@@ -37,7 +43,7 @@ impl App {
                         }
                         Err(err) => {
                             self.chat_widget
-                                .add_error_message(format!("Failed to open workspace: {err}"));
+                                .add_error_message(workspace_open_error_message(err));
                             tui.frame_requester().schedule_frame();
                             return Ok(AppRunControl::Continue);
                         }
@@ -2488,4 +2494,8 @@ impl App {
             }
         }
     }
+}
+
+pub(super) fn workspace_open_error_message(error: impl std::fmt::Display) -> String {
+    format!("Failed to open workspace: {error}")
 }

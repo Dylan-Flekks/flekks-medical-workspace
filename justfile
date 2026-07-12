@@ -20,9 +20,7 @@ codex *args:
 # Once the TUI opens, enter `/workspacemedical`.
 [unix]
 medical-workspace:
-    @echo "Opening Codex. Enter /workspacemedical to open the synthetic medical dashboard."
-    stty cols 160 rows 45
-    cargo run --bin codex
+    "{{ justfile_directory() }}/scripts/run_medical_workspace.sh"
 
 # `codex exec`
 exec *args:
