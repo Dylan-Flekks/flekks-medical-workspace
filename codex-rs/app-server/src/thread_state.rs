@@ -7,17 +7,21 @@ use codex_app_server_protocol::ThreadSettings;
 use codex_app_server_protocol::Turn;
 use codex_app_server_protocol::TurnError;
 use codex_core::CodexThread;
+use codex_core::NewThread;
 use codex_core::ThreadConfigSnapshot;
+use codex_core::ThreadManager;
 use codex_file_watcher::WatchRegistration;
 use codex_protocol::ThreadId;
 #[cfg(test)]
 use codex_protocol::config_types::MultiAgentMode;
+use codex_protocol::error::Result as CodexResult;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::RolloutItem;
 use codex_rollout::state_db::StateDbHandle;
 use codex_utils_path_uri::LegacyAppPathString;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::future::Future;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::sync::Weak;
@@ -204,6 +208,8 @@ mod tests {
     use codex_protocol::config_types::Settings;
     use codex_utils_absolute_path::AbsolutePathBuf;
     use pretty_assertions::assert_eq;
+    use std::time::Duration;
+    use tokio::sync::Notify;
 
     #[test]
     fn note_thread_settings_reports_only_effective_changes() {
@@ -219,6 +225,64 @@ mod tests {
         ];
 
         assert_eq!(results, vec![true, false, true, false]);
+    }
+
+    #[tokio::test]
+    async fn isolated_publication_serializes_owner_disconnect() {
+        let manager = ThreadStateManager::new();
+        let thread_id =
+            ThreadId::from_string("ce5d47fb-77f6-40c4-b45d-e9aec7d19f28").expect("valid thread id");
+        let connection_id = ConnectionId(7);
+        manager
+            .connection_initialized(connection_id, ConnectionCapabilities::default())
+            .await;
+        let publication_entered = Arc::new(Notify::new());
+        let allow_publication = Arc::new(Notify::new());
+        let manager_for_publication = manager.clone();
+        let entered_for_publication = Arc::clone(&publication_entered);
+        let allow_for_publication = Arc::clone(&allow_publication);
+        let publication = tokio::spawn(async move {
+            manager_for_publication
+                .register_and_publish_isolated_thread_with(
+                    thread_id,
+                    connection_id,
+                    || async move {
+                        entered_for_publication.notify_one();
+                        allow_for_publication.notified().await;
+                        Ok(())
+                    },
+                )
+                .await
+        });
+        publication_entered.notified().await;
+
+        let manager_for_disconnect = manager.clone();
+        let mut disconnect = tokio::spawn(async move {
+            manager_for_disconnect
+                .remove_connection(connection_id)
+                .await
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut disconnect)
+                .await
+                .is_err(),
+            "disconnect must wait while ownership and core publication commit atomically"
+        );
+
+        allow_publication.notify_one();
+        assert!(
+            publication
+                .await
+                .expect("publication task should join")
+                .expect("synthetic publication should succeed")
+        );
+        assert_eq!(
+            disconnect.await.expect("disconnect task should join"),
+            RemovedConnection {
+                threads_without_connections: Vec::new(),
+                owned_isolated_threads: vec![thread_id],
+            }
+        );
     }
 
     fn thread_settings(model: &str) -> ThreadSettings {
@@ -279,8 +343,36 @@ impl ThreadEntry {
 #[derive(Default)]
 struct ThreadStateManagerInner {
     live_connections: HashMap<ConnectionId, ConnectionCapabilities>,
+    isolated_connections: HashSet<ConnectionId>,
     threads: HashMap<ThreadId, ThreadEntry>,
     thread_ids_by_connection: HashMap<ConnectionId, HashSet<ThreadId>>,
+    isolated_thread_owners: HashMap<ThreadId, IsolatedThreadOwnership>,
+}
+
+#[derive(Clone, Copy)]
+struct IsolatedThreadOwnership {
+    owner: ConnectionId,
+    turn_claimed: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum IsolatedTurnClaimResult {
+    Claimed,
+    NotFound,
+    NotOwner,
+    AlreadyClaimed,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ThreadSubscriptionAccess {
+    Standard,
+    IsolatedOwner,
+}
+
+#[derive(Debug, Default, Eq, PartialEq)]
+pub(crate) struct RemovedConnection {
+    pub(crate) threads_without_connections: Vec<ThreadId>,
+    pub(crate) owned_isolated_threads: Vec<ThreadId>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -360,6 +452,164 @@ impl ThreadStateManager {
             .unwrap_or_default()
     }
 
+    #[cfg(test)]
+    pub(crate) async fn register_isolated_thread_owner(
+        &self,
+        thread_id: ThreadId,
+        connection_id: ConnectionId,
+    ) -> bool {
+        let mut state = self.state.lock().await;
+        Self::register_isolated_thread_owner_locked(&mut state, thread_id, connection_id).is_some()
+    }
+
+    pub(crate) async fn register_and_publish_isolated_thread(
+        &self,
+        thread_manager: &ThreadManager,
+        thread: &NewThread,
+        connection_id: ConnectionId,
+    ) -> CodexResult<bool> {
+        self.register_and_publish_isolated_thread_with(thread.thread_id, connection_id, || {
+            thread_manager.publish_isolated_thread(thread)
+        })
+        .await
+    }
+
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "isolated ownership must stay locked until core publication commits"
+    )]
+    async fn register_and_publish_isolated_thread_with<F, Fut>(
+        &self,
+        thread_id: ThreadId,
+        connection_id: ConnectionId,
+        publish: F,
+    ) -> CodexResult<bool>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = CodexResult<()>>,
+    {
+        let mut state = self.state.lock().await;
+        let connection_was_isolated = state.isolated_connections.contains(&connection_id);
+        let Some(inserted_owner) =
+            Self::register_isolated_thread_owner_locked(&mut state, thread_id, connection_id)
+        else {
+            return Ok(false);
+        };
+
+        if let Err(error) = publish().await {
+            if inserted_owner {
+                state.isolated_thread_owners.remove(&thread_id);
+            }
+            if !connection_was_isolated {
+                state.isolated_connections.remove(&connection_id);
+            }
+            return Err(error);
+        }
+        Ok(true)
+    }
+
+    fn register_isolated_thread_owner_locked(
+        state: &mut ThreadStateManagerInner,
+        thread_id: ThreadId,
+        connection_id: ConnectionId,
+    ) -> Option<bool> {
+        if !state.live_connections.contains_key(&connection_id) {
+            return None;
+        }
+        let inserted = match state.isolated_thread_owners.entry(thread_id) {
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(IsolatedThreadOwnership {
+                    owner: connection_id,
+                    turn_claimed: false,
+                });
+                true
+            }
+            std::collections::hash_map::Entry::Occupied(entry) => {
+                if entry.get().owner != connection_id {
+                    return None;
+                }
+                false
+            }
+        };
+        state.isolated_connections.insert(connection_id);
+        Some(inserted)
+    }
+
+    pub(crate) async fn connection_is_isolated(&self, connection_id: ConnectionId) -> bool {
+        self.state
+            .lock()
+            .await
+            .isolated_connections
+            .contains(&connection_id)
+    }
+
+    pub(crate) async fn isolated_thread_owner(&self, thread_id: ThreadId) -> Option<ConnectionId> {
+        self.state
+            .lock()
+            .await
+            .isolated_thread_owners
+            .get(&thread_id)
+            .map(|ownership| ownership.owner)
+    }
+
+    pub(crate) async fn isolated_thread_has_live_owner(
+        &self,
+        thread_id: ThreadId,
+        connection_id: ConnectionId,
+    ) -> bool {
+        let state = self.state.lock().await;
+        state.live_connections.contains_key(&connection_id)
+            && state
+                .isolated_thread_owners
+                .get(&thread_id)
+                .is_some_and(|ownership| ownership.owner == connection_id)
+    }
+
+    pub(crate) async fn isolated_thread_ids(&self) -> HashSet<ThreadId> {
+        self.state
+            .lock()
+            .await
+            .isolated_thread_owners
+            .keys()
+            .copied()
+            .collect()
+    }
+
+    pub(crate) async fn claim_isolated_thread_turn(
+        &self,
+        thread_id: ThreadId,
+        connection_id: ConnectionId,
+    ) -> IsolatedTurnClaimResult {
+        let mut state = self.state.lock().await;
+        if !state.live_connections.contains_key(&connection_id) {
+            return IsolatedTurnClaimResult::NotFound;
+        }
+        let Some(ownership) = state.isolated_thread_owners.get_mut(&thread_id) else {
+            return IsolatedTurnClaimResult::NotFound;
+        };
+        if ownership.owner != connection_id {
+            return IsolatedTurnClaimResult::NotOwner;
+        }
+        if ownership.turn_claimed {
+            return IsolatedTurnClaimResult::AlreadyClaimed;
+        }
+        ownership.turn_claimed = true;
+        IsolatedTurnClaimResult::Claimed
+    }
+
+    pub(crate) async fn release_isolated_thread_turn_claim(
+        &self,
+        thread_id: ThreadId,
+        connection_id: ConnectionId,
+    ) {
+        let mut state = self.state.lock().await;
+        if let Some(ownership) = state.isolated_thread_owners.get_mut(&thread_id)
+            && ownership.owner == connection_id
+        {
+            ownership.turn_claimed = false;
+        }
+    }
+
     pub(crate) async fn thread_state(&self, thread_id: ThreadId) -> Arc<Mutex<ThreadState>> {
         let mut state = self.state.lock().await;
         state.threads.entry(thread_id).or_default().state.clone()
@@ -405,6 +655,7 @@ impl ThreadStateManager {
                 thread_ids.remove(&thread_id);
                 !thread_ids.is_empty()
             });
+            state.isolated_thread_owners.remove(&thread_id);
             thread_state
         };
         self.unregister_listener_command_tx(thread_id);
@@ -495,11 +746,28 @@ impl ThreadStateManager {
         thread_id: ThreadId,
         connection_id: ConnectionId,
         experimental_raw_events: bool,
+        access: ThreadSubscriptionAccess,
     ) -> Option<Arc<Mutex<ThreadState>>> {
         let thread_state = {
             let mut state = self.state.lock().await;
             if !state.live_connections.contains_key(&connection_id) {
                 return None;
+            }
+            match access {
+                ThreadSubscriptionAccess::Standard => {
+                    if state.isolated_thread_owners.contains_key(&thread_id) {
+                        return None;
+                    }
+                }
+                ThreadSubscriptionAccess::IsolatedOwner => {
+                    if !state
+                        .isolated_thread_owners
+                        .get(&thread_id)
+                        .is_some_and(|ownership| ownership.owner == connection_id)
+                    {
+                        return None;
+                    }
+                }
             }
             state
                 .thread_ids_by_connection
@@ -529,6 +797,13 @@ impl ThreadStateManager {
         if !state.live_connections.contains_key(&connection_id) {
             return false;
         }
+        if state
+            .isolated_thread_owners
+            .get(&thread_id)
+            .is_some_and(|ownership| ownership.owner != connection_id)
+        {
+            return false;
+        }
         state
             .thread_ids_by_connection
             .entry(connection_id)
@@ -540,29 +815,43 @@ impl ThreadStateManager {
         true
     }
 
-    pub(crate) async fn remove_connection(&self, connection_id: ConnectionId) -> Vec<ThreadId> {
-        {
-            let mut state = self.state.lock().await;
-            state.live_connections.remove(&connection_id);
-            let thread_ids = state
-                .thread_ids_by_connection
-                .remove(&connection_id)
-                .unwrap_or_default();
-            for thread_id in &thread_ids {
-                if let Some(thread_entry) = state.threads.get_mut(thread_id) {
-                    thread_entry.connection_ids.remove(&connection_id);
-                    thread_entry.update_has_connections();
-                }
+    pub(crate) async fn remove_connection(&self, connection_id: ConnectionId) -> RemovedConnection {
+        let mut state = self.state.lock().await;
+        let was_live = state.live_connections.remove(&connection_id).is_some();
+        state.isolated_connections.remove(&connection_id);
+        let thread_ids = state
+            .thread_ids_by_connection
+            .remove(&connection_id)
+            .unwrap_or_default();
+        for thread_id in &thread_ids {
+            if let Some(thread_entry) = state.threads.get_mut(thread_id) {
+                thread_entry.connection_ids.remove(&connection_id);
+                thread_entry.update_has_connections();
             }
-            thread_ids
-                .into_iter()
-                .filter(|thread_id| {
-                    state
-                        .threads
-                        .get(thread_id)
-                        .is_some_and(|thread_entry| thread_entry.connection_ids.is_empty())
+        }
+        let threads_without_connections = thread_ids
+            .into_iter()
+            .filter(|thread_id| {
+                state
+                    .threads
+                    .get(thread_id)
+                    .is_some_and(|thread_entry| thread_entry.connection_ids.is_empty())
+            })
+            .collect();
+        let owned_isolated_threads = if was_live {
+            state
+                .isolated_thread_owners
+                .iter()
+                .filter_map(|(thread_id, ownership)| {
+                    (ownership.owner == connection_id).then_some(*thread_id)
                 })
-                .collect::<Vec<_>>()
+                .collect()
+        } else {
+            Default::default()
+        };
+        RemovedConnection {
+            threads_without_connections,
+            owned_isolated_threads,
         }
     }
 

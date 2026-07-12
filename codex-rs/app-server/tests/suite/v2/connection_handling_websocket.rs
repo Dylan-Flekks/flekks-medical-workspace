@@ -2,12 +2,15 @@ use anyhow::Context;
 use anyhow::Result;
 use anyhow::bail;
 use app_test_support::DISABLE_PLUGIN_STARTUP_TASKS_ARG;
+use app_test_support::create_final_assistant_message_sse_response;
 use app_test_support::create_mock_responses_server_sequence_unchecked;
 use app_test_support::to_response;
+use app_test_support::write_models_cache;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use codex_app_server_protocol::ClientInfo;
 use codex_app_server_protocol::ConfigWarningNotification;
+use codex_app_server_protocol::InitializeCapabilities;
 use codex_app_server_protocol::InitializeParams;
 use codex_app_server_protocol::JSONRPCError;
 use codex_app_server_protocol::JSONRPCMessage;
@@ -19,7 +22,14 @@ use codex_app_server_protocol::ThreadLoadedListParams;
 use codex_app_server_protocol::ThreadLoadedListResponse;
 use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::ThreadStartResponse;
+use codex_app_server_protocol::ThreadStatus;
+use codex_app_server_protocol::ThreadStatusChangedNotification;
+use codex_app_server_protocol::ThreadUnsubscribeParams;
+use codex_app_server_protocol::TurnInterruptParams;
+use codex_app_server_protocol::TurnStartParams;
+use codex_app_server_protocol::UserInput;
 use codex_core::config::set_project_trust_level;
+use codex_protocol::config_types::ModelToolMode;
 use codex_protocol::config_types::TrustLevel;
 use futures::SinkExt;
 use futures::StreamExt;
@@ -99,6 +109,204 @@ async fn websocket_transport_routes_per_connection_handshake_and_responses() -> 
     assert_eq!(ws2_config.id, RequestId::Integer(77));
     assert!(ws1_config.result.get("config").is_some());
     assert!(ws2_config.result.get("config").is_some());
+
+    process
+        .kill()
+        .await
+        .context("failed to stop websocket app-server process")?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn isolated_thread_is_owned_and_visible_only_to_its_creator_connection() -> Result<()> {
+    let server = create_mock_responses_server_sequence_unchecked(vec![
+        create_final_assistant_message_sse_response(r#"{"answer":"ok"}"#)?,
+    ])
+    .await;
+    let codex_home = TempDir::new()?;
+    create_config_toml(codex_home.path(), &server.uri(), "never")?;
+    write_models_cache(codex_home.path())?;
+
+    let (mut process, bind_addr) = spawn_websocket_server(codex_home.path()).await?;
+    let mut owner = connect_websocket(bind_addr).await?;
+    let mut other = connect_websocket(bind_addr).await?;
+
+    send_experimental_initialize_request(&mut owner, /*id*/ 1, "isolated_owner").await?;
+    read_response_for_id(&mut owner, /*id*/ 1).await?;
+    send_experimental_initialize_request(&mut other, /*id*/ 2, "isolated_other").await?;
+    read_response_for_id(&mut other, /*id*/ 2).await?;
+
+    send_request(
+        &mut owner,
+        "thread/start",
+        /*id*/ 3,
+        Some(serde_json::to_value(ThreadStartParams {
+            model: Some("gpt-5.4".to_string()),
+            model_provider: Some("mock_provider".to_string()),
+            model_tool_mode: Some(ModelToolMode::Isolated),
+            ephemeral: Some(true),
+            environments: Some(Vec::new()),
+            runtime_workspace_roots: Some(Vec::new()),
+            ..Default::default()
+        })?),
+    )
+    .await?;
+    let start_response = read_response_for_id(&mut owner, /*id*/ 3).await?;
+    let ThreadStartResponse { thread, .. } = to_response(start_response)?;
+
+    assert_no_notification_for_thread_any_method(
+        &mut other,
+        &thread.id,
+        Duration::from_millis(250),
+    )
+    .await?;
+    assert_loaded_threads(&mut owner, /*id*/ 4, &[]).await?;
+    assert_loaded_threads(&mut other, /*id*/ 5, &[]).await?;
+
+    send_request(
+        &mut other,
+        "thread/resume",
+        /*id*/ 60,
+        Some(json!({"threadId": thread.id.clone()})),
+    )
+    .await?;
+    let resume_error = read_error_for_id(&mut other, /*id*/ 60).await?;
+    assert!(resume_error.error.message.contains("thread not found"));
+
+    send_request(
+        &mut owner,
+        "thread/start",
+        /*id*/ 61,
+        Some(serde_json::to_value(ThreadStartParams {
+            model: Some("gpt-5.4".to_string()),
+            model_provider: Some("mock_provider".to_string()),
+            model_tool_mode: Some(ModelToolMode::Isolated),
+            ephemeral: Some(true),
+            environments: Some(Vec::new()),
+            runtime_workspace_roots: Some(Vec::new()),
+            ..Default::default()
+        })?),
+    )
+    .await?;
+    let second_start_response = read_response_for_id(&mut owner, /*id*/ 61).await?;
+    let ThreadStartResponse {
+        thread: second_thread,
+        ..
+    } = to_response(second_start_response)?;
+    assert_no_notification_for_thread_any_method(
+        &mut other,
+        &second_thread.id,
+        Duration::from_millis(250),
+    )
+    .await?;
+
+    send_request(
+        &mut other,
+        "turn/start",
+        /*id*/ 6,
+        Some(serde_json::to_value(TurnStartParams {
+            thread_id: thread.id.clone(),
+            input: vec![UserInput::Text {
+                text: "must not run".to_string(),
+                text_elements: Vec::new(),
+            }],
+            output_schema: Some(json!({
+                "type": "object",
+                "properties": {"answer": {"type": "string"}},
+                "required": ["answer"],
+                "additionalProperties": false
+            })),
+            ..Default::default()
+        })?),
+    )
+    .await?;
+    let turn_error = read_error_for_id(&mut other, /*id*/ 6).await?;
+    assert!(turn_error.error.message.contains("thread not found"));
+
+    send_request(
+        &mut other,
+        "turn/interrupt",
+        /*id*/ 7,
+        Some(serde_json::to_value(TurnInterruptParams {
+            thread_id: thread.id.clone(),
+            turn_id: "not-owned".to_string(),
+        })?),
+    )
+    .await?;
+    let interrupt_error = read_error_for_id(&mut other, /*id*/ 7).await?;
+    assert!(interrupt_error.error.message.contains("thread not found"));
+
+    send_request(
+        &mut other,
+        "thread/unsubscribe",
+        /*id*/ 8,
+        Some(serde_json::to_value(ThreadUnsubscribeParams {
+            thread_id: thread.id.clone(),
+        })?),
+    )
+    .await?;
+    let unsubscribe_error = read_error_for_id(&mut other, /*id*/ 8).await?;
+    assert!(unsubscribe_error.error.message.contains("thread not found"));
+
+    send_request(
+        &mut owner,
+        "thread/unsubscribe",
+        /*id*/ 9,
+        Some(serde_json::to_value(ThreadUnsubscribeParams {
+            thread_id: thread.id.clone(),
+        })?),
+    )
+    .await?;
+    let owner_unsubscribe_error = read_error_for_id(&mut owner, /*id*/ 9).await?;
+    assert!(
+        owner_unsubscribe_error
+            .error
+            .message
+            .contains("stay attached")
+    );
+
+    send_request(
+        &mut owner,
+        "turn/start",
+        /*id*/ 10,
+        Some(serde_json::to_value(TurnStartParams {
+            thread_id: thread.id.clone(),
+            input: vec![UserInput::Text {
+                text: "analyze the bounded packet".to_string(),
+                text_elements: Vec::new(),
+            }],
+            output_schema: Some(json!({
+                "type": "object",
+                "properties": {"answer": {"type": "string"}},
+                "required": ["answer"],
+                "additionalProperties": false
+            })),
+            ..Default::default()
+        })?),
+    )
+    .await?;
+    read_isolated_turn_response_and_statuses(&mut owner, /*id*/ 10, &thread.id).await?;
+    assert_no_notification_for_thread_any_method(
+        &mut other,
+        &thread.id,
+        Duration::from_millis(250),
+    )
+    .await?;
+
+    owner.close(None).await?;
+    assert_no_notification_for_thread_any_method(
+        &mut other,
+        &thread.id,
+        Duration::from_millis(250),
+    )
+    .await?;
+    assert_no_notification_for_thread_any_method(
+        &mut other,
+        &second_thread.id,
+        Duration::from_millis(250),
+    )
+    .await?;
+    assert_loaded_threads(&mut other, /*id*/ 11, &[]).await?;
 
     process
         .kill()
@@ -710,6 +918,106 @@ pub(super) async fn send_initialize_request(
         Some(serde_json::to_value(params)?),
     )
     .await
+}
+
+async fn send_experimental_initialize_request(
+    stream: &mut WsClient,
+    id: i64,
+    client_name: &str,
+) -> Result<()> {
+    let params = InitializeParams {
+        client_info: ClientInfo {
+            name: client_name.to_string(),
+            title: Some("WebSocket Test Client".to_string()),
+            version: "0.1.0".to_string(),
+        },
+        capabilities: Some(InitializeCapabilities {
+            experimental_api: true,
+            request_attestation: false,
+            mcp_server_openai_form_elicitation: false,
+            opt_out_notification_methods: None,
+        }),
+    };
+    send_request(
+        stream,
+        "initialize",
+        id,
+        Some(serde_json::to_value(params)?),
+    )
+    .await
+}
+
+async fn assert_no_notification_for_thread_any_method(
+    stream: &mut WsClient,
+    thread_id: &str,
+    wait_for: Duration,
+) -> Result<()> {
+    let scan = timeout(wait_for, async {
+        loop {
+            let message = read_jsonrpc_message(stream).await?;
+            if let JSONRPCMessage::Notification(notification) = message
+                && notification_targets_thread(&notification, thread_id)
+            {
+                bail!(
+                    "{} leaked isolated thread {thread_id} to another connection",
+                    notification.method
+                );
+            }
+        }
+    })
+    .await;
+    match scan {
+        Ok(result) => result,
+        Err(_) => Ok(()),
+    }
+}
+
+fn notification_targets_thread(notification: &JSONRPCNotification, thread_id: &str) -> bool {
+    notification.params.as_ref().is_some_and(|params| {
+        params.get("threadId").and_then(serde_json::Value::as_str) == Some(thread_id)
+            || params
+                .pointer("/thread/id")
+                .and_then(serde_json::Value::as_str)
+                == Some(thread_id)
+    })
+}
+
+async fn read_isolated_turn_response_and_statuses(
+    stream: &mut WsClient,
+    id: i64,
+    thread_id: &str,
+) -> Result<()> {
+    let target_id = RequestId::Integer(id);
+    timeout(DEFAULT_READ_TIMEOUT, async {
+        let mut received_response = false;
+        let mut received_active = false;
+        let mut received_idle = false;
+        while !received_response || !received_active || !received_idle {
+            match read_jsonrpc_message(stream).await? {
+                JSONRPCMessage::Response(response) if response.id == target_id => {
+                    received_response = true;
+                }
+                JSONRPCMessage::Notification(notification)
+                    if notification.method == "thread/status/changed" =>
+                {
+                    let status: ThreadStatusChangedNotification =
+                        serde_json::from_value(notification.params.unwrap_or_default())?;
+                    if status.thread_id == thread_id {
+                        match status.status {
+                            ThreadStatus::Active { .. } => received_active = true,
+                            ThreadStatus::Idle => received_idle = true,
+                            _ => {}
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .context("timed out waiting for isolated turn response and owner-routed statuses")??;
+    Ok(())
 }
 
 async fn start_thread(stream: &mut WsClient, id: i64) -> Result<String> {

@@ -1,3 +1,5 @@
+mod isolated_start;
+
 use super::*;
 use crate::error_code::method_not_found;
 use codex_app_server_protocol::SelectedCapabilityRoot;
@@ -841,12 +843,28 @@ impl ThreadRequestProcessor {
         let thread_id = ThreadId::from_string(&params.thread_id)
             .map_err(|err| invalid_request(format!("invalid thread id: {err}")))?;
 
-        if self.thread_manager.get_thread(thread_id).await.is_err() {
-            self.finalize_thread_teardown(thread_id).await;
-            return Ok(ThreadUnsubscribeResponse {
-                status: ThreadUnsubscribeStatus::NotLoaded,
-            });
+        let isolated_owner = self
+            .thread_state_manager
+            .isolated_thread_owner(thread_id)
+            .await;
+
+        let thread = match self.thread_manager.get_thread(thread_id).await {
+            Ok(thread) => thread,
+            Err(_) => {
+                self.finalize_thread_teardown(thread_id).await;
+                return Ok(ThreadUnsubscribeResponse {
+                    status: ThreadUnsubscribeStatus::NotLoaded,
+                });
+            }
         };
+        if thread.config_snapshot().await.model_tool_mode.is_isolated() {
+            if isolated_owner != Some(connection_id) {
+                return Err(invalid_request(format!("thread not found: {thread_id}")));
+            }
+            return Err(invalid_request(
+                "isolated threads stay attached until their owner connection closes",
+            ));
+        }
 
         let was_subscribed = self
             .thread_state_manager
@@ -937,6 +955,10 @@ impl ThreadRequestProcessor {
         supports_openai_form_elicitation: bool,
         request_context: RequestContext,
     ) -> Result<(), JSONRPCErrorError> {
+        if params.model_tool_mode == Some(ModelToolMode::Isolated) {
+            return self.isolated_thread_start(request_id, params).await;
+        }
+
         let ThreadStartParams {
             model,
             model_provider,
@@ -2007,7 +2029,7 @@ impl ThreadRequestProcessor {
             ThreadSortKey::RecencyAt => StoreThreadSortKey::RecencyAt,
         };
         let sort_direction = sort_direction.unwrap_or(SortDirection::Desc);
-        let (stored_threads, next_cursor) = self
+        let (mut stored_threads, next_cursor) = self
             .list_threads_common(
                 requested_page_size,
                 cursor,
@@ -2024,6 +2046,8 @@ impl ThreadRequestProcessor {
                 },
             )
             .await?;
+        let isolated_thread_ids = self.thread_state_manager.isolated_thread_ids().await;
+        stored_threads.retain(|thread| !isolated_thread_ids.contains(&thread.thread_id));
         let backwards_cursor = stored_threads.first().and_then(|thread| {
             thread_backwards_cursor_for_sort_key(thread, store_sort_key, sort_direction)
         });
@@ -2095,6 +2119,7 @@ impl ThreadRequestProcessor {
         let mut remaining = requested_page_size;
         let mut search_results = Vec::with_capacity(requested_page_size);
         let mut next_cursor = None;
+        let isolated_thread_ids = self.thread_state_manager.isolated_thread_ids().await;
 
         while remaining > 0 {
             let page = self
@@ -2115,6 +2140,9 @@ impl ThreadRequestProcessor {
                 .map_err(thread_store_list_error)?;
 
             for result in page.items {
+                if isolated_thread_ids.contains(&result.thread.thread_id) {
+                    continue;
+                }
                 let source = with_thread_spawn_agent_metadata(
                     result.thread.source.clone(),
                     result.thread.agent_nickname.clone(),
@@ -2193,13 +2221,17 @@ impl ThreadRequestProcessor {
         params: ThreadLoadedListParams,
     ) -> Result<ThreadLoadedListResponse, JSONRPCErrorError> {
         let ThreadLoadedListParams { cursor, limit } = params;
-        let mut data: Vec<String> = self
-            .thread_manager
-            .list_thread_ids()
-            .await
-            .into_iter()
-            .map(|thread_id| thread_id.to_string())
-            .collect();
+        let mut data = Vec::new();
+        for thread_id in self.thread_manager.list_thread_ids().await {
+            let Ok(thread) = self.thread_manager.get_thread(thread_id).await else {
+                // The list snapshot can race teardown. Fail closed instead of
+                // exposing an ID whose isolation mode can no longer be proven.
+                continue;
+            };
+            if !thread.config_snapshot().await.model_tool_mode.is_isolated() {
+                data.push(thread_id.to_string());
+            }
+        }
 
         if data.is_empty() {
             return Ok(ThreadLoadedListResponse {
@@ -2613,12 +2645,30 @@ impl ThreadRequestProcessor {
     }
 
     pub(crate) async fn connection_closed(&self, connection_id: ConnectionId) {
-        let thread_ids = self
+        let crate::thread_state::RemovedConnection {
+            threads_without_connections,
+            owned_isolated_threads,
+        } = self
             .thread_state_manager
             .remove_connection(connection_id)
             .await;
 
-        for thread_id in thread_ids {
+        if !owned_isolated_threads.is_empty() {
+            remove_isolated_threads_for_owner_disconnect(
+                Arc::clone(&self.thread_manager),
+                Arc::clone(&self.outgoing),
+                Arc::clone(&self.pending_thread_unloads),
+                self.thread_state_manager.clone(),
+                self.thread_watch_manager.clone(),
+                owned_isolated_threads.clone(),
+            )
+            .await;
+        }
+
+        for thread_id in threads_without_connections {
+            if owned_isolated_threads.contains(&thread_id) {
+                continue;
+            }
             if self.thread_manager.get_thread(thread_id).await.is_err() {
                 // Reconcile stale app-server bookkeeping when the thread has already been
                 // removed from the core manager.
@@ -2640,6 +2690,9 @@ impl ThreadRequestProcessor {
         let mut raw_events_enabled = false;
         if let Ok(thread) = self.thread_manager.get_thread(thread_id).await {
             let config_snapshot = thread.config_snapshot().await;
+            if config_snapshot.model_tool_mode.is_isolated() {
+                return;
+            }
             let loaded_thread = build_thread_from_snapshot(
                 thread_id,
                 thread.session_configured().session_id.to_string(),
@@ -3022,12 +3075,19 @@ impl ThreadRequestProcessor {
     ) -> Result<RunningThreadResumeResult, JSONRPCErrorError> {
         let running_thread = if params.history.is_some() {
             if let Ok(existing_thread_id) = ThreadId::from_string(&params.thread_id)
-                && self
-                    .thread_manager
-                    .get_thread(existing_thread_id)
-                    .await
-                    .is_ok()
+                && let Ok(existing_thread) =
+                    self.thread_manager.get_thread(existing_thread_id).await
             {
+                if existing_thread
+                    .config_snapshot()
+                    .await
+                    .model_tool_mode
+                    .is_isolated()
+                {
+                    return Err(invalid_request(format!(
+                        "thread not found: {existing_thread_id}"
+                    )));
+                }
                 return Err(invalid_request(format!(
                     "cannot resume thread {existing_thread_id} with history while it is already running"
                 )));
@@ -3036,6 +3096,16 @@ impl ThreadRequestProcessor {
         } else if let Ok(existing_thread_id) = ThreadId::from_string(&params.thread_id)
             && let Ok(existing_thread) = self.thread_manager.get_thread(existing_thread_id).await
         {
+            if existing_thread
+                .config_snapshot()
+                .await
+                .model_tool_mode
+                .is_isolated()
+            {
+                return Err(invalid_request(format!(
+                    "thread not found: {existing_thread_id}"
+                )));
+            }
             let source_thread = self
                 .read_stored_thread_for_resume(
                     &params.thread_id,

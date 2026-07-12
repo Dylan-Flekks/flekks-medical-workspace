@@ -107,6 +107,8 @@ mod thread_processor_behavior_tests {
     use super::super::*;
     use crate::outgoing_message::OutgoingEnvelope;
     use crate::outgoing_message::OutgoingMessage;
+    use crate::thread_state::IsolatedTurnClaimResult;
+    use crate::thread_state::RemovedConnection;
     use anyhow::Result;
     use chrono::DateTime;
     use chrono::Utc;
@@ -1254,7 +1256,10 @@ mod thread_processor_behavior_tests {
             .await;
         manager
             .try_ensure_connection_subscribed(
-                thread_id, connection, /*experimental_raw_events*/ false,
+                thread_id,
+                connection,
+                /*experimental_raw_events*/ false,
+                ThreadSubscriptionAccess::Standard,
             )
             .await
             .expect("connection should be live");
@@ -1306,6 +1311,7 @@ mod thread_processor_behavior_tests {
                 thread_id,
                 connection_a,
                 /*experimental_raw_events*/ false,
+                ThreadSubscriptionAccess::Standard,
             )
             .await
             .expect("connection_a should be live");
@@ -1314,6 +1320,7 @@ mod thread_processor_behavior_tests {
                 thread_id,
                 connection_b,
                 /*experimental_raw_events*/ false,
+                ThreadSubscriptionAccess::Standard,
             )
             .await
             .expect("connection_b should be live");
@@ -1322,8 +1329,8 @@ mod thread_processor_behavior_tests {
             state.lock().await.cancel_tx = Some(cancel_tx);
         }
 
-        let threads_to_unload = manager.remove_connection(connection_a).await;
-        assert_eq!(threads_to_unload, Vec::<ThreadId>::new());
+        let removed_connection = manager.remove_connection(connection_a).await;
+        assert_eq!(removed_connection, RemovedConnection::default());
         assert!(
             tokio::time::timeout(Duration::from_millis(20), &mut cancel_rx)
                 .await
@@ -1333,6 +1340,151 @@ mod thread_processor_behavior_tests {
         assert_eq!(
             manager.subscribed_connection_ids(thread_id).await,
             vec![connection_b]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn isolated_owner_registration_and_disconnect_have_no_orphan_interleaving() -> Result<()>
+    {
+        let thread_id = ThreadId::from_string("9fb47097-84d3-4a0c-9e92-5be3b05d963e")?;
+        let connection = ConnectionId(1);
+
+        let registered_first = ThreadStateManager::new();
+        registered_first
+            .connection_initialized(connection, ConnectionCapabilities::default())
+            .await;
+        assert!(
+            registered_first
+                .register_isolated_thread_owner(thread_id, connection)
+                .await
+        );
+        assert!(registered_first.connection_is_isolated(connection).await);
+        let removed = registered_first.remove_connection(connection).await;
+        assert_eq!(removed.owned_isolated_threads, vec![thread_id]);
+        assert!(removed.threads_without_connections.is_empty());
+        assert!(
+            !registered_first
+                .isolated_thread_has_live_owner(thread_id, connection)
+                .await
+        );
+        assert!(!registered_first.connection_is_isolated(connection).await);
+
+        let disconnected_first = ThreadStateManager::new();
+        disconnected_first
+            .connection_initialized(connection, ConnectionCapabilities::default())
+            .await;
+        assert_eq!(
+            disconnected_first.remove_connection(connection).await,
+            RemovedConnection::default()
+        );
+        assert!(
+            !disconnected_first
+                .register_isolated_thread_owner(thread_id, connection)
+                .await
+        );
+        assert_eq!(
+            disconnected_first.isolated_thread_owner(thread_id).await,
+            None
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn isolated_listener_subscription_requires_the_live_owner_access_mode() -> Result<()> {
+        let manager = ThreadStateManager::new();
+        let thread_id = ThreadId::from_string("1d07f8e4-4a6d-49ab-a98f-8f5eabf5a637")?;
+        let owner = ConnectionId(1);
+        let other = ConnectionId(2);
+        manager
+            .connection_initialized(owner, ConnectionCapabilities::default())
+            .await;
+        manager
+            .connection_initialized(other, ConnectionCapabilities::default())
+            .await;
+        assert!(
+            manager
+                .register_isolated_thread_owner(thread_id, owner)
+                .await
+        );
+
+        assert!(
+            manager
+                .try_ensure_connection_subscribed(
+                    thread_id,
+                    owner,
+                    /*experimental_raw_events*/ false,
+                    ThreadSubscriptionAccess::Standard,
+                )
+                .await
+                .is_none()
+        );
+        assert!(
+            manager
+                .try_ensure_connection_subscribed(
+                    thread_id,
+                    other,
+                    /*experimental_raw_events*/ false,
+                    ThreadSubscriptionAccess::IsolatedOwner,
+                )
+                .await
+                .is_none()
+        );
+        assert!(
+            manager
+                .try_ensure_connection_subscribed(
+                    thread_id,
+                    owner,
+                    /*experimental_raw_events*/ false,
+                    ThreadSubscriptionAccess::IsolatedOwner,
+                )
+                .await
+                .is_some()
+        );
+        assert_eq!(
+            manager.subscribed_connection_ids(thread_id).await,
+            vec![owner]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn isolated_turn_claim_is_atomic_and_releasable_before_enqueue() -> Result<()> {
+        let manager = ThreadStateManager::new();
+        let thread_id = ThreadId::from_string("c5512061-61a2-4944-8fe2-75e341d3ec3b")?;
+        let connection = ConnectionId(1);
+        manager
+            .connection_initialized(connection, ConnectionCapabilities::default())
+            .await;
+        assert!(
+            manager
+                .register_isolated_thread_owner(thread_id, connection)
+                .await
+        );
+
+        let (first, second) = tokio::join!(
+            manager.claim_isolated_thread_turn(thread_id, connection),
+            manager.claim_isolated_thread_turn(thread_id, connection),
+        );
+        assert!(matches!(
+            (first, second),
+            (
+                IsolatedTurnClaimResult::Claimed,
+                IsolatedTurnClaimResult::AlreadyClaimed
+            ) | (
+                IsolatedTurnClaimResult::AlreadyClaimed,
+                IsolatedTurnClaimResult::Claimed
+            )
+        ));
+
+        manager
+            .release_isolated_thread_turn_claim(thread_id, connection)
+            .await;
+        assert_eq!(
+            manager
+                .claim_isolated_thread_turn(thread_id, connection)
+                .await,
+            IsolatedTurnClaimResult::Claimed
         );
         Ok(())
     }
@@ -1355,6 +1507,7 @@ mod thread_processor_behavior_tests {
                 thread_id,
                 connection_a,
                 /*experimental_raw_events*/ false,
+                ThreadSubscriptionAccess::Standard,
             )
             .await
             .expect("connection_a should be live");
@@ -1422,13 +1575,16 @@ mod thread_processor_behavior_tests {
         manager
             .connection_initialized(connection, ConnectionCapabilities::default())
             .await;
-        let threads_to_unload = manager.remove_connection(connection).await;
-        assert_eq!(threads_to_unload, Vec::<ThreadId>::new());
+        let removed_connection = manager.remove_connection(connection).await;
+        assert_eq!(removed_connection, RemovedConnection::default());
 
         assert!(
             manager
                 .try_ensure_connection_subscribed(
-                    thread_id, connection, /*experimental_raw_events*/ false
+                    thread_id,
+                    connection,
+                    /*experimental_raw_events*/ false,
+                    ThreadSubscriptionAccess::Standard,
                 )
                 .await
                 .is_none()

@@ -72,6 +72,7 @@ use codex_goal_extension::GoalService;
 use codex_home::CodexHomeUserInstructionsProvider;
 use codex_login::AuthManager;
 use codex_protocol::ThreadId;
+use codex_protocol::config_types::ModelToolMode;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::W3cTraceContext;
 use codex_rollout::StateDbHandle;
@@ -221,6 +222,13 @@ pub(crate) struct MessageProcessorArgs {
     pub(crate) rpc_transport: AppServerRpcTransport,
     pub(crate) remote_control_handle: Option<RemoteControlHandle>,
     pub(crate) plugin_startup_tasks: crate::PluginStartupTasks,
+}
+
+struct InitializedRequestMetadata {
+    app_server_client_name: Option<String>,
+    client_version: Option<String>,
+    supports_openai_form_elicitation: bool,
+    isolated_request: bool,
 }
 
 impl MessageProcessor {
@@ -805,16 +813,36 @@ impl MessageProcessor {
             return Err(invalid_request(experimental_required_message(reason)));
         }
         let connection_id = connection_request_id.connection_id;
-        self.initialize_processor.track_initialized_request(
-            connection_id,
-            connection_request_id.request_id.clone(),
-            &codex_request,
-        );
+        let isolated_request = self
+            .turn_processor
+            .connection_is_isolated(connection_id)
+            .await
+            || match &codex_request {
+                ClientRequest::ThreadStart { params, .. } => {
+                    params.model_tool_mode == Some(ModelToolMode::Isolated)
+                }
+                ClientRequest::TurnStart { params, .. } => {
+                    self.turn_processor
+                        .thread_is_isolated(&params.thread_id)
+                        .await
+                }
+                _ => false,
+            };
+        if !isolated_request {
+            self.initialize_processor.track_initialized_request(
+                connection_id,
+                connection_request_id.request_id.clone(),
+                &codex_request,
+            );
+        }
 
         let serialization_scope = codex_request.serialization_scope();
-        let app_server_client_name = session.app_server_client_name().map(str::to_string);
-        let client_version = session.client_version().map(str::to_string);
-        let supports_openai_form_elicitation = session.supports_openai_form_elicitation();
+        let request_metadata = InitializedRequestMetadata {
+            app_server_client_name: session.app_server_client_name().map(str::to_string),
+            client_version: session.client_version().map(str::to_string),
+            supports_openai_form_elicitation: session.supports_openai_form_elicitation(),
+            isolated_request,
+        };
         let error_request_id = connection_request_id.clone();
         let rpc_gate = Arc::clone(&session.rpc_gate);
         let processor = Arc::clone(self);
@@ -828,9 +856,7 @@ impl MessageProcessor {
                         connection_request_id,
                         codex_request,
                         request_context,
-                        app_server_client_name,
-                        client_version,
-                        supports_openai_form_elicitation,
+                        request_metadata,
                     )
                     .await;
                 if let Err(error) = result {
@@ -858,10 +884,14 @@ impl MessageProcessor {
         connection_request_id: ConnectionRequestId,
         codex_request: ClientRequest,
         request_context: RequestContext,
-        app_server_client_name: Option<String>,
-        client_version: Option<String>,
-        supports_openai_form_elicitation: bool,
+        request_metadata: InitializedRequestMetadata,
     ) -> Result<(), JSONRPCErrorError> {
+        let InitializedRequestMetadata {
+            app_server_client_name,
+            client_version,
+            supports_openai_form_elicitation,
+            isolated_request,
+        } = request_metadata;
         let connection_id = connection_request_id.connection_id;
         let request_id = ConnectionRequestId {
             connection_id,
@@ -1625,9 +1655,15 @@ impl MessageProcessor {
 
         match result {
             Ok(Some(response)) => {
-                self.outgoing
-                    .send_response_as(request_id.clone(), response)
-                    .await;
+                if isolated_request {
+                    self.outgoing
+                        .send_response_as_without_analytics(request_id.clone(), response)
+                        .await;
+                } else {
+                    self.outgoing
+                        .send_response_as(request_id.clone(), response)
+                        .await;
+                }
             }
             Ok(None) => {}
             Err(error) => {

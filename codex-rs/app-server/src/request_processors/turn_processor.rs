@@ -1,3 +1,5 @@
+mod isolated_start;
+
 use super::*;
 use codex_protocol::config_types::ModelToolMode;
 use codex_protocol::models::ContentItem;
@@ -449,20 +451,38 @@ impl TurnRequestProcessor {
         app_server_client_version: Option<String>,
         supports_openai_form_elicitation: bool,
     ) -> Result<TurnStartResponse, JSONRPCErrorError> {
+        let track_analytics = !self.connection_is_isolated(request_id.connection_id).await;
         let (thread_id, thread) =
             self.load_thread(&params.thread_id)
                 .await
                 .inspect_err(|error| {
-                    self.track_error_response(&request_id, error, /*error_type*/ None);
+                    if track_analytics {
+                        self.track_error_response(&request_id, error, /*error_type*/ None);
+                    }
                 })?;
+        if thread.config_snapshot().await.model_tool_mode.is_isolated() {
+            if self
+                .thread_state_manager
+                .isolated_thread_owner(thread_id)
+                .await
+                != Some(request_id.connection_id)
+            {
+                return Err(invalid_request(format!("thread not found: {thread_id}")));
+            }
+            return self
+                .isolated_turn_start(request_id, params, thread_id, thread)
+                .await;
+        }
         self.ensure_direct_input_allowed(&request_id, thread.as_ref())
             .await?;
         if let Err(error) = Self::validate_v2_input_limit(&params.input) {
-            self.track_error_response(
-                &request_id,
-                &error,
-                Some(AnalyticsJsonRpcError::Input(InputError::TooLarge)),
-            );
+            if track_analytics {
+                self.track_error_response(
+                    &request_id,
+                    &error,
+                    Some(AnalyticsJsonRpcError::Input(InputError::TooLarge)),
+                );
+            }
             return Err(error);
         }
         Self::set_app_server_client_info(
@@ -472,7 +492,9 @@ impl TurnRequestProcessor {
         )
         .await
         .inspect_err(|error| {
-            self.track_error_response(&request_id, error, /*error_type*/ None);
+            if track_analytics {
+                self.track_error_response(&request_id, error, /*error_type*/ None);
+            }
         })?;
         thread
             .set_openai_form_elicitation_support(supports_openai_form_elicitation)
@@ -538,7 +560,9 @@ impl TurnRequestProcessor {
             .await
             .map_err(|err| {
                 let error = internal_error(format!("failed to start turn: {err}"));
-                self.track_error_response(&request_id, &error, /*error_type*/ None);
+                if track_analytics {
+                    self.track_error_response(&request_id, &error, /*error_type*/ None);
+                }
                 error
             })?;
 
@@ -1367,6 +1391,14 @@ impl TurnRequestProcessor {
         let is_startup_interrupt = turn_id.is_empty();
 
         let (thread_uuid, thread) = self.load_thread(&thread_id).await?;
+        let isolated_owner = self
+            .thread_state_manager
+            .isolated_thread_owner(thread_uuid)
+            .await;
+        let isolated = thread.config_snapshot().await.model_tool_mode.is_isolated();
+        if isolated && isolated_owner != Some(request_id.connection_id) {
+            return Err(invalid_request(format!("thread not found: {thread_uuid}")));
+        }
 
         // Record turn interrupts so we can reply when TurnAborted arrives. Startup
         // interrupts do not have a turn and are acknowledged after submission.
@@ -1397,10 +1429,15 @@ impl TurnRequestProcessor {
 
         // Submit the interrupt. Turn interrupts respond upon TurnAborted; startup
         // interrupts respond here because startup cancellation has no turn event.
-        match self
-            .submit_core_op(request_id, thread.as_ref(), Op::Interrupt)
-            .await
-        {
+        let submission = if isolated {
+            thread
+                .submit_with_trace(Op::Interrupt, /*trace*/ None)
+                .await
+        } else {
+            self.submit_core_op(request_id, thread.as_ref(), Op::Interrupt)
+                .await
+        };
+        match submission {
             Ok(_) if is_startup_interrupt => Ok(Some(TurnInterruptResponse {})),
             Ok(_) => Ok(None),
             Err(err) => {

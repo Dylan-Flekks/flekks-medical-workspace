@@ -109,6 +109,7 @@ pub(crate) struct ThreadScopedOutgoingMessageSender {
     outgoing: Arc<OutgoingMessageSender>,
     connection_ids: Arc<Vec<ConnectionId>>,
     thread_id: ThreadId,
+    isolated: bool,
 }
 
 struct PendingCallbackEntry {
@@ -123,10 +124,28 @@ impl ThreadScopedOutgoingMessageSender {
         connection_ids: Vec<ConnectionId>,
         thread_id: ThreadId,
     ) -> Self {
+        Self::new_with_isolation(outgoing, connection_ids, thread_id, /*isolated*/ false)
+    }
+
+    pub(crate) fn new_isolated(
+        outgoing: Arc<OutgoingMessageSender>,
+        connection_ids: Vec<ConnectionId>,
+        thread_id: ThreadId,
+    ) -> Self {
+        Self::new_with_isolation(outgoing, connection_ids, thread_id, /*isolated*/ true)
+    }
+
+    fn new_with_isolation(
+        outgoing: Arc<OutgoingMessageSender>,
+        connection_ids: Vec<ConnectionId>,
+        thread_id: ThreadId,
+        isolated: bool,
+    ) -> Self {
         Self {
             outgoing,
             connection_ids: Arc::new(connection_ids),
             thread_id,
+            isolated,
         }
     }
 
@@ -134,6 +153,14 @@ impl ThreadScopedOutgoingMessageSender {
         &self,
         payload: ServerRequestPayload,
     ) -> (RequestId, oneshot::Receiver<ClientRequestResult>) {
+        if self.isolated {
+            let request_id = self.outgoing.next_request_id();
+            let (callback_tx, callback_rx) = oneshot::channel();
+            let _ = callback_tx.send(Err(internal_error(
+                "server requests are unavailable in isolated model mode",
+            )));
+            return (request_id, callback_rx);
+        }
         self.outgoing
             .send_request_to_connections(
                 Some(self.connection_ids.as_slice()),
@@ -148,6 +175,9 @@ impl ThreadScopedOutgoingMessageSender {
         request_id: RequestId,
         response: RequestPermissionsResponse,
     ) {
+        if self.isolated {
+            return;
+        }
         self.outgoing
             .analytics_events_client
             .track_effective_permissions_approval_response(
@@ -158,9 +188,11 @@ impl ThreadScopedOutgoingMessageSender {
     }
 
     pub(crate) async fn send_server_notification(&self, notification: ServerNotification) {
-        self.outgoing
-            .analytics_events_client
-            .track_notification(notification.clone());
+        if !self.isolated {
+            self.outgoing
+                .analytics_events_client
+                .track_notification(notification.clone());
+        }
         if self.connection_ids.is_empty() {
             return;
         }
@@ -170,7 +202,19 @@ impl ThreadScopedOutgoingMessageSender {
     }
 
     pub(crate) async fn send_global_server_notification(&self, notification: ServerNotification) {
-        self.outgoing.send_server_notification(notification).await;
+        if self.isolated {
+            if self.connection_ids.is_empty() {
+                return;
+            }
+            self.outgoing
+                .send_server_notification_to_connections(
+                    self.connection_ids.as_slice(),
+                    notification,
+                )
+                .await;
+        } else {
+            self.outgoing.send_server_notification(notification).await;
+        }
     }
 
     pub(crate) async fn abort_pending_server_requests(&self) {
@@ -504,8 +548,13 @@ impl OutgoingMessageSender {
     where
         T: Into<ClientResponsePayload>,
     {
-        self.send_response_as_inner(request_id, response.into(), /*thread_originator*/ None)
-            .await;
+        self.send_response_as_inner(
+            request_id,
+            response.into(),
+            /*thread_originator*/ None,
+            /*track_analytics*/ true,
+        )
+        .await;
     }
 
     pub(crate) async fn send_response_with_thread_originator<T>(
@@ -516,8 +565,29 @@ impl OutgoingMessageSender {
     ) where
         T: Into<ClientResponsePayload>,
     {
-        self.send_response_as_inner(request_id, response.into(), Some(thread_originator))
-            .await;
+        self.send_response_as_inner(
+            request_id,
+            response.into(),
+            Some(thread_originator),
+            /*track_analytics*/ true,
+        )
+        .await;
+    }
+
+    pub(crate) async fn send_response_without_analytics<T>(
+        &self,
+        request_id: ConnectionRequestId,
+        response: T,
+    ) where
+        T: Into<ClientResponsePayload>,
+    {
+        self.send_response_as_inner(
+            request_id,
+            response.into(),
+            /*thread_originator*/ None,
+            /*track_analytics*/ false,
+        )
+        .await;
     }
 
     pub(crate) async fn send_response_as(
@@ -525,8 +595,21 @@ impl OutgoingMessageSender {
         request_id: ConnectionRequestId,
         response: ClientResponsePayload,
     ) {
-        self.send_response_as_inner(request_id, response, /*thread_originator*/ None)
-            .await;
+        self.send_response_as_inner(
+            request_id, response, /*thread_originator*/ None, /*track_analytics*/ true,
+        )
+        .await;
+    }
+
+    pub(crate) async fn send_response_as_without_analytics(
+        &self,
+        request_id: ConnectionRequestId,
+        response: ClientResponsePayload,
+    ) {
+        self.send_response_as_inner(
+            request_id, response, /*thread_originator*/ None, /*track_analytics*/ false,
+        )
+        .await;
     }
 
     async fn send_response_as_inner(
@@ -534,13 +617,14 @@ impl OutgoingMessageSender {
         request_id: ConnectionRequestId,
         response: ClientResponsePayload,
         thread_originator: Option<String>,
+        track_analytics: bool,
     ) {
         let connection_id = request_id.connection_id;
         let request_id_for_analytics = request_id.request_id.clone();
         let serialized_response = response
             .into_jsonrpc_parts_and_payload(request_id.request_id.clone())
             .map(|(id, result, response)| {
-                if let Some(response) = response {
+                if track_analytics && let Some(response) = response {
                     match thread_originator {
                         Some(thread_originator) => {
                             self.analytics_events_client
@@ -750,6 +834,7 @@ mod tests {
     use codex_app_server_protocol::RateLimitSnapshot;
     use codex_app_server_protocol::RateLimitWindow;
     use codex_app_server_protocol::ServerResponse;
+    use codex_app_server_protocol::ThreadClosedNotification;
     use codex_app_server_protocol::ToolRequestUserInputParams;
     use codex_app_server_protocol::TurnModerationMetadataNotification;
     use codex_protocol::ThreadId;
@@ -1084,6 +1169,56 @@ mod tests {
             }
             other => panic!("expected targeted response envelope, got: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn isolated_sender_with_no_owner_drops_global_notifications_and_server_requests() {
+        let (tx, mut rx) = mpsc::channel::<OutgoingEnvelope>(4);
+        let outgoing = Arc::new(OutgoingMessageSender::new(
+            tx,
+            codex_analytics::AnalyticsEventsClient::disabled(),
+        ));
+        let thread_id = ThreadId::new();
+        let thread_outgoing = ThreadScopedOutgoingMessageSender::new_isolated(
+            outgoing.clone(),
+            Vec::new(),
+            thread_id,
+        );
+
+        thread_outgoing
+            .send_global_server_notification(ServerNotification::ThreadClosed(
+                ThreadClosedNotification {
+                    thread_id: thread_id.to_string(),
+                },
+            ))
+            .await;
+        let (_request_id, request_result) = thread_outgoing
+            .send_request(ServerRequestPayload::DynamicToolCall(
+                DynamicToolCallParams {
+                    thread_id: thread_id.to_string(),
+                    turn_id: "turn-1".to_string(),
+                    call_id: "call-1".to_string(),
+                    namespace: None,
+                    tool: "must-not-run".to_string(),
+                    arguments: json!({}),
+                },
+            ))
+            .await;
+        let request_error = request_result
+            .await
+            .expect("isolated server request should resolve locally")
+            .expect_err("isolated server request should fail closed");
+        assert!(request_error.message.contains("isolated model mode"));
+        assert!(
+            timeout(Duration::from_millis(50), rx.recv()).await.is_err(),
+            "isolated sender must not broadcast without its owner"
+        );
+        assert!(
+            outgoing
+                .pending_requests_for_thread(thread_id)
+                .await
+                .is_empty()
+        );
     }
 
     #[tokio::test]
