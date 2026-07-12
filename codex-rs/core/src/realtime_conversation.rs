@@ -703,7 +703,7 @@ pub(crate) async fn handle_start(
     params: ConversationStartParams,
     model_tool_mode: ModelToolMode,
 ) -> CodexResult<()> {
-    if model_tool_mode == ModelToolMode::Disabled {
+    if model_tool_mode.tools_disabled() {
         return Err(CodexErr::InvalidRequest(
             "realtime conversations are unavailable while model tool mode is disabled".to_string(),
         ));

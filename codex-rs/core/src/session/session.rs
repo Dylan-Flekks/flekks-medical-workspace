@@ -256,6 +256,13 @@ impl SessionConfiguration {
             next_configuration.personality = Some(personality);
         }
         if let Some(model_tool_mode) = updates.model_tool_mode {
+            super::model_isolation::validate_mode_transition(self.model_tool_mode, model_tool_mode)
+                .map_err(|reason| ConstraintError::InvalidValue {
+                    field_name: "model_tool_mode",
+                    candidate: model_tool_mode.to_string(),
+                    allowed: reason,
+                    requirement_source: codex_config::RequirementSource::Unknown,
+                })?;
             next_configuration.model_tool_mode = model_tool_mode;
         }
         if let Some(approval_policy) = updates.approval_policy {

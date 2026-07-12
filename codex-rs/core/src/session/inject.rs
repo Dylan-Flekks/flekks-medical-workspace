@@ -20,6 +20,9 @@ impl Session {
         &self,
         input: Vec<ResponseItem>,
     ) -> Result<(), Vec<ResponseItem>> {
+        if self.model_tool_mode_is_isolated().await {
+            return Err(input);
+        }
         let mut active = self.active_turn.lock().await;
         match active.as_mut() {
             Some(active_turn) => {
@@ -48,6 +51,12 @@ impl Session {
     ) -> Result<(), TryStartTurnIfIdleError> {
         if input.is_empty() {
             return Ok(());
+        }
+        if self.model_tool_mode_is_isolated().await {
+            return Err(TryStartTurnIfIdleError::new(
+                TryStartTurnIfIdleRejectionReason::IsolatedMode,
+                input,
+            ));
         }
         if self.input_queue.has_trigger_turn_mailbox_items().await {
             return Err(TryStartTurnIfIdleError::new(
@@ -145,6 +154,9 @@ impl Session {
         items: Vec<ResponseItem>,
         current_turn_context: Option<&TurnContext>,
     ) {
+        if self.model_tool_mode_is_isolated().await {
+            return;
+        }
         let Err(items) = self.inject_if_running(items).await else {
             return;
         };
