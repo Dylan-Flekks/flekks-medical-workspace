@@ -516,7 +516,7 @@ impl TurnRequestProcessor {
                     summary: params.summary,
                     collaboration_mode: params.collaboration_mode,
                     personality: params.personality,
-                    model_tool_mode: params.model_tool_mode,
+                    model_tool_mode: params.model_tool_mode.map(Into::into),
                 },
             )
             .await?;

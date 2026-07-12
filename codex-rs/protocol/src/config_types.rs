@@ -78,7 +78,7 @@ pub enum Verbosity {
     High,
 }
 
-/// Controls whether a regular model sampling turn may discover or call tools.
+/// Controls which capabilities a regular model sampling turn may use.
 #[derive(
     Debug, Serialize, Deserialize, Default, Clone, Copy, PartialEq, Eq, Display, JsonSchema, TS,
 )]
@@ -89,6 +89,24 @@ pub enum ModelToolMode {
     #[default]
     Default,
     Disabled,
+    /// Reserved fail-closed mode for bounded ephemeral turns.
+    ///
+    /// This first isolation slice does not suppress session boot or context
+    /// contributors. Workspace Guide execution must not use this mode until
+    /// those sterile-session guarantees are implemented.
+    Isolated,
+}
+
+impl ModelToolMode {
+    /// Returns whether model-visible and executable tools must be disabled.
+    pub const fn tools_disabled(self) -> bool {
+        matches!(self, Self::Disabled | Self::Isolated)
+    }
+
+    /// Returns whether the thread uses the fail-closed isolated-turn contract.
+    pub const fn is_isolated(self) -> bool {
+        matches!(self, Self::Isolated)
+    }
 }
 
 #[derive(

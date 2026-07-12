@@ -12863,12 +12863,23 @@
         "type": "object"
       },
       "ModelToolMode": {
-        "description": "Controls whether a regular model sampling turn may discover or call tools.",
-        "enum": [
-          "default",
-          "disabled"
-        ],
-        "type": "string"
+        "description": "Controls which capabilities a regular model sampling turn may use.",
+        "oneOf": [
+          {
+            "enum": [
+              "default",
+              "disabled"
+            ],
+            "type": "string"
+          },
+          {
+            "description": "Reserved fail-closed mode for bounded ephemeral turns.\n\nThis first isolation slice does not suppress session boot or context contributors. Workspace Guide execution must not use this mode until those sterile-session guarantees are implemented.",
+            "enum": [
+              "isolated"
+            ],
+            "type": "string"
+          }
+        ]
       },
       "ModelUpgradeInfo": {
         "properties": {
@@ -20430,6 +20441,14 @@
             "type": "string"
           }
         ]
+      },
+      "TurnModelToolMode": {
+        "description": "Model capability modes that may be selected after thread creation.\n\n`isolated` is intentionally absent because that mode is creation-only and immutable for the lifetime of its bounded thread.",
+        "enum": [
+          "default",
+          "disabled"
+        ],
+        "type": "string"
       },
       "TurnModerationMetadataNotification": {
         "$schema": "http://json-schema.org/draft-07/schema#",

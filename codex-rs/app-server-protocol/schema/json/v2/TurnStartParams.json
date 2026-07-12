@@ -140,14 +140,6 @@
       ],
       "type": "string"
     },
-    "ModelToolMode": {
-      "description": "Controls whether a regular model sampling turn may discover or call tools.",
-      "enum": [
-        "default",
-        "disabled"
-      ],
-      "type": "string"
-    },
     "MultiAgentMode": {
       "description": "Controls the effective multi-agent delegation instructions for a turn. `custom` means the configured mode hint defines the policy instead of a built-in policy.",
       "oneOf": [
@@ -377,6 +369,14 @@
         "environmentId"
       ],
       "type": "object"
+    },
+    "TurnModelToolMode": {
+      "description": "Model capability modes that may be selected after thread creation.\n\n`isolated` is intentionally absent because that mode is creation-only and immutable for the lifetime of its bounded thread.",
+      "enum": [
+        "default",
+        "disabled"
+      ],
+      "type": "string"
     },
     "UserInput": {
       "oneOf": [

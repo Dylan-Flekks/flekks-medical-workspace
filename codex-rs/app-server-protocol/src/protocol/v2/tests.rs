@@ -4326,16 +4326,39 @@ fn model_tool_mode_uses_camel_case_wire_values_and_is_experimental() {
         Some("thread/start.modelToolMode")
     );
 
+    let isolated_thread: ThreadStartParams = serde_json::from_value(json!({
+        "modelToolMode": "isolated",
+    }))
+    .expect("isolated thread params should deserialize");
+    assert_eq!(
+        isolated_thread.model_tool_mode,
+        Some(ModelToolMode::Isolated)
+    );
+    assert_eq!(
+        crate::experimental_api::ExperimentalApi::experimental_reason(&isolated_thread),
+        Some("thread/start.modelToolMode")
+    );
+
     let turn: TurnStartParams = serde_json::from_value(json!({
         "threadId": "thread_123",
         "input": [],
         "modelToolMode": "default",
     }))
     .expect("turn params should deserialize");
-    assert_eq!(turn.model_tool_mode, Some(ModelToolMode::Default));
+    assert_eq!(turn.model_tool_mode, Some(TurnModelToolMode::Default));
     assert_eq!(
         crate::experimental_api::ExperimentalApi::experimental_reason(&turn),
         Some("turn/start.modelToolMode")
+    );
+
+    let isolated_turn = serde_json::from_value::<TurnStartParams>(json!({
+        "threadId": "thread_123",
+        "input": [],
+        "modelToolMode": "isolated",
+    }));
+    assert!(
+        isolated_turn.is_err(),
+        "isolated mode must be rejected by the turn/start wire type"
     );
 }
 
