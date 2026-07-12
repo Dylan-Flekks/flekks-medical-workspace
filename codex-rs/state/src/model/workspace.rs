@@ -13,17 +13,55 @@ use super::epoch_millis_to_datetime;
 pub struct WorkspaceClient {
     pub id: String,
     pub display_name: String,
+    #[serde(default)]
+    pub legal_first_name: Option<String>,
+    #[serde(default)]
+    pub legal_middle_name: Option<String>,
+    #[serde(default)]
+    pub legal_last_name: Option<String>,
+    #[serde(default)]
+    pub legal_suffix: Option<String>,
     pub preferred_name: Option<String>,
+    #[serde(default)]
+    pub previous_name: Option<String>,
     pub date_of_birth: Option<String>,
     pub sex_or_gender: Option<String>,
+    #[serde(default)]
+    pub administrative_sex: Option<String>,
+    #[serde(default)]
+    pub preferred_language: Option<String>,
+    #[serde(default)]
+    pub interpreter_required: bool,
     pub external_id: Option<String>,
     pub record_start_date: Option<String>,
     pub record_end_date: Option<String>,
     pub summary: String,
     pub primary_phone: Option<String>,
+    #[serde(default)]
+    pub primary_phone_use: Option<String>,
     pub secondary_phone: Option<String>,
+    #[serde(default)]
+    pub secondary_phone_use: Option<String>,
     pub email: Option<String>,
+    #[serde(default)]
+    pub primary_email: Option<String>,
+    #[serde(default)]
+    pub secondary_email: Option<String>,
     pub preferred_contact_method: Option<String>,
+    #[serde(default)]
+    pub address_line_1: Option<String>,
+    #[serde(default)]
+    pub address_line_2: Option<String>,
+    #[serde(default)]
+    pub city: Option<String>,
+    #[serde(default)]
+    pub state_or_province: Option<String>,
+    #[serde(default)]
+    pub postal_code: Option<String>,
+    #[serde(default)]
+    pub country: Option<String>,
+    #[serde(default)]
+    pub address_use: Option<String>,
     pub emergency_contact_name: Option<String>,
     pub emergency_contact_relationship: Option<String>,
     pub emergency_contact_phone: Option<String>,
@@ -45,17 +83,55 @@ pub struct WorkspaceClient {
 pub struct WorkspaceClientUpsert {
     pub id: Option<String>,
     pub display_name: String,
+    #[serde(default)]
+    pub legal_first_name: Option<String>,
+    #[serde(default)]
+    pub legal_middle_name: Option<String>,
+    #[serde(default)]
+    pub legal_last_name: Option<String>,
+    #[serde(default)]
+    pub legal_suffix: Option<String>,
     pub preferred_name: Option<String>,
+    #[serde(default)]
+    pub previous_name: Option<String>,
     pub date_of_birth: Option<String>,
     pub sex_or_gender: Option<String>,
+    #[serde(default)]
+    pub administrative_sex: Option<String>,
+    #[serde(default)]
+    pub preferred_language: Option<String>,
+    #[serde(default)]
+    pub interpreter_required: bool,
     pub external_id: Option<String>,
     pub record_start_date: Option<String>,
     pub record_end_date: Option<String>,
     pub summary: String,
     pub primary_phone: Option<String>,
+    #[serde(default)]
+    pub primary_phone_use: Option<String>,
     pub secondary_phone: Option<String>,
+    #[serde(default)]
+    pub secondary_phone_use: Option<String>,
     pub email: Option<String>,
+    #[serde(default)]
+    pub primary_email: Option<String>,
+    #[serde(default)]
+    pub secondary_email: Option<String>,
     pub preferred_contact_method: Option<String>,
+    #[serde(default)]
+    pub address_line_1: Option<String>,
+    #[serde(default)]
+    pub address_line_2: Option<String>,
+    #[serde(default)]
+    pub city: Option<String>,
+    #[serde(default)]
+    pub state_or_province: Option<String>,
+    #[serde(default)]
+    pub postal_code: Option<String>,
+    #[serde(default)]
+    pub country: Option<String>,
+    #[serde(default)]
+    pub address_use: Option<String>,
     pub emergency_contact_name: Option<String>,
     pub emergency_contact_relationship: Option<String>,
     pub emergency_contact_phone: Option<String>,
@@ -799,18 +875,36 @@ pub struct WorkspaceAuditEventFilter {
 pub(crate) struct WorkspaceClientRow {
     pub id: String,
     pub display_name: String,
+    pub legal_first_name: Option<String>,
+    pub legal_middle_name: Option<String>,
+    pub legal_last_name: Option<String>,
+    pub legal_suffix: Option<String>,
     pub preferred_name: Option<String>,
+    pub previous_name: Option<String>,
     pub date_of_birth: Option<String>,
     pub sex_or_gender: Option<String>,
+    pub administrative_sex: Option<String>,
+    pub preferred_language: Option<String>,
+    pub interpreter_required: bool,
     pub external_id: Option<String>,
     pub record_start_date: Option<String>,
     pub record_end_date: Option<String>,
     pub summary: String,
     pub contact_row_present: bool,
     pub primary_phone: Option<String>,
+    pub primary_phone_use: Option<String>,
     pub secondary_phone: Option<String>,
+    pub secondary_phone_use: Option<String>,
     pub email: Option<String>,
+    pub secondary_email: Option<String>,
     pub preferred_contact_method: Option<String>,
+    pub address_line_1: Option<String>,
+    pub address_line_2: Option<String>,
+    pub city: Option<String>,
+    pub state_or_province: Option<String>,
+    pub postal_code: Option<String>,
+    pub country: Option<String>,
+    pub address_use: Option<String>,
     pub emergency_contact_name: Option<String>,
     pub emergency_contact_relationship: Option<String>,
     pub emergency_contact_phone: Option<String>,
@@ -834,9 +928,17 @@ impl WorkspaceClientRow {
         Ok(Self {
             id: row.try_get("id")?,
             display_name: row.try_get("display_name")?,
+            legal_first_name: row.try_get("legal_first_name")?,
+            legal_middle_name: row.try_get("legal_middle_name")?,
+            legal_last_name: row.try_get("legal_last_name")?,
+            legal_suffix: row.try_get("legal_suffix")?,
             preferred_name: row.try_get("preferred_name")?,
+            previous_name: row.try_get("previous_name")?,
             date_of_birth: row.try_get("date_of_birth")?,
             sex_or_gender: row.try_get("sex_or_gender")?,
+            administrative_sex: row.try_get("administrative_sex")?,
+            preferred_language: row.try_get("preferred_language")?,
+            interpreter_required: row.try_get::<i64, _>("interpreter_required")? != 0,
             external_id: row.try_get("external_id")?,
             record_start_date: row.try_get("record_start_date")?,
             record_end_date: row.try_get("record_end_date")?,
@@ -845,9 +947,19 @@ impl WorkspaceClientRow {
                 .try_get::<Option<String>, _>("contact_client_id")?
                 .is_some(),
             primary_phone: row.try_get("primary_phone")?,
+            primary_phone_use: row.try_get("primary_phone_use")?,
             secondary_phone: row.try_get("secondary_phone")?,
+            secondary_phone_use: row.try_get("secondary_phone_use")?,
             email: row.try_get("email")?,
+            secondary_email: row.try_get("secondary_email")?,
             preferred_contact_method: row.try_get("preferred_contact_method")?,
+            address_line_1: row.try_get("address_line_1")?,
+            address_line_2: row.try_get("address_line_2")?,
+            city: row.try_get("city")?,
+            state_or_province: row.try_get("state_or_province")?,
+            postal_code: row.try_get("postal_code")?,
+            country: row.try_get("country")?,
+            address_use: row.try_get("address_use")?,
             emergency_contact_name: row.try_get("emergency_contact_name")?,
             emergency_contact_relationship: row.try_get("emergency_contact_relationship")?,
             emergency_contact_phone: row.try_get("emergency_contact_phone")?,
@@ -945,17 +1057,36 @@ impl TryFrom<WorkspaceClientRow> for WorkspaceClient {
         Ok(Self {
             id: row.id,
             display_name: row.display_name,
+            legal_first_name: row.legal_first_name,
+            legal_middle_name: row.legal_middle_name,
+            legal_last_name: row.legal_last_name,
+            legal_suffix: row.legal_suffix,
             preferred_name: row.preferred_name,
+            previous_name: row.previous_name,
             date_of_birth: row.date_of_birth,
             sex_or_gender: row.sex_or_gender,
+            administrative_sex: row.administrative_sex,
+            preferred_language: row.preferred_language,
+            interpreter_required: row.interpreter_required,
             external_id: row.external_id,
             record_start_date: row.record_start_date,
             record_end_date: row.record_end_date,
             summary: row.summary,
             primary_phone,
+            primary_phone_use: row.primary_phone_use,
             secondary_phone,
+            secondary_phone_use: row.secondary_phone_use,
+            primary_email: email.clone(),
             email,
+            secondary_email: row.secondary_email,
             preferred_contact_method,
+            address_line_1: row.address_line_1,
+            address_line_2: row.address_line_2,
+            city: row.city,
+            state_or_province: row.state_or_province,
+            postal_code: row.postal_code,
+            country: row.country,
+            address_use: row.address_use,
             emergency_contact_name,
             emergency_contact_relationship,
             emergency_contact_phone,

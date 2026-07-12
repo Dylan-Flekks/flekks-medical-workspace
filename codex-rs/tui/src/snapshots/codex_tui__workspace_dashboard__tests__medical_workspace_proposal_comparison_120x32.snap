@@ -6,13 +6,13 @@ Medical Workspace
 Patient: Jordan Patient  DOB: blank  MRN: blank  Contact: Missing contact  Coverage: Missing coverage  Encounter: No
  EXPLORER                      PATIENT CHART
 ┌Patient Directory───────────┐┌Patient Demographics────────────────────────────────────────────────────────────────────┐
-│Local search: /             ││Display: Jordan Patient                                                                 │
-│0 active patients; local    ││Preferred:                                                                              │
-│only                        ││DOB:                                                                                    │
-│No saved patients yet.      ││Sex/Gender:                                                                             │
-│New patient: :patient new   ││Patient ID / MRN:                                                                       │
-│                            ││Chart start: 2026-01-01                                                                 │
-│                            ││Chart end: 2026-06-09                                                                   │
+│Local search: /             ││Identity: Jordan Patient · preferred not set                                            │
+│0 active patients; local    ││Legal/card: legal name missing                                                          │
+│only                        ││DOB: missing · admin sex: missing · MRN: missing                                        │
+│No saved patients yet.      ││Contact: phone missing; email missing; method not set                                   │
+│New patient: :patient new   ││Address: address missing                                                                │
+│                            ││Emergency: name missing; relationship missing; phone missing                            │
+│                            ││Coverage: P not entered; S not entered; T not entered                                   │
 │                            │└────────────────────────────────────────────────────────────────────────────────────────┘
 └────────────────────────────┘┌Note Title──────────────────────────────────────────────────────────────────────────────┐
 ┌Patient Notes───────────────┐│Visit note                                                                              │

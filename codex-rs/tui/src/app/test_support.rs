@@ -24,6 +24,7 @@ pub(super) async fn make_test_app() -> App {
         workspace_command_runner: None,
         workspace_dashboard: None,
         workspace_dashboard_visible: false,
+        workspace_draft_runtime: workspace_drafts::WorkspaceDraftRuntime::default(),
         config,
         state_db: None,
         cli_kv_overrides: Vec::new(),

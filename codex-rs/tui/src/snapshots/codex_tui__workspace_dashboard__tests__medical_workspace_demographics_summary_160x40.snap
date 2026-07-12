@@ -1,0 +1,44 @@
+---
+source: tui/src/workspace_dashboard.rs
+expression: "render_dashboard_lines_at(&summary, 160, 40)"
+---
+Medical Workspace
+Patient: Jordan Patient  DOB: blank  MRN: blank  Contact: Contact on file  Coverage: Missing coverage  Encounter: No encounter
+ EXPLORER                          PATIENT CHART                                                                   AGENT WORK
+┌Patient Directory───────────────┐┌Patient Demographics──────────────────────────────────────────────────────────┐┌Agent Work──────────────────────────────────┐
+│Local search: /                 ││Identity: Jordan Patient · preferred not set                                  ││Patient Chart: Jordan...; Open encounter    │
+│0 active patients; local only   ││Legal/card: Jordan Q Patient                                                  ││[Pending]  History  Audit  ←/→              │
+│No saved patients yet.          ││DOB: missing · admin sex: missing · MRN: missing                              ││                                            │
+│New patient: :patient new       ││Contact: 555-0101; jordan.fake@example.test; method not set                   ││Local Coach                                 │
+│                                ││Address: 10 Example Street; Exampleville IL 60000                             ││  Choose supporting context                 │
+│                                ││Emergency: Maya Contact; relationship missing; 555-0199                       ││  Select only the files, reviewed text, and │
+│                                ││Coverage: P not entered; S not entered; T not entered                         ││clips the agent needs for this request.     │
+│                                ││Enter edits all identity/contact fields · Ctrl-P opens actions                ││  ● next: Mark agent context                │
+│                                │└──────────────────────────────────────────────────────────────────────────────┘│  Guidance only; no model call and no chart │
+│                                │┌Note Title────────────────────────────────────────────────────────────────────┐│mutation.                                   │
+└────────────────────────────────┘│Visit note                                                                    ││                                            │
+┌Patient Notes───────────────────┐└──────────────────────────────────────────────────────────────────────────────┘│Mode: > Input |   Packet |   Returned       │
+│Patient Notes                   │┌Note Body─────────────────────────────────────────────────────────────────────┐│  ● draft: No instructions drafted          │
+│  New note                      ││Fake human-entered visit note body.                                           ││  ● context: 0 files | 0 text | 0 clips     │
+│  No patient notes yet. Use     ││                                                                              ││  ● plan: not sent                          │
+│:note new.                      ││                                                                              ││  ● returned: none                          │
+│  Medical, communication, and   ││                                                                              ││                                            │
+│admin notes appear here.        ││                                                                              ││  ● review: :agent preview, then Ctrl-G     │
+│                                ││                                                                              ││  No upload/OCR/payer action/auto-apply.    │
+│                                ││                                                                              ││                                            │
+└────────────────────────────────┘│                                                                              ││                                            │
+┌Uploaded Documents──────────────┐│                                                                              ││                                            │
+│Uploaded Documents              ││                                                                              ││                                            │
+│No files yet                    ││                                                                              ││                                            │
+│Paste/drop JPG/PDF. Space...    ││                                                                              ││                                            │
+│                                ││                                                                              ││                                            │
+│                                ││                                                                              ││                                            │
+│                                ││                                                                              ││                                            │
+│                                ││                                                                              ││                                            │
+│                                ││                                                                              ││                                            │
+│                                ││                                                                              ││                                            │
+│                                ││                                                                              ││                                            │
+│                                ││                                                                              ││                                            │
+│                                ││                                                                              ││                                            │
+└────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────┘└────────────────────────────────────────────┘
+Focus: Demographics | Mode: Patient field | Keys: Enter edit  Ctrl-S save  Tab/⇧Tab pane  Ctrl-P actions | Next: Edit patient data

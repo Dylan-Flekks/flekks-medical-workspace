@@ -50,6 +50,7 @@ pub(crate) enum WorkspaceActionId {
     DerivativeSave,
     DerivativeSelect,
     DerivativeToggle,
+    DiscardLocalDraft,
     DocumentAttach,
     DocumentChoose,
     EncounterOpen,
@@ -63,6 +64,7 @@ pub(crate) enum WorkspaceActionId {
     FocusPatients,
     PatientSearch,
     CoverageEdit,
+    CoverageVerify,
     FocusProposals,
     FocusTimeline,
     FocusVisit,
@@ -82,6 +84,7 @@ pub(crate) enum WorkspaceActionId {
     ProposalAccept,
     ProposalDecline,
     ProposalNext,
+    RestoreLocalDraft,
     Return,
     Save,
     SafetyOpen,
@@ -246,6 +249,30 @@ pub(crate) const WORKSPACE_ACTIONS: &[WorkspaceActionDef] = &[
         id: WorkspaceActionId::CoverageEdit,
         label: "Edit coverage",
         command: "coverage edit",
+        shortcut: None,
+        group: WorkspaceActionGroup::Records,
+        profile: WorkspaceActionProfile::Medical,
+    },
+    WorkspaceActionDef {
+        id: WorkspaceActionId::CoverageVerify,
+        label: "Compare coverage card",
+        command: "coverage verify",
+        shortcut: None,
+        group: WorkspaceActionGroup::Records,
+        profile: WorkspaceActionProfile::Medical,
+    },
+    WorkspaceActionDef {
+        id: WorkspaceActionId::RestoreLocalDraft,
+        label: "Restore local draft",
+        command: "draft restore",
+        shortcut: None,
+        group: WorkspaceActionGroup::Records,
+        profile: WorkspaceActionProfile::Medical,
+    },
+    WorkspaceActionDef {
+        id: WorkspaceActionId::DiscardLocalDraft,
+        label: "Discard local draft",
+        command: "draft discard",
         shortcut: None,
         group: WorkspaceActionGroup::Records,
         profile: WorkspaceActionProfile::Medical,
@@ -1053,6 +1080,16 @@ pub(crate) fn action_for_command(
                 return Some(WorkspaceActionId::EmergencyContactEdit);
             }
             "coverage edit" | "edit coverage" => return Some(WorkspaceActionId::CoverageEdit),
+            "coverage verify"
+            | "verify coverage"
+            | "compare coverage card"
+            | "card compare" => return Some(WorkspaceActionId::CoverageVerify),
+            "draft restore" | "restore draft" | "restore local draft" => {
+                return Some(WorkspaceActionId::RestoreLocalDraft);
+            }
+            "draft discard" | "discard draft" | "discard local draft" => {
+                return Some(WorkspaceActionId::DiscardLocalDraft);
+            }
             "safety" | "clinical safety" | "allergies" | "medications" | "meds" | "problems"
             | "conditions" | "precautions" => return Some(WorkspaceActionId::SafetyOpen),
             "allergy add" | "add allergy" | "new allergy" | "allergies add" => {
@@ -1403,6 +1440,7 @@ pub(crate) fn action_for_command(
         "patient details" | "details" | "focus patient details" | "demographics" => "demographics",
         "contact" | "contact edit" => "demographics edit",
         "coverage" => "coverage edit",
+        "verify coverage" | "coverage card" | "insurance card" => "coverage verify",
         "title" | "note title" => "focus note title",
         "body" | "note body" | "write eval note" | "write first eval" => "focus note body",
         "workflow" | "practice workflow" | "clinical workspace" => "focus clinical workspace",

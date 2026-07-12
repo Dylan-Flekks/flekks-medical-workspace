@@ -85,6 +85,7 @@ use crate::workspace_context_assembly::packet_scoped_agent_handoff_prompt_for_ru
 use crate::workspace_dashboard::WorkspaceDashboard;
 use crate::workspace_dashboard::WorkspaceDashboardAction;
 use crate::workspace_dashboard::WorkspaceProfile;
+use crate::workspace_draft::WorkspaceDraftCheckpointTrigger;
 use codex_ansi_escape::ansi_escape_line;
 use codex_app_server_client::AppServerRequestHandle;
 use codex_app_server_client::TypedRequestError;
@@ -230,6 +231,7 @@ mod thread_routing;
 mod thread_session_state;
 mod thread_settings;
 mod workspace_agent_capture;
+mod workspace_drafts;
 
 use self::agent_navigation::AgentNavigationDirection;
 use self::agent_navigation::AgentNavigationState;
@@ -517,6 +519,7 @@ pub(crate) struct App {
     workspace_command_runner: Option<WorkspaceCommandRunner>,
     workspace_dashboard: Option<WorkspaceDashboard>,
     workspace_dashboard_visible: bool,
+    workspace_draft_runtime: workspace_drafts::WorkspaceDraftRuntime,
     pending_workspace_agent_capture: Option<PendingWorkspaceAgentCapture>,
     /// Config is stored here so we can recreate ChatWidgets as needed.
     pub(crate) config: Config,
@@ -1034,6 +1037,7 @@ See the Codex keymap documentation for supported actions and examples."
             workspace_command_runner: Some(workspace_command_runner),
             workspace_dashboard: None,
             workspace_dashboard_visible: false,
+            workspace_draft_runtime: workspace_drafts::WorkspaceDraftRuntime::default(),
             pending_workspace_agent_capture: None,
             config,
             state_db,
@@ -1390,7 +1394,6 @@ See the Codex keymap documentation for supported actions and examples."
                     .unwrap_or(WorkspaceDashboardAction::Consumed);
                 self.handle_workspace_dashboard_action(tui, app_server, action)
                     .await;
-                tui.frame_requester().schedule_frame();
             }
             TuiEvent::MouseScroll(scroll_event) => {
                 let viewport = tui
@@ -1405,7 +1408,6 @@ See the Codex keymap documentation for supported actions and examples."
                     .unwrap_or(WorkspaceDashboardAction::Consumed);
                 self.handle_workspace_dashboard_action(tui, app_server, action)
                     .await;
-                tui.frame_requester().schedule_frame();
             }
             TuiEvent::Draw | TuiEvent::Resize => {
                 self.chat_widget.maybe_post_pending_notification(tui);
@@ -1416,6 +1418,7 @@ See the Codex keymap documentation for supported actions and examples."
                     return Ok(AppRunControl::Continue);
                 }
                 self.chat_widget.pre_draw_tick();
+                self.maybe_autosave_workspace_draft(tui, app_server).await;
                 let resized = matches!(event, TuiEvent::Resize);
                 self.render_workspace_dashboard_frame(tui, resized)?;
                 if self.chat_widget.external_editor_state() == ExternalEditorState::Requested {
@@ -1453,10 +1456,72 @@ See the Codex keymap documentation for supported actions and examples."
                 }
             }
             WorkspaceDashboardAction::Consumed => {}
+            WorkspaceDashboardAction::CheckpointDraft => {
+                if let Err(err) = self
+                    .flush_workspace_draft(
+                        app_server,
+                        WorkspaceDraftCheckpointTrigger::PacketPreview,
+                    )
+                    .await
+                    && let Some(dashboard) = self.workspace_dashboard.as_mut() {
+                        dashboard.set_status(format!(
+                            "Packet preview is read-only, but local recovery checkpoint failed: {err}"
+                        ));
+                    }
+            }
             WorkspaceDashboardAction::Close => {
+                if self.workspace_draft_recovery_pending() {
+                    // The offered checkpoint is already durable and must remain untouched until
+                    // an explicit restore or discard. Closing the view is therefore safe without
+                    // creating a competing checkpoint.
+                    self.hide_workspace_dashboard_and_leave_alt_screen(tui);
+                    return;
+                }
+                if let Err(err) = self
+                    .flush_workspace_draft(
+                        app_server,
+                        WorkspaceDraftCheckpointTrigger::WorkspaceClose,
+                    )
+                    .await
+                {
+                    if let Some(dashboard) = self.workspace_dashboard.as_mut() {
+                        dashboard.set_status(format!(
+                            "Local recovery save failed; workspace remains open: {err}"
+                        ));
+                    }
+                    self.chat_widget.add_error_message(format!(
+                        "Failed to checkpoint workspace draft before close: {err}"
+                    ));
+                    self.observe_workspace_draft(tui);
+                    tui.frame_requester().schedule_frame();
+                    return;
+                }
                 self.hide_workspace_dashboard_and_leave_alt_screen(tui);
             }
             WorkspaceDashboardAction::CloseAndDiscard => {
+                if let Err(err) = self
+                    .flush_workspace_draft(
+                        app_server,
+                        WorkspaceDraftCheckpointTrigger::WorkspaceClose,
+                    )
+                    .await
+                {
+                    self.chat_widget.add_error_message(format!(
+                        "Failed to checkpoint workspace draft before discard: {err}"
+                    ));
+                    tui.frame_requester().schedule_frame();
+                    return;
+                }
+                if let Err(err) = self
+                    .discard_current_workspace_draft_session(app_server)
+                    .await
+                {
+                    self.chat_widget.add_error_message(format!(
+                        "Failed to discard workspace draft session safely: {err}"
+                    ));
+                    tui.frame_requester().schedule_frame();
+                    return;
+                }
                 self.workspace_dashboard = None;
                 self.hide_workspace_dashboard_and_leave_alt_screen(tui);
             }
@@ -1488,15 +1553,55 @@ See the Codex keymap documentation for supported actions and examples."
                 }
             }
             WorkspaceDashboardAction::SendContextToAgent => {
+                if let Err(err) = self
+                    .flush_workspace_draft(
+                        app_server,
+                        WorkspaceDraftCheckpointTrigger::AgentHandoff,
+                    )
+                    .await
+                {
+                    if let Some(dashboard) = self.workspace_dashboard.as_mut() {
+                        dashboard.set_status(format!(
+                            "Agent handoff blocked until local recovery checkpoint succeeds: {err}"
+                        ));
+                    }
+                    self.chat_widget.add_error_message(format!(
+                        "Failed to checkpoint workspace draft before agent handoff: {err}"
+                    ));
+                    self.observe_workspace_draft(tui);
+                    tui.frame_requester().schedule_frame();
+                    return;
+                }
                 let was_visible = self.workspace_dashboard_active();
                 if let Err(err) = self.send_workspace_context_to_agent(app_server).await {
                     self.chat_widget
                         .add_error_message(format!("Failed to send workspace context: {err}"));
-                } else if was_visible && !self.workspace_dashboard_active() {
-                    let _ = tui.leave_alt_screen();
+                } else {
+                    if let Err(err) = self
+                        .close_workspace_draft_after_handoff(app_server)
+                        .await
+                    {
+                        self.chat_widget.add_error_message(format!(
+                            "Context was handed off, but its local draft session could not be closed: {err}"
+                        ));
+                    }
+                    if was_visible && !self.workspace_dashboard_active() {
+                        let _ = tui.leave_alt_screen();
+                    }
                 }
             }
             WorkspaceDashboardAction::Save => {
+                if let Err(err) = self
+                    .flush_workspace_draft(
+                        app_server,
+                        WorkspaceDraftCheckpointTrigger::ExplicitSave,
+                    )
+                    .await
+                {
+                    self.chat_widget.add_error_message(format!(
+                        "Local recovery checkpoint failed; continuing explicit canonical save: {err}"
+                    ));
+                }
                 let result = if let Some(dashboard) = self.workspace_dashboard.as_mut() {
                     dashboard.save(app_server).await
                 } else {
@@ -1660,7 +1765,92 @@ See the Codex keymap documentation for supported actions and examples."
                     ));
                 }
             }
+            WorkspaceDashboardAction::SelectCoveragePriority(priority) => {
+                let result = if let Some(dashboard) = self.workspace_dashboard.as_mut() {
+                    dashboard
+                        .select_coverage_priority(app_server, priority)
+                        .await
+                } else {
+                    Ok(())
+                };
+                if let Err(err) = result {
+                    self.chat_widget.add_error_message(format!(
+                        "Failed to switch workspace coverage priority: {err}"
+                    ));
+                }
+            }
+            WorkspaceDashboardAction::CreateCoverageVerification(params) => {
+                let result = if let Some(dashboard) = self.workspace_dashboard.as_mut() {
+                    dashboard
+                        .create_coverage_verification(app_server, params)
+                        .await
+                } else {
+                    Ok(())
+                };
+                if let Err(err) = result {
+                    self.chat_widget.add_error_message(format!(
+                        "Failed to record workspace coverage card comparison: {err}"
+                    ));
+                }
+            }
+            WorkspaceDashboardAction::StartNewClient => {
+                if let Err(err) = self
+                    .flush_workspace_draft(
+                        app_server,
+                        WorkspaceDraftCheckpointTrigger::PatientNavigation,
+                    )
+                    .await
+                {
+                    if let Some(dashboard) = self.workspace_dashboard.as_mut() {
+                        dashboard.set_status(format!(
+                            "New patient blocked until local draft checkpoint succeeds: {err}"
+                        ));
+                    }
+                    tui.frame_requester().schedule_frame();
+                    return;
+                }
+                if let Some(dashboard) = self.workspace_dashboard.as_mut() {
+                    dashboard.start_new_client();
+                }
+                self.initialize_workspace_draft_recovery(app_server).await;
+            }
+            WorkspaceDashboardAction::StartNewNote => {
+                if let Err(err) = self
+                    .flush_workspace_draft(
+                        app_server,
+                        WorkspaceDraftCheckpointTrigger::NoteNavigation,
+                    )
+                    .await
+                {
+                    if let Some(dashboard) = self.workspace_dashboard.as_mut() {
+                        dashboard.set_status(format!(
+                            "New note blocked until local draft checkpoint succeeds: {err}"
+                        ));
+                    }
+                    tui.frame_requester().schedule_frame();
+                    return;
+                }
+                if let Some(dashboard) = self.workspace_dashboard.as_mut() {
+                    dashboard.start_new_note();
+                }
+                self.initialize_workspace_draft_recovery(app_server).await;
+            }
             WorkspaceDashboardAction::SelectClient(index) => {
+                if let Err(err) = self
+                    .flush_workspace_draft(
+                        app_server,
+                        WorkspaceDraftCheckpointTrigger::PatientNavigation,
+                    )
+                    .await
+                {
+                    if let Some(dashboard) = self.workspace_dashboard.as_mut() {
+                        dashboard.set_status(format!(
+                            "Patient switch blocked until local draft checkpoint succeeds: {err}"
+                        ));
+                    }
+                    tui.frame_requester().schedule_frame();
+                    return;
+                }
                 let result = if let Some(dashboard) = self.workspace_dashboard.as_mut() {
                     dashboard.select_client(app_server, index).await
                 } else {
@@ -1669,9 +1859,26 @@ See the Codex keymap documentation for supported actions and examples."
                 if let Err(err) = result {
                     self.chat_widget
                         .add_error_message(format!("Failed to load workspace client: {err}"));
+                } else {
+                    self.initialize_workspace_draft_recovery(app_server).await;
                 }
             }
             WorkspaceDashboardAction::SelectNote(index) => {
+                if let Err(err) = self
+                    .flush_workspace_draft(
+                        app_server,
+                        WorkspaceDraftCheckpointTrigger::NoteNavigation,
+                    )
+                    .await
+                {
+                    if let Some(dashboard) = self.workspace_dashboard.as_mut() {
+                        dashboard.set_status(format!(
+                            "Note switch blocked until local draft checkpoint succeeds: {err}"
+                        ));
+                    }
+                    tui.frame_requester().schedule_frame();
+                    return;
+                }
                 let result = if let Some(dashboard) = self.workspace_dashboard.as_mut() {
                     dashboard.select_note(app_server, index).await
                 } else {
@@ -1680,6 +1887,8 @@ See the Codex keymap documentation for supported actions and examples."
                 if let Err(err) = result {
                     self.chat_widget
                         .add_error_message(format!("Failed to load workspace note: {err}"));
+                } else {
+                    self.initialize_workspace_draft_recovery(app_server).await;
                 }
             }
             WorkspaceDashboardAction::SignNote => {
@@ -1706,7 +1915,20 @@ See the Codex keymap documentation for supported actions and examples."
                         .add_error_message(format!("Failed to update workspace job: {err}"));
                 }
             }
+            WorkspaceDashboardAction::RestoreLocalDraft => {
+                if let Err(err) = self.restore_workspace_draft_recovery().await {
+                    self.chat_widget
+                        .add_error_message(format!("Failed to restore local workspace draft: {err}"));
+                }
+            }
+            WorkspaceDashboardAction::DiscardLocalDraft => {
+                if let Err(err) = self.discard_workspace_draft_recovery(app_server).await {
+                    self.chat_widget
+                        .add_error_message(format!("Failed to discard local workspace draft: {err}"));
+                }
+            }
         }
+        self.observe_workspace_draft(tui);
         tui.frame_requester().schedule_frame();
     }
 
@@ -1853,14 +2075,16 @@ See the Codex keymap documentation for supported actions and examples."
     fn render_workspace_dashboard_frame(
         &mut self,
         tui: &mut tui::Tui,
-        _resized: bool,
+        resized: bool,
     ) -> Result<Rect> {
         let desired_height = tui.terminal.size()?.height;
         let mut rendered_area = Rect::default();
-        // The workspace dashboard is a full-screen surface. Force a visible
-        // clear before drawing it so missed or coalesced resize events cannot
-        // leave stale chat-widget cells behind in Terminal.app.
-        tui.terminal.clear_visible_screen()?;
+        // Normal workspace frames rely on the terminal's buffer diff. A physical clear here
+        // flashes a blank screen between every typed character, so reserve it for resize recovery
+        // where stale cells may exist outside the newly sized viewport.
+        if resized {
+            tui.terminal.clear_visible_screen()?;
+        }
         tui.draw_with_resize_reflow(desired_height, |frame| {
             let area = frame.area();
             rendered_area = area;

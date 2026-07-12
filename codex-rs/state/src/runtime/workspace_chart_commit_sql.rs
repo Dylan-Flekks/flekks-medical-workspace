@@ -39,11 +39,18 @@ pub(super) async fn client(
         tx,
         r#"
 SELECT
-    client.id, client.display_name, client.preferred_name, client.date_of_birth,
-    client.sex_or_gender, client.external_id, client.record_start_date,
+    client.id, client.display_name, client.legal_first_name,
+    client.legal_middle_name, client.legal_last_name, client.legal_suffix,
+    client.preferred_name, client.previous_name, client.date_of_birth,
+    client.sex_or_gender, client.administrative_sex, client.preferred_language,
+    client.interpreter_required, client.external_id, client.record_start_date,
     client.record_end_date, client.summary,
     contact.client_id AS contact_client_id, contact.primary_phone,
-    contact.secondary_phone, contact.email, contact.preferred_contact_method,
+    contact.primary_phone_use, contact.secondary_phone, contact.secondary_phone_use,
+    contact.email, contact.secondary_email, contact.preferred_contact_method,
+    contact.address_line_1, contact.address_line_2, contact.city,
+    contact.state_or_province, contact.postal_code, contact.country,
+    contact.address_use,
     contact.emergency_contact_name, contact.emergency_contact_relationship,
     contact.emergency_contact_phone, contact.emergency_contact_email,
     contact.contact_notes,
@@ -206,15 +213,25 @@ pub(super) async fn put_client(
     sqlx::query(
         r#"
 INSERT INTO workspace_clients (
-    id, display_name, preferred_name, date_of_birth, sex_or_gender, external_id,
+    id, display_name, legal_first_name, legal_middle_name, legal_last_name,
+    legal_suffix, preferred_name, previous_name, date_of_birth, sex_or_gender,
+    administrative_sex, preferred_language, interpreter_required, external_id,
     record_start_date, record_end_date, summary, archived_at_ms, created_at_ms,
     updated_at_ms
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
 ON CONFLICT(id) DO UPDATE SET
     display_name = excluded.display_name,
+    legal_first_name = excluded.legal_first_name,
+    legal_middle_name = excluded.legal_middle_name,
+    legal_last_name = excluded.legal_last_name,
+    legal_suffix = excluded.legal_suffix,
     preferred_name = excluded.preferred_name,
+    previous_name = excluded.previous_name,
     date_of_birth = excluded.date_of_birth,
     sex_or_gender = excluded.sex_or_gender,
+    administrative_sex = excluded.administrative_sex,
+    preferred_language = excluded.preferred_language,
+    interpreter_required = excluded.interpreter_required,
     external_id = excluded.external_id,
     record_start_date = excluded.record_start_date,
     record_end_date = excluded.record_end_date,
@@ -225,9 +242,17 @@ ON CONFLICT(id) DO UPDATE SET
     )
     .bind(id)
     .bind(&input.display_name)
+    .bind(&input.legal_first_name)
+    .bind(&input.legal_middle_name)
+    .bind(&input.legal_last_name)
+    .bind(&input.legal_suffix)
     .bind(&input.preferred_name)
+    .bind(&input.previous_name)
     .bind(&input.date_of_birth)
     .bind(&input.sex_or_gender)
+    .bind(&input.administrative_sex)
+    .bind(&input.preferred_language)
+    .bind(input.interpreter_required)
     .bind(&input.external_id)
     .bind(&input.record_start_date)
     .bind(&input.record_end_date)

@@ -1,0 +1,36 @@
+---
+source: tui/src/workspace_dashboard.rs
+expression: "render_dashboard_lines_at(&recovery, 120, 32)"
+---
+Medical Workspace
+Patient: Jordan Patient  DOB: blank  MRN: blank  Contact: Missing contact  Coverage: Missing coverage  Encounter: No
+ EXPLORER                      AGENT WORK
+┌Patient Directory───────────┐┌Agent Work──────────────────────────────────────────────────────────────────────────────┐
+│Local search: /             ││Patient Chart: Jordan...; Open encounter                                                │
+│0 active patients; local    ││[Pending]  History  Audit  ←/→                                                          │
+│only                        ││                                                                                        │
+│No saved patients yet.      ││  ● recovery: Recovery available: Ctrl-P → Restore local draft or Discard local draft.  │
+│New patient: :patient new   ││                                                                                        │
+│                            ││Local Coach                                                                             │
+│                            ││  Choose supporting context                                                             │
+│                            ││  Select only the files, reviewed text, and clips the agent needs for this request.     │
+└────────────────────────────┘│  ● next: Mark agent context                                                            │
+┌Patient Notes───────────────┐│  Guidance only; no model call and no chart mutation.                                   │
+│Patient Notes               ││                                                                                        │
+│  New note                  ││Mode: > Input |   Packet |   Returned                                                   │
+│  No patient notes yet. Use ││  ● draft: No instructions drafted                                                      │
+│:note new.                  ││  ● context: 0 files | 0 text | 0 clips                                                 │
+│  Medical, communication,   ││  ● plan: not sent                                                                      │
+│and admin notes appear here.││  ● returned: none                                                                      │
+└────────────────────────────┘│                                                                                        │
+┌Uploaded Documents──────────┐│  ● review: :agent preview, then Ctrl-G                                                 │
+│Uploaded Documents          ││  No upload/OCR/payer action/auto-apply.                                                │
+│No files yet                ││                                                                                        │
+│Paste/drop JPG/PDF. S...    ││                                                                                        │
+│                            ││                                                                                        │
+│                            ││                                                                                        │
+│                            ││                                                                                        │
+│                            ││                                                                                        │
+│                            ││                                                                                        │
+└────────────────────────────┘└────────────────────────────────────────────────────────────────────────────────────────┘
+Focus: Agent | Mode: Navigate | Keys: Type starts request  ←/→ Agent tab  ↑/↓ scroll  Tab/⇧Tab pane  Ctrl-P commands

@@ -26,14 +26,18 @@ async fn fixture() -> (
 async fn checkpoint(
     runtime: &StateRuntime,
     client: &crate::WorkspaceClient,
-    session_id: Option<String>,
+    current: Option<&crate::WorkspaceDraftCheckpoint>,
     title: &str,
 ) -> crate::WorkspaceDraftCheckpoint {
     runtime
         .workspace()
         .create_draft_checkpoint(crate::WorkspaceDraftCheckpointCreate {
-            session_id,
+            session_id: current.map(|checkpoint| checkpoint.session_id.clone()),
             client_id: client.id.clone(),
+            expected_current_checkpoint_id: current.map(|checkpoint| checkpoint.id.clone()),
+            expected_current_checkpoint_revision: current.map(|checkpoint| checkpoint.revision),
+            expected_current_checkpoint_sha256: current
+                .map(|checkpoint| checkpoint.content_sha256.clone()),
             note_id: Some("draft-note".to_string()),
             base_note_revision: Some(1),
             draft_json: format!(r#"{{"schemaVersion":1,"note":{{"title":{title:?}}}}}"#),
@@ -184,7 +188,7 @@ async fn workspace_guide_run_lifecycle_is_bounded_exact_stale_and_noncanonical()
     let mut oversized = input;
     oversized.request_json = serde_json::json!({"text": "x".repeat(MAX_REQUEST_BYTES)}).to_string();
     assert!(begin_error(&runtime, oversized).await.contains("exceeds"));
-    let second = checkpoint(&runtime, &client, Some(first.session_id.clone()), "Second").await;
+    let second = checkpoint(&runtime, &client, Some(&first), "Second").await;
     let completion = finish(
         &run,
         crate::WorkspaceGuideRunOutcome::Completed {

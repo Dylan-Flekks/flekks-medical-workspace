@@ -23,19 +23,34 @@ The core safety invariant is:
 
 > An agent may inspect explicitly authorized synthetic context and propose changes, but only an explicit clinician review action may create a new canonical chart revision.
 
-See [Agent proposal workflow](docs/agent-proposal-workflow.md) and [Architecture](docs/architecture.md).
+See [Agent proposal workflow](docs/agent-proposal-workflow.md),
+[Patient identity, contact, and coverage](PATIENT_IDENTITY_AND_COVERAGE.md), and
+[Architecture](docs/architecture.md).
 
 ## Current capabilities
 
 - Local SQLite patient, note, encounter, task, file-metadata, safety, packet, result, proposal, and audit persistence.
+- `/workspacemedical` refuses to open against a remote app-server store; the current medical-data
+  path is intentionally local-only.
+- Structured patient display and legal identity, contact methods, mailing address, emergency contact,
+  preferred language, interpreter need, and local contact notes.
+- Ordered primary, secondary, and tertiary coverage records with optimistic version guards and a
+  compatibility projection for older primary-coverage clients.
 - Local-only patient search across identifiers, contact, emergency-contact, and coverage fields.
 - Note revision history, local note locking, addenda, and stale-proposal checks.
+- Local working-draft checkpoints for note title and body, Agent requests, and selected context,
+  with explicit restore or discard after an interrupted session. Canonical chart changes still
+  require an explicit human save.
 - Explicit packet selection for multimodal file metadata and human-reviewed excerpts.
 - Durable prepared packets, idempotent agent runs, immutable packet-source snapshots, review-pending results, revision-bound proposals, and append-only clinician decisions.
 - Patient-rooted atomic chart changesets with optimistic note revisions, opaque entity-version guards, durable idempotency receipts, exact-request retry, explicit note-only reconciliation, and fail-closed discard/reload for broader stale drafts.
 - A model-visible `workspace_context_read` tool restricted to a running packet ID and explicitly authorized visit-history or progress-note categories; returned note bodies are byte-bounded and local-path tokens are redacted before immutable snapshot hashing.
 - Automatic packet-id/hash turn binding and review-pending capture of the final agent answer with thread/turn provenance.
 - A responsive three-zone Explorer / Patient Chart / Agent Work layout with Pending, History, and Audit views.
+- Conventional multiline note and Agent-request editing, plus deterministic local workflow hints
+  that teach the next context-packet step without changing the chart.
+- Human-entered coverage-card comparison tied to a selected local source document, with append-only
+  provenance and advisory `match`, `mismatch`, `unverified`, `stale`, or `incomplete` readiness.
 - Read-only current-versus-proposed comparison with stale and signed-note guards.
 - Deterministic Ratatui snapshot and readability harnesses.
 
@@ -53,7 +68,8 @@ cd flekks-medical-workspace
 just medical-workspace
 ```
 
-To update an existing clone to the latest public version:
+To update an existing clone to the latest public version, first make sure `git status --short` is
+empty. Commit or stash any local changes before switching branches or pulling, then run:
 
 ```bash
 cd flekks-medical-workspace
@@ -62,8 +78,6 @@ git switch main
 git pull --ff-only origin main
 just medical-workspace
 ```
-
-Commit or stash any local changes shown by `git status` before switching branches or pulling.
 
 When the TUI opens, run:
 
@@ -98,16 +112,28 @@ The repository is being opened early because the system needs help from Rust/TUI
 
 Known blockers include:
 
+- production safeguards for PHI, secure storage, authenticated clinician identity, role-based
+  access, and privacy controls; the current local database is for synthetic/test data only;
+- coverage-card verification is a human transcription and deterministic comparison workflow only:
+  there is no remote card upload, OCR, model extraction, payer query, eligibility lookup, claim
+  creation, EDI submission, or automatic chart mutation;
+- working-draft recovery currently covers note text, Agent requests, and context selections tied to
+  the exact patient, note, and base revision; demographic and coverage edits remain explicit-save
+  canonical drafts rather than recoverable background checkpoints;
+- working-draft checkpoints are local full snapshots; production-grade compression, retention,
+  storage-health reporting, and authenticated ownership are not implemented yet;
+- local workflow hints are deterministic navigation and packet-building guidance, not medical or
+  clinical recommendations, and the parent agent is engaged only through an explicit handoff;
 - atomic multi-document batch intake and durable restart recovery for an unresolved local changeset;
 - extension of the packet-authorized reader beyond visit history and progress notes;
 - partial per-change proposal review in both the app-server API and TUI; edited whole-proposal acceptance is state/API-ready;
 - startup reconciliation for a run abandoned by an abrupt process termination;
-- synthetic-workspace enforcement and secure storage design;
-- authenticated clinician identity and production privacy controls.
+- technical enforcement that prevents accidental entry of real patient data.
 
 Matching model turns are captured automatically as review-pending Agent Work with thread/turn provenance. The explicit `:agent result save` path remains available as a clinician-attributed recovery import when a response was produced outside the bound harness turn.
 
-See the [Roadmap](ROADMAP.md) and issues labeled `help wanted`.
+See the [Patient identity, contact, and coverage design](PATIENT_IDENTITY_AND_COVERAGE.md), the
+[Roadmap](ROADMAP.md), and issues labeled `help wanted`.
 
 ## Contributing
 

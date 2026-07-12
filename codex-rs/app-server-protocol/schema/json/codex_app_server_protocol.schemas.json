@@ -21808,8 +21808,42 @@
         ],
         "type": "object"
       },
+      "WorkspaceBillingReadiness": {
+        "enum": [
+          "match",
+          "mismatch",
+          "unverified",
+          "stale",
+          "incomplete"
+        ],
+        "type": "string"
+      },
       "WorkspaceClient": {
         "properties": {
+          "addressLine1": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "addressLine2": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "addressUse": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "administrativeSex": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "archivedAt": {
             "format": "int64",
             "type": [
@@ -21817,7 +21851,19 @@
               "null"
             ]
           },
+          "city": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "contactNotes": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "country": {
             "type": [
               "string",
               "null"
@@ -21899,6 +21945,34 @@
           "id": {
             "type": "string"
           },
+          "interpreterRequired": {
+            "default": false,
+            "type": "boolean"
+          },
+          "legalFirstName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "legalLastName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "legalMiddleName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "legalSuffix": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "memberId": {
             "type": [
               "string",
@@ -21917,7 +21991,19 @@
               "null"
             ]
           },
+          "postalCode": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "preferredContactMethod": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "preferredLanguage": {
             "type": [
               "string",
               "null"
@@ -21929,7 +22015,25 @@
               "null"
             ]
           },
+          "previousName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "primaryEmail": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "primaryPhone": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "primaryPhoneUse": {
             "type": [
               "string",
               "null"
@@ -21947,13 +22051,31 @@
               "null"
             ]
           },
+          "secondaryEmail": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "secondaryPhone": {
             "type": [
               "string",
               "null"
             ]
           },
+          "secondaryPhoneUse": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "sexOrGender": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "stateOrProvince": {
             "type": [
               "string",
               "null"
@@ -22321,6 +22443,456 @@
           "status"
         ],
         "type": "object"
+      },
+      "WorkspaceCoverage": {
+        "properties": {
+          "billingReadiness": {
+            "$ref": "#/definitions/v2/WorkspaceBillingReadiness"
+          },
+          "clientId": {
+            "type": "string"
+          },
+          "coverageNotes": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "coverageStatus": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "coverageType": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "createdAt": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "effectiveDate": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "groupNumber": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "memberId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "patientRelationshipToSubscriber": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "payerName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "planName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "priority": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "subscriberAddressLine1": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "subscriberAddressLine2": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "subscriberAddressSameAsPatient": {
+            "type": "boolean"
+          },
+          "subscriberAdministrativeSex": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "subscriberCity": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "subscriberCountry": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "subscriberDateOfBirth": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "subscriberFirstName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "subscriberLastName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "subscriberMiddleName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "subscriberPostalCode": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "subscriberStateOrProvince": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "subscriberSuffix": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "terminationDate": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "updatedAt": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "version": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "billingReadiness",
+          "clientId",
+          "createdAt",
+          "id",
+          "priority",
+          "subscriberAddressSameAsPatient",
+          "updatedAt",
+          "version"
+        ],
+        "type": "object"
+      },
+      "WorkspaceCoverageMatchResult": {
+        "enum": [
+          "match",
+          "mismatch"
+        ],
+        "type": "string"
+      },
+      "WorkspaceCoverageUpsertParams": {
+        "properties": {
+          "clientId": {
+            "type": "string"
+          },
+          "coverageNotes": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "coverageStatus": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "coverageType": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "effectiveDate": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "groupNumber": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "memberId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "patientRelationshipToSubscriber": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "payerName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "planName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "priority": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "subscriberAddressLine1": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "subscriberAddressLine2": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "subscriberAddressSameAsPatient": {
+            "type": "boolean"
+          },
+          "subscriberAdministrativeSex": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "subscriberCity": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "subscriberCountry": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "subscriberDateOfBirth": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "subscriberFirstName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "subscriberLastName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "subscriberMiddleName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "subscriberPostalCode": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "subscriberStateOrProvince": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "subscriberSuffix": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "terminationDate": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "clientId",
+          "priority"
+        ],
+        "type": "object"
+      },
+      "WorkspaceCoverageVerification": {
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "clientId": {
+            "type": "string"
+          },
+          "comparedSubject": {
+            "$ref": "#/definitions/v2/WorkspaceCoverageVerificationSubject"
+          },
+          "contentSha256": {
+            "type": "string"
+          },
+          "coverageId": {
+            "type": "string"
+          },
+          "coverageVersion": {
+            "type": "string"
+          },
+          "createdAt": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "id": {
+            "type": "string"
+          },
+          "isStale": {
+            "type": "boolean"
+          },
+          "matchResult": {
+            "$ref": "#/definitions/v2/WorkspaceCoverageMatchResult"
+          },
+          "mismatchFields": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "observedFirstName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "observedLastName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "observedMemberId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "observedMiddleName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "observedSuffix": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "patientRecordVersion": {
+            "type": "string"
+          },
+          "patientVersion": {
+            "type": "string"
+          },
+          "sourceDocumentContentSha256": {
+            "type": "string"
+          },
+          "sourceDocumentId": {
+            "type": "string"
+          },
+          "sourceDocumentVersion": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "actor",
+          "clientId",
+          "comparedSubject",
+          "contentSha256",
+          "coverageId",
+          "coverageVersion",
+          "createdAt",
+          "id",
+          "isStale",
+          "matchResult",
+          "mismatchFields",
+          "patientRecordVersion",
+          "patientVersion",
+          "sourceDocumentContentSha256",
+          "sourceDocumentId",
+          "sourceDocumentVersion"
+        ],
+        "type": "object"
+      },
+      "WorkspaceCoverageVerificationSubject": {
+        "enum": [
+          "beneficiary",
+          "subscriber"
+        ],
+        "type": "string"
       },
       "WorkspaceDocument": {
         "properties": {

@@ -6,12 +6,12 @@ Medical Workspace
 Patient: Jordan Patient  DOB: blank  MRN: blank  Contact: Missing contact  Coverage: Missing
  EXPLORER                      PATIENT CHART
 ┌Patient Directory───────────┐┌Patient Demographics────────────────────────────────────────────────┐
-│Local search: /             ││Display: Jordan Patient                                             │
-│0 active patients; local    ││Preferred:                                                          │
+│Local search: /             ││Identity: Jordan Patient · preferred not set                        │
+│0 active patients; local    ││Legal/card: legal name missing                                      │
 │only     ┌Commands──────────────────────────────────────────────────────────────────────┐         │
 │No saved │Search commands  :                                                            │         │
 │New patie│Ctrl-P Commands anywhere  Enter run  Esc close  ↑/↓                           │         │
-│         │                                                                              │         │
+│         │                                                                              │g        │
 │         │Recommended now                                                               │         │
 └─────────│> Search patients                                        :patient search [/]  │─────────┘
 ┌Patient N│Open patient list                                                :patients    │─────────┐
@@ -21,7 +21,7 @@ Patient: Jordan Patient  DOB: blank  MRN: blank  Contact: Missing contact  Cover
 │saves it │Save chart workspace                                        :save [Ctrl-S]    │         │
 └─────────│Agent bridge                                                                  │         │
 ┌Uploaded │Review Packet                                               :agent preview    │         │
-│Uploaded │… 104 more                                                                    │─────────┘
+│Uploaded │… 107 more                                                                    │─────────┘
 │No files │                                                                              │─────────┐
 │Paste/dro└──────────────────────────────────────────────────────────────────────────────┘         │
 │                            ││Next                                                                │

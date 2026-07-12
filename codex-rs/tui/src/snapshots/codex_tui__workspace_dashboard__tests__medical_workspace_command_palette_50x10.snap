@@ -10,5 +10,5 @@ expression: "render_dashboard_lines_at(&dashboard, width, height)"
 │Recommended now                                 │
 │> Search patients          :patient search [/]  │
 │Open patient list                  :patients    │
-│… 110 more                                      │
+│… 113 more                                      │
 └────────────────────────────────────────────────┘

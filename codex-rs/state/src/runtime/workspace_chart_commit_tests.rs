@@ -33,6 +33,7 @@ fn request(key: &str, client: WorkspaceClientUpsert) -> WorkspaceChartCommitRequ
         source_turn_id: Some("turn-1".to_string()),
         client_id,
         client: Some(client),
+        coverage: None,
         expected_versions: Default::default(),
         safety_item: None,
         encounter: None,
@@ -79,6 +80,7 @@ fn existing_client(client: &WorkspaceClient) -> WorkspaceClientUpsert {
         coverage_type: client.coverage_type.clone(),
         coverage_status: client.coverage_status.clone(),
         coverage_notes: client.coverage_notes.clone(),
+        ..Default::default()
     }
 }
 

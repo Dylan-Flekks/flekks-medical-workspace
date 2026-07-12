@@ -3,16 +3,16 @@ source: tui/src/workspace_dashboard.rs
 expression: "render_dashboard_lines_at(&search, 120, 32)"
 ---
 Medical Workspace
-Patient: Jordan Patient  DOB: 1980-01-02  MRN: MRN-123  Contact: Contact on file  Coverage: Coverage on file  Encounter:
+Patient: Jordan Patient  DOB: 1980-01-02  MRN: MRN-123  Contact: Contact on file  Coverage: Missing coverage  Encounter:
  EXPLORER                      PATIENT CHART
 ┌Patient Directory───────────┐┌Patient Demographics────────────────────────────────────────────────────────────────────┐
-│Local search: /Jordan       ││Display: Jordan Patient                                                                 │
-│2 active patients; local    ││Preferred: JP                                                                           │
-│only                        ││DOB: 1980-01-02                                                                         │
-│Enter opens chart; search is││Sex/Gender:                                                                             │
-│not agent context.          ││Patient ID / MRN: MRN-123                                                               │
-│> Jordan Patient  1980-01-02││Chart start:                                                                            │
-│ MRN-123  active            ││Chart end:                                                                              │
+│Local search: /Jordan       ││Identity: Jordan Patient · preferred JP                                                 │
+│2 active patients; local    ││Legal/card: legal name missing                                                          │
+│only                        ││DOB: 1980-01-02 · admin sex: missing · MRN: MRN-123                                     │
+│Enter opens chart; search is││Contact: 555-0101; jordan.fake@example.test; method not set                             │
+│not agent context.          ││Address: address missing                                                                │
+│> Jordan Patient  1980-01-02││Emergency: Maya Contact; relationship missing; 555-0199                                 │
+│ MRN-123  active            ││Coverage: P not entered; S not entered; T not entered                                   │
 │                            │└────────────────────────────────────────────────────────────────────────────────────────┘
 └────────────────────────────┘┌Note Title──────────────────────────────────────────────────────────────────────────────┐
 ┌Patient Notes───────────────┐│Visit note                                                                              │

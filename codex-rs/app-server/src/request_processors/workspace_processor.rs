@@ -107,6 +107,10 @@ use codex_app_server_protocol::WorkspaceTaskUpsertResponse;
 
 #[path = "workspace_chart_commit_processor.rs"]
 mod chart_commit;
+#[path = "workspace_client_patch.rs"]
+mod client_patch;
+#[path = "workspace_coverage_processor.rs"]
+mod coverage;
 #[path = "workspace_draft_processor.rs"]
 mod drafts;
 
@@ -170,39 +174,27 @@ impl WorkspaceRequestProcessor {
                 "workspace client displayName must not be empty",
             ));
         }
+        let requested_id = empty_to_none(params.id.clone());
+        let existing = match requested_id.as_deref() {
+            Some(id) => state_db
+                .workspace()
+                .get_client(id)
+                .await
+                .map_err(|err| internal_error(format!("failed to read workspace client: {err}")))?,
+            None => None,
+        };
+        let expected_version = empty_to_none(params.expected_version.clone());
+        if existing.is_some() && expected_version.is_none() {
+            return Err(invalid_request(
+                "workspace client expectedVersion is required for update",
+            ));
+        }
+        let input = client_patch::state_client_upsert(params, existing.as_ref())?;
         let client = state_db
             .workspace()
-            .upsert_client(codex_state::WorkspaceClientUpsert {
-                id: empty_to_none(params.id),
-                display_name: display_name.to_string(),
-                preferred_name: empty_to_none(params.preferred_name),
-                date_of_birth: empty_to_none(params.date_of_birth),
-                sex_or_gender: empty_to_none(params.sex_or_gender),
-                external_id: empty_to_none(params.external_id),
-                record_start_date: empty_to_none(params.record_start_date),
-                record_end_date: empty_to_none(params.record_end_date),
-                summary: params.summary,
-                primary_phone: empty_to_none(params.primary_phone),
-                secondary_phone: empty_to_none(params.secondary_phone),
-                email: empty_to_none(params.email),
-                preferred_contact_method: empty_to_none(params.preferred_contact_method),
-                emergency_contact_name: empty_to_none(params.emergency_contact_name),
-                emergency_contact_relationship: empty_to_none(
-                    params.emergency_contact_relationship,
-                ),
-                emergency_contact_phone: empty_to_none(params.emergency_contact_phone),
-                emergency_contact_email: empty_to_none(params.emergency_contact_email),
-                contact_notes: empty_to_none(params.contact_notes),
-                payer_name: empty_to_none(params.payer_name),
-                plan_name: empty_to_none(params.plan_name),
-                member_id: empty_to_none(params.member_id),
-                group_number: empty_to_none(params.group_number),
-                coverage_type: empty_to_none(params.coverage_type),
-                coverage_status: empty_to_none(params.coverage_status),
-                coverage_notes: empty_to_none(params.coverage_notes),
-            })
+            .upsert_client_checked(input, expected_version)
             .await
-            .map_err(|err| internal_error(format!("failed to save workspace client: {err}")))?;
+            .map_err(|err| invalid_request(format!("failed to save workspace client: {err}")))?;
         Ok(Some(
             WorkspaceClientUpsertResponse {
                 client: api_workspace_client_from_state(client)?,
@@ -1752,17 +1744,36 @@ fn api_workspace_client_from_state(
         id: value.id,
         version,
         display_name: value.display_name,
+        legal_first_name: value.legal_first_name,
+        legal_middle_name: value.legal_middle_name,
+        legal_last_name: value.legal_last_name,
+        legal_suffix: value.legal_suffix,
         preferred_name: value.preferred_name,
+        previous_name: value.previous_name,
         date_of_birth: value.date_of_birth,
         sex_or_gender: value.sex_or_gender,
+        administrative_sex: value.administrative_sex,
+        preferred_language: value.preferred_language,
+        interpreter_required: value.interpreter_required,
         external_id: value.external_id,
         record_start_date: value.record_start_date,
         record_end_date: value.record_end_date,
         summary: value.summary,
         primary_phone: value.primary_phone,
+        primary_phone_use: value.primary_phone_use,
         secondary_phone: value.secondary_phone,
+        secondary_phone_use: value.secondary_phone_use,
         email: value.email,
+        primary_email: value.primary_email,
+        secondary_email: value.secondary_email,
         preferred_contact_method: value.preferred_contact_method,
+        address_line_1: value.address_line_1,
+        address_line_2: value.address_line_2,
+        city: value.city,
+        state_or_province: value.state_or_province,
+        postal_code: value.postal_code,
+        country: value.country,
+        address_use: value.address_use,
         emergency_contact_name: value.emergency_contact_name,
         emergency_contact_relationship: value.emergency_contact_relationship,
         emergency_contact_phone: value.emergency_contact_phone,

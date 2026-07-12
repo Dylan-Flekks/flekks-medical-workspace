@@ -6,14 +6,14 @@ Medical Workspace
 Patient: Jordan Patient  DOB: blank  MRN: blank  Contact: Missing contact  Coverage: Missing coverage  Encounter: No encounter
  EXPLORER                          PATIENT CHART                                                                   AGENT WORK
 ┌Patient Directory───────────────┐┌Patient Demographics──────────────────────────────────────────────────────────┐┌Agent Work──────────────────────────────────┐
-│Local search: /                 ││Display: Jordan Patient                                                       ││Patient Chart: Jordan...; Accept proposal   │
-│0 active patients; local only   ││Preferred:                                                                    ││[Pending]  History  Audit  ←/→              │
-│No saved patients yet.          ││DOB:                                                                          ││                                            │
-│New patient: :patient new       ││Sex/Gender:                                                                   ││Pending Proposal Changeset                  │
-│                                ││Patient ID / MRN:                                                             ││Review state: READY · proposal base matches │
-│                                ││Chart start: 2026-01-01                                                       ││current r3                                  │
-│                                ││Chart end: 2026-06-09                                                         ││  Change: replace note note-1 body          │
-│                                ││Summary:                                                                      ││  Guard: expected canonical note r3         │
+│Local search: /                 ││Identity: Jordan Patient · preferred not set                                  ││Patient Chart: Jordan...; Accept proposal   │
+│0 active patients; local only   ││Legal/card: legal name missing                                                ││[Pending]  History  Audit  ←/→              │
+│No saved patients yet.          ││DOB: missing · admin sex: missing · MRN: missing                              ││                                            │
+│New patient: :patient new       ││Contact: phone missing; email missing; method not set                         ││Pending Proposal Changeset                  │
+│                                ││Address: address missing                                                      ││Review state: READY · proposal base matches │
+│                                ││Emergency: name missing; relationship missing; phone missing                  ││current r3                                  │
+│                                ││Coverage: P not entered; S not entered; T not entered                         ││  Change: replace note note-1 body          │
+│                                ││Enter edits all identity/contact fields · Ctrl-P opens actions                ││  Guard: expected canonical note r3         │
 │                                │└──────────────────────────────────────────────────────────────────────────────┘│  Patient: identity only; demographics      │
 │                                │┌Note Title────────────────────────────────────────────────────────────────────┐│untouched                                   │
 └────────────────────────────────┘│Visit note                                                                    ││  Provenance: thread thread-1 · turn turn-1 │

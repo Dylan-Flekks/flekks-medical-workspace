@@ -1,0 +1,49 @@
+---
+source: tui/src/workspace_dashboard.rs
+expression: "render_dashboard_lines_at(&composer, 160, 45)"
+---
+Medical Workspace
+Patient: Jordan Patient  DOB: blank  MRN: blank  Contact: Missing contact  Coverage: Missing coverage  Encounter: No encounter
+ EXPLORER                          PATIENT CHART                                                                   AGENT WORK
+┌Patient Directory───────────────┐┌Patient Demographics──────────────────────────────────────────────────────────┐┌Agent Work──────────────────────────────────┐
+│Local search: /                 ││Identity: Jordan Patient · preferred not set                                  ││Agent: Jordan...; preview                   │
+│0 active patients; local only   ││Legal/card: legal name missing                                                ││[Pending]  History  Audit  ←/→              │
+│No saved patients yet.          ││DOB: missing · admin sex: missing · MRN: missing                              ││                                            │
+│New patient: :patient new       ││Contact: phone missing; email missing; method not set                         ││Local Coach                                 │
+│                                ││Address: address missing                                                      ││  Choose supporting context                 │
+│                                ││Emergency: name missing; relationship missing; phone missing                  ││  Select only the files, reviewed text, and │
+│                                ││Coverage: P not entered; S not entered; T not entered                         ││clips the agent needs for this request.     │
+│                                ││Enter edits all identity/contact fields · Ctrl-P opens actions                ││  ● next: Mark agent context                │
+│                                │└──────────────────────────────────────────────────────────────────────────────┘│  Guidance only; no model call and no chart │
+│                                │┌Note Title────────────────────────────────────────────────────────────────────┐│mutation.                                   │
+│                                ││Visit note                                                                    ││                                            │
+│                                │└──────────────────────────────────────────────────────────────────────────────┘│Mode: > Input |   Packet |   Returned       │
+└────────────────────────────────┘┌Note Body─────────────────────────────────────────────────────────────────────┐│  ● request: edit the local draft below     │
+┌Patient Notes───────────────────┐│Fake human-entered visit note body.                                           ││  Nothing is sent until Packet review and   │
+│Patient Notes                   ││                                                                              ││Ctrl-G.                                     │
+│  New note                      ││                                                                              ││  Local only; the composer stays pinned     │
+│  No patient notes yet. Use     ││                                                                              ││below guidance.                             │
+│:note new.                      ││                                                                              ││                                            │
+│  Medical, communication, and   ││                                                                              ││  ● context: 0 files | 0 text | 0 clips     │
+│admin notes appear here.        ││                                                                              ││  ● review: :agent preview                  │
+│                                ││                                                                              ││Recent History                              │
+│                                ││                                                                              ││  No saved agent work for this note.        │
+│                                ││                                                                              ││                                            │
+└────────────────────────────────┘│                                                                              ││                                            │
+┌Uploaded Documents──────────────┐│                                                                              ││                                            │
+│Uploaded Documents              ││                                                                              ││                                            │
+│No files yet                    ││                                                                              ││                                            │
+│Paste/drop JPG/PDF. Space...    ││                                                                              ││                                            │
+│                                ││                                                                              ││                                            │
+│                                ││                                                                              ││                                            │
+│                                ││                                                                              ││                                            │
+│                                ││                                                                              ││                                            │
+│                                ││                                                                              ││                                            │
+│                                ││                                                                              ││                                            │
+│                                ││                                                                              ││Ask Agent · local · Enter ↵ · Ctrl-G review │
+│                                ││                                                                              ││  Draft assessment                          │
+│                                ││                                                                              ││  Keep goals measurable                     │
+│                                ││                                                                              ││  Flag missing evidence                     │
+│                                ││                                                                              ││                                            │
+└────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────┘└────────────────────────────────────────────┘
+Focus: Agent | Mode: Agent input | Keys: ↑/↓ line  ←/→ cursor  PgUp/PgDn guidance  Ctrl-G send  Tab/⇧Tab pane  Ctrl-P commands | Next: Mark agent context

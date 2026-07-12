@@ -576,6 +576,24 @@ client_request_definitions! {
         serialization: global("workspace"),
         response: v2::WorkspaceClientArchiveResponse,
     },
+    #[experimental("workspace/coverage/list")]
+    WorkspaceCoverageList => "workspace/coverage/list" {
+        params: v2::WorkspaceCoverageListParams,
+        serialization: global_shared_read("workspace"),
+        response: v2::WorkspaceCoverageListResponse,
+    },
+    #[experimental("workspace/coverage/verification/list")]
+    WorkspaceCoverageVerificationList => "workspace/coverage/verification/list" {
+        params: v2::WorkspaceCoverageVerificationListParams,
+        serialization: global_shared_read("workspace"),
+        response: v2::WorkspaceCoverageVerificationListResponse,
+    },
+    #[experimental("workspace/coverage/verification/create")]
+    WorkspaceCoverageVerificationCreate => "workspace/coverage/verification/create" {
+        params: v2::WorkspaceCoverageVerificationCreateParams,
+        serialization: global("workspace"),
+        response: v2::WorkspaceCoverageVerificationCreateResponse,
+    },
     #[experimental("workspace/chart/commit")]
     WorkspaceChartCommit => "workspace/chart/commit" {
         params: v2::WorkspaceChartCommitParams,

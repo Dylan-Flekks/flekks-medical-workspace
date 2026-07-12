@@ -1100,6 +1100,19 @@ impl MessageProcessor {
             ClientRequest::WorkspaceClientArchive { params, .. } => {
                 self.workspace_processor.client_archive(params).await
             }
+            ClientRequest::WorkspaceCoverageList { params, .. } => {
+                self.workspace_processor.coverage_list(params).await
+            }
+            ClientRequest::WorkspaceCoverageVerificationList { params, .. } => {
+                self.workspace_processor
+                    .coverage_verification_list(params)
+                    .await
+            }
+            ClientRequest::WorkspaceCoverageVerificationCreate { params, .. } => {
+                self.workspace_processor
+                    .coverage_verification_create(params)
+                    .await
+            }
             ClientRequest::WorkspaceChartCommit { params, .. } => {
                 self.workspace_processor.chart_commit(params).await
             }

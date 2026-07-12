@@ -82,6 +82,8 @@ mod workspace_chart_commit_ops;
 mod workspace_chart_commit_sql;
 mod workspace_chart_commit_validate;
 mod workspace_chart_commit_versions;
+mod workspace_coverage;
+mod workspace_coverage_identity;
 mod workspace_draft_close;
 mod workspace_drafts;
 mod workspace_guides;

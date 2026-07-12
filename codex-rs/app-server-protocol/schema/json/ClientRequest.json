@@ -4873,6 +4873,170 @@
       ],
       "type": "string"
     },
+    "WorkspaceCoverageUpsertParams": {
+      "properties": {
+        "clientId": {
+          "type": "string"
+        },
+        "coverageNotes": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "coverageStatus": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "coverageType": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "effectiveDate": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "groupNumber": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "memberId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "patientRelationshipToSubscriber": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "payerName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "planName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "priority": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "subscriberAddressLine1": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "subscriberAddressLine2": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "subscriberAddressSameAsPatient": {
+          "type": "boolean"
+        },
+        "subscriberAdministrativeSex": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "subscriberCity": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "subscriberCountry": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "subscriberDateOfBirth": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "subscriberFirstName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "subscriberLastName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "subscriberMiddleName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "subscriberPostalCode": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "subscriberStateOrProvince": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "subscriberSuffix": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "terminationDate": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "clientId",
+        "priority"
+      ],
+      "type": "object"
+    },
+    "WorkspaceCoverageVerificationSubject": {
+      "enum": [
+        "beneficiary",
+        "subscriber"
+      ],
+      "type": "string"
+    },
     "WorkspaceDraftSessionCloseStatus": {
       "enum": [
         "closed",

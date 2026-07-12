@@ -19,6 +19,6 @@ expression: "render_dashboard_lines_at(&dashboard, width, height)"
 │Open returned work review                                     :agent inbox    │
 │Write agent instructions                                    :agent request    │
 │Open last scope                                            :scope last off    │
-│… 100 more                                                                    │
+│… 103 more                                                                    │
 │                                                                              │
 └──────────────────────────────────────────────────────────────────────────────┘

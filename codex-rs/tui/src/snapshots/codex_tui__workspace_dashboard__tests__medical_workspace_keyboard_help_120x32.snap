@@ -24,11 +24,11 @@ Patient: No patient selected  DOB: blank  MRN: blank  Contact: Missing contact  
 │and admin n│  Edit patient demographics :demographics edit                                                │           │
 └───────────│  Edit emergency contact :emergency contact edit                                              │           │
 ┌Uploaded Do│  Edit coverage :coverage edit                                                                │           │
-│Uploaded Do│  New patient :patient new [c]                                                                │           │
-│No files ye│                                                                                              │───────────┘
-│Paste/drop │Search                                                                                        │───────────┐
-│           │  Search patients :patient search [/]                                                         │           │
-│           │                                                                                              │           │
+│Uploaded Do│  Compare coverage card :coverage verify disabled: Save this coverage before comparing the    │           │
+│No files ye│card.                                                                                         │───────────┘
+│Paste/drop │  Restore local draft :draft restore disabled: No recoverable local draft for the active      │───────────┐
+│           │patient and note.                                                                             │           │
+│           │  Discard local draft :draft discard disabled: No recoverable local draft for the active      │           │
 │           └──────────────────────────────────────────────────────────────────────────────────────────────┘           │
 │                            ││                                                                                        │
 │                            ││Intake Checklist                                                                        │

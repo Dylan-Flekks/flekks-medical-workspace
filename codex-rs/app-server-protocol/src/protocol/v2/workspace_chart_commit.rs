@@ -4,6 +4,8 @@ use super::workspace::WorkspaceClient;
 use super::workspace::WorkspaceClientUpsertParams;
 use super::workspace::WorkspaceContextClip;
 use super::workspace::WorkspaceContextClipUpsertParams;
+use super::workspace_coverage::WorkspaceCoverage;
+use super::workspace_coverage::WorkspaceCoverageUpsertParams;
 use super::workspace::WorkspaceDocument;
 use super::workspace::WorkspaceDocumentUpsertParams;
 use super::workspace::WorkspaceEncounter;
@@ -36,6 +38,9 @@ pub struct WorkspaceChartExpectedVersions {
     #[ts(optional = nullable)]
     #[serde(default)]
     pub client: Option<String>,
+    #[ts(optional = nullable)]
+    #[serde(default)]
+    pub coverage: Option<String>,
     #[ts(optional = nullable)]
     #[serde(default)]
     pub safety_item: Option<String>,
@@ -77,6 +82,9 @@ pub struct WorkspaceChartCommitParams {
     pub client: Option<WorkspaceClientUpsertParams>,
     #[ts(optional = nullable)]
     #[serde(default)]
+    pub coverage: Option<WorkspaceCoverageUpsertParams>,
+    #[ts(optional = nullable)]
+    #[serde(default)]
     pub expected_versions: Option<WorkspaceChartExpectedVersions>,
     #[ts(optional = nullable)]
     #[serde(default)]
@@ -106,6 +114,7 @@ pub struct WorkspaceChartCommitParams {
 #[ts(export_to = "v2/")]
 pub enum WorkspaceChartEntityKind {
     Client,
+    Coverage,
     SafetyItem,
     Encounter,
     Note,
@@ -153,6 +162,7 @@ pub struct WorkspaceChartCommitResponse {
     pub replayed: bool,
     pub changed_entity_kinds: Vec<WorkspaceChartEntityKind>,
     pub client: WorkspaceClient,
+    pub coverage: Option<WorkspaceCoverage>,
     pub safety_item: Option<WorkspacePatientSafetyItem>,
     pub encounter: Option<WorkspaceEncounter>,
     pub note: Option<WorkspaceNote>,

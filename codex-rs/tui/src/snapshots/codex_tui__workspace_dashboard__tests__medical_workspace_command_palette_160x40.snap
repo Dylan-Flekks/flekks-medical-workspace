@@ -6,32 +6,32 @@ Medical Workspace
 Patient: Jordan Patient  DOB: blank  MRN: blank  Contact: Missing contact  Coverage: Missing coverage  Encounter: No encounter
  EXPLORER                          PATIENT CHART                                                                   AGENT WORK
 ┌Patient Directory───────────────┐┌Patient Demographics──────────────────────────────────────────────────────────┐┌Agent Work──────────────────────────────────┐
-│Local search: /                 ││Display: Jordan Patient                                                       ││Patient Chart: Jordan...; Save first eval   │
-│0 active patients; local only   ││Preferred:                                                                    ││[Pending]  History  Audit  ←/→              │
-│No saved patients yet.          ││DOB:                                                                          ││                                            │
-│New patient: :patient new       ││Sex/Gender:                                                                   ││Mode: > Input |   Packet |   Returned       │
-│               ┌Commands──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐afted          │
-│               │Search commands  :                                                                                                            │ | 0 clips     │
-│               │Ctrl-P Commands anywhere  Enter run  Esc close  ↑/↓                                                                           │               │
+│Local search: /                 ││Identity: Jordan Patient · preferred not set                                  ││Patient Chart: Jordan...; Save first eval   │
+│0 active patients; local only   ││Legal/card: legal name missing                                                ││[Pending]  History  Audit  ←/→              │
+│No saved patients yet.          ││DOB: missing · admin sex: missing · MRN: missing                              ││                                            │
+│New patient: :patient new       ││Contact: phone missing; email missing; method not set                         ││Local Coach                                 │
+│               ┌Commands──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐               │
+│               │Search commands  :                                                                                                            │ save the new  │
+│               │Ctrl-P Commands anywhere  Enter run  Esc close  ↑/↓                                                                           │ context.      │
 │               │                                                                                                                              │               │
-│               │Recommended now                                                                                                               │               │
-│               │> Search patients                                                                                        :patient search [/]  │hen Ctrl-G     │
-└───────────────│Open patient list                                                                                                :patients    │auto-apply.    │
-┌Patient Notes──│Open patient demographics                                                                                    :demographics    │               │
-│Patient Notes  │Common actions                                                                                                                │               │
-│  Visit note [u│New note                                                                                                     :note new [n]    │               │
+│               │Recommended now                                                                                                               │l and no chart │
+│               │> Search patients                                                                                        :patient search [/]  │               │
+└───────────────│Open patient list                                                                                                :patients    │               │
+┌Patient Notes──│Open patient demographics                                                                                    :demographics    │Returned       │
+│Patient Notes  │Common actions                                                                                                                │afted          │
+│  Visit note [u│New note                                                                                                     :note new [n]    │ | 0 clips     │
 │  Working draft│Save chart workspace                                                                                        :save [Ctrl-S]    │               │
 │to the chart.  │Agent bridge                                                                                                                  │               │
 │  Medical, comm│Review Packet                                                                                               :agent preview    │               │
-│admin notes app│Submit Medical Agent Plan                                                                                      :agent send    │               │
-│               │Open returned work review                                                                                     :agent inbox    │               │
+│admin notes app│Submit Medical Agent Plan                                                                                      :agent send    │hen Ctrl-G     │
+│               │Open returned work review                                                                                     :agent inbox    │auto-apply.    │
 │               │Write agent instructions                                                                                    :agent request    │               │
 └───────────────│Open last scope                                                                                            :scope last off    │               │
 ┌Uploaded Docume│Navigation                                                                                                                    │               │
 │Uploaded Docume│Show workspace actions                                                                                        :actions [?]    │               │
 │No files yet   │Focus note title                                                                                         :focus note title    │               │
 │Paste/drop JPG/│Focus note body                                                                                           :focus note body    │               │
-│               │… 96 more                                                                                                                     │               │
+│               │… 99 more                                                                                                                     │               │
 │               │                                                                                                                              │               │
 │               └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘               │
 │                                ││                                                                              ││                                            │

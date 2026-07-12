@@ -16,6 +16,23 @@ impl WorkspaceRequestProcessor {
         let reason = required_commit_text("reason", params.reason)?;
         let source_thread_id = empty_to_none(params.source_thread_id);
         let source_turn_id = empty_to_none(params.source_turn_id);
+        let client_id = empty_to_none(params.client_id);
+        let existing_client_id = client_id.as_deref().or_else(|| {
+            params
+                .client
+                .as_ref()
+                .and_then(|client| client.id.as_deref())
+        });
+        let existing_client = match (params.client.as_ref(), existing_client_id) {
+            (Some(_), Some(client_id)) => state_db
+                .workspace()
+                .get_client(client_id)
+                .await
+                .map_err(|err| {
+                    internal_error(format!("failed to read workspace client: {err}"))
+                })?,
+            (Some(_), None) | (None, _) => None,
+        };
 
         let request = codex_state::WorkspaceChartCommitRequest {
             idempotency_key,
@@ -23,8 +40,14 @@ impl WorkspaceRequestProcessor {
             reason,
             source_thread_id: source_thread_id.clone(),
             source_turn_id: source_turn_id.clone(),
-            client_id: empty_to_none(params.client_id),
-            client: params.client.map(state_client_upsert),
+            client_id,
+            client: params
+                .client
+                .map(|value| {
+                    super::client_patch::state_client_upsert(value, existing_client.as_ref())
+                })
+                .transpose()?,
+            coverage: params.coverage.map(super::coverage::state_coverage_upsert),
             expected_versions: state_expected_versions(params.expected_versions),
             safety_item: params.safety_item.map(state_safety_item_upsert),
             encounter: params.encounter.map(state_encounter_upsert).transpose()?,
@@ -46,6 +69,27 @@ impl WorkspaceRequestProcessor {
             .commit_chart(request)
             .await
             .map_err(chart_commit_error)?;
+        let committed_coverage_readiness = result.coverage_billing_readiness;
+        let coverage = match result.coverage {
+            Some(coverage) => {
+                let readiness = match committed_coverage_readiness {
+                    Some(readiness) => readiness,
+                    None => state_db
+                        .workspace()
+                        .coverage_billing_readiness(&coverage)
+                        .await
+                        .map_err(|err| {
+                            internal_error(format!(
+                                "failed to derive workspace billing readiness: {err}"
+                            ))
+                        })?,
+                };
+                Some(super::coverage::api_coverage_from_state(
+                    coverage, readiness,
+                )?)
+            }
+            None => None,
+        };
 
         Ok(Some(
             WorkspaceChartCommitResponse {
@@ -58,6 +102,7 @@ impl WorkspaceRequestProcessor {
                     .map(api_entity_kind)
                     .collect(),
                 client: api_workspace_client_from_state(result.client)?,
+                coverage,
                 safety_item: result
                     .safety_item
                     .map(api_workspace_patient_safety_item_from_state)
@@ -88,44 +133,13 @@ impl WorkspaceRequestProcessor {
     }
 }
 
-fn state_client_upsert(
-    value: codex_app_server_protocol::WorkspaceClientUpsertParams,
-) -> codex_state::WorkspaceClientUpsert {
-    codex_state::WorkspaceClientUpsert {
-        id: value.id,
-        display_name: value.display_name,
-        preferred_name: value.preferred_name,
-        date_of_birth: value.date_of_birth,
-        sex_or_gender: value.sex_or_gender,
-        external_id: value.external_id,
-        record_start_date: value.record_start_date,
-        record_end_date: value.record_end_date,
-        summary: value.summary,
-        primary_phone: value.primary_phone,
-        secondary_phone: value.secondary_phone,
-        email: value.email,
-        preferred_contact_method: value.preferred_contact_method,
-        emergency_contact_name: value.emergency_contact_name,
-        emergency_contact_relationship: value.emergency_contact_relationship,
-        emergency_contact_phone: value.emergency_contact_phone,
-        emergency_contact_email: value.emergency_contact_email,
-        contact_notes: value.contact_notes,
-        payer_name: value.payer_name,
-        plan_name: value.plan_name,
-        member_id: value.member_id,
-        group_number: value.group_number,
-        coverage_type: value.coverage_type,
-        coverage_status: value.coverage_status,
-        coverage_notes: value.coverage_notes,
-    }
-}
-
 fn state_expected_versions(
     value: Option<codex_app_server_protocol::WorkspaceChartExpectedVersions>,
 ) -> codex_state::WorkspaceChartExpectedVersions {
     let value = value.unwrap_or_default();
     codex_state::WorkspaceChartExpectedVersions {
         client: empty_to_none(value.client),
+        coverage: empty_to_none(value.coverage),
         safety_item: empty_to_none(value.safety_item),
         encounter: empty_to_none(value.encounter),
         document: empty_to_none(value.document),
@@ -300,6 +314,7 @@ fn state_task_upsert(
 fn api_entity_kind(value: codex_state::WorkspaceChartEntityKind) -> WorkspaceChartEntityKind {
     match value {
         codex_state::WorkspaceChartEntityKind::Client => WorkspaceChartEntityKind::Client,
+        codex_state::WorkspaceChartEntityKind::Coverage => WorkspaceChartEntityKind::Coverage,
         codex_state::WorkspaceChartEntityKind::SafetyItem => WorkspaceChartEntityKind::SafetyItem,
         codex_state::WorkspaceChartEntityKind::Encounter => WorkspaceChartEntityKind::Encounter,
         codex_state::WorkspaceChartEntityKind::Note => WorkspaceChartEntityKind::Note,

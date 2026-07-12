@@ -35,6 +35,20 @@ fn input(
     }
 }
 
+fn append_input(
+    client: &crate::WorkspaceClient,
+    current: &crate::WorkspaceDraftCheckpoint,
+    title: &str,
+) -> crate::WorkspaceDraftCheckpointCreate {
+    crate::WorkspaceDraftCheckpointCreate {
+        session_id: Some(current.session_id.clone()),
+        expected_current_checkpoint_id: Some(current.id.clone()),
+        expected_current_checkpoint_revision: Some(current.revision),
+        expected_current_checkpoint_sha256: Some(current.content_sha256.clone()),
+        ..input(client, None, title)
+    }
+}
+
 async fn checkpoint_error(
     runtime: &StateRuntime,
     input: crate::WorkspaceDraftCheckpointCreate,
@@ -86,25 +100,18 @@ async fn workspace_drafts_checkpoint_is_normalized_idempotent_and_revisioned() {
         format!("{:x}", sha2::Sha256::digest(first.draft_json.as_bytes()))
     );
 
-    let replay = save(
-        &runtime,
-        input(&client, Some(first.session_id.clone()), "First"),
-    )
-    .await;
+    let replay = save(&runtime, append_input(&client, &first, "First")).await;
     assert!(replay.replayed);
     assert_eq!(replay.id, first.id);
-    let second = save(
-        &runtime,
-        input(&client, Some(first.session_id.clone()), "Second"),
-    )
-    .await;
+    let second_request = append_input(&client, &first, "Second");
+    let second = save(&runtime, second_request.clone()).await;
     assert_eq!(second.revision, 2);
 
-    save(
-        &runtime,
-        input(&client, Some(first.session_id.clone()), "First"),
-    )
-    .await;
+    let second_replay = save(&runtime, second_request).await;
+    assert!(second_replay.replayed);
+    assert_eq!(second_replay.id, second.id);
+    let backward = checkpoint_error(&runtime, append_input(&client, &second, "First")).await;
+    assert!(backward.contains("cannot move the session head backward"));
     let current = runtime
         .workspace()
         .list_draft_checkpoints(crate::WorkspaceDraftCheckpointFilter {
@@ -113,7 +120,7 @@ async fn workspace_drafts_checkpoint_is_normalized_idempotent_and_revisioned() {
         })
         .await
         .expect("current checkpoint should list");
-    assert_eq!(current[0].id, first.id);
+    assert_eq!(current[0].id, second.id);
     let history = runtime
         .workspace()
         .list_draft_checkpoints(crate::WorkspaceDraftCheckpointFilter {
@@ -155,10 +162,10 @@ async fn workspace_drafts_checkpoint_is_normalized_idempotent_and_revisioned() {
         })
         .await
         .expect("draft sessions should list");
-    assert_eq!(sessions[0].session.current_revision, 1);
-    assert_eq!(sessions[0].current_checkpoint.id, first.id);
+    assert_eq!(sessions[0].session.current_revision, 2);
+    assert_eq!(sessions[0].current_checkpoint.id, second.id);
 
-    let mut mismatch = input(&client, Some(first.session_id), "First");
+    let mut mismatch = append_input(&client, &first, "Second");
     mismatch.note_id = Some("different-note".to_string());
     let error = checkpoint_error(&runtime, mismatch).await;
     assert!(error.contains("different metadata"));
@@ -194,6 +201,70 @@ async fn workspace_drafts_checkpoint_validates_client_schema_and_size() {
             .await
             .contains("normalized limit")
     );
+
+    let first = save(&runtime, input(&client, None, "First")).await;
+    let mut new_with_expected = input(&client, None, "New with expected");
+    new_with_expected.expected_current_checkpoint_id = Some(first.id.clone());
+    new_with_expected.expected_current_checkpoint_revision = Some(first.revision);
+    new_with_expected.expected_current_checkpoint_sha256 = Some(first.content_sha256.clone());
+    assert!(
+        checkpoint_error(&runtime, new_with_expected)
+            .await
+            .contains("new-session checkpoint must omit")
+    );
+
+    assert!(
+        checkpoint_error(
+            &runtime,
+            input(&client, Some(first.session_id.clone()), "Missing CAS")
+        )
+        .await
+        .contains("existing-session append requires")
+    );
+
+    let mut partial = append_input(&client, &first, "Partial CAS");
+    partial.expected_current_checkpoint_sha256 = None;
+    assert!(
+        checkpoint_error(&runtime, partial)
+            .await
+            .contains("must be provided together")
+    );
+}
+
+#[tokio::test]
+async fn workspace_draft_append_cas_allows_one_concurrent_owner_and_exact_retry() {
+    let (runtime, client) = fixture().await;
+    let first = save(&runtime, input(&client, None, "First")).await;
+    let owner_a = append_input(&client, &first, "Owner A");
+    let owner_b = append_input(&client, &first, "Owner B");
+
+    let (result_a, result_b) = tokio::join!(
+        runtime
+            .workspace()
+            .create_draft_checkpoint(owner_a.clone()),
+        runtime
+            .workspace()
+            .create_draft_checkpoint(owner_b.clone()),
+    );
+    let (winner, winner_request, loser_error) = match (result_a, result_b) {
+        (Ok(winner), Err(error)) => (winner, owner_a, error),
+        (Err(error), Ok(winner)) => (winner, owner_b, error),
+        results => panic!("exactly one concurrent append should win, got {results:?}"),
+    };
+    assert!(loser_error.to_string().contains("current checkpoint changed"));
+
+    let replay = save(&runtime, winner_request).await;
+    assert!(replay.replayed);
+    assert_eq!(replay.id, winner.id);
+    let sessions = runtime
+        .workspace()
+        .list_draft_sessions(crate::WorkspaceDraftSessionFilter {
+            client_id: client.id,
+            ..Default::default()
+        })
+        .await
+        .expect("winning session head should list");
+    assert_eq!(sessions[0].current_checkpoint, winner);
 }
 
 #[tokio::test]
@@ -357,7 +428,7 @@ async fn workspace_drafts_discard_is_durable_idempotent_and_client_scoped() {
             .expect("active sessions should list")
             .is_empty()
     );
-    let rejected = input(&client, Some(checkpoint.session_id), "Newer");
+    let rejected = append_input(&client, &checkpoint, "Newer");
     assert!(
         checkpoint_error(&runtime, rejected)
             .await
@@ -393,11 +464,7 @@ async fn workspace_draft_close_rejects_stale_current_checkpoint_provenance() {
         );
     }
 
-    let newer = save(
-        &runtime,
-        input(&client, Some(first.session_id.clone()), "Newer"),
-    )
-    .await;
+    let newer = save(&runtime, append_input(&client, &first, "Newer")).await;
     assert!(
         runtime
             .workspace()

@@ -11,6 +11,15 @@ use crate::external_agent_config_migration_flow::ExternalAgentConfigMigrationFlo
 use codex_config::types::WindowsSandboxModeToml;
 
 const SHUTDOWN_FIRST_EXIT_TIMEOUT: Duration = Duration::from_secs(/*secs*/ 2);
+const REMOTE_MEDICAL_WORKSPACE_BLOCK_MESSAGE: &str = "Medical Workspace is local-only and cannot open against a remote app-server store. Reconnect with the local app-server before using /workspacemedical.";
+
+fn remote_workspace_block_message(
+    profile: WorkspaceProfile,
+    uses_remote_workspace: bool,
+) -> Option<&'static str> {
+    (profile == WorkspaceProfile::Medical && uses_remote_workspace)
+        .then_some(REMOTE_MEDICAL_WORKSPACE_BLOCK_MESSAGE)
+}
 
 impl App {
     pub(super) async fn handle_event(
@@ -21,8 +30,54 @@ impl App {
     ) -> Result<AppRunControl> {
         match event {
             AppEvent::OpenWorkspaceDashboard { profile } => {
+                if profile != WorkspaceProfile::Medical
+                    && self.workspace_draft_recovery_pending()
+                {
+                    self.chat_widget.add_error_message(
+                        "A Medical Workspace recovery is pending. Reopen /workspacemedical and explicitly restore or discard it before switching workspace profiles."
+                            .to_string(),
+                    );
+                    tui.frame_requester().schedule_frame();
+                    return Ok(AppRunControl::Continue);
+                }
+                if let Some(message) =
+                    remote_workspace_block_message(profile, app_server.uses_remote_workspace())
+                {
+                    self.chat_widget.add_error_message(message.to_string());
+                    tui.frame_requester().schedule_frame();
+                    return Ok(AppRunControl::Continue);
+                }
+                let switching_profiles = self
+                    .workspace_dashboard
+                    .as_ref()
+                    .is_some_and(|dashboard| dashboard.profile() != profile);
+                if switching_profiles {
+                    let leaving_medical = self.workspace_dashboard.as_ref().is_some_and(|dashboard| {
+                        dashboard.profile() == WorkspaceProfile::Medical
+                    });
+                    if leaving_medical
+                        && let Err(error) = self
+                            .flush_workspace_draft(
+                                app_server,
+                                WorkspaceDraftCheckpointTrigger::WorkspaceClose,
+                            )
+                            .await
+                    {
+                        self.chat_widget.add_error_message(format!(
+                            "Workspace profile switch blocked until the local medical draft is checkpointed: {error}"
+                        ));
+                        tui.frame_requester().schedule_frame();
+                        return Ok(AppRunControl::Continue);
+                    }
+                    self.workspace_dashboard = None;
+                }
                 let _ = tui.enter_workspace_alt_screen();
-                if self.workspace_dashboard.is_none() {
+                // Entering from an already-active alternate screen does not perform a raw clear.
+                // Invalidate the prior chat diff buffer so the first workspace frame still paints
+                // every cell without introducing an intermediate blank screen.
+                tui.terminal.invalidate_viewport();
+                let opened_new_dashboard = self.workspace_dashboard.is_none();
+                if opened_new_dashboard {
                     let mut dashboard = WorkspaceDashboard::new(profile);
                     if app_server.uses_remote_workspace() {
                         dashboard.set_store_description("Remote app-server workspace store");
@@ -46,6 +101,9 @@ impl App {
                     dashboard.set_profile(profile);
                 }
                 self.workspace_dashboard_visible = true;
+                if opened_new_dashboard || self.workspace_draft_recovery_needs_retry() {
+                    self.initialize_workspace_draft_recovery(app_server).await;
+                }
                 tui.frame_requester().schedule_frame();
             }
             AppEvent::NewSession => {
@@ -2487,5 +2545,28 @@ impl App {
                 AppRunControl::Continue
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::REMOTE_MEDICAL_WORKSPACE_BLOCK_MESSAGE;
+    use super::WorkspaceProfile;
+    use super::remote_workspace_block_message;
+
+    #[test]
+    fn remote_store_blocks_medical_workspace_but_not_generic_workspace() {
+        assert_eq!(
+            remote_workspace_block_message(WorkspaceProfile::Medical, true),
+            Some(REMOTE_MEDICAL_WORKSPACE_BLOCK_MESSAGE)
+        );
+        assert_eq!(
+            remote_workspace_block_message(WorkspaceProfile::Generic, true),
+            None
+        );
+        assert_eq!(
+            remote_workspace_block_message(WorkspaceProfile::Medical, false),
+            None
+        );
     }
 }

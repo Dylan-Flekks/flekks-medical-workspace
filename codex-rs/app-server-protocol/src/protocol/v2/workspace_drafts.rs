@@ -73,6 +73,13 @@ pub struct WorkspaceDraftCheckpointCreateParams {
     pub session_id: Option<String>,
     pub client_id: String,
     #[ts(optional = nullable)]
+    pub expected_current_checkpoint_id: Option<String>,
+    #[ts(type = "number | null")]
+    #[ts(optional = nullable)]
+    pub expected_current_checkpoint_revision: Option<i64>,
+    #[ts(optional = nullable)]
+    pub expected_current_checkpoint_sha256: Option<String>,
+    #[ts(optional = nullable)]
     pub encounter_id: Option<String>,
     #[ts(optional = nullable)]
     pub note_id: Option<String>,

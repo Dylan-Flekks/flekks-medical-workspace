@@ -10,17 +10,37 @@ pub struct WorkspaceClient {
     pub id: String,
     pub version: String,
     pub display_name: String,
+    pub legal_first_name: Option<String>,
+    pub legal_middle_name: Option<String>,
+    pub legal_last_name: Option<String>,
+    pub legal_suffix: Option<String>,
     pub preferred_name: Option<String>,
+    pub previous_name: Option<String>,
     pub date_of_birth: Option<String>,
     pub sex_or_gender: Option<String>,
+    pub administrative_sex: Option<String>,
+    pub preferred_language: Option<String>,
+    #[serde(default)]
+    pub interpreter_required: bool,
     pub external_id: Option<String>,
     pub record_start_date: Option<String>,
     pub record_end_date: Option<String>,
     pub summary: String,
     pub primary_phone: Option<String>,
+    pub primary_phone_use: Option<String>,
     pub secondary_phone: Option<String>,
+    pub secondary_phone_use: Option<String>,
     pub email: Option<String>,
+    pub primary_email: Option<String>,
+    pub secondary_email: Option<String>,
     pub preferred_contact_method: Option<String>,
+    pub address_line_1: Option<String>,
+    pub address_line_2: Option<String>,
+    pub city: Option<String>,
+    pub state_or_province: Option<String>,
+    pub postal_code: Option<String>,
+    pub country: Option<String>,
+    pub address_use: Option<String>,
     pub emergency_contact_name: Option<String>,
     pub emergency_contact_relationship: Option<String>,
     pub emergency_contact_phone: Option<String>,
@@ -71,19 +91,174 @@ pub struct WorkspaceClientGetResponse {
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
 pub struct WorkspaceClientUpsertParams {
+    #[ts(optional = nullable)]
     pub id: Option<String>,
+    #[ts(optional = nullable)]
+    pub expected_version: Option<String>,
     pub display_name: String,
+    #[serde(
+        default,
+        deserialize_with = "crate::protocol::serde_helpers::deserialize_double_option",
+        serialize_with = "crate::protocol::serde_helpers::serialize_double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[ts(type = "string | null", optional = nullable)]
+    pub legal_first_name: Option<Option<String>>,
+    #[serde(
+        default,
+        deserialize_with = "crate::protocol::serde_helpers::deserialize_double_option",
+        serialize_with = "crate::protocol::serde_helpers::serialize_double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[ts(type = "string | null", optional = nullable)]
+    pub legal_middle_name: Option<Option<String>>,
+    #[serde(
+        default,
+        deserialize_with = "crate::protocol::serde_helpers::deserialize_double_option",
+        serialize_with = "crate::protocol::serde_helpers::serialize_double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[ts(type = "string | null", optional = nullable)]
+    pub legal_last_name: Option<Option<String>>,
+    #[serde(
+        default,
+        deserialize_with = "crate::protocol::serde_helpers::deserialize_double_option",
+        serialize_with = "crate::protocol::serde_helpers::serialize_double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[ts(type = "string | null", optional = nullable)]
+    pub legal_suffix: Option<Option<String>>,
     pub preferred_name: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "crate::protocol::serde_helpers::deserialize_double_option",
+        serialize_with = "crate::protocol::serde_helpers::serialize_double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[ts(type = "string | null", optional = nullable)]
+    pub previous_name: Option<Option<String>>,
     pub date_of_birth: Option<String>,
     pub sex_or_gender: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "crate::protocol::serde_helpers::deserialize_double_option",
+        serialize_with = "crate::protocol::serde_helpers::serialize_double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[ts(type = "string | null", optional = nullable)]
+    pub administrative_sex: Option<Option<String>>,
+    #[serde(
+        default,
+        deserialize_with = "crate::protocol::serde_helpers::deserialize_double_option",
+        serialize_with = "crate::protocol::serde_helpers::serialize_double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[ts(type = "string | null", optional = nullable)]
+    pub preferred_language: Option<Option<String>>,
+    #[serde(
+        default,
+        deserialize_with = "crate::protocol::serde_helpers::deserialize_double_option",
+        serialize_with = "crate::protocol::serde_helpers::serialize_double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[ts(type = "boolean | null", optional = nullable)]
+    pub interpreter_required: Option<Option<bool>>,
     pub external_id: Option<String>,
     pub record_start_date: Option<String>,
     pub record_end_date: Option<String>,
     pub summary: String,
     pub primary_phone: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "crate::protocol::serde_helpers::deserialize_double_option",
+        serialize_with = "crate::protocol::serde_helpers::serialize_double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[ts(type = "string | null", optional = nullable)]
+    pub primary_phone_use: Option<Option<String>>,
     pub secondary_phone: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "crate::protocol::serde_helpers::deserialize_double_option",
+        serialize_with = "crate::protocol::serde_helpers::serialize_double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[ts(type = "string | null", optional = nullable)]
+    pub secondary_phone_use: Option<Option<String>>,
     pub email: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "crate::protocol::serde_helpers::deserialize_double_option",
+        serialize_with = "crate::protocol::serde_helpers::serialize_double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[ts(type = "string | null", optional = nullable)]
+    pub primary_email: Option<Option<String>>,
+    #[serde(
+        default,
+        deserialize_with = "crate::protocol::serde_helpers::deserialize_double_option",
+        serialize_with = "crate::protocol::serde_helpers::serialize_double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[ts(type = "string | null", optional = nullable)]
+    pub secondary_email: Option<Option<String>>,
     pub preferred_contact_method: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "crate::protocol::serde_helpers::deserialize_double_option",
+        serialize_with = "crate::protocol::serde_helpers::serialize_double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[ts(type = "string | null", optional = nullable)]
+    pub address_line_1: Option<Option<String>>,
+    #[serde(
+        default,
+        deserialize_with = "crate::protocol::serde_helpers::deserialize_double_option",
+        serialize_with = "crate::protocol::serde_helpers::serialize_double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[ts(type = "string | null", optional = nullable)]
+    pub address_line_2: Option<Option<String>>,
+    #[serde(
+        default,
+        deserialize_with = "crate::protocol::serde_helpers::deserialize_double_option",
+        serialize_with = "crate::protocol::serde_helpers::serialize_double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[ts(type = "string | null", optional = nullable)]
+    pub city: Option<Option<String>>,
+    #[serde(
+        default,
+        deserialize_with = "crate::protocol::serde_helpers::deserialize_double_option",
+        serialize_with = "crate::protocol::serde_helpers::serialize_double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[ts(type = "string | null", optional = nullable)]
+    pub state_or_province: Option<Option<String>>,
+    #[serde(
+        default,
+        deserialize_with = "crate::protocol::serde_helpers::deserialize_double_option",
+        serialize_with = "crate::protocol::serde_helpers::serialize_double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[ts(type = "string | null", optional = nullable)]
+    pub postal_code: Option<Option<String>>,
+    #[serde(
+        default,
+        deserialize_with = "crate::protocol::serde_helpers::deserialize_double_option",
+        serialize_with = "crate::protocol::serde_helpers::serialize_double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[ts(type = "string | null", optional = nullable)]
+    pub country: Option<Option<String>>,
+    #[serde(
+        default,
+        deserialize_with = "crate::protocol::serde_helpers::deserialize_double_option",
+        serialize_with = "crate::protocol::serde_helpers::serialize_double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[ts(type = "string | null", optional = nullable)]
+    pub address_use: Option<Option<String>>,
     pub emergency_contact_name: Option<String>,
     pub emergency_contact_relationship: Option<String>,
     pub emergency_contact_phone: Option<String>,

@@ -1,5 +1,15 @@
 mod chart_changeset;
+mod coach;
+mod coverage;
+mod coverage_actions;
+mod coverage_render;
+mod client_draft;
 mod footer;
+mod patient_admin_fields;
+mod patient_admin_input;
+mod patient_admin_metadata;
+mod patient_admin_render;
+mod working_draft_recovery;
 
 use crate::app_server_session::AppServerSession;
 use crate::clipboard_paste::normalize_pasted_path;
@@ -37,9 +47,27 @@ use crate::workspace_context_assembly::edi_transaction_label;
 use crate::workspace_context_assembly::edi_transaction_label_from_text;
 use crate::workspace_context_assembly::provider_file_reference_summary;
 use crate::workspace_context_assembly::provider_reviewed_text_summary;
+use crate::workspace_editor::WorkspaceEditor;
+use crate::workspace_draft::MedicalWorkspaceWorkingDraftInput;
+use crate::workspace_draft::MedicalWorkspaceWorkingDraftV1;
+use crate::workspace_draft::WorkspaceDraftError;
 use chart_changeset::ChartChangesetPurpose;
 use chart_changeset::ChartChangesetReviewState;
 use chart_changeset::PendingChartChangeset;
+use client_draft::ClientDraft;
+use coach::WorkspaceCoachAdvice;
+use coach::WorkspaceCoachState;
+use coach::workspace_coach_advice;
+use coverage::CARD_VERIFICATION_ENTRY_HELP;
+use coverage::CardVerificationDraft;
+use coverage::CoverageDraft;
+use coverage::CoverageField;
+use coverage::CoveragePriority;
+use coverage::billing_readiness_label;
+use coverage::billing_readiness_summary;
+use coverage::verification_subject_label;
+use coverage_actions::coverage_draft_has_input;
+use coverage_render::CardVerificationField;
 use chrono::DateTime;
 use chrono::Utc;
 use codex_app_server_client::TypedRequestError;
@@ -53,6 +81,7 @@ use codex_app_server_protocol::WorkspaceArtifactDerivativeStatusUpdateParams;
 use codex_app_server_protocol::WorkspaceArtifactDerivativeUpsertParams;
 use codex_app_server_protocol::WorkspaceAuditEvent;
 use codex_app_server_protocol::WorkspaceAuditListParams;
+use codex_app_server_protocol::WorkspaceBillingReadiness;
 use codex_app_server_protocol::WorkspaceChartCommitErrorData;
 use codex_app_server_protocol::WorkspaceChartCommitParams;
 use codex_app_server_protocol::WorkspaceChartCommitResponse;
@@ -68,6 +97,14 @@ use codex_app_server_protocol::WorkspaceContextClipUpsertParams;
 use codex_app_server_protocol::WorkspaceContextPacket;
 use codex_app_server_protocol::WorkspaceContextPacketCreateParams;
 use codex_app_server_protocol::WorkspaceContextPacketListParams;
+use codex_app_server_protocol::WorkspaceCoverage;
+use codex_app_server_protocol::WorkspaceCoverageListParams;
+use codex_app_server_protocol::WorkspaceCoverageMatchResult;
+use codex_app_server_protocol::WorkspaceCoverageUpsertParams;
+use codex_app_server_protocol::WorkspaceCoverageVerification;
+use codex_app_server_protocol::WorkspaceCoverageVerificationCreateParams;
+use codex_app_server_protocol::WorkspaceCoverageVerificationListParams;
+use codex_app_server_protocol::WorkspaceCoverageVerificationSubject;
 use codex_app_server_protocol::WorkspaceDocument;
 use codex_app_server_protocol::WorkspaceDocumentUpsertParams;
 use codex_app_server_protocol::WorkspaceEncounter;
@@ -101,6 +138,11 @@ use footer::MedicalKeyContext;
 use footer::compose_legacy_footer;
 use footer::compose_medical_footer;
 use footer::compose_mode_footer;
+use patient_admin_fields::DemographicsField;
+use patient_admin_fields::PatientAdminEditMode;
+use patient_admin_fields::PatientAdminField;
+use patient_admin_metadata::patient_admin_metadata_for_client;
+use patient_admin_metadata::patient_admin_metadata_for_draft;
 use image::GenericImageView;
 use image::imageops::FilterType;
 use ratatui::buffer::Buffer;
@@ -132,6 +174,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 use std::time::Instant;
 use std::time::UNIX_EPOCH;
+use uuid::Uuid;
 
 // Failure/recovery invariant for the medical workspace:
 // - failed or blocked actions must not leave optimistic saved state behind
@@ -223,6 +266,7 @@ pub(crate) enum WorkspaceDashboardAction {
         body: String,
     },
     Consumed,
+    CheckpointDraft,
     Close,
     CloseAndDiscard,
     EnsureEncounter,
@@ -248,7 +292,10 @@ pub(crate) enum WorkspaceDashboardAction {
     },
     SaveDroppedFileReferences(Vec<WorkspaceDocumentUpsertParams>),
     SendContextToAgent,
+    StartNewClient,
+    StartNewNote,
     SelectClient(usize),
+    SelectCoveragePriority(i64),
     SelectNote(usize),
     SignNote,
     UpdateAgentResultStatus {
@@ -266,6 +313,9 @@ pub(crate) enum WorkspaceDashboardAction {
     ConvertAgentResultToProposal {
         result_id: String,
     },
+    CreateCoverageVerification(WorkspaceCoverageVerificationCreateParams),
+    RestoreLocalDraft,
+    DiscardLocalDraft,
     UpdateTaskStatus {
         task_id: String,
         status: WorkspaceTaskStatus,
@@ -635,571 +685,6 @@ fn medical_scope_tab_for_section(section: MedicalWorkflowSection) -> MedicalScop
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DemographicsField {
-    DisplayName,
-    PreferredName,
-    DateOfBirth,
-    SexOrGender,
-    ExternalId,
-    RecordStartDate,
-    RecordEndDate,
-    Summary,
-}
-
-impl DemographicsField {
-    const ALL: [Self; 8] = [
-        Self::DisplayName,
-        Self::PreferredName,
-        Self::DateOfBirth,
-        Self::SexOrGender,
-        Self::ExternalId,
-        Self::RecordStartDate,
-        Self::RecordEndDate,
-        Self::Summary,
-    ];
-
-    fn index(self) -> usize {
-        Self::ALL
-            .iter()
-            .position(|field| *field == self)
-            .unwrap_or(0)
-    }
-
-    fn next(self) -> Self {
-        Self::ALL[(self.index() + 1) % Self::ALL.len()]
-    }
-
-    fn previous(self) -> Self {
-        let index = self.index();
-        Self::ALL[(index + Self::ALL.len() - 1) % Self::ALL.len()]
-    }
-
-    fn label(self, profile: WorkspaceProfile) -> &'static str {
-        match (profile, self) {
-            (_, Self::DisplayName) => "Display",
-            (_, Self::PreferredName) => "Preferred",
-            (_, Self::DateOfBirth) => "DOB",
-            (_, Self::SexOrGender) => "Sex/Gender",
-            (WorkspaceProfile::Medical, Self::ExternalId) => "Patient ID / MRN",
-            (_, Self::ExternalId) => "External ID",
-            (WorkspaceProfile::Medical, Self::RecordStartDate) => "Chart start",
-            (WorkspaceProfile::Medical, Self::RecordEndDate) => "Chart end",
-            (_, Self::RecordStartDate) => "Record start",
-            (_, Self::RecordEndDate) => "Record end",
-            (_, Self::Summary) => "Summary",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PatientAdminEditMode {
-    Contact,
-    Coverage,
-}
-
-impl PatientAdminEditMode {
-    fn title(self) -> &'static str {
-        match self {
-            Self::Contact => "Patient Demographics Editor",
-            Self::Coverage => "Coverage Editor",
-        }
-    }
-
-    fn fields(self) -> &'static [PatientAdminField] {
-        match self {
-            Self::Contact => &CONTACT_ADMIN_FIELDS,
-            Self::Coverage => &COVERAGE_ADMIN_FIELDS,
-        }
-    }
-
-    fn first_field(self) -> PatientAdminField {
-        self.fields()
-            .first()
-            .copied()
-            .unwrap_or(PatientAdminField::PrimaryPhone)
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PatientAdminField {
-    PrimaryPhone,
-    SecondaryPhone,
-    Email,
-    PreferredContactMethod,
-    EmergencyContactName,
-    EmergencyContactRelationship,
-    EmergencyContactPhone,
-    EmergencyContactEmail,
-    ContactNotes,
-    PayerName,
-    PlanName,
-    MemberId,
-    GroupNumber,
-    CoverageType,
-    CoverageStatus,
-    CoverageNotes,
-}
-
-const CONTACT_ADMIN_FIELDS: [PatientAdminField; 9] = [
-    PatientAdminField::PrimaryPhone,
-    PatientAdminField::SecondaryPhone,
-    PatientAdminField::Email,
-    PatientAdminField::PreferredContactMethod,
-    PatientAdminField::EmergencyContactName,
-    PatientAdminField::EmergencyContactRelationship,
-    PatientAdminField::EmergencyContactPhone,
-    PatientAdminField::EmergencyContactEmail,
-    PatientAdminField::ContactNotes,
-];
-
-const COVERAGE_ADMIN_FIELDS: [PatientAdminField; 7] = [
-    PatientAdminField::PayerName,
-    PatientAdminField::PlanName,
-    PatientAdminField::MemberId,
-    PatientAdminField::GroupNumber,
-    PatientAdminField::CoverageType,
-    PatientAdminField::CoverageStatus,
-    PatientAdminField::CoverageNotes,
-];
-
-impl PatientAdminField {
-    fn mode(self) -> PatientAdminEditMode {
-        match self {
-            Self::PrimaryPhone
-            | Self::SecondaryPhone
-            | Self::Email
-            | Self::PreferredContactMethod
-            | Self::EmergencyContactName
-            | Self::EmergencyContactRelationship
-            | Self::EmergencyContactPhone
-            | Self::EmergencyContactEmail
-            | Self::ContactNotes => PatientAdminEditMode::Contact,
-            Self::PayerName
-            | Self::PlanName
-            | Self::MemberId
-            | Self::GroupNumber
-            | Self::CoverageType
-            | Self::CoverageStatus
-            | Self::CoverageNotes => PatientAdminEditMode::Coverage,
-        }
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::PrimaryPhone => "Primary phone",
-            Self::SecondaryPhone => "Secondary phone",
-            Self::Email => "Email",
-            Self::PreferredContactMethod => "Preferred contact",
-            Self::EmergencyContactName => "Emergency name",
-            Self::EmergencyContactRelationship => "Emergency relation",
-            Self::EmergencyContactPhone => "Emergency phone",
-            Self::EmergencyContactEmail => "Emergency email",
-            Self::ContactNotes => "Contact notes",
-            Self::PayerName => "Payer",
-            Self::PlanName => "Plan name",
-            Self::MemberId => "Member ID / Medicare ID",
-            Self::GroupNumber => "Group number",
-            Self::CoverageType => "Coverage type",
-            Self::CoverageStatus => "Coverage status",
-            Self::CoverageNotes => "Coverage notes",
-        }
-    }
-
-    fn next_in(self, mode: PatientAdminEditMode) -> Self {
-        let fields = mode.fields();
-        let index = fields.iter().position(|field| *field == self).unwrap_or(0);
-        fields[(index + 1) % fields.len()]
-    }
-
-    fn previous_in(self, mode: PatientAdminEditMode) -> Self {
-        let fields = mode.fields();
-        let index = fields.iter().position(|field| *field == self).unwrap_or(0);
-        fields[(index + fields.len() - 1) % fields.len()]
-    }
-
-    fn placeholder(self) -> &'static str {
-        match self.mode() {
-            PatientAdminEditMode::Contact => "missing",
-            PatientAdminEditMode::Coverage => "not set",
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-struct ClientDraft {
-    id: Option<String>,
-    display_name: String,
-    preferred_name: String,
-    date_of_birth: String,
-    sex_or_gender: String,
-    external_id: String,
-    record_start_date: String,
-    record_end_date: String,
-    summary: String,
-    primary_phone: String,
-    secondary_phone: String,
-    email: String,
-    preferred_contact_method: String,
-    emergency_contact_name: String,
-    emergency_contact_relationship: String,
-    emergency_contact_phone: String,
-    emergency_contact_email: String,
-    contact_notes: String,
-    payer_name: String,
-    plan_name: String,
-    member_id: String,
-    group_number: String,
-    coverage_type: String,
-    coverage_status: String,
-    coverage_notes: String,
-}
-
-impl Default for ClientDraft {
-    fn default() -> Self {
-        Self {
-            id: None,
-            display_name: "New client".to_string(),
-            preferred_name: String::new(),
-            date_of_birth: String::new(),
-            sex_or_gender: String::new(),
-            external_id: String::new(),
-            record_start_date: String::new(),
-            record_end_date: String::new(),
-            summary: String::new(),
-            primary_phone: String::new(),
-            secondary_phone: String::new(),
-            email: String::new(),
-            preferred_contact_method: String::new(),
-            emergency_contact_name: String::new(),
-            emergency_contact_relationship: String::new(),
-            emergency_contact_phone: String::new(),
-            emergency_contact_email: String::new(),
-            contact_notes: String::new(),
-            payer_name: String::new(),
-            plan_name: String::new(),
-            member_id: String::new(),
-            group_number: String::new(),
-            coverage_type: String::new(),
-            coverage_status: String::new(),
-            coverage_notes: String::new(),
-        }
-    }
-}
-
-impl ClientDraft {
-    fn from_client(client: &WorkspaceClient) -> Self {
-        Self {
-            id: Some(client.id.clone()),
-            display_name: client.display_name.clone(),
-            preferred_name: client.preferred_name.clone().unwrap_or_default(),
-            date_of_birth: client.date_of_birth.clone().unwrap_or_default(),
-            sex_or_gender: client.sex_or_gender.clone().unwrap_or_default(),
-            external_id: client.external_id.clone().unwrap_or_default(),
-            record_start_date: client.record_start_date.clone().unwrap_or_default(),
-            record_end_date: client.record_end_date.clone().unwrap_or_default(),
-            summary: client.summary.clone(),
-            primary_phone: client.primary_phone.clone().unwrap_or_default(),
-            secondary_phone: client.secondary_phone.clone().unwrap_or_default(),
-            email: client.email.clone().unwrap_or_default(),
-            preferred_contact_method: client.preferred_contact_method.clone().unwrap_or_default(),
-            emergency_contact_name: client.emergency_contact_name.clone().unwrap_or_default(),
-            emergency_contact_relationship: client
-                .emergency_contact_relationship
-                .clone()
-                .unwrap_or_default(),
-            emergency_contact_phone: client.emergency_contact_phone.clone().unwrap_or_default(),
-            emergency_contact_email: client.emergency_contact_email.clone().unwrap_or_default(),
-            contact_notes: client.contact_notes.clone().unwrap_or_default(),
-            payer_name: client.payer_name.clone().unwrap_or_default(),
-            plan_name: client.plan_name.clone().unwrap_or_default(),
-            member_id: client.member_id.clone().unwrap_or_default(),
-            group_number: client.group_number.clone().unwrap_or_default(),
-            coverage_type: client.coverage_type.clone().unwrap_or_default(),
-            coverage_status: client.coverage_status.clone().unwrap_or_default(),
-            coverage_notes: client.coverage_notes.clone().unwrap_or_default(),
-        }
-    }
-
-    fn upsert_params(&self) -> WorkspaceClientUpsertParams {
-        WorkspaceClientUpsertParams {
-            id: self.id.clone(),
-            display_name: self.display_name.trim().to_string(),
-            preferred_name: nonempty_option(&self.preferred_name),
-            date_of_birth: nonempty_option(&self.date_of_birth),
-            sex_or_gender: nonempty_option(&self.sex_or_gender),
-            external_id: nonempty_option(&self.external_id),
-            record_start_date: nonempty_option(&self.record_start_date),
-            record_end_date: nonempty_option(&self.record_end_date),
-            summary: self.summary.clone(),
-            primary_phone: nonempty_option(&self.primary_phone),
-            secondary_phone: nonempty_option(&self.secondary_phone),
-            email: nonempty_option(&self.email),
-            preferred_contact_method: nonempty_option(&self.preferred_contact_method),
-            emergency_contact_name: nonempty_option(&self.emergency_contact_name),
-            emergency_contact_relationship: nonempty_option(&self.emergency_contact_relationship),
-            emergency_contact_phone: nonempty_option(&self.emergency_contact_phone),
-            emergency_contact_email: nonempty_option(&self.emergency_contact_email),
-            contact_notes: nonempty_option(&self.contact_notes),
-            payer_name: nonempty_option(&self.payer_name),
-            plan_name: nonempty_option(&self.plan_name),
-            member_id: nonempty_option(&self.member_id),
-            group_number: nonempty_option(&self.group_number),
-            coverage_type: nonempty_option(&self.coverage_type),
-            coverage_status: nonempty_option(&self.coverage_status),
-            coverage_notes: nonempty_option(&self.coverage_notes),
-        }
-    }
-
-    fn value_mut(&mut self, field: DemographicsField) -> &mut String {
-        match field {
-            DemographicsField::DisplayName => &mut self.display_name,
-            DemographicsField::PreferredName => &mut self.preferred_name,
-            DemographicsField::DateOfBirth => &mut self.date_of_birth,
-            DemographicsField::SexOrGender => &mut self.sex_or_gender,
-            DemographicsField::ExternalId => &mut self.external_id,
-            DemographicsField::RecordStartDate => &mut self.record_start_date,
-            DemographicsField::RecordEndDate => &mut self.record_end_date,
-            DemographicsField::Summary => &mut self.summary,
-        }
-    }
-
-    fn admin_value_mut(&mut self, field: PatientAdminField) -> &mut String {
-        match field {
-            PatientAdminField::PrimaryPhone => &mut self.primary_phone,
-            PatientAdminField::SecondaryPhone => &mut self.secondary_phone,
-            PatientAdminField::Email => &mut self.email,
-            PatientAdminField::PreferredContactMethod => &mut self.preferred_contact_method,
-            PatientAdminField::EmergencyContactName => &mut self.emergency_contact_name,
-            PatientAdminField::EmergencyContactRelationship => {
-                &mut self.emergency_contact_relationship
-            }
-            PatientAdminField::EmergencyContactPhone => &mut self.emergency_contact_phone,
-            PatientAdminField::EmergencyContactEmail => &mut self.emergency_contact_email,
-            PatientAdminField::ContactNotes => &mut self.contact_notes,
-            PatientAdminField::PayerName => &mut self.payer_name,
-            PatientAdminField::PlanName => &mut self.plan_name,
-            PatientAdminField::MemberId => &mut self.member_id,
-            PatientAdminField::GroupNumber => &mut self.group_number,
-            PatientAdminField::CoverageType => &mut self.coverage_type,
-            PatientAdminField::CoverageStatus => &mut self.coverage_status,
-            PatientAdminField::CoverageNotes => &mut self.coverage_notes,
-        }
-    }
-
-    fn value(&self, field: DemographicsField) -> &str {
-        match field {
-            DemographicsField::DisplayName => &self.display_name,
-            DemographicsField::PreferredName => &self.preferred_name,
-            DemographicsField::DateOfBirth => &self.date_of_birth,
-            DemographicsField::SexOrGender => &self.sex_or_gender,
-            DemographicsField::ExternalId => &self.external_id,
-            DemographicsField::RecordStartDate => &self.record_start_date,
-            DemographicsField::RecordEndDate => &self.record_end_date,
-            DemographicsField::Summary => &self.summary,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct PatientAdminMetadata {
-    primary_phone: String,
-    secondary_phone: String,
-    email: String,
-    preferred_contact_method: String,
-    emergency_contact_name: String,
-    emergency_contact_relationship: String,
-    emergency_contact_phone: String,
-    emergency_contact_email: String,
-    contact_notes: String,
-    payer_name: String,
-    plan_name: String,
-    member_id: String,
-    group_number: String,
-    coverage_type: String,
-    coverage_status: String,
-    coverage_notes: String,
-}
-
-impl PatientAdminMetadata {
-    fn from_client(client: &WorkspaceClient) -> Self {
-        Self {
-            primary_phone: client.primary_phone.clone().unwrap_or_default(),
-            secondary_phone: client.secondary_phone.clone().unwrap_or_default(),
-            email: client.email.clone().unwrap_or_default(),
-            preferred_contact_method: client.preferred_contact_method.clone().unwrap_or_default(),
-            emergency_contact_name: client.emergency_contact_name.clone().unwrap_or_default(),
-            emergency_contact_relationship: client
-                .emergency_contact_relationship
-                .clone()
-                .unwrap_or_default(),
-            emergency_contact_phone: client.emergency_contact_phone.clone().unwrap_or_default(),
-            emergency_contact_email: client.emergency_contact_email.clone().unwrap_or_default(),
-            contact_notes: client.contact_notes.clone().unwrap_or_default(),
-            payer_name: client.payer_name.clone().unwrap_or_default(),
-            plan_name: client.plan_name.clone().unwrap_or_default(),
-            member_id: client.member_id.clone().unwrap_or_default(),
-            group_number: client.group_number.clone().unwrap_or_default(),
-            coverage_type: client.coverage_type.clone().unwrap_or_default(),
-            coverage_status: client.coverage_status.clone().unwrap_or_default(),
-            coverage_notes: client.coverage_notes.clone().unwrap_or_default(),
-        }
-    }
-
-    fn from_draft(draft: &ClientDraft) -> Self {
-        Self {
-            primary_phone: draft.primary_phone.clone(),
-            secondary_phone: draft.secondary_phone.clone(),
-            email: draft.email.clone(),
-            preferred_contact_method: draft.preferred_contact_method.clone(),
-            emergency_contact_name: draft.emergency_contact_name.clone(),
-            emergency_contact_relationship: draft.emergency_contact_relationship.clone(),
-            emergency_contact_phone: draft.emergency_contact_phone.clone(),
-            emergency_contact_email: draft.emergency_contact_email.clone(),
-            contact_notes: draft.contact_notes.clone(),
-            payer_name: draft.payer_name.clone(),
-            plan_name: draft.plan_name.clone(),
-            member_id: draft.member_id.clone(),
-            group_number: draft.group_number.clone(),
-            coverage_type: draft.coverage_type.clone(),
-            coverage_status: draft.coverage_status.clone(),
-            coverage_notes: draft.coverage_notes.clone(),
-        }
-    }
-
-    fn has_contact(&self) -> bool {
-        [
-            self.primary_phone.as_str(),
-            self.secondary_phone.as_str(),
-            self.email.as_str(),
-        ]
-        .iter()
-        .any(|value| !value.trim().is_empty())
-    }
-
-    fn has_emergency_contact(&self) -> bool {
-        [
-            self.emergency_contact_name.as_str(),
-            self.emergency_contact_phone.as_str(),
-            self.emergency_contact_email.as_str(),
-        ]
-        .iter()
-        .any(|value| !value.trim().is_empty())
-    }
-
-    fn has_coverage(&self) -> bool {
-        [
-            self.payer_name.as_str(),
-            self.plan_name.as_str(),
-            self.member_id.as_str(),
-            self.group_number.as_str(),
-            self.coverage_type.as_str(),
-            self.coverage_status.as_str(),
-        ]
-        .iter()
-        .any(|value| !value.trim().is_empty())
-    }
-
-    fn contact_status_label(&self) -> &'static str {
-        if self.has_contact() {
-            "Contact on file"
-        } else {
-            "Missing contact"
-        }
-    }
-
-    fn emergency_status_label(&self) -> &'static str {
-        if self.has_emergency_contact() {
-            "emergency present"
-        } else {
-            "emergency missing"
-        }
-    }
-
-    fn coverage_status_label(&self) -> &'static str {
-        if self.has_coverage() {
-            "Coverage on file"
-        } else {
-            "Missing coverage"
-        }
-    }
-
-    fn contact_summary(&self) -> String {
-        let phone = nonempty_or(&self.primary_phone, "phone missing");
-        let email = nonempty_or(&self.email, "email missing");
-        let method = nonempty_or(&self.preferred_contact_method, "method not set");
-        format!("{phone}; {email}; {method}")
-    }
-
-    fn emergency_summary(&self) -> String {
-        let name = nonempty_or(&self.emergency_contact_name, "name missing");
-        let relationship =
-            nonempty_or(&self.emergency_contact_relationship, "relationship missing");
-        let phone = nonempty_or(&self.emergency_contact_phone, "phone missing");
-        format!("{name}; {relationship}; {phone}")
-    }
-
-    fn coverage_summary(&self) -> String {
-        let payer = nonempty_or(&self.payer_name, "payer missing");
-        let member = nonempty_or(&self.member_id, "member ID missing");
-        let status = nonempty_or(&self.coverage_status, "status not set");
-        format!("{payer}; {member}; {status}")
-    }
-
-    fn search_values(&self) -> Vec<String> {
-        [
-            &self.primary_phone,
-            &self.secondary_phone,
-            &self.email,
-            &self.preferred_contact_method,
-            &self.emergency_contact_name,
-            &self.emergency_contact_relationship,
-            &self.emergency_contact_phone,
-            &self.emergency_contact_email,
-            &self.contact_notes,
-            &self.payer_name,
-            &self.plan_name,
-            &self.member_id,
-            &self.group_number,
-            &self.coverage_type,
-            &self.coverage_status,
-            &self.coverage_notes,
-        ]
-        .iter()
-        .filter_map(|value| nonempty_option(value))
-        .collect()
-    }
-
-    fn value(&self, field: PatientAdminField) -> &str {
-        match field {
-            PatientAdminField::PrimaryPhone => &self.primary_phone,
-            PatientAdminField::SecondaryPhone => &self.secondary_phone,
-            PatientAdminField::Email => &self.email,
-            PatientAdminField::PreferredContactMethod => &self.preferred_contact_method,
-            PatientAdminField::EmergencyContactName => &self.emergency_contact_name,
-            PatientAdminField::EmergencyContactRelationship => &self.emergency_contact_relationship,
-            PatientAdminField::EmergencyContactPhone => &self.emergency_contact_phone,
-            PatientAdminField::EmergencyContactEmail => &self.emergency_contact_email,
-            PatientAdminField::ContactNotes => &self.contact_notes,
-            PatientAdminField::PayerName => &self.payer_name,
-            PatientAdminField::PlanName => &self.plan_name,
-            PatientAdminField::MemberId => &self.member_id,
-            PatientAdminField::GroupNumber => &self.group_number,
-            PatientAdminField::CoverageType => &self.coverage_type,
-            PatientAdminField::CoverageStatus => &self.coverage_status,
-            PatientAdminField::CoverageNotes => &self.coverage_notes,
-        }
-    }
-}
-
-fn patient_admin_metadata_for_client(client: &WorkspaceClient) -> PatientAdminMetadata {
-    PatientAdminMetadata::from_client(client)
-}
-
-fn patient_admin_metadata_for_draft(draft: &ClientDraft) -> PatientAdminMetadata {
-    PatientAdminMetadata::from_draft(draft)
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SafetyField {
     Category,
     Name,
@@ -1502,7 +987,8 @@ fn patient_file_group_label(document: &WorkspaceDocument) -> &'static str {
         document.detected_kind,
         document.mime_type.as_deref().unwrap_or_default(),
     )
-    .to_ascii_lowercase();
+    .to_ascii_lowercase()
+    .replace(['_', '-'], " ");
     if haystack.contains("medicare")
         || haystack.contains("insurance card")
         || haystack.contains("payer card")
@@ -1563,6 +1049,43 @@ fn patient_file_group_label(document: &WorkspaceDocument) -> &'static str {
     } else {
         "Other Files"
     }
+}
+
+fn coverage_card_document_is_eligible(document: &WorkspaceDocument) -> bool {
+    let card_kind = |value: &str| {
+        let normalized = value
+            .trim()
+            .to_ascii_lowercase()
+            .replace(['_', '-'], " ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        matches!(
+            normalized.as_str(),
+            "insurance card" | "medicare insurance card image"
+        )
+    };
+    let source_hash = document
+        .content_sha256
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .or(document.sha256.as_deref())
+        .map(str::trim)
+        .unwrap_or_default();
+    document.archived_at.is_none()
+        && document.scope.trim().eq_ignore_ascii_case("patient")
+        && (card_kind(&document.kind) || card_kind(&document.detected_kind))
+        && document
+            .reference_kind
+            .trim()
+            .eq_ignore_ascii_case("local_reference")
+        && document
+            .existence_status
+            .trim()
+            .eq_ignore_ascii_case("present")
+        && !document.local_path.trim().is_empty()
+        && source_hash.len() == 64
+        && source_hash.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn patient_directory_row_lines(
@@ -1647,14 +1170,29 @@ impl DocumentField {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 struct NoteDraft {
     id: Option<String>,
+    working_note_id: String,
     encounter_id: Option<String>,
     title: String,
     body: String,
     status: String,
     current_revision: i64,
+}
+
+impl Default for NoteDraft {
+    fn default() -> Self {
+        Self {
+            id: None,
+            working_note_id: Uuid::new_v4().to_string(),
+            encounter_id: None,
+            title: String::new(),
+            body: String::new(),
+            status: String::new(),
+            current_revision: 0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -2318,6 +1856,7 @@ impl NoteDraft {
     fn from_note(note: &WorkspaceNote) -> Self {
         Self {
             id: Some(note.id.clone()),
+            working_note_id: note.id.clone(),
             encounter_id: note.encounter_id.clone(),
             title: note.title.clone(),
             body: note.body.clone(),
@@ -2444,6 +1983,8 @@ impl AgentResultDraft {
 pub(crate) struct WorkspaceDashboard {
     profile: WorkspaceProfile,
     clients: Vec<WorkspaceClient>,
+    coverages: Vec<WorkspaceCoverage>,
+    coverage_verifications: Vec<WorkspaceCoverageVerification>,
     encounters: Vec<WorkspaceEncounter>,
     notes: Vec<WorkspaceNote>,
     documents: Vec<WorkspaceDocument>,
@@ -2467,6 +2008,10 @@ pub(crate) struct WorkspaceDashboard {
     demographics_field: DemographicsField,
     patient_admin_edit_mode: Option<PatientAdminEditMode>,
     patient_admin_field: PatientAdminField,
+    coverage_draft: CoverageDraft,
+    coverage_field: CoverageField,
+    card_verification_draft: Option<CardVerificationDraft>,
+    card_verification_field: CardVerificationField,
     safety_field: SafetyField,
     document_field: DocumentField,
     derivative_field: DerivativeField,
@@ -2479,6 +2024,7 @@ pub(crate) struct WorkspaceDashboard {
     agent_rail_tab: AgentRailTab,
     draft_client: ClientDraft,
     draft_note: NoteDraft,
+    note_body_editor: WorkspaceEditor,
     draft_document: DocumentDraft,
     draft_safety: SafetyDraft,
     derivative_draft: DerivativeDraft,
@@ -2486,6 +2032,7 @@ pub(crate) struct WorkspaceDashboard {
     draft_task: TaskDraft,
     addendum_draft: AddendumDraft,
     agent_request: AgentRequestDraft,
+    agent_request_editor: WorkspaceEditor,
     agent_result: AgentResultDraft,
     context_packets: Vec<WorkspaceContextPacket>,
     agent_results: Vec<WorkspaceAgentResult>,
@@ -2512,11 +2059,14 @@ pub(crate) struct WorkspaceDashboard {
     dirty: bool,
     status: String,
     store_description: Option<String>,
+    draft_persistence_message: Option<String>,
+    draft_recovery_available: bool,
 }
 
 #[derive(Debug, Clone)]
 struct ChartDraftSnapshot {
     client: ClientDraft,
+    coverage: CoverageDraft,
     note: NoteDraft,
     document: DocumentDraft,
     safety: SafetyDraft,
@@ -2530,6 +2080,7 @@ impl ChartDraftSnapshot {
     fn capture(dashboard: &WorkspaceDashboard) -> Self {
         Self {
             client: dashboard.draft_client.clone(),
+            coverage: dashboard.coverage_draft.clone(),
             note: dashboard.draft_note.clone(),
             document: dashboard.draft_document.clone(),
             safety: dashboard.draft_safety.clone(),
@@ -2556,6 +2107,7 @@ impl ChartDraftSnapshot {
         });
 
         dashboard.draft_client = self.client;
+        dashboard.coverage_draft = self.coverage;
         dashboard.draft_note = self.note;
         dashboard.draft_document = self.document;
         dashboard.draft_safety = self.safety;
@@ -2570,6 +2122,9 @@ impl ChartDraftSnapshot {
             dashboard.draft_note.current_revision = current_revision;
             dashboard.select_encounter_for_active_note();
         }
+        dashboard
+            .note_body_editor
+            .reset(&dashboard.draft_note.body);
     }
 }
 
@@ -2578,6 +2133,8 @@ impl Default for WorkspaceDashboard {
         Self {
             profile: WorkspaceProfile::default(),
             clients: Vec::new(),
+            coverages: Vec::new(),
+            coverage_verifications: Vec::new(),
             encounters: Vec::new(),
             notes: Vec::new(),
             documents: Vec::new(),
@@ -2601,6 +2158,10 @@ impl Default for WorkspaceDashboard {
             demographics_field: DemographicsField::DisplayName,
             patient_admin_edit_mode: None,
             patient_admin_field: PatientAdminField::PrimaryPhone,
+            coverage_draft: CoverageDraft::new(String::new(), CoveragePriority::Primary),
+            coverage_field: CoverageField::PayerName,
+            card_verification_draft: None,
+            card_verification_field: CardVerificationField::SourceDocument,
             safety_field: SafetyField::Category,
             document_field: DocumentField::Title,
             derivative_field: DerivativeField::Title,
@@ -2613,6 +2174,7 @@ impl Default for WorkspaceDashboard {
             agent_rail_tab: AgentRailTab::default(),
             draft_client: ClientDraft::default(),
             draft_note: NoteDraft::default(),
+            note_body_editor: WorkspaceEditor::default(),
             draft_document: DocumentDraft::default(),
             draft_safety: SafetyDraft::default(),
             derivative_draft: DerivativeDraft::default(),
@@ -2620,6 +2182,7 @@ impl Default for WorkspaceDashboard {
             draft_task: TaskDraft::default(),
             addendum_draft: AddendumDraft::default(),
             agent_request: AgentRequestDraft::default(),
+            agent_request_editor: WorkspaceEditor::default(),
             agent_result: AgentResultDraft::default(),
             context_packets: Vec::new(),
             agent_results: Vec::new(),
@@ -2646,6 +2209,8 @@ impl Default for WorkspaceDashboard {
             dirty: false,
             status: "Workspace".to_string(),
             store_description: None,
+            draft_persistence_message: None,
+            draft_recovery_available: false,
         }
     }
 }
@@ -2745,6 +2310,8 @@ impl WorkspaceDashboard {
             (request, purpose)
         };
 
+        let prior_note_id = self.draft_note.id.clone();
+        let prior_working_note_id = self.draft_note.working_note_id.clone();
         let response = match app_server.workspace_chart_commit(params).await {
             Ok(response) => response,
             Err(error) => {
@@ -2837,6 +2404,16 @@ impl WorkspaceDashboard {
                 compact_preview(&response.commit_id, 12)
             );
             return Err(error);
+        }
+        let same_working_note = match prior_note_id.as_deref() {
+            Some(prior_note_id) => self.draft_note.id.as_deref() == Some(prior_note_id),
+            None => response
+                .note
+                .as_ref()
+                .is_some_and(|note| self.draft_note.id.as_deref() == Some(note.id.as_str())),
+        };
+        if same_working_note {
+            self.draft_note.working_note_id = prior_working_note_id;
         }
 
         self.draft_safety.clear();
@@ -2961,6 +2538,31 @@ impl WorkspaceDashboard {
             Some(client_upsert)
         };
         let child_client_id = root_client_id.clone().unwrap_or_default();
+        let mut coverage_upsert = WorkspaceCoverageUpsertParams::from(&self.coverage_draft);
+        coverage_upsert.client_id.clone_from(&child_client_id);
+        let coverage = if let Some(coverage_id) = self.coverage_draft.id.as_deref() {
+            let canonical = self
+                .coverages
+                .iter()
+                .find(|coverage| coverage.id == coverage_id)
+                .ok_or_else(|| {
+                    "The loaded coverage version is unavailable; reload before saving."
+                        .to_string()
+                })?;
+            let canonical_upsert = WorkspaceCoverageUpsertParams::from(
+                &CoverageDraft::try_from(canonical).map_err(|error| error.to_string())?,
+            );
+            if coverage_upsert == canonical_upsert {
+                None
+            } else {
+                expected_versions.coverage = Some(canonical.version.clone());
+                Some(coverage_upsert)
+            }
+        } else if coverage_draft_has_input(&self.coverage_draft) {
+            Some(coverage_upsert)
+        } else {
+            None
+        };
 
         if self.draft_safety.is_active() && !self.draft_safety.should_save() {
             return Err("Clinical safety name is required.".to_string());
@@ -3213,6 +2815,9 @@ impl WorkspaceDashboard {
         if client.is_some() {
             changed.push("demographics");
         }
+        if coverage.is_some() {
+            changed.push("coverage");
+        }
         if safety_item.is_some() {
             changed.push("clinical safety");
         }
@@ -3248,6 +2853,7 @@ impl WorkspaceDashboard {
             source_turn_id: None,
             client_id: root_client_id,
             client,
+            coverage,
             expected_versions,
             safety_item,
             encounter,
@@ -3265,6 +2871,14 @@ impl WorkspaceDashboard {
                 &client.id
             });
         self.draft_client = ClientDraft::from_client(&response.client);
+        if let Some(coverage) = response.coverage.clone() {
+            replace_or_push_by_id(&mut self.coverages, coverage.clone(), |coverage| {
+                &coverage.id
+            });
+            if let Ok(draft) = CoverageDraft::try_from(&coverage) {
+                self.coverage_draft = draft;
+            }
+        }
         if let Some(encounter) = response.encounter.clone() {
             self.encounter_index =
                 replace_or_push_by_id(&mut self.encounters, encounter, |encounter| &encounter.id);
@@ -3272,6 +2886,7 @@ impl WorkspaceDashboard {
         if let Some(note) = response.note.clone() {
             self.note_index = replace_or_push_by_id(&mut self.notes, note.clone(), |note| &note.id);
             self.draft_note = NoteDraft::from_note(&note);
+            self.note_body_editor.reset(&self.draft_note.body);
         }
         if let Some(document) = response.document.clone() {
             replace_or_push_by_id(&mut self.documents, document.clone(), |document| {
@@ -3323,6 +2938,7 @@ impl WorkspaceDashboard {
 
         self.note_index = index;
         self.draft_note = NoteDraft::from_note(&self.notes[self.note_index]);
+        self.note_body_editor.reset(&self.draft_note.body);
         self.select_encounter_for_active_note();
         self.addendum_draft.clear();
         self.reload_packet_history(app_server).await?;
@@ -3559,6 +3175,23 @@ impl WorkspaceDashboard {
         }
         let key_event = normalize_workspace_key_event(key_event);
 
+        if self.profile == WorkspaceProfile::Medical
+            && self.draft_recovery_available
+            && self.command_input.is_none()
+            && !workspace_command_shortcut_key(&key_event)
+            && !matches!(
+                key_event.code,
+                KeyCode::Tab | KeyCode::BackTab | KeyCode::Char('?') | KeyCode::Esc
+            )
+            && !(key_event.modifiers.contains(KeyModifiers::CONTROL)
+                && matches!(key_event.code, KeyCode::Char('p' | 'w')))
+        {
+            self.status =
+                "Resolve the recoverable local draft first: Ctrl-P → Restore local draft or Discard local draft."
+                    .to_string();
+            return WorkspaceDashboardAction::Consumed;
+        }
+
         if self.chart_changeset_input_is_frozen() {
             let close_action = if self
                 .pending_chart_changeset
@@ -3651,6 +3284,11 @@ impl WorkspaceDashboard {
                     return WorkspaceDashboardAction::Consumed;
                 }
                 KeyCode::Char(c) if c.eq_ignore_ascii_case(&'s') => {
+                    if self.focus == WorkspaceFocus::Demographics
+                        && self.card_verification_draft.is_some()
+                    {
+                        return self.request_coverage_verification_create();
+                    }
                     return WorkspaceDashboardAction::Save;
                 }
                 KeyCode::Char(c) if c.eq_ignore_ascii_case(&'g') => {
@@ -4114,7 +3752,8 @@ impl WorkspaceDashboard {
             return;
         }
         self.status =
-            "Focused Agent Work. Use r or :agent request to start a local draft.".to_string();
+            "Focused Agent Work. Start typing, or use :agent request, to draft a local request."
+                .to_string();
     }
 
     fn can_focus_patient_files_sidepane(&self) -> bool {
@@ -4157,31 +3796,6 @@ impl WorkspaceDashboard {
         self.status =
             "Patient search. Type a name, DOB, Patient ID / MRN, contact, or coverage ID."
                 .to_string();
-    }
-
-    fn open_patient_admin_editor(&mut self, mode: PatientAdminEditMode, field: PatientAdminField) {
-        self.patient_search_query = None;
-        self.patient_search_selection_index = 0;
-        self.patient_search_return_focus = None;
-        self.patient_search_return_section = None;
-        self.action_overlay_visible = false;
-        self.command_input = None;
-        self.patient_admin_edit_mode = Some(mode);
-        self.patient_admin_field = if field.mode() == mode {
-            field
-        } else {
-            mode.first_field()
-        };
-        self.focus = WorkspaceFocus::Demographics;
-        self.status = match mode {
-            PatientAdminEditMode::Contact => {
-                "Editing patient demographics and emergency contact fields. Ctrl-S saves."
-                    .to_string()
-            }
-            PatientAdminEditMode::Coverage => {
-                "Editing coverage fields. Member ID stays under coverage; Ctrl-S saves.".to_string()
-            }
-        };
     }
 
     fn close_patient_search(&mut self) {
@@ -4227,6 +3841,11 @@ impl WorkspaceDashboard {
     fn exit_medical_edit_mode(&mut self) -> bool {
         if self.profile != WorkspaceProfile::Medical {
             return false;
+        }
+        if self.card_verification_draft.take().is_some() {
+            self.status =
+                "Closed unsaved card comparison; no verification record was created.".to_string();
+            return true;
         }
         if self.patient_admin_edit_mode.take().is_some() {
             self.focus = WorkspaceFocus::Demographics;
@@ -4350,15 +3969,10 @@ impl WorkspaceDashboard {
                 if results.is_empty() {
                     if self.dirty || self.has_unsaved_addendum_draft() {
                         self.status = "Save before creating or switching patients.".to_string();
+                        return WorkspaceDashboardAction::Consumed;
                     } else {
-                        self.patient_search_query = None;
-                        self.patient_search_selection_index = 0;
-                        self.patient_search_return_focus = None;
-                        self.patient_search_return_section = None;
-                        self.start_new_client();
-                        self.status = "New patient draft.".to_string();
+                        return WorkspaceDashboardAction::StartNewClient;
                     }
-                    return WorkspaceDashboardAction::Consumed;
                 }
                 if self.dirty || self.has_unsaved_addendum_draft() {
                     self.status = "Save before switching patients.".to_string();
@@ -4444,6 +4058,22 @@ impl WorkspaceDashboard {
 
     pub(crate) fn execute_workspace_command(&mut self, command: &str) -> WorkspaceDashboardAction {
         let normalized = normalize_workspace_command(command);
+        if self.profile == WorkspaceProfile::Medical && self.draft_recovery_available {
+            let allowed = action_for_command(self.profile, &normalized).is_some_and(|action| {
+                matches!(
+                    action,
+                    WorkspaceActionId::Actions
+                        | WorkspaceActionId::RestoreLocalDraft
+                        | WorkspaceActionId::DiscardLocalDraft
+                )
+            });
+            if !allowed {
+                self.status =
+                    "Restore or discard the recoverable local draft before other commands."
+                        .to_string();
+                return WorkspaceDashboardAction::Consumed;
+            }
+        }
         if self.profile == WorkspaceProfile::Medical
             && matches!(normalized.as_str(), "workflow documents" | "workflow files")
         {
@@ -4490,6 +4120,7 @@ impl WorkspaceDashboard {
             }
             WorkspaceActionId::AgentClear => {
                 self.agent_request.clear();
+                self.agent_request_editor.reset(&self.agent_request.body);
                 self.focus_workflow_section(MedicalWorkflowSection::AgentRequest);
                 self.status = "Agent instructions cleared.".to_string();
                 WorkspaceDashboardAction::Consumed
@@ -4512,7 +4143,7 @@ impl WorkspaceDashboard {
             }
             WorkspaceActionId::AgentPreview => {
                 self.focus_workflow_section(MedicalWorkflowSection::ContextPacket);
-                WorkspaceDashboardAction::Consumed
+                WorkspaceDashboardAction::CheckpointDraft
             }
             WorkspaceActionId::AgentRequest => {
                 self.start_agent_request();
@@ -4720,10 +4351,7 @@ impl WorkspaceDashboard {
                     review_status: "archived".to_string(),
                 }
             }
-            WorkspaceActionId::ClientNew => {
-                self.start_new_client();
-                WorkspaceDashboardAction::Consumed
-            }
+            WorkspaceActionId::ClientNew => WorkspaceDashboardAction::StartNewClient,
             WorkspaceActionId::ContactEdit => {
                 self.open_patient_admin_editor(
                     PatientAdminEditMode::Contact,
@@ -4738,6 +4366,16 @@ impl WorkspaceDashboard {
                 );
                 WorkspaceDashboardAction::Consumed
             }
+            WorkspaceActionId::CoverageVerify => {
+                self.open_patient_admin_editor(
+                    PatientAdminEditMode::Coverage,
+                    PatientAdminField::PayerName,
+                );
+                self.start_coverage_verification();
+                WorkspaceDashboardAction::Consumed
+            }
+            WorkspaceActionId::RestoreLocalDraft => WorkspaceDashboardAction::RestoreLocalDraft,
+            WorkspaceActionId::DiscardLocalDraft => WorkspaceDashboardAction::DiscardLocalDraft,
             WorkspaceActionId::SafetyOpen => {
                 self.focus_workflow_section(MedicalWorkflowSection::Safety);
                 WorkspaceDashboardAction::Consumed
@@ -4852,10 +4490,7 @@ impl WorkspaceDashboard {
                 self.select_next_task();
                 WorkspaceDashboardAction::Consumed
             }
-            WorkspaceActionId::NoteNew => {
-                self.start_new_note();
-                WorkspaceDashboardAction::Consumed
-            }
+            WorkspaceActionId::NoteNew => WorkspaceDashboardAction::StartNewNote,
             WorkspaceActionId::NoteSign => WorkspaceDashboardAction::SignNote,
             WorkspaceActionId::PracticeLibraryAssociate => {
                 self.request_practice_library_association()
@@ -4877,7 +4512,7 @@ impl WorkspaceDashboard {
             WorkspaceActionId::Return => WorkspaceDashboardAction::Close,
             WorkspaceActionId::ScopeAgentPacket => {
                 self.focus_workflow_section(MedicalWorkflowSection::ContextPacket);
-                WorkspaceDashboardAction::Consumed
+                WorkspaceDashboardAction::CheckpointDraft
             }
             WorkspaceActionId::ScopeAgentReview => {
                 self.focus_workflow_section(MedicalWorkflowSection::AgentInbox);
@@ -5048,6 +4683,15 @@ impl WorkspaceDashboard {
     }
 
     pub(crate) fn handle_paste(&mut self, pasted: String) -> WorkspaceDashboardAction {
+        if self.profile == WorkspaceProfile::Medical
+            && self.draft_recovery_available
+            && self.command_input.is_none()
+        {
+            self.status =
+                "Resolve the recoverable local draft before pasting: Ctrl-P → Restore local draft or Discard local draft."
+                    .to_string();
+            return WorkspaceDashboardAction::Consumed;
+        }
         if self.chart_changeset_input_is_frozen() {
             self.status =
                 "Chart changeset is unresolved; use Ctrl-S for its required recovery step or close before editing."
@@ -5091,8 +4735,11 @@ impl WorkspaceDashboard {
                 WorkspaceDashboardAction::Consumed
             }
             WorkspaceFocus::NoteBody => {
-                self.draft_note.body.push_str(&pasted);
-                self.mark_dirty();
+                let edited = self.note_body_editor.paste(&self.draft_note.body, &pasted);
+                if edited != self.draft_note.body {
+                    self.draft_note.body = edited;
+                    self.mark_dirty();
+                }
                 WorkspaceDashboardAction::Consumed
             }
             WorkspaceFocus::Workflow => {
@@ -5139,8 +4786,13 @@ impl WorkspaceDashboard {
                     self.agent_result.body.push_str(&pasted);
                     self.status = "Unsaved returned work draft.".to_string();
                 } else if self.agent_request.is_active() {
-                    self.agent_request.body.push_str(&pasted);
-                    self.status = "Local agent instructions draft.".to_string();
+                    let edited = self
+                        .agent_request_editor
+                        .paste(&self.agent_request.body, &pasted);
+                    if edited != self.agent_request.body {
+                        self.agent_request.body = edited;
+                        self.status = "Local agent instructions draft.".to_string();
+                    }
                 } else {
                     self.status =
                         "Agent Work ready. Use :agent request before typing instructions."
@@ -5515,6 +5167,7 @@ impl WorkspaceDashboard {
         self.context_packets.retain(|entry| entry.id != packet.id);
         self.context_packets.insert(0, packet);
         self.agent_request.clear();
+        self.agent_request_editor.reset(&self.agent_request.body);
         self.agent_result.clear();
         self.stale_context_notice = None;
         self.focus = WorkspaceFocus::Agent;
@@ -6391,6 +6044,7 @@ impl WorkspaceDashboard {
             return;
         };
         self.agent_request.clear();
+        self.agent_request_editor.reset(&self.agent_request.body);
         self.agent_result.start(packet_id.clone());
         self.focus = WorkspaceFocus::Agent;
         self.set_workflow_section(MedicalWorkflowSection::AgentInbox);
@@ -7724,7 +7378,9 @@ impl WorkspaceDashboard {
         self.render_notes(areas.notes, buf);
         self.render_patient_files_sidepane(areas.patient_files, buf);
 
-        if self.medical_chart_shows_workflow() {
+        if self.patient_admin_edit_mode.is_some() {
+            self.render_demographics(areas.active_work, buf);
+        } else if self.medical_chart_shows_workflow() {
             if self.medical_chart_can_render_active_work_detail() {
                 self.render_medical_active_work_area(areas.active_work, buf);
             } else {
@@ -7776,6 +7432,8 @@ impl WorkspaceDashboard {
 
         if self.focus == WorkspaceFocus::Agent {
             self.render_agent_workpane(areas.main, buf);
+        } else if self.patient_admin_edit_mode.is_some() {
+            self.render_demographics(areas.main, buf);
         } else if self.medical_chart_shows_workflow() {
             if self.medical_chart_can_render_active_work_detail() {
                 self.render_medical_active_work_area(areas.main, buf);
@@ -8250,14 +7908,8 @@ impl WorkspaceDashboard {
             }
             WorkspaceFocus::NoteBody => {
                 let inner = inner_rect(areas.note_body);
-                if inner.width == 0 || inner.height == 0 {
-                    return None;
-                }
-                let lines: Vec<&str> = self.draft_note.body.lines().collect();
-                let line_count = lines.len().max(1);
-                let row = (line_count - 1).min(inner.height.saturating_sub(1) as usize) as u16;
-                let text = lines.last().copied().unwrap_or("");
-                Some(cursor_at_text_end(inner, row, 0, text))
+                self.note_body_editor
+                    .cursor_pos(&self.draft_note.body, inner)
             }
             WorkspaceFocus::Workflow => {
                 if self.profile != WorkspaceProfile::Medical {
@@ -8287,21 +7939,8 @@ impl WorkspaceDashboard {
         let areas = MedicalLargeAreas::new(area);
         match self.focus {
             WorkspaceFocus::Demographics => {
-                let inner = inner_rect(areas.demographics);
-                if inner.width == 0 || inner.height == 0 {
-                    return None;
-                }
-                let row = self.demographics_field.index() as u16;
-                if row >= inner.height {
-                    return None;
-                }
-                let label_len = self.demographics_field.label(self.profile).len() + 2;
-                Some(cursor_at_text_end(
-                    inner,
-                    row,
-                    label_len,
-                    self.draft_client.value(self.demographics_field),
-                ))
+                let mode = self.patient_admin_edit_mode?;
+                self.cursor_pos_in_patient_admin_inner(inner_rect(areas.active_work), mode)
             }
             WorkspaceFocus::NoteTitle => {
                 let inner = inner_rect(areas.note_title);
@@ -8312,14 +7951,8 @@ impl WorkspaceDashboard {
             }
             WorkspaceFocus::NoteBody => {
                 let inner = inner_rect(areas.note_body);
-                if inner.width == 0 || inner.height == 0 {
-                    return None;
-                }
-                let lines: Vec<&str> = self.draft_note.body.lines().collect();
-                let line_count = lines.len().max(1);
-                let row = (line_count - 1).min(inner.height.saturating_sub(1) as usize) as u16;
-                let text = lines.last().copied().unwrap_or("");
-                Some(cursor_at_text_end(inner, row, 0, text))
+                self.note_body_editor
+                    .cursor_pos(&self.draft_note.body, inner)
             }
             WorkspaceFocus::Workflow => {
                 let inner = inner_rect(areas.active_work);
@@ -8343,21 +7976,8 @@ impl WorkspaceDashboard {
         let areas = MedicalMediumAreas::new(area);
         match self.focus {
             WorkspaceFocus::Demographics => {
-                let inner = inner_rect(areas.demographics);
-                if inner.width == 0 || inner.height == 0 {
-                    return None;
-                }
-                let row = self.demographics_field.index() as u16;
-                if row >= inner.height {
-                    return None;
-                }
-                let label_len = self.demographics_field.label(self.profile).len() + 2;
-                Some(cursor_at_text_end(
-                    inner,
-                    row,
-                    label_len,
-                    self.draft_client.value(self.demographics_field),
-                ))
+                let mode = self.patient_admin_edit_mode?;
+                self.cursor_pos_in_patient_admin_inner(inner_rect(areas.main), mode)
             }
             WorkspaceFocus::NoteTitle => {
                 let inner = inner_rect(areas.note_title);
@@ -8368,21 +7988,8 @@ impl WorkspaceDashboard {
             }
             WorkspaceFocus::NoteBody => {
                 let inner = inner_rect(areas.note_body);
-                if inner.width == 0 || inner.height == 0 {
-                    return None;
-                }
-                let lines = self.draft_note.body.lines().collect::<Vec<_>>();
-                let row = lines
-                    .len()
-                    .max(1)
-                    .saturating_sub(1)
-                    .min(inner.height.saturating_sub(1) as usize) as u16;
-                Some(cursor_at_text_end(
-                    inner,
-                    row,
-                    0,
-                    lines.last().copied().unwrap_or(""),
-                ))
+                self.note_body_editor
+                    .cursor_pos(&self.draft_note.body, inner)
             }
             WorkspaceFocus::Workflow => {
                 let workflow = if self.medical_chart_shows_workflow() {
@@ -8414,34 +8021,15 @@ impl WorkspaceDashboard {
         }
         match self.focus {
             WorkspaceFocus::Demographics => {
-                let row = self.demographics_field.index() as u16;
-                if row >= inner.height {
-                    return None;
-                }
-                let label_len = self.demographics_field.label(self.profile).len() + 2;
-                Some(cursor_at_text_end(
-                    inner,
-                    row,
-                    label_len,
-                    self.draft_client.value(self.demographics_field),
-                ))
+                let mode = self.patient_admin_edit_mode?;
+                self.cursor_pos_in_patient_admin_inner(inner, mode)
             }
             WorkspaceFocus::NoteTitle => {
                 Some(cursor_at_text_end(inner, 0, 0, &self.draft_note.title))
             }
             WorkspaceFocus::NoteBody => {
-                let lines = self.draft_note.body.lines().collect::<Vec<_>>();
-                let row = lines
-                    .len()
-                    .max(1)
-                    .saturating_sub(1)
-                    .min(inner.height.saturating_sub(1) as usize) as u16;
-                Some(cursor_at_text_end(
-                    inner,
-                    row,
-                    0,
-                    lines.last().copied().unwrap_or(""),
-                ))
+                self.note_body_editor
+                    .cursor_pos(&self.draft_note.body, inner)
             }
             WorkspaceFocus::Workflow => self.cursor_pos_in_workflow_inner(inner),
             WorkspaceFocus::Agent => self.cursor_pos_in_agent_workpane_inner(inner),
@@ -8451,17 +8039,13 @@ impl WorkspaceDashboard {
 
     fn cursor_pos_in_agent_workpane_inner(&self, inner: Rect) -> Option<(u16, u16)> {
         if self.agent_request.is_active() {
-            let lines = self.agent_workpane_active_lines();
-            let (logical_row, label_len) = agent_request_cursor_row_and_label_len(&lines)?;
-            let text = text_after_last_newline(&self.agent_request.body);
-            return cursor_at_wrapped_line_text_end(
+            let (_, _, editor_rect) = self.agent_request_composer_rects(
                 inner,
-                &lines,
-                logical_row,
-                self.agent_scroll as usize,
-                label_len,
-                text,
-            );
+                /*compact_summary*/ inner.height <= 1,
+            )?;
+            return self
+                .agent_request_editor
+                .cursor_pos(&self.agent_request.body, editor_rect);
         }
         if self.agent_result.is_active() {
             let lines = self.agent_workpane_active_lines();
@@ -8572,6 +8156,10 @@ impl WorkspaceDashboard {
         preferred_encounter_id: Option<String>,
         preferred_task_id: Option<String>,
     ) -> Result<()> {
+        let prior_client_id = self.draft_client.id.clone();
+        let prior_note_id = self.draft_note.id.clone();
+        let prior_encounter_id = self.draft_note.encounter_id.clone();
+        let prior_working_note_id = self.draft_note.working_note_id.clone();
         self.clients = app_server.workspace_client_list().await?.clients;
         if self.clients.is_empty() {
             self.start_new_client();
@@ -8586,6 +8174,18 @@ impl WorkspaceDashboard {
         self.draft_client = ClientDraft::from_client(&self.clients[self.client_index]);
 
         let client_id = self.clients[self.client_index].id.clone();
+        let coverage_priority = self.coverage_draft.priority;
+        self.coverages = app_server
+            .workspace_coverage_list(WorkspaceCoverageListParams {
+                client_id: client_id.clone(),
+                cursor: None,
+                limit: Some(3),
+            })
+            .await?
+            .data;
+        self.coverages.sort_by_key(|coverage| coverage.priority);
+        self.load_coverage_draft(coverage_priority);
+        self.reload_coverage_verification_history(app_server).await?;
         self.notes = app_server.workspace_note_list(client_id).await?.notes;
         self.note_index = preferred_note_id
             .as_deref()
@@ -8596,6 +8196,13 @@ impl WorkspaceDashboard {
             .get(self.note_index)
             .map(NoteDraft::from_note)
             .unwrap_or_default();
+        if self.draft_client.id == prior_client_id
+            && self.draft_note.id == prior_note_id
+            && self.draft_note.encounter_id == prior_encounter_id
+        {
+            self.draft_note.working_note_id = prior_working_note_id;
+        }
+        self.note_body_editor.reset(&self.draft_note.body);
         let client_id = self.clients[self.client_index].id.clone();
         self.encounters = app_server
             .workspace_encounter_list(client_id.clone())
@@ -8894,13 +8501,15 @@ impl WorkspaceDashboard {
             .map(|encounter| encounter.id.clone())
     }
 
-    fn start_new_client(&mut self) {
+    pub(crate) fn start_new_client(&mut self) {
         self.patient_search_query = None;
         self.patient_search_selection_index = 0;
         self.patient_search_return_focus = None;
         self.patient_search_return_section = None;
         self.client_index = self.clients.len();
         self.encounters.clear();
+        self.coverages.clear();
+        self.coverage_verifications.clear();
         self.notes.clear();
         self.documents.clear();
         self.patient_safety_items.clear();
@@ -8917,7 +8526,10 @@ impl WorkspaceDashboard {
         self.task_index = 0;
         self.draft_client = ClientDraft::default();
         self.apply_profile_default_client_label();
+        self.coverage_draft = CoverageDraft::new(String::new(), CoveragePriority::Primary);
+        self.card_verification_draft = None;
         self.draft_note = NoteDraft::default();
+        self.note_body_editor.reset(&self.draft_note.body);
         self.draft_document = DocumentDraft::default();
         self.draft_safety.clear();
         self.derivative_draft.clear();
@@ -8925,6 +8537,7 @@ impl WorkspaceDashboard {
         self.draft_task.clear();
         self.addendum_draft.clear();
         self.agent_request.clear();
+        self.agent_request_editor.reset(&self.agent_request.body);
         self.agent_result.clear();
         self.context_packets.clear();
         self.agent_results.clear();
@@ -8942,9 +8555,10 @@ impl WorkspaceDashboard {
         self.focus = WorkspaceFocus::Demographics;
     }
 
-    fn start_new_note(&mut self) {
+    pub(crate) fn start_new_note(&mut self) {
         self.note_index = self.notes.len();
         self.draft_note = NoteDraft::default();
+        self.note_body_editor.reset(&self.draft_note.body);
         self.signatures.clear();
         self.addenda.clear();
         self.proposals.clear();
@@ -8957,6 +8571,7 @@ impl WorkspaceDashboard {
         self.derivative_draft.clear();
         self.clip_draft.clear();
         self.agent_request.clear();
+        self.agent_request_editor.reset(&self.agent_request.body);
         self.agent_result.clear();
         self.context_packets.clear();
         self.agent_results.clear();
@@ -9006,6 +8621,7 @@ impl WorkspaceDashboard {
     fn start_agent_request(&mut self) {
         self.agent_result.clear();
         self.agent_request.start();
+        self.agent_request_editor.reset(&self.agent_request.body);
         self.focus = WorkspaceFocus::Agent;
         self.agent_rail_tab = AgentRailTab::Pending;
         self.set_workflow_section(MedicalWorkflowSection::AgentRequest);
@@ -9164,6 +8780,17 @@ impl WorkspaceDashboard {
     }
 
     fn action_disabled_reason(&self, action_id: WorkspaceActionId) -> Option<&'static str> {
+        if self.profile == WorkspaceProfile::Medical
+            && self.draft_recovery_available
+            && !matches!(
+                action_id,
+                WorkspaceActionId::Actions
+                    | WorkspaceActionId::RestoreLocalDraft
+                    | WorkspaceActionId::DiscardLocalDraft
+            )
+        {
+            return Some("Restore or discard the recoverable local draft before other actions.");
+        }
         match action_id {
             WorkspaceActionId::AddendumSave => {
                 if self.draft_note.id.is_none() {
@@ -9508,6 +9135,28 @@ impl WorkspaceDashboard {
                     None
                 }
             }
+            WorkspaceActionId::RestoreLocalDraft | WorkspaceActionId::DiscardLocalDraft => {
+                if self.draft_recovery_available {
+                    None
+                } else {
+                    Some("No recoverable local draft for the active patient and note.")
+                }
+            }
+            WorkspaceActionId::CoverageVerify => {
+                if self.dirty {
+                    Some("Save patient and coverage changes before comparing the card.")
+                } else if self.coverage_draft.id.is_none() {
+                    Some("Save this coverage before comparing the card.")
+                } else if !self
+                    .documents
+                    .iter()
+                    .any(coverage_card_document_is_eligible)
+                {
+                    Some("Add a present, hashed local insurance-card reference before comparing it.")
+                } else {
+                    None
+                }
+            }
             WorkspaceActionId::Actions
             | WorkspaceActionId::AgentClear
             | WorkspaceActionId::AgentInbox
@@ -9556,10 +9205,10 @@ impl WorkspaceDashboard {
             KeyCode::Char('c') => {
                 if self.dirty || self.has_unsaved_addendum_draft() {
                     self.status = "Save before switching workspace records.".to_string();
+                    WorkspaceDashboardAction::Consumed
                 } else {
-                    self.start_new_client();
+                    WorkspaceDashboardAction::StartNewClient
                 }
-                WorkspaceDashboardAction::Consumed
             }
             KeyCode::Enter => {
                 if self.profile == WorkspaceProfile::Medical {
@@ -9623,10 +9272,10 @@ impl WorkspaceDashboard {
             KeyCode::Char('n') => {
                 if self.dirty || self.has_unsaved_addendum_draft() {
                     self.status = "Save before switching notes.".to_string();
+                    WorkspaceDashboardAction::Consumed
                 } else {
-                    self.start_new_note();
+                    WorkspaceDashboardAction::StartNewNote
                 }
-                WorkspaceDashboardAction::Consumed
             }
             KeyCode::Enter => {
                 self.set_workflow_section(MedicalWorkflowSection::Visit);
@@ -9657,67 +9306,6 @@ impl WorkspaceDashboard {
         } else {
             WorkspaceDashboardAction::SelectNote(next)
         }
-    }
-
-    fn handle_demographics_key_event(&mut self, key_event: KeyEvent) -> WorkspaceDashboardAction {
-        if self.profile == WorkspaceProfile::Medical
-            && let Some(mode) = self.patient_admin_edit_mode
-        {
-            return self.handle_patient_admin_key_event(mode, key_event);
-        }
-        match key_event.code {
-            KeyCode::Up => self.demographics_field = self.demographics_field.previous(),
-            KeyCode::Down | KeyCode::Enter => {
-                self.demographics_field = self.demographics_field.next()
-            }
-            KeyCode::Backspace => {
-                self.draft_client.value_mut(self.demographics_field).pop();
-                self.mark_dirty();
-            }
-            KeyCode::Char(c) => {
-                self.draft_client.value_mut(self.demographics_field).push(c);
-                self.mark_dirty();
-            }
-            _ if text_cursor_navigation_key(&key_event) => {
-                self.status =
-                    "Text fields are end-anchored: type appends, Backspace deletes, Up/Down changes field."
-                        .to_string();
-            }
-            _ => {}
-        }
-        WorkspaceDashboardAction::Consumed
-    }
-
-    fn handle_patient_admin_key_event(
-        &mut self,
-        mode: PatientAdminEditMode,
-        key_event: KeyEvent,
-    ) -> WorkspaceDashboardAction {
-        match key_event.code {
-            KeyCode::Up => self.patient_admin_field = self.patient_admin_field.previous_in(mode),
-            KeyCode::Down | KeyCode::Enter => {
-                self.patient_admin_field = self.patient_admin_field.next_in(mode)
-            }
-            KeyCode::Backspace => {
-                self.draft_client
-                    .admin_value_mut(self.patient_admin_field)
-                    .pop();
-                self.mark_dirty();
-            }
-            KeyCode::Char(c) => {
-                self.draft_client
-                    .admin_value_mut(self.patient_admin_field)
-                    .push(c);
-                self.mark_dirty();
-            }
-            _ if text_cursor_navigation_key(&key_event) => {
-                self.status =
-                    "Text fields are end-anchored: type appends, Backspace deletes, Up/Down changes field."
-                        .to_string();
-            }
-            _ => {}
-        }
-        WorkspaceDashboardAction::Consumed
     }
 
     fn handle_note_title_key_event(&mut self, key_event: KeyEvent) -> WorkspaceDashboardAction {
@@ -9760,34 +9348,19 @@ impl WorkspaceDashboard {
             self.status = self.locked_note_read_only_status();
             return WorkspaceDashboardAction::Consumed;
         }
-        match key_event.code {
-            KeyCode::Up
-                if self.profile != WorkspaceProfile::Medical && self.draft_note.body.is_empty() =>
-            {
-                self.focus = WorkspaceFocus::NoteTitle;
-            }
-            KeyCode::Up | KeyCode::Down if self.profile == WorkspaceProfile::Medical => {
-                self.status =
-                    "Note Body stays focused. This editor is end-anchored; Tab/Shift-Tab changes pane."
-                        .to_string();
-            }
-            KeyCode::Backspace => {
-                self.draft_note.body.pop();
-                self.mark_dirty();
-            }
-            KeyCode::Enter => {
-                self.draft_note.body.push('\n');
-                self.mark_dirty();
-            }
-            KeyCode::Char(c) => {
-                self.draft_note.body.push(c);
-                self.mark_dirty();
-            }
-            _ if text_cursor_navigation_key(&key_event) => {
-                self.status =
-                    "Note body is end-anchored: type appends and Backspace deletes.".to_string();
-            }
-            _ => {}
+        if key_event.code == KeyCode::Up
+            && self.profile != WorkspaceProfile::Medical
+            && self.draft_note.body.is_empty()
+        {
+            self.focus = WorkspaceFocus::NoteTitle;
+            return WorkspaceDashboardAction::Consumed;
+        }
+        let edited = self
+            .note_body_editor
+            .input(&self.draft_note.body, key_event);
+        if edited != self.draft_note.body {
+            self.draft_note.body = edited;
+            self.mark_dirty();
         }
         WorkspaceDashboardAction::Consumed
     }
@@ -9852,30 +9425,37 @@ impl WorkspaceDashboard {
         }
         if self.agent_request.is_active() {
             match key_event.code {
-                KeyCode::Backspace => {
-                    self.agent_request.body.pop();
-                    self.status = "Local agent instructions draft.".to_string();
-                }
-                KeyCode::Enter => {
-                    self.agent_request.body.push('\n');
-                    self.status = "Local agent instructions draft.".to_string();
-                }
                 KeyCode::PageUp => {
                     self.scroll_agent_workpane(-1, 8);
                 }
                 KeyCode::PageDown => {
                     self.scroll_agent_workpane(1, 8);
                 }
-                _ if text_cursor_navigation_key(&key_event) => {
-                    self.status =
-                        "Agent input is end-anchored: type appends and Backspace deletes."
-                            .to_string();
+                _ => {
+                    let edited = self
+                        .agent_request_editor
+                        .input(&self.agent_request.body, key_event);
+                    if edited != self.agent_request.body {
+                        self.agent_request.body = edited;
+                        self.status = "Local agent instructions draft.".to_string();
+                    }
                 }
-                KeyCode::Char(c) => {
-                    self.agent_request.body.push(c);
-                    self.status = "Local agent instructions draft.".to_string();
-                }
-                _ => {}
+            }
+            return WorkspaceDashboardAction::Consumed;
+        }
+        if self.agent_rail_tab == AgentRailTab::Pending
+            && !key_event
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER)
+            && matches!(key_event.code, KeyCode::Char(_))
+        {
+            self.start_agent_request();
+            let edited = self
+                .agent_request_editor
+                .input(&self.agent_request.body, key_event);
+            if edited != self.agent_request.body {
+                self.agent_request.body = edited;
+                self.status = "Local agent instructions draft.".to_string();
             }
             return WorkspaceDashboardAction::Consumed;
         }
@@ -9908,6 +9488,7 @@ impl WorkspaceDashboard {
                 self.set_workflow_section(MedicalWorkflowSection::ContextPacket);
                 self.agent_scroll = 0;
                 self.status = "Focused Medical Agent Plan review.".to_string();
+                return WorkspaceDashboardAction::CheckpointDraft;
             }
             KeyCode::Char('i') => {
                 self.agent_rail_tab = AgentRailTab::Pending;
@@ -10214,6 +9795,10 @@ impl WorkspaceDashboard {
             .and_then(PendingChartChangeset::merge_target);
         match target {
             Some(WorkspaceChartEntityKind::Client) => self.focus == WorkspaceFocus::Demographics,
+            Some(WorkspaceChartEntityKind::Coverage) => {
+                self.focus == WorkspaceFocus::Demographics
+                    && self.patient_admin_edit_mode == Some(PatientAdminEditMode::Coverage)
+            }
             Some(WorkspaceChartEntityKind::SafetyItem) => {
                 self.focus == WorkspaceFocus::Workflow && self.draft_safety.is_active()
             }
@@ -10243,6 +9828,10 @@ impl WorkspaceDashboard {
     fn focus_chart_merge_target(&mut self, target: Option<WorkspaceChartEntityKind>) {
         match target {
             Some(WorkspaceChartEntityKind::Client) => self.focus = WorkspaceFocus::Demographics,
+            Some(WorkspaceChartEntityKind::Coverage) => {
+                self.focus = WorkspaceFocus::Demographics;
+                self.patient_admin_edit_mode = Some(PatientAdminEditMode::Coverage);
+            }
             Some(WorkspaceChartEntityKind::SafetyItem) => {
                 self.focus = WorkspaceFocus::Workflow;
                 self.set_workflow_section(MedicalWorkflowSection::Safety);
@@ -10316,7 +9905,7 @@ impl WorkspaceDashboard {
                 Span::styled("  Contact: ", Style::default().fg(Color::DarkGray)),
                 Span::raw(admin.contact_status_label()),
                 Span::styled("  Coverage: ", Style::default().fg(Color::DarkGray)),
-                Span::raw(admin.coverage_status_label()),
+                Span::raw(self.coverage_header_status()),
                 Span::styled("  Encounter: ", Style::default().fg(Color::DarkGray)),
                 Span::raw(compact_preview(encounter, 14)),
             ]));
@@ -10456,7 +10045,13 @@ impl WorkspaceDashboard {
                 | WorkspaceFocus::PatientFiles => MedicalKeyContext::CenterSections,
             },
             WorkspaceInputMode::PatientField | WorkspaceInputMode::PatientAdminField => {
-                MedicalKeyContext::PatientField
+                if self.card_verification_draft.is_some() {
+                    MedicalKeyContext::CardVerification
+                } else if self.patient_admin_edit_mode == Some(PatientAdminEditMode::Coverage) {
+                    MedicalKeyContext::CoverageEditor
+                } else {
+                    MedicalKeyContext::PatientField
+                }
             }
             WorkspaceInputMode::NoteTitle => MedicalKeyContext::NoteTitle,
             WorkspaceInputMode::NoteBody => MedicalKeyContext::NoteBody,
@@ -10556,7 +10151,11 @@ impl WorkspaceDashboard {
                 }
             }
             WorkspaceFocus::Demographics => {
-                if self.patient_admin_edit_mode.is_some() {
+                if self.card_verification_draft.is_some() {
+                    "Enter exact printed card values".to_string()
+                } else if self.patient_admin_edit_mode == Some(PatientAdminEditMode::Coverage) {
+                    "Edit coverage or compare card".to_string()
+                } else if self.patient_admin_edit_mode.is_some() {
                     "Type patient admin field".to_string()
                 } else {
                     "Edit patient data".to_string()
@@ -10576,12 +10175,7 @@ impl WorkspaceDashboard {
             WorkspaceFocus::Agent if self.agent_rail_tab == AgentRailTab::Audit => {
                 "Review agent provenance events".to_string()
             }
-            WorkspaceFocus::Agent => match self.workflow_section {
-                MedicalWorkflowSection::AgentRequest => "type local instructions".to_string(),
-                MedicalWorkflowSection::ContextPacket => "Ctrl-G sends packet".to_string(),
-                MedicalWorkflowSection::AgentInbox => "Open Agent Review".to_string(),
-                _ => "r input | p packet | i returned".to_string(),
-            },
+            WorkspaceFocus::Agent => self.workspace_coach_advice().next.to_string(),
             WorkspaceFocus::Workflow => {
                 let next_label = self.workflow_single_line_next_action_label();
                 next_label
@@ -10593,6 +10187,12 @@ impl WorkspaceDashboard {
     }
 
     fn medical_focus_footer_label(&self) -> &'static str {
+        if self.card_verification_draft.is_some() {
+            return "Card Verify";
+        }
+        if self.patient_admin_edit_mode == Some(PatientAdminEditMode::Coverage) {
+            return "Coverage";
+        }
         match self.current_medical_pane_slot() {
             MedicalPaneSlot::PatientDirectory => "Directory",
             MedicalPaneSlot::ChartTree => "Patient Notes",
@@ -10992,6 +10592,7 @@ impl WorkspaceDashboard {
                 WorkspaceActionId::ContactEdit,
                 WorkspaceActionId::EmergencyContactEdit,
                 WorkspaceActionId::CoverageEdit,
+                WorkspaceActionId::CoverageVerify,
                 WorkspaceActionId::FocusNoteTitle,
             ],
             WorkspaceFocus::NoteTitle => vec![
@@ -11371,125 +10972,6 @@ impl WorkspaceDashboard {
         })
     }
 
-    fn patient_admin_editor_lines(&self, mode: PatientAdminEditMode) -> Vec<Line<'static>> {
-        let admin = patient_admin_metadata_for_draft(&self.draft_client);
-        let mut lines = vec![
-            Line::from(format!(
-                "Patient: {}",
-                nonempty_or(&self.draft_client.display_name, "unsaved patient")
-            )),
-            Line::from(format!(
-                "DOB: {}; Patient ID / MRN: {}",
-                nonempty_or(&self.draft_client.date_of_birth, "blank"),
-                nonempty_or(&self.draft_client.external_id, "blank")
-            )),
-            Line::from(Span::styled(
-                mode.title(),
-                Style::default().add_modifier(Modifier::BOLD),
-            )),
-        ];
-        if mode == PatientAdminEditMode::Contact {
-            lines.push(Line::from(format!(
-                "Contact info: {}",
-                admin.contact_summary()
-            )));
-            lines.push(Line::from(format!(
-                "Emergency contact: {}",
-                admin.emergency_summary()
-            )));
-        } else {
-            lines.push(Line::from(Span::styled(
-                "Coverage/member ID is separate from Patient ID / MRN.",
-                Style::default().fg(Color::DarkGray),
-            )));
-        }
-        for field in mode.fields() {
-            if mode == PatientAdminEditMode::Contact
-                && *field == PatientAdminField::EmergencyContactName
-            {
-                lines.push(Line::from(Span::styled(
-                    "Emergency Contact",
-                    Style::default().fg(Color::Gray),
-                )));
-            }
-            let active =
-                self.focus == WorkspaceFocus::Demographics && self.patient_admin_field == *field;
-            lines.push(patient_admin_editor_field_line(
-                field.label(),
-                admin.value(*field),
-                active,
-                field.placeholder(),
-            ));
-        }
-        lines.push(Line::from(""));
-        match mode {
-            PatientAdminEditMode::Contact => {
-                lines.push(Line::from(Span::styled(
-                    "Local fake demographics metadata only; Ctrl-S saves the patient.",
-                    Style::default().fg(Color::DarkGray),
-                )));
-            }
-            PatientAdminEditMode::Coverage => {
-                lines.push(Line::from(Span::styled(
-                    "No eligibility checks, payer messages, claims, or submissions.",
-                    Style::default().fg(Color::DarkGray),
-                )));
-            }
-        }
-        lines
-    }
-
-    fn render_demographics(&self, area: Rect, buf: &mut Buffer) {
-        if self.profile == WorkspaceProfile::Medical
-            && let Some(mode) = self.patient_admin_edit_mode
-        {
-            render_pane(
-                mode.title(),
-                area,
-                self.focus == WorkspaceFocus::Demographics,
-                Paragraph::new(self.patient_admin_editor_lines(mode)).wrap(Wrap { trim: false }),
-                buf,
-            );
-            return;
-        }
-        let mut lines = DemographicsField::ALL
-            .iter()
-            .map(|field| {
-                let active =
-                    self.focus == WorkspaceFocus::Demographics && *field == self.demographics_field;
-                field_line(
-                    field.label(self.profile),
-                    self.draft_client.value(*field),
-                    active,
-                )
-            })
-            .collect::<Vec<_>>();
-        if self.profile == WorkspaceProfile::Medical {
-            let admin = patient_admin_metadata_for_draft(&self.draft_client);
-            lines.extend([
-                Line::from(""),
-                Line::from(Span::styled(
-                    "Patient Demographics",
-                    Style::default().add_modifier(Modifier::BOLD),
-                )),
-                Line::from(format!("Contact info: {}", admin.contact_summary())),
-                Line::from(format!("Emergency contact: {}", admin.emergency_summary())),
-                Line::from(format!("Coverage: {}", admin.coverage_summary())),
-                Line::from(Span::styled(
-                    "Local fake metadata only; no eligibility checks or payer communication.",
-                    Style::default().fg(Color::DarkGray),
-                )),
-            ]);
-        }
-        render_pane(
-            self.profile.demographics_title(),
-            area,
-            self.focus == WorkspaceFocus::Demographics,
-            Paragraph::new(lines).wrap(Wrap { trim: false }),
-            buf,
-        );
-    }
-
     fn render_note_title(&self, area: Rect, buf: &mut Buffer) {
         let title_text = nonempty_or(&self.draft_note.title, UNTITLED_NOTE_TITLE);
         let title = if self.profile == WorkspaceProfile::Medical && self.draft_note.is_locked() {
@@ -11575,13 +11057,15 @@ impl WorkspaceDashboard {
             );
             return;
         }
-        render_pane(
+        Clear.render(area, buf);
+        let block = pane_block(
             self.profile.note_body_label(),
-            area,
             self.focus == WorkspaceFocus::NoteBody,
-            Paragraph::new(self.draft_note.body.clone()).wrap(Wrap { trim: false }),
-            buf,
         );
+        let inner = block.inner(area);
+        block.render(area, buf);
+        self.note_body_editor
+            .render(&self.draft_note.body, inner, buf);
     }
 
     fn render_workflow(&self, area: Rect, buf: &mut Buffer) {
@@ -11802,7 +11286,14 @@ impl WorkspaceDashboard {
         } else {
             self.agent_workpane_active_lines()
         };
-        let max_scroll = lines.len().saturating_sub(inner.height as usize) as u16;
+        let composer = self.agent_request_composer_rects(inner, compact_summary);
+        let guidance_rect = composer
+            .map(|(guidance, _, _)| guidance)
+            .unwrap_or(inner);
+        let visual_line_count = workflow_visual_line_count(&lines, guidance_rect.width);
+        let max_scroll = visual_line_count
+            .saturating_sub(guidance_rect.height as usize)
+            .min(u16::MAX as usize) as u16;
         let scroll = if active && !compact_summary {
             self.agent_scroll.min(max_scroll)
         } else {
@@ -11811,7 +11302,66 @@ impl WorkspaceDashboard {
         Paragraph::new(lines)
             .wrap(Wrap { trim: false })
             .scroll((scroll, 0))
-            .render(inner, buf);
+            .render(guidance_rect, buf);
+        if let Some((_, composer_header, editor_rect)) = composer {
+            Clear.render(composer_header, buf);
+            Paragraph::new(Line::from(vec![
+                Span::styled(
+                    "Ask Agent",
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    " · local · Enter ↵ · Ctrl-G review",
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ]))
+            .render(composer_header, buf);
+            Clear.render(editor_rect, buf);
+            self.agent_request_editor
+                .render(&self.agent_request.body, editor_rect, buf);
+        }
+    }
+
+    fn agent_request_composer_rects(
+        &self,
+        inner: Rect,
+        compact_summary: bool,
+    ) -> Option<(Rect, Rect, Rect)> {
+        if compact_summary
+            || !self.agent_request.is_active()
+            || self.agent_rail_tab != AgentRailTab::Pending
+            || self.pending_chart_changeset.is_some()
+            || self.workflow_section != MedicalWorkflowSection::AgentRequest
+            || inner.width <= 2
+            || inner.height <= 1
+        {
+            return None;
+        }
+
+        let logical_lines = text_field_display_lines(&self.agent_request.body).len().max(1);
+        let desired_editor_height = logical_lines.saturating_add(1).clamp(3, 8) as u16;
+        let editor_height = if inner.height >= 8 {
+            desired_editor_height.min(inner.height.saturating_sub(5))
+        } else {
+            inner.height.saturating_sub(2).max(1)
+        };
+        let header_y = inner.bottom().saturating_sub(editor_height + 1);
+        let guidance = Rect::new(
+            inner.x,
+            inner.y,
+            inner.width,
+            header_y.saturating_sub(inner.y),
+        );
+        let header = Rect::new(inner.x, header_y, inner.width, 1);
+        let editor = Rect::new(
+            inner.x.saturating_add(2),
+            header_y.saturating_add(1),
+            inner.width.saturating_sub(2),
+            editor_height,
+        );
+        Some((guidance, header, editor))
     }
 
     fn render_medical_agent_changeset_summary(&self, area: Rect, buf: &mut Buffer) {
@@ -12226,7 +11776,9 @@ impl WorkspaceDashboard {
             WorkflowTone::Ready
         };
 
-        vec![
+        let mut lines = self.agent_workpane_coach_lines();
+        lines.extend([
+            Line::from(""),
             self.agent_workpane_mode_line("Input"),
             workflow_context_signal_line(WorkflowTone::Agent, "draft", request),
             workflow_context_signal_line(
@@ -12241,22 +11793,84 @@ impl WorkspaceDashboard {
             Line::from(""),
             workflow_action_hint_line("review: :agent preview, then Ctrl-G"),
             Line::from("  No upload/OCR/payer action/auto-apply."),
-        ]
+        ]);
+        lines
     }
 
     fn agent_workpane_request_lines(&self) -> Vec<Line<'static>> {
-        let mut lines = vec![
+        let mut lines = self.agent_workpane_coach_lines();
+        lines.extend([
+            Line::from(""),
             self.agent_workpane_mode_line("Input"),
-            workflow_action_hint_line("request: type local instructions"),
-        ];
-        lines.extend(agent_request_input_lines(&self.agent_request.body, true, 8));
-        if self.agent_request.body.trim().is_empty() {
-            lines.push(Line::from("  Nothing is sent until Packet review."));
-        }
-        lines.push(Line::from("  Local only; preview packet before Ctrl-G."));
+            workflow_action_hint_line("request: edit the local draft below"),
+            Line::from("  Nothing is sent until Packet review and Ctrl-G."),
+            Line::from("  Local only; the composer stays pinned below guidance."),
+        ]);
         lines.push(Line::from(""));
         lines.extend(self.agent_workpane_selected_context_lines());
         lines.extend(self.agent_workpane_note_history_lines(1));
+        lines
+    }
+
+    fn workspace_coach_advice(&self) -> WorkspaceCoachAdvice {
+        let request_has_text = self.agent_request.has_text();
+        let current_request_has_packet = !request_has_text && !self.context_packets.is_empty();
+        let packet_waiting_for_result = !request_has_text
+            && self
+                .context_packets
+                .iter()
+                .any(|packet| !self.packet_has_result(&packet.id));
+        workspace_coach_advice(WorkspaceCoachState {
+            patient_saved: self.draft_client.id.is_some(),
+            note_saved: self.draft_note.id.is_some(),
+            note_has_title: !self.draft_note.title.trim().is_empty(),
+            note_has_body: !self.draft_note.body.trim().is_empty(),
+            chart_has_unsaved_changes: self.dirty,
+            selected_file_count: self.selected_artifacts().len(),
+            selected_text_count: self.selected_derivatives().len(),
+            selected_clip_count: self.selected_clips().len(),
+            request_has_text,
+            packet_review_open: self.workflow_section == MedicalWorkflowSection::ContextPacket,
+            packet_submitted: current_request_has_packet,
+            packet_waiting_for_result,
+            returned_work_available: !request_has_text && !self.agent_results.is_empty(),
+        })
+    }
+
+    fn agent_workpane_coach_lines(&self) -> Vec<Line<'static>> {
+        let advice = self.workspace_coach_advice();
+        let mut lines = Vec::new();
+        if let Some(message) = self.draft_persistence_message.as_deref() {
+            lines.push(workflow_context_signal_line(
+                if self.draft_recovery_available {
+                    WorkflowTone::Caution
+                } else {
+                    WorkflowTone::Review
+                },
+                if self.draft_recovery_available {
+                    "recovery"
+                } else {
+                    "local draft"
+                },
+                message,
+            ));
+            lines.push(Line::from(""));
+        }
+        lines.extend([
+            workflow_header_line("Local Coach", WorkflowTone::Ready),
+            Line::from(vec![
+                Span::styled(
+                    format!("  {}", advice.title),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
+            ]),
+            Line::from(format!("  {}", advice.detail)),
+            workflow_action_hint_line(format!("next: {}", advice.next)),
+            Line::from(Span::styled(
+                "  Guidance only; no model call and no chart mutation.",
+                Style::default().fg(Color::DarkGray),
+            )),
+        ]);
         lines
     }
 
@@ -15292,6 +14906,7 @@ impl WorkspaceDashboard {
 
 fn workspace_chart_expected_versions_is_empty(versions: &WorkspaceChartExpectedVersions) -> bool {
     versions.client.is_none()
+        && versions.coverage.is_none()
         && versions.safety_item.is_none()
         && versions.encounter.is_none()
         && versions.document.is_none()
@@ -15387,6 +15002,7 @@ fn chart_commit_failure_from_typed_error(typed: &TypedRequestError) -> Option<Ch
 fn workspace_chart_entity_kind_label(kind: WorkspaceChartEntityKind) -> &'static str {
     match kind {
         WorkspaceChartEntityKind::Client => "patient",
+        WorkspaceChartEntityKind::Coverage => "coverage",
         WorkspaceChartEntityKind::SafetyItem => "clinical safety item",
         WorkspaceChartEntityKind::Encounter => "encounter",
         WorkspaceChartEntityKind::Note => "note",
@@ -16023,33 +15639,6 @@ fn field_line(label: &str, value: &str, active: bool) -> Line<'static> {
     ])
 }
 
-fn patient_admin_editor_field_line(
-    label: &str,
-    value: &str,
-    active: bool,
-    placeholder: &str,
-) -> Line<'static> {
-    let label_style = if active {
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(Color::Gray)
-    };
-    let value_span = if value.trim().is_empty() {
-        Span::styled(
-            placeholder.to_string(),
-            Style::default().fg(Color::DarkGray),
-        )
-    } else {
-        Span::raw(value.to_string())
-    };
-    Line::from(vec![
-        Span::styled(format!("{label}: "), label_style),
-        value_span,
-    ])
-}
-
 fn safety_category_heading(category: &str) -> &'static str {
     match category {
         "allergy" => "Allergies",
@@ -16487,6 +16076,13 @@ fn apply_delta(current: usize, total: usize, delta: isize) -> usize {
 fn nonempty_option(value: &str) -> Option<String> {
     let trimmed = value.trim();
     (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+fn affirmative_text(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "y" | "required"
+    )
 }
 
 fn associated_practice_document_notes(document: &WorkspaceDocument) -> String {
@@ -17856,7 +17452,7 @@ fn dropped_file_kind(path: &Path) -> &'static str {
                 || name.contains("payer")
                 || name.contains("coverage")
             {
-                "medicare insurance card image"
+                "insurance_card"
             } else if name.contains("id")
                 || name.contains("license")
                 || name.contains("driver")
@@ -17868,7 +17464,13 @@ fn dropped_file_kind(path: &Path) -> &'static str {
             }
         }
         "pdf" => {
-            if name.contains("referral") {
+            if name.contains("medicare")
+                || name.contains("insurance")
+                || name.contains("payer")
+                || name.contains("coverage")
+            {
+                "insurance_card"
+            } else if name.contains("referral") {
                 "referral pdf"
             } else {
                 "pdf"
@@ -18009,6 +17611,15 @@ fn command_aliases(command: &str) -> &'static [&'static str] {
         ],
         "emergency contact edit" => &["edit emergency contact", "emergency contact"],
         "coverage edit" => &["edit coverage", "coverage", "member id", "insurance"],
+        "coverage verify" => &[
+            "verify coverage",
+            "compare coverage card",
+            "coverage card",
+            "insurance card",
+            "medicare card",
+        ],
+        "draft restore" => &["restore draft", "restore local draft"],
+        "draft discard" => &["discard draft", "discard local draft"],
         "agent result" => &[
             "returned work",
             "paste returned work",
@@ -18458,9 +18069,12 @@ mod tests {
         assert!(!rendered.contains("Chart Sections"));
         assert!(rendered.contains("Note Title"));
         assert!(rendered.contains("Note Body"));
-        assert!(rendered.contains("Patient ID / MRN"));
-        assert!(rendered.contains("Chart start"));
-        assert!(rendered.contains("Chart end"));
+        assert!(rendered.contains("MRN:"));
+        assert!(rendered.contains("Legal/card:"));
+        assert!(rendered.contains("Contact:"));
+        assert!(rendered.contains("Address:"));
+        assert!(rendered.contains("Emergency:"));
+        assert!(rendered.contains("Coverage: P not entered; S not entered; T not entered"));
         assert!(rendered.contains("Agent Work"));
         assert!(rendered.contains("Mode:"));
         assert!(rendered.contains("No upload/OCR/payer action/auto-apply"));
@@ -18682,8 +18296,9 @@ mod tests {
 
         assert_eq!(
             dashboard.execute_workspace_command(":patient new"),
-            WorkspaceDashboardAction::Consumed
+            WorkspaceDashboardAction::StartNewClient
         );
+        dashboard.start_new_client();
         assert_eq!(dashboard.focus, WorkspaceFocus::Demographics);
         let directory_rendered = dashboard
             .patient_directory_lines()
@@ -18700,8 +18315,9 @@ mod tests {
         dashboard.draft_client.id = Some("client-new".to_string());
         assert_eq!(
             dashboard.execute_workspace_command(":note new daily"),
-            WorkspaceDashboardAction::Consumed
+            WorkspaceDashboardAction::StartNewNote
         );
+        dashboard.start_new_note();
         assert_eq!(dashboard.focus, WorkspaceFocus::NoteBody);
         for c in "SOAP fake sample note: patient tolerated exercise.".chars() {
             dashboard.handle_key_event(KeyEvent::from(KeyCode::Char(c)));
@@ -18764,26 +18380,36 @@ mod tests {
             dashboard.handle_key_event(KeyEvent::from(KeyCode::Char(c)));
         }
         dashboard.handle_key_event(KeyEvent::from(KeyCode::Down));
+        type_text(&mut dashboard, "mobile");
+        dashboard.handle_key_event(KeyEvent::from(KeyCode::Down));
         for c in "555-0102".chars() {
             dashboard.handle_key_event(KeyEvent::from(KeyCode::Char(c)));
         }
         dashboard.handle_key_event(KeyEvent::from(KeyCode::Down));
+        type_text(&mut dashboard, "home");
+        dashboard.handle_key_event(KeyEvent::from(KeyCode::Down));
         for c in "jordan.fake@example.test".chars() {
             dashboard.handle_key_event(KeyEvent::from(KeyCode::Char(c)));
         }
-        let rendered = render_dashboard_lines_at(&dashboard, 160, 45);
+        let editor = dashboard
+            .patient_admin_editor_lines(PatientAdminEditMode::Contact)
+            .iter()
+            .map(line_plain_text)
+            .collect::<Vec<_>>()
+            .join("\n");
 
-        assert!(rendered.contains("Patient Demographics Editor"));
-        assert!(rendered.contains("Primary phone: 555-0101"));
-        assert!(rendered.contains("Secondary phone: 555-0102"));
-        assert!(rendered.contains("Email: jordan.fake@example.test"));
-        assert!(
-            rendered
-                .contains("Emergency contact: name missing; relationship missing; phone missing")
-        );
+        assert!(editor.contains("Patient Demographics Editor"));
+        assert!(editor.contains("Primary phone: 555-0101"));
+        assert!(editor.contains("Primary phone type: mobile"));
+        assert!(editor.contains("Secondary phone: 555-0102"));
+        assert!(editor.contains("Secondary phone type: home"));
+        assert!(editor.contains("Primary email: jordan.fake@example.test"));
+        assert!(editor.contains("Emergency Contact"));
         assert!(dashboard.dirty);
         assert_eq!(dashboard.draft_client.primary_phone, "555-0101");
+        assert_eq!(dashboard.draft_client.primary_phone_use, "mobile");
         assert_eq!(dashboard.draft_client.secondary_phone, "555-0102");
+        assert_eq!(dashboard.draft_client.secondary_phone_use, "home");
         assert_eq!(dashboard.draft_client.email, "jordan.fake@example.test");
 
         dashboard.clients[0].primary_phone = Some(dashboard.draft_client.primary_phone.clone());
@@ -18862,15 +18488,15 @@ mod tests {
 
         assert!(rendered.contains("Coverage Editor"));
         assert!(rendered.contains("Patient ID / MRN: MRN-123"));
-        assert!(rendered.contains("Member ID / Medicare ID: MED-777"));
+        assert!(rendered.contains("Member ID: MED-777"));
         assert!(rendered.contains("Coverage/member ID is separate from Patient ID / MRN."));
         assert!(!rendered.contains("External ID"));
-        assert_eq!(dashboard.draft_client.payer_name, "Fake Medicare");
-        assert_eq!(dashboard.draft_client.plan_name, "Plan A");
-        assert_eq!(dashboard.draft_client.member_id, "MED-777");
-        assert_eq!(dashboard.draft_client.group_number, "GRP-1");
-        assert_eq!(dashboard.draft_client.coverage_type, "Medicare");
-        assert_eq!(dashboard.draft_client.coverage_status, "active");
+        assert_eq!(dashboard.coverage_draft.payer_name, "Fake Medicare");
+        assert_eq!(dashboard.coverage_draft.plan_name, "Plan A");
+        assert_eq!(dashboard.coverage_draft.member_id, "MED-777");
+        assert_eq!(dashboard.coverage_draft.group_number, "GRP-1");
+        assert_eq!(dashboard.coverage_draft.coverage_type, "Medicare");
+        assert_eq!(dashboard.coverage_draft.coverage_status, "active");
         assert_eq!(
             dashboard.draft_client.emergency_contact_name,
             "Maya Contact"
@@ -18891,22 +18517,389 @@ mod tests {
         );
         dashboard.clients[0].emergency_contact_phone =
             Some(dashboard.draft_client.emergency_contact_phone.clone());
-        dashboard.clients[0].payer_name = Some(dashboard.draft_client.payer_name.clone());
-        dashboard.clients[0].plan_name = Some(dashboard.draft_client.plan_name.clone());
-        dashboard.clients[0].member_id = Some(dashboard.draft_client.member_id.clone());
-        dashboard.clients[0].group_number = Some(dashboard.draft_client.group_number.clone());
-        dashboard.clients[0].coverage_type = Some(dashboard.draft_client.coverage_type.clone());
-        dashboard.clients[0].coverage_status = Some(dashboard.draft_client.coverage_status.clone());
+        assert!(dashboard.draft_client.payer_name.is_empty());
+        assert!(dashboard.draft_client.plan_name.is_empty());
+        assert!(dashboard.draft_client.member_id.is_empty());
         dashboard.patient_search_query = Some("Maya Contact".to_string());
         assert_eq!(dashboard.patient_search_result_indices(), vec![0]);
         dashboard.patient_search_query = Some("5550199".to_string());
-        assert_eq!(dashboard.patient_search_result_indices(), vec![0]);
-        dashboard.patient_search_query = Some("MED-777".to_string());
         assert_eq!(dashboard.patient_search_result_indices(), vec![0]);
         dashboard.patient_search_query = Some("SEARCH_UI_ONLY_SENTINEL".to_string());
         let prompt = dashboard.agent_context_prompt();
         assert!(prompt.contains("Jordan Patient"));
         assert!(!prompt.contains("SEARCH_UI_ONLY_SENTINEL"));
+    }
+
+    #[test]
+    fn medical_demographics_summary_and_editor_keep_identity_contact_and_cursor_visible() {
+        let mut dashboard = medical_recursive_base_dashboard();
+        dashboard.draft_client.legal_first_name = "Jordan".to_string();
+        dashboard.draft_client.legal_middle_name = "Q".to_string();
+        dashboard.draft_client.legal_last_name = "Patient".to_string();
+        dashboard.draft_client.primary_phone = "555-0101".to_string();
+        dashboard.draft_client.email = "jordan.fake@example.test".to_string();
+        dashboard.draft_client.address_line_1 = "10 Example Street".to_string();
+        dashboard.draft_client.city = "Exampleville".to_string();
+        dashboard.draft_client.state_or_province = "IL".to_string();
+        dashboard.draft_client.postal_code = "60000".to_string();
+        dashboard.draft_client.emergency_contact_name = "Maya Contact".to_string();
+        dashboard.draft_client.emergency_contact_phone = "555-0199".to_string();
+        dashboard.focus = WorkspaceFocus::Demographics;
+
+        let summary = render_dashboard_lines_at(&dashboard, 160, 40);
+        for expected in [
+            "Legal/card: Jordan Q Patient",
+            "555-0101",
+            "jordan.fake@example.test",
+            "10 Example Street",
+            "Exampleville",
+            "Maya Contact",
+            "555-0199",
+            "Coverage: P not entered; S not entered; T not entered",
+        ] {
+            assert!(
+                summary.contains(expected),
+                "missing {expected:?} from compact demographics summary:\n{summary}"
+            );
+        }
+
+        press_consumed(&mut dashboard, KeyCode::Enter);
+        assert_eq!(
+            dashboard.patient_admin_edit_mode,
+            Some(PatientAdminEditMode::Contact)
+        );
+        assert_eq!(
+            dashboard.patient_admin_field,
+            PatientAdminField::DisplayName
+        );
+
+        dashboard.patient_admin_field = PatientAdminField::ContactNotes;
+        dashboard.draft_client.contact_notes =
+            "Call the fake emergency contact before scheduling.".to_string();
+        for viewport in [Rect::new(0, 0, 80, 20), Rect::new(0, 0, 120, 32)] {
+            let rendered = render_dashboard_lines_at(
+                &dashboard,
+                viewport.width,
+                viewport.height,
+            );
+            assert!(
+                rendered.contains("> Contact notes:"),
+                "selected long-form field should be scrolled into view at {viewport:?}:\n{rendered}"
+            );
+            let cursor = dashboard
+                .cursor_pos(viewport)
+                .expect("selected contact field should expose a cursor");
+            let editor = match WorkspaceLayoutMode::for_area(viewport) {
+                WorkspaceLayoutMode::Medium => inner_rect(MedicalMediumAreas::new(viewport).main),
+                WorkspaceLayoutMode::Compact => {
+                    inner_rect(MedicalCompactAreas::new(viewport).body)
+                }
+                mode => panic!("unexpected test layout {mode:?}"),
+            };
+            assert!(rect_contains(editor, cursor));
+        }
+    }
+
+    #[test]
+    fn normalized_coverage_editor_routes_priority_toggle_and_advisory_mismatch() {
+        let mut dashboard = medical_recursive_base_dashboard();
+        assert_eq!(
+            dashboard.execute_workspace_command(":coverage edit"),
+            WorkspaceDashboardAction::Consumed
+        );
+
+        type_text(&mut dashboard, "Fake Payer");
+        press_consumed(&mut dashboard, KeyCode::Down);
+        type_text(&mut dashboard, "Fake Plan");
+        assert_eq!(dashboard.coverage_draft.payer_name, "Fake Payer");
+        assert_eq!(dashboard.coverage_draft.plan_name, "Fake Plan");
+        assert!(dashboard.draft_client.payer_name.is_empty());
+        assert!(dashboard.draft_client.plan_name.is_empty());
+
+        assert_eq!(
+            press_key(&mut dashboard, KeyCode::Right),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert!(dashboard.status.contains("Save the current coverage"));
+        assert_eq!(dashboard.coverage_draft.priority, CoveragePriority::Primary);
+
+        dashboard.dirty = false;
+        assert_eq!(
+            press_key(&mut dashboard, KeyCode::Right),
+            WorkspaceDashboardAction::SelectCoveragePriority(2)
+        );
+        assert_eq!(dashboard.coverage_draft.priority, CoveragePriority::Primary);
+        assert_eq!(
+            press_key(&mut dashboard, KeyCode::Left),
+            WorkspaceDashboardAction::SelectCoveragePriority(3)
+        );
+
+        dashboard.coverage_field = CoverageField::SubscriberAddressSameAsPatient;
+        assert!(!dashboard.coverage_draft.subscriber_address_same_as_patient);
+        press_consumed(&mut dashboard, KeyCode::Char(' '));
+        assert!(dashboard.coverage_draft.subscriber_address_same_as_patient);
+        assert!(dashboard.dirty);
+
+        dashboard.dirty = false;
+        dashboard.coverage_draft.billing_readiness = WorkspaceBillingReadiness::Mismatch;
+        let editor = dashboard
+            .coverage_editor_lines()
+            .iter()
+            .map(line_plain_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(editor.contains("MISMATCH · billing/export blocked"));
+        assert!(editor.contains("clinical chart saves remain available"));
+        assert_eq!(
+            press_key_event(
+                &mut dashboard,
+                KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL),
+            ),
+            WorkspaceDashboardAction::Save,
+            "billing mismatch must remain advisory for ordinary clinical chart saves"
+        );
+
+        let mut primary = test_coverage(
+            "coverage-primary",
+            "client-1",
+            CoveragePriority::Primary,
+            WorkspaceBillingReadiness::Mismatch,
+        );
+        primary.payer_name = Some("Fake Primary".to_string());
+        let mut secondary = test_coverage(
+            "coverage-secondary",
+            "client-1",
+            CoveragePriority::Secondary,
+            WorkspaceBillingReadiness::Match,
+        );
+        secondary.payer_name = Some("Fake Secondary".to_string());
+        let mut tertiary = test_coverage(
+            "coverage-tertiary",
+            "client-1",
+            CoveragePriority::Tertiary,
+            WorkspaceBillingReadiness::Incomplete,
+        );
+        tertiary.payer_name = Some("Fake Tertiary".to_string());
+        dashboard.coverages = vec![primary, secondary, tertiary];
+        dashboard.coverage_draft =
+            CoverageDraft::new("client-1", CoveragePriority::Primary);
+        dashboard.patient_admin_edit_mode = None;
+        dashboard.focus = WorkspaceFocus::Demographics;
+        let summary = render_dashboard_lines_at(&dashboard, 220, 40);
+        assert!(summary.contains("P Fake Primary [mismatch]"));
+        assert!(summary.contains("S Fake Secondary [match]"));
+        assert!(summary.contains("T Fake Tertiary [incomplete]"));
+    }
+
+    #[test]
+    fn human_card_comparison_renders_boundaries_and_builds_exact_create_action() {
+        let coverage = test_coverage(
+            "coverage-primary",
+            "client-1",
+            CoveragePriority::Primary,
+            WorkspaceBillingReadiness::Unverified,
+        );
+        let client = test_client("client-1", "Jordan Patient");
+        let mut dashboard = medical_recursive_base_dashboard();
+        dashboard.clients = vec![client.clone()];
+        dashboard.draft_client = ClientDraft::from_client(&client);
+        dashboard.coverages = vec![coverage.clone()];
+        dashboard.coverage_draft = CoverageDraft::try_from(&coverage).expect("coverage draft");
+
+        assert_eq!(
+            dashboard.execute_workspace_command(":coverage card"),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert!(
+            dashboard
+                .status
+                .contains("present, hashed local insurance-card reference")
+        );
+        assert!(dashboard.card_verification_draft.is_none());
+
+        let mut card_document = patient_file(
+            "document-card",
+            "Fake Medicare card front",
+            "insurance_card",
+            "/tmp/fake-card.jpg",
+        );
+        card_document.sha256 = Some("a".repeat(64));
+        card_document.content_sha256 = Some("a".repeat(64));
+        card_document.existence_status = "present".to_string();
+        dashboard.documents = vec![card_document];
+        assert_eq!(
+            dashboard.execute_workspace_command(":coverage card"),
+            WorkspaceDashboardAction::Consumed
+        );
+        let rendered = dashboard
+            .card_verification_editor_lines()
+            .iter()
+            .map(line_plain_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(rendered.contains("Human Coverage Card Comparison"));
+        assert!(rendered.contains("Type the identity exactly as printed on the card"));
+        assert!(rendered.contains("No OCR or model inference"));
+        assert!(rendered.contains("No OCR/model extraction, eligibility check, payer message"));
+
+        let draft = dashboard
+            .card_verification_draft
+            .as_mut()
+            .expect("card comparison draft");
+        draft.observed_first_name = "Jordan".to_string();
+        draft.observed_middle_name = "Q".to_string();
+        draft.observed_last_name = "Patient".to_string();
+        draft.observed_suffix = "Jr".to_string();
+        draft.observed_member_id = "1EG4TE5MK73".to_string();
+        draft.actor = "Taylor PT".to_string();
+
+        assert_eq!(
+            press_key_event(
+                &mut dashboard,
+                KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL),
+            ),
+            WorkspaceDashboardAction::CreateCoverageVerification(
+                WorkspaceCoverageVerificationCreateParams {
+                    coverage_id: "coverage-primary".to_string(),
+                    source_document_id: "document-card".to_string(),
+                    expected_patient_version: "version-client-1".to_string(),
+                    expected_coverage_version: "version-coverage-primary".to_string(),
+                    expected_document_version: "version-document-card".to_string(),
+                    compared_subject: WorkspaceCoverageVerificationSubject::Beneficiary,
+                    observed_first_name: Some("Jordan".to_string()),
+                    observed_middle_name: Some("Q".to_string()),
+                    observed_last_name: Some("Patient".to_string()),
+                    observed_suffix: Some("Jr".to_string()),
+                    observed_member_id: Some("1EG4TE5MK73".to_string()),
+                    actor: "Taylor PT".to_string(),
+                }
+            )
+        );
+    }
+
+    #[test]
+    fn local_draft_recovery_gates_chart_edits_but_keeps_recovery_controls_available() {
+        let mut dashboard = medical_recursive_base_dashboard();
+        dashboard.focus = WorkspaceFocus::NoteBody;
+        dashboard.set_draft_recovery_available(true);
+        let original_body = dashboard.draft_note.body.clone();
+
+        press_consumed(&mut dashboard, KeyCode::Char('x'));
+        assert_eq!(dashboard.draft_note.body, original_body);
+        assert!(dashboard.status.contains("Resolve the recoverable local draft"));
+
+        press_consumed(&mut dashboard, KeyCode::Tab);
+        assert_eq!(dashboard.focus, WorkspaceFocus::Workflow);
+
+        let mut escape = medical_recursive_base_dashboard();
+        escape.set_draft_recovery_available(true);
+        assert_eq!(press_key(&mut escape, KeyCode::Esc), WorkspaceDashboardAction::Close);
+
+        let mut commands = medical_recursive_base_dashboard();
+        commands.set_draft_recovery_available(true);
+        assert_eq!(
+            press_key_event(
+                &mut commands,
+                KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
+            ),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert_eq!(commands.command_input.as_deref(), Some(""));
+
+        for command in [":draft restore", ":restore draft", ":restore local draft"] {
+            let mut restore = medical_recursive_base_dashboard();
+            restore.set_draft_recovery_available(true);
+            assert_eq!(
+                restore.execute_workspace_command(command),
+                WorkspaceDashboardAction::RestoreLocalDraft
+            );
+        }
+        for command in [":draft discard", ":discard draft", ":discard local draft"] {
+            let mut discard = medical_recursive_base_dashboard();
+            discard.set_draft_recovery_available(true);
+            assert_eq!(
+                discard.execute_workspace_command(command),
+                WorkspaceDashboardAction::DiscardLocalDraft
+            );
+        }
+    }
+
+    #[test]
+    fn local_draft_recovery_blocks_paste_and_command_palette_chart_mutations() {
+        let mut note = medical_recursive_base_dashboard();
+        note.focus = WorkspaceFocus::NoteBody;
+        note.set_draft_recovery_available(true);
+        let original_body = note.draft_note.body.clone();
+        assert_eq!(
+            note.handle_paste("PASTE_MUTATION_SENTINEL".to_string()),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert_eq!(note.draft_note.body, original_body);
+        assert!(note.status.contains("Resolve the recoverable local draft"));
+
+        let mut files = medical_recursive_files_dashboard();
+        files.focus_patient_files_tree();
+        files.set_draft_recovery_available(true);
+        let document_count = files.documents.len();
+        assert_eq!(
+            files.handle_paste("/tmp/recovery-blocked-card.pdf".to_string()),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert_eq!(files.documents.len(), document_count);
+        assert!(files.status.contains("Resolve the recoverable local draft"));
+
+        let mut patient_action = medical_recursive_base_dashboard();
+        patient_action.set_draft_recovery_available(true);
+        let patient_before = patient_action.draft_client.display_name.clone();
+        patient_action.open_command_palette();
+        type_text(&mut patient_action, "patient new");
+        press_consumed(&mut patient_action, KeyCode::Enter);
+        assert_eq!(patient_action.draft_client.display_name, patient_before);
+        assert!(patient_action.status.contains("Restore or discard"));
+
+        let mut selector_action = medical_recursive_files_dashboard();
+        selector_action.set_draft_recovery_available(true);
+        selector_action.open_command_palette();
+        type_text(&mut selector_action, "artifact toggle 1");
+        press_consumed(&mut selector_action, KeyCode::Enter);
+        assert!(selector_action.selected_artifact_ids.is_empty());
+        assert!(selector_action.status.contains("Restore or discard"));
+    }
+
+    #[test]
+    fn local_draft_recovery_rejects_a_different_encounter_for_an_unsaved_note() {
+        let mut dashboard = medical_recursive_base_dashboard();
+        dashboard.draft_note.id = None;
+        dashboard.draft_note.current_revision = 0;
+        dashboard.draft_note.encounter_id = Some("encounter-current".to_string());
+        dashboard.draft_note.title = "Current unsaved note".to_string();
+        dashboard.draft_note.body = "Current unsaved body".to_string();
+        let working_note_id = dashboard.draft_note.working_note_id.clone();
+        let recovered = MedicalWorkspaceWorkingDraftV1::new(MedicalWorkspaceWorkingDraftInput {
+            client_id: "client-1".to_string(),
+            note_id: None,
+            working_note_id,
+            encounter_id: Some("encounter-other".to_string()),
+            base_note_revision: None,
+            note_title: "Wrong encounter title".to_string(),
+            note_body: "Wrong encounter body".to_string(),
+            agent_request_body: String::new(),
+            selected_file_ids: Vec::new(),
+            selected_reviewed_text_ids: Vec::new(),
+            selected_clip_ids: Vec::new(),
+        })
+        .expect("valid unsaved recovery fixture");
+
+        let error = dashboard
+            .apply_recovered_medical_working_draft(recovered)
+            .expect_err("different encounter must reject recovery");
+        assert!(matches!(
+            error,
+            WorkspaceDraftError::InvalidRecovery(ref message)
+                if message.contains("different encounter")
+        ));
+        assert_eq!(dashboard.draft_note.title, "Current unsaved note");
+        assert_eq!(dashboard.draft_note.body, "Current unsaved body");
     }
 
     #[test]
@@ -19015,7 +19008,7 @@ mod tests {
 
         let rendered = render_dashboard_lines_at(&dashboard, 180, 60);
 
-        assert!(rendered.contains("Patient ID / MRN"));
+        assert!(rendered.contains("MRN: MRN-123"));
         assert!(!rendered.contains("External ID"));
     }
 
@@ -19342,14 +19335,10 @@ mod tests {
         assert_eq!(dashboard.focus, WorkspaceFocus::Agent);
         assert_eq!(dashboard.workflow_section, MedicalWorkflowSection::Visit);
         assert!(!dashboard.agent_request.is_active());
-        assert_eq!(
-            dashboard.handle_key_event(KeyEvent::from(KeyCode::Char('r'))),
-            WorkspaceDashboardAction::Consumed
-        );
-        assert!(dashboard.agent_request.is_active());
         for c in "Use eval template".chars() {
             dashboard.handle_key_event(KeyEvent::from(KeyCode::Char(c)));
         }
+        assert!(dashboard.agent_request.is_active());
         assert_eq!(dashboard.agent_request.body, "Use eval template");
         assert_eq!(
             dashboard.handle_key_event(KeyEvent::from(KeyCode::Tab)),
@@ -19465,7 +19454,6 @@ mod tests {
         press_consumed(&mut dashboard, KeyCode::Tab);
         assert_eq!(dashboard.focus, WorkspaceFocus::Agent);
         assert_eq!(dashboard.workflow_section, MedicalWorkflowSection::Visit);
-        press_consumed(&mut dashboard, KeyCode::Char('r'));
         type_text(&mut dashboard, "Use eval template");
         assert_eq!(dashboard.agent_request.body, "Use eval template");
 
@@ -19577,7 +19565,6 @@ mod tests {
             dashboard.draft_note.body = "Existing note body.".to_string();
             if focus == WorkspaceFocus::Agent {
                 dashboard.focus_medical_agent_workpane();
-                press_consumed(&mut dashboard, KeyCode::Char('r'));
                 type_text(&mut dashboard, "Use eval template");
             }
             let before_agent = dashboard.agent_request.body.clone();
@@ -19623,13 +19610,11 @@ mod tests {
         assert_eq!(dashboard.focus, WorkspaceFocus::Agent);
         assert_eq!(dashboard.workflow_section, MedicalWorkflowSection::Visit);
         assert!(!dashboard.agent_request.is_active());
-        press_consumed(&mut dashboard, KeyCode::Char('r'));
-        assert!(dashboard.agent_request.is_active());
-
         type_text(
             &mut dashboard,
             "Use eval template\nDraft assessment from objective measures",
         );
+        assert!(dashboard.agent_request.is_active());
         assert!(
             dashboard
                 .agent_request
@@ -19701,7 +19686,6 @@ mod tests {
         assert_eq!(dashboard.focus, WorkspaceFocus::Workflow);
         press_consumed(&mut dashboard, KeyCode::Tab);
         assert_eq!(dashboard.focus, WorkspaceFocus::Agent);
-        press_consumed(&mut dashboard, KeyCode::Char('r'));
         type_text(&mut dashboard, "Use concise plan");
         let agent_body = dashboard.agent_request.body.clone();
 
@@ -20019,12 +20003,12 @@ mod tests {
         }
 
         dashboard.focus_medical_agent_workpane();
-        press_consumed(&mut dashboard, KeyCode::Char('r'));
         type_text(&mut dashboard, "Use eval template");
         let agent_status = status_line_text(&dashboard);
         assert!(agent_status.contains("Focus: Agent"));
         assert!(agent_status.contains("Mode: Agent input"));
-        assert!(agent_status.contains("Keys: Type request"));
+        assert!(agent_status.contains("Keys: ↑/↓ line"));
+        assert!(agent_status.contains("←/→ cursor"));
         assert!(agent_status.contains("Tab/⇧Tab pane"));
         assert!(!agent_status.contains("Work:"));
 
@@ -20056,11 +20040,11 @@ mod tests {
             (WorkspaceFocus::Clients, "↑/↓ patient"),
             (WorkspaceFocus::Notes, "↑/↓ note"),
             (WorkspaceFocus::PatientFiles, "←/→ fold"),
-            (WorkspaceFocus::Demographics, "↑/↓ field"),
+            (WorkspaceFocus::Demographics, "Enter"),
             (WorkspaceFocus::NoteTitle, "↑/↓ stay"),
-            (WorkspaceFocus::NoteBody, "↑/↓ stay"),
+            (WorkspaceFocus::NoteBody, "↑/↓ line"),
             (WorkspaceFocus::Workflow, "↑/↓ section"),
-            (WorkspaceFocus::Agent, "←/→ Agent tab"),
+            (WorkspaceFocus::Agent, "←"),
         ] {
             let mut dashboard = medical_recursive_files_dashboard();
             dashboard.focus = focus;
@@ -20081,11 +20065,11 @@ mod tests {
                     "expected {expected_hint:?} for {focus:?} at width {width}: {footer}"
                 );
                 assert!(
-                    footer.contains("Tab/⇧Tab pane"),
+                    footer.contains("Tab/⇧Tab pane") || footer.contains("Tab pane"),
                     "pane navigation missing for {focus:?} at width {width}: {footer}"
                 );
                 assert!(
-                    footer.contains("Ctrl-P commands"),
+                    footer.contains("Ctrl-P commands") || footer.contains("Ctrl-P actions"),
                     "global Commands shortcut missing for {focus:?} at width {width}: {footer}"
                 );
             }
@@ -20145,7 +20129,6 @@ mod tests {
     fn medical_agent_workpane_escape_is_predictable_and_preserves_local_draft() {
         let mut dashboard = medical_recursive_base_dashboard();
         dashboard.focus_medical_agent_workpane();
-        press_consumed(&mut dashboard, KeyCode::Char('r'));
         type_text(&mut dashboard, "Use eval template");
 
         assert_eq!(
@@ -20159,6 +20142,84 @@ mod tests {
     }
 
     #[test]
+    fn medical_agent_first_printable_starts_a_bottom_pinned_multiline_composer() {
+        let mut dashboard = medical_recursive_base_dashboard();
+        dashboard.focus_medical_agent_workpane();
+
+        press_consumed(&mut dashboard, KeyCode::Char('D'));
+        assert!(dashboard.agent_request.is_active());
+        assert_eq!(dashboard.agent_request.body, "D");
+        assert_eq!(
+            dashboard.workflow_section,
+            MedicalWorkflowSection::AgentRequest
+        );
+        let medium_viewport = Rect::new(0, 0, 120, 32);
+        let medium_inner = inner_rect(MedicalMediumAreas::new(medium_viewport).main);
+        let one_line_medium_editor = dashboard
+            .agent_request_composer_rects(medium_inner, false)
+            .expect("one-line medium composer")
+            .2;
+        let large_viewport = Rect::new(0, 0, 160, 45);
+        let large_inner = inner_rect(MedicalLargeAreas::new(large_viewport).agent);
+        let one_line_large_editor = dashboard
+            .agent_request_composer_rects(large_inner, false)
+            .expect("one-line large composer")
+            .2;
+        type_text(
+            &mut dashboard,
+            "raft assessment\nKeep goals measurable\nFlag missing evidence",
+        );
+        assert_eq!(
+            dashboard.agent_request.body,
+            "Draft assessment\nKeep goals measurable\nFlag missing evidence"
+        );
+
+        for (viewport, one_line_editor) in [
+            (medium_viewport, one_line_medium_editor),
+            (large_viewport, one_line_large_editor),
+        ] {
+            let inner = match WorkspaceLayoutMode::for_area(viewport) {
+                WorkspaceLayoutMode::Medium => inner_rect(MedicalMediumAreas::new(viewport).main),
+                WorkspaceLayoutMode::Large => inner_rect(MedicalLargeAreas::new(viewport).agent),
+                mode => panic!("unexpected test layout {mode:?}"),
+            };
+            let (guidance, header, editor) = dashboard
+                .agent_request_composer_rects(inner, false)
+                .expect("active request should expose pinned composer geometry");
+            assert_eq!(editor.bottom(), inner.bottom());
+            assert_eq!(editor.bottom(), one_line_editor.bottom());
+            assert!(editor.y <= one_line_editor.y);
+            assert!(editor.height >= one_line_editor.height);
+            assert_eq!(guidance.bottom(), header.y);
+            assert_eq!(header.bottom(), editor.y);
+
+            let cursor = dashboard
+                .cursor_pos(viewport)
+                .expect("active request should expose a cursor");
+            assert!(
+                rect_contains(editor, cursor),
+                "cursor {cursor:?} should stay inside {editor:?} at {viewport:?}"
+            );
+
+            let rendered = render_dashboard_lines_at(
+                &dashboard,
+                viewport.width,
+                viewport.height,
+            );
+            let coach_row = rendered
+                .lines()
+                .position(|line| line.contains("Local Coach"))
+                .expect("coach guidance should render above the composer");
+            let composer_row = rendered
+                .lines()
+                .position(|line| line.contains("Ask Agent"))
+                .expect("Ask Agent header should render");
+            assert!(coach_row < composer_row);
+            assert!(rendered.contains("Flag missing evidence"));
+        }
+    }
+
+    #[test]
     fn medical_command_palette_finds_clinician_language_actions() {
         for (filter, expected) in [
             ("patient search", ":patient search"),
@@ -20166,6 +20227,9 @@ mod tests {
             ("contact", ":demographics edit"),
             ("demographics", ":demographics"),
             ("coverage", ":coverage edit"),
+            ("coverage card", ":coverage verify"),
+            ("restore draft", ":draft restore"),
+            ("discard draft", ":draft discard"),
             ("note new daily", ":note new"),
             ("file add", ":file add"),
             ("agent handoff", ":agent handoff"),
@@ -20520,64 +20584,89 @@ mod tests {
     fn workspace_focus_commands_jump_to_major_medical_panes() {
         let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
 
-        for (command, focus, status) in [
-            (":patients", WorkspaceFocus::Clients, "Patient directory."),
+        for (command, expected_action, focus, status) in [
+            (
+                ":patients",
+                WorkspaceDashboardAction::Consumed,
+                WorkspaceFocus::Clients,
+                "Patient directory.",
+            ),
             (
                 ":demographics",
+                WorkspaceDashboardAction::Consumed,
                 WorkspaceFocus::Demographics,
                 "Focused patient demographics. Use :demographics edit or :coverage edit for admin fields.",
             ),
             (
                 ":demographics edit",
+                WorkspaceDashboardAction::Consumed,
                 WorkspaceFocus::Demographics,
                 "Editing patient demographics and emergency contact fields. Ctrl-S saves.",
             ),
             (
                 ":coverage edit",
+                WorkspaceDashboardAction::Consumed,
                 WorkspaceFocus::Demographics,
                 "Editing coverage fields. Member ID stays under coverage; Ctrl-S saves.",
             ),
             (
                 ":note title",
+                WorkspaceDashboardAction::Consumed,
                 WorkspaceFocus::NoteTitle,
                 "Focused note title.",
             ),
-            (":note body", WorkspaceFocus::NoteBody, "Focused note body."),
+            (
+                ":note body",
+                WorkspaceDashboardAction::Consumed,
+                WorkspaceFocus::NoteBody,
+                "Focused note body.",
+            ),
             (
                 ":documents",
+                WorkspaceDashboardAction::Consumed,
                 WorkspaceFocus::PatientFiles,
                 "Uploaded Documents focused. Paste/drop a JPG/PDF path.",
             ),
             (
                 ":patient files",
+                WorkspaceDashboardAction::Consumed,
                 WorkspaceFocus::PatientFiles,
                 "Uploaded Documents focused. Paste/drop a JPG/PDF path.",
             ),
             (
                 ":agent request",
+                WorkspaceDashboardAction::Consumed,
                 WorkspaceFocus::Agent,
                 "Agent input ready. Typing is local until Medical Agent Plan review.",
             ),
             (
                 ":agent preview",
+                WorkspaceDashboardAction::CheckpointDraft,
                 WorkspaceFocus::Agent,
                 "Focused Agent Work.",
             ),
             (
                 ":agent inbox",
+                WorkspaceDashboardAction::Consumed,
                 WorkspaceFocus::Agent,
                 "Focused Agent Review.",
             ),
-            (":jobs", WorkspaceFocus::Workflow, "Focused jobs workflow."),
+            (
+                ":jobs",
+                WorkspaceDashboardAction::Consumed,
+                WorkspaceFocus::Workflow,
+                "Focused jobs workflow.",
+            ),
             (
                 ":addenda",
+                WorkspaceDashboardAction::Consumed,
                 WorkspaceFocus::Workflow,
                 "Focused addenda workflow.",
             ),
         ] {
             assert_eq!(
                 dashboard.execute_workspace_command(command),
-                WorkspaceDashboardAction::Consumed
+                expected_action
             );
             assert_eq!(dashboard.focus, focus);
             assert_eq!(dashboard.status, status);
@@ -20612,63 +20701,73 @@ mod tests {
             ),
         ];
 
-        for (command, section, focus, marker) in [
+        for (command, expected_action, section, focus, marker) in [
             (
                 ":workflow visit",
+                WorkspaceDashboardAction::Consumed,
                 MedicalWorkflowSection::Visit,
                 WorkspaceFocus::Workflow,
                 "Today's Visit",
             ),
             (
                 ":workflow proposals",
+                WorkspaceDashboardAction::Consumed,
                 MedicalWorkflowSection::Proposals,
                 WorkspaceFocus::Workflow,
                 "Note Proposals",
             ),
             (
                 ":workflow documents",
+                WorkspaceDashboardAction::Consumed,
                 MedicalWorkflowSection::Documents,
                 WorkspaceFocus::Workflow,
                 "> Uploaded Documents",
             ),
             (
                 ":agent preview",
+                WorkspaceDashboardAction::CheckpointDraft,
                 MedicalWorkflowSection::ContextPacket,
                 WorkspaceFocus::Agent,
                 "Review Packet",
             ),
             (
                 ":agent inbox",
+                WorkspaceDashboardAction::Consumed,
                 MedicalWorkflowSection::AgentInbox,
                 WorkspaceFocus::Agent,
                 "Agent Review",
             ),
             (
                 ":workflow jobs",
+                WorkspaceDashboardAction::Consumed,
                 MedicalWorkflowSection::Jobs,
                 WorkspaceFocus::Workflow,
                 "> Jobs",
             ),
             (
                 ":workflow timeline",
+                WorkspaceDashboardAction::Consumed,
                 MedicalWorkflowSection::Timeline,
                 WorkspaceFocus::Workflow,
                 "> Timeline",
             ),
             (
                 ":scope practice",
+                WorkspaceDashboardAction::Consumed,
                 MedicalWorkflowSection::PracticeLibrary,
                 WorkspaceFocus::Workflow,
                 "> Practice Library",
             ),
             (
                 ":scope intelligence",
+                WorkspaceDashboardAction::Consumed,
                 MedicalWorkflowSection::PracticeIntelligence,
                 WorkspaceFocus::Workflow,
                 "> Practice Intelligence",
             ),
             (
                 ":workflow audit",
+                WorkspaceDashboardAction::Consumed,
                 MedicalWorkflowSection::Audit,
                 WorkspaceFocus::Workflow,
                 "> Audit Trail",
@@ -20676,7 +20775,7 @@ mod tests {
         ] {
             assert_eq!(
                 dashboard.execute_workspace_command(command),
-                WorkspaceDashboardAction::Consumed
+                expected_action
             );
             assert_eq!(dashboard.focus, focus);
             assert_eq!(dashboard.workflow_section, section);
@@ -20808,7 +20907,7 @@ mod tests {
     }
 
     #[test]
-    fn note_editor_arrows_stay_local_and_enter_opens_the_body() {
+    fn note_editor_arrows_edit_locally_and_enter_opens_the_body() {
         let mut dashboard = WorkspaceDashboard {
             focus: WorkspaceFocus::NoteTitle,
             ..WorkspaceDashboard::new(WorkspaceProfile::Medical)
@@ -20829,14 +20928,16 @@ mod tests {
         );
         assert_eq!(dashboard.focus, WorkspaceFocus::NoteBody);
 
+        let original_body = dashboard.draft_note.body.clone();
         for code in [KeyCode::Up, KeyCode::Down] {
             assert_eq!(
                 dashboard.handle_key_event(KeyEvent::from(code)),
                 WorkspaceDashboardAction::Consumed
             );
             assert_eq!(dashboard.focus, WorkspaceFocus::NoteBody);
-            assert!(dashboard.status.contains("Note Body stays focused"));
+            assert_eq!(dashboard.draft_note.body, original_body);
         }
+        assert!(status_line_text(&dashboard).contains("Keys: ↑/↓ line"));
     }
 
     #[test]
@@ -21017,6 +21118,19 @@ mod tests {
             WorkspaceDashboardAction::Consumed
         );
         assert_eq!(dashboard.status, "Save the patient before creating a job.");
+
+        let coverage = medical_command_palette_filter_dashboard("coverage card");
+        let coverage_rendered = render_dashboard_lines_at(&coverage, 160, 40);
+        assert!(coverage_rendered.contains(":coverage verify off"));
+        assert!(coverage_rendered.contains("Save this coverage before comparing the card."));
+
+        let restore = medical_command_palette_filter_dashboard("restore draft");
+        let restore_rendered = render_dashboard_lines_at(&restore, 160, 40);
+        assert!(
+            restore_rendered.contains(":draft restore off"),
+            "restore command should render disabled:\n{restore_rendered}"
+        );
+        assert!(restore_rendered.contains("No recoverable local draft"));
     }
 
     #[test]
@@ -21576,7 +21690,7 @@ mod tests {
 
         assert_eq!(params.len(), 1);
         assert_eq!(params[0].client_id, "client-1");
-        assert_eq!(params[0].kind, "medicare insurance card image");
+        assert_eq!(params[0].kind, "insurance_card");
         assert_eq!(params[0].reference_kind, "local_reference");
         assert_eq!(params[0].intake_source, "drop_or_paste_path");
         assert_eq!(params[0].source_label, "drop/paste local path");
@@ -21613,14 +21727,10 @@ mod tests {
         assert_eq!(dashboard.workflow_section, MedicalWorkflowSection::Visit);
         assert!(!dashboard.agent_request.is_active());
         assert!(dashboard.status.contains("Focused Agent Work"));
-        assert_eq!(
-            dashboard.handle_key_event(KeyEvent::from(KeyCode::Char('r'))),
-            WorkspaceDashboardAction::Consumed
-        );
-        assert!(dashboard.agent_request.is_active());
         for c in "Use eval template".chars() {
             dashboard.handle_key_event(KeyEvent::from(KeyCode::Char(c)));
         }
+        assert!(dashboard.agent_request.is_active());
         assert_eq!(dashboard.agent_request.body, "Use eval template");
         assert_eq!(
             dashboard.handle_key_event(KeyEvent::from(KeyCode::Tab)),
@@ -21717,7 +21827,12 @@ mod tests {
             WorkspaceDashboardAction::Consumed
         );
         assert_eq!(dashboard.focus, WorkspaceFocus::Demographics);
-        dashboard.demographics_field = DemographicsField::PreferredName;
+        press_consumed(&mut dashboard, KeyCode::Enter);
+        assert_eq!(
+            dashboard.patient_admin_field,
+            PatientAdminField::DisplayName
+        );
+        press_consumed(&mut dashboard, KeyCode::Down);
         type_text(&mut dashboard, "Trackpad Test");
         assert!(
             dashboard
@@ -21725,6 +21840,8 @@ mod tests {
                 .preferred_name
                 .contains("Trackpad Test")
         );
+        press_consumed(&mut dashboard, KeyCode::Esc);
+        assert!(dashboard.patient_admin_edit_mode.is_none());
         assert_eq!(
             dashboard.handle_key_event(KeyEvent::from(KeyCode::BackTab)),
             WorkspaceDashboardAction::Consumed
@@ -21909,7 +22026,6 @@ mod tests {
 
         let selected_before = dashboard.highlighted_patient_file_document_id();
         dashboard.focus_medical_agent_workpane();
-        press_consumed(&mut dashboard, KeyCode::Char('r'));
         for c in "template".chars() {
             dashboard.handle_key_event(KeyEvent::from(KeyCode::Char(c)));
         }
@@ -22116,7 +22232,12 @@ mod tests {
 
         let mut demographics = medical_recursive_base_dashboard();
         demographics.focus = WorkspaceFocus::Demographics;
-        demographics.demographics_field = DemographicsField::PreferredName;
+        press_consumed(&mut demographics, KeyCode::Enter);
+        assert_eq!(
+            demographics.patient_admin_field,
+            PatientAdminField::DisplayName
+        );
+        press_consumed(&mut demographics, KeyCode::Down);
         type_text(&mut demographics, "Tester");
         assert!(demographics.dirty);
         assert!(demographics.draft_client.preferred_name.contains("Tester"));
@@ -22125,6 +22246,8 @@ mod tests {
         let mut contact = medical_recursive_base_dashboard();
         contact.execute_workspace_command(":contact edit");
         type_text(&mut contact, "555-1212");
+        press_consumed(&mut contact, KeyCode::Down);
+        type_text(&mut contact, "mobile");
         press_consumed(&mut contact, KeyCode::Down);
         type_text(&mut contact, "555-3434");
         assert!(contact.draft_client.primary_phone.contains("555-1212"));
@@ -22136,8 +22259,10 @@ mod tests {
         type_text(&mut coverage, "Fake Payer");
         press_consumed(&mut coverage, KeyCode::Down);
         type_text(&mut coverage, "Fake Plan");
-        assert!(coverage.draft_client.payer_name.contains("Fake Payer"));
-        assert!(coverage.draft_client.plan_name.contains("Fake Plan"));
+        assert!(coverage.coverage_draft.payer_name.contains("Fake Payer"));
+        assert!(coverage.coverage_draft.plan_name.contains("Fake Plan"));
+        assert!(coverage.draft_client.payer_name.is_empty());
+        assert!(coverage.draft_client.plan_name.is_empty());
         record(&mut workflows, "coverage editor typing", &coverage);
 
         let mut chart_tree = medical_recursive_base_dashboard();
@@ -22257,7 +22382,6 @@ mod tests {
 
         let mut agent = medical_recursive_base_dashboard();
         agent.focus_medical_agent_workpane();
-        press_consumed(&mut agent, KeyCode::Char('r'));
         type_text(&mut agent, "Use eval template.");
         assert_eq!(agent.agent_request.body, "Use eval template.");
         press_consumed(&mut agent, KeyCode::Tab);
@@ -22575,7 +22699,7 @@ mod tests {
         assert_eq!(params.client_id, "client-1");
         assert_eq!(params.encounter_id.as_deref(), Some("encounter-1"));
         assert_eq!(params.scope, "patient");
-        assert_eq!(params.kind, "medicare insurance card image");
+        assert_eq!(params.kind, "insurance_card");
         assert_eq!(params.detected_kind, "image");
         assert_eq!(params.mime_type.as_deref(), Some("image/jpeg"));
         assert_eq!(params.source_label, "macOS file chooser");
@@ -22844,6 +22968,69 @@ mod tests {
     }
 
     #[test]
+    fn medical_note_body_edits_and_pastes_at_the_cursor() {
+        let mut dashboard = WorkspaceDashboard {
+            focus: WorkspaceFocus::NoteBody,
+            ..WorkspaceDashboard::new(WorkspaceProfile::Medical)
+        };
+        dashboard.draft_note.body = "alpha\nbeta".to_string();
+
+        press_consumed(&mut dashboard, KeyCode::Up);
+        press_consumed(&mut dashboard, KeyCode::Left);
+        press_consumed(&mut dashboard, KeyCode::Char('X'));
+        assert_eq!(dashboard.draft_note.body, "alpXha\nbeta");
+
+        assert_eq!(
+            dashboard.handle_paste("中\n".to_string()),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert_eq!(dashboard.draft_note.body, "alpX中\nha\nbeta");
+    }
+
+    #[test]
+    fn medical_note_body_arrows_follow_visual_wrapping() {
+        let mut dashboard = WorkspaceDashboard {
+            focus: WorkspaceFocus::NoteBody,
+            ..WorkspaceDashboard::new(WorkspaceProfile::Medical)
+        };
+        dashboard.draft_note.body = "a".repeat(90);
+
+        let _ = render_dashboard_lines_at(&dashboard, 80, 20);
+        press_consumed(&mut dashboard, KeyCode::Up);
+        press_consumed(&mut dashboard, KeyCode::Char('X'));
+
+        assert_eq!(dashboard.draft_note.body, format!("{}X{}", "a".repeat(12), "a".repeat(78)));
+        insta::assert_snapshot!(
+            "medical_workspace_multiline_note_editor_80x20",
+            render_dashboard_lines_at(&dashboard, 80, 20)
+        );
+    }
+
+    #[test]
+    fn medical_agent_request_edits_and_pastes_at_the_cursor() {
+        let mut dashboard = medical_recursive_base_dashboard();
+        dashboard.start_agent_request();
+        type_text(&mut dashboard, "first");
+        press_consumed(&mut dashboard, KeyCode::Enter);
+        type_text(&mut dashboard, "second");
+
+        press_consumed(&mut dashboard, KeyCode::Up);
+        press_consumed(&mut dashboard, KeyCode::Left);
+        press_consumed(&mut dashboard, KeyCode::Char('X'));
+        assert_eq!(dashboard.agent_request.body, "firsXt\nsecond");
+
+        assert_eq!(
+            dashboard.handle_paste("中".to_string()),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert_eq!(dashboard.agent_request.body, "firsX中t\nsecond");
+        let footer = line_plain_text(&dashboard.status_line(160));
+        assert!(footer.contains("↑/↓ line"));
+        assert!(footer.contains("←/→ cursor"));
+        assert!(footer.contains("PgUp/PgDn guidance"));
+    }
+
+    #[test]
     fn unknown_workspace_command_has_no_side_effect() {
         let mut dashboard = WorkspaceDashboard::default();
 
@@ -23000,7 +23187,7 @@ mod tests {
 
         assert_eq!(
             dashboard.execute_workspace_command(":context packet"),
-            WorkspaceDashboardAction::Consumed
+            WorkspaceDashboardAction::CheckpointDraft
         );
         let packet_render = render_dashboard_lines_at(&dashboard, 80, 20);
         assert!(
@@ -23078,33 +23265,60 @@ mod tests {
     #[test]
     fn medical_wayfinding_keeps_primary_context_visible() {
         let mut dashboard = medical_recursive_base_dashboard();
-        for (command, scope, visible_scope, expected_action) in [
-            (":scope patient", "Today's Visit", "Today's Visit", "Next:"),
+        for (command, expected_result, scope, visible_scope, expected_action) in [
+            (
+                ":scope patient",
+                WorkspaceDashboardAction::Consumed,
+                "Today's Visit",
+                "Today's Visit",
+                "Next:",
+            ),
             (
                 ":scope files",
+                WorkspaceDashboardAction::Consumed,
                 "Uploaded Documents",
                 "Documents",
                 "Paste/drop JPG/PDF",
             ),
-            (":scope packet", "Agent Work", "Agent Work", "Blocked:"),
-            (":scope review", "Agent Review", "Returned", "Blocked:"),
+            (
+                ":scope packet",
+                WorkspaceDashboardAction::CheckpointDraft,
+                "Agent Work",
+                "Agent Work",
+                "Blocked:",
+            ),
+            (
+                ":scope review",
+                WorkspaceDashboardAction::Consumed,
+                "Agent Review",
+                "Returned",
+                "Blocked:",
+            ),
             (
                 ":scope practice",
+                WorkspaceDashboardAction::Consumed,
                 "Practice Library",
                 "Practice Lib",
                 "Next:",
             ),
             (
                 ":scope intelligence",
+                WorkspaceDashboardAction::Consumed,
                 "Practice Intelligence",
                 "Practice Int",
                 "Read-only",
             ),
-            (":scope audit", "Audit Trail", "Audit Trail", "Read-only"),
+            (
+                ":scope audit",
+                WorkspaceDashboardAction::Consumed,
+                "Audit Trail",
+                "Audit Trail",
+                "Read-only",
+            ),
         ] {
             assert_eq!(
                 dashboard.execute_workspace_command(command),
-                WorkspaceDashboardAction::Consumed,
+                expected_result,
                 "{command} should route to a scope"
             );
             let compact = render_dashboard_lines_at(&dashboard, 80, 20);
@@ -23263,19 +23477,29 @@ mod tests {
             WorkspaceDashboardAction::Consumed
         );
         let request_empty = render_dashboard_lines_at(&dashboard, 160, 45);
-        assert!(request_empty.contains("> Request:"));
-        assert!(request_empty.contains("request: type local instructions"));
-        let cursor = dashboard
-            .cursor_pos(Rect::new(0, 0, 160, 45))
-            .expect("Request row should expose a cursor when it is the active typing target");
-        let request_row = request_empty
+        assert!(request_empty.contains("Local Coach"));
+        assert!(request_empty.contains("Ask Agent"));
+        assert!(request_empty.contains("local draft"));
+        let coach_row = request_empty
             .lines()
-            .position(|line| line.contains("> Request:"))
-            .expect("request input row should render");
-        assert_eq!(
-            usize::from(cursor.1),
-            request_row,
-            "cursor should land on the rendered Request row:\n{request_empty}"
+            .position(|line| line.contains("Local Coach"))
+            .expect("local coach guidance should render");
+        let composer_row = request_empty
+            .lines()
+            .position(|line| line.contains("Ask Agent"))
+            .expect("pinned Ask Agent composer should render");
+        assert!(coach_row < composer_row, "guidance should precede the composer");
+        let viewport = Rect::new(0, 0, 160, 45);
+        let agent_inner = inner_rect(MedicalLargeAreas::new(viewport).agent);
+        let (_, _, editor_rect) = dashboard
+            .agent_request_composer_rects(agent_inner, false)
+            .expect("active request should have a pinned editor");
+        let cursor = dashboard
+            .cursor_pos(viewport)
+            .expect("Ask Agent editor should expose a cursor");
+        assert!(
+            rect_contains(editor_rect, cursor),
+            "cursor should stay inside the pinned editor {editor_rect:?}, got {cursor:?}\n{request_empty}"
         );
 
         for c in "Draft a follow-up plan.".chars() {
@@ -23289,7 +23513,7 @@ mod tests {
 
         assert_eq!(
             dashboard.execute_workspace_command(":context packet"),
-            WorkspaceDashboardAction::Consumed
+            WorkspaceDashboardAction::CheckpointDraft
         );
         let packet_ready = render_dashboard_lines_at(&dashboard, 160, 45);
         assert!(packet_ready.contains("Agent Work"));
@@ -23349,12 +23573,20 @@ mod tests {
 
         let request_render = render_dashboard_lines_at(&dashboard, 160, 45);
         assert!(request_render.contains("Mode:"));
-        assert!(request_render.contains("> Request: Use my eval template"));
-        assert!(request_render.contains("Local only; preview packet before Ctrl-G"));
+        assert!(request_render.contains("Ask Agent"));
+        assert!(request_render.contains("Use my eval template"));
+        assert!(request_render.contains("local draft"));
+        let request_guidance = dashboard
+            .agent_workpane_request_lines()
+            .iter()
+            .map(line_plain_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(request_guidance.contains("Nothing is sent until Packet review and Ctrl-G"));
 
         assert_eq!(
             dashboard.execute_workspace_command(":agent preview"),
-            WorkspaceDashboardAction::Consumed
+            WorkspaceDashboardAction::CheckpointDraft
         );
         let preview_render = render_dashboard_lines_at(&dashboard, 160, 45);
         assert!(preview_render.contains("Review Packet"));
@@ -23436,7 +23668,7 @@ mod tests {
         }
         assert_eq!(
             dashboard.execute_workspace_command(":context packet"),
-            WorkspaceDashboardAction::Consumed
+            WorkspaceDashboardAction::CheckpointDraft
         );
         let preview = dashboard.context_packet_preview_lines().join("\n");
         assert!(preview.contains("retry is safe"));
@@ -24042,6 +24274,121 @@ mod tests {
         }
     }
 
+    fn medical_demographics_snapshot_dashboard() -> WorkspaceDashboard {
+        let mut summary = medical_recursive_base_dashboard();
+        summary.draft_client.legal_first_name = "Jordan".to_string();
+        summary.draft_client.legal_middle_name = "Q".to_string();
+        summary.draft_client.legal_last_name = "Patient".to_string();
+        summary.draft_client.primary_phone = "555-0101".to_string();
+        summary.draft_client.email = "jordan.fake@example.test".to_string();
+        summary.draft_client.address_line_1 = "10 Example Street".to_string();
+        summary.draft_client.city = "Exampleville".to_string();
+        summary.draft_client.state_or_province = "IL".to_string();
+        summary.draft_client.postal_code = "60000".to_string();
+        summary.draft_client.emergency_contact_name = "Maya Contact".to_string();
+        summary.draft_client.emergency_contact_phone = "555-0199".to_string();
+        summary.focus = WorkspaceFocus::Demographics;
+        summary.status = "Focused patient demographics.".to_string();
+        summary
+    }
+
+    #[test]
+    fn medical_demographics_summary_render_snapshot() {
+        let summary = medical_demographics_snapshot_dashboard();
+        insta::assert_snapshot!(
+            "medical_workspace_demographics_summary_160x40",
+            render_dashboard_lines_at(&summary, 160, 40)
+        );
+    }
+
+    #[test]
+    fn medical_demographics_editor_render_snapshot() {
+        let mut summary = medical_demographics_snapshot_dashboard();
+        summary.open_patient_admin_editor(
+            PatientAdminEditMode::Contact,
+            PatientAdminField::DisplayName,
+        );
+        summary.patient_admin_field = PatientAdminField::ContactNotes;
+        summary.draft_client.contact_notes =
+            "Call the fake emergency contact before scheduling.".to_string();
+        insta::assert_snapshot!(
+            "medical_workspace_demographics_editor_120x32",
+            render_dashboard_lines_at(&summary, 120, 32)
+        );
+    }
+
+    fn medical_coverage_snapshot_dashboard() -> WorkspaceDashboard {
+        let coverage = test_coverage(
+            "coverage-primary",
+            "client-1",
+            CoveragePriority::Primary,
+            WorkspaceBillingReadiness::Mismatch,
+        );
+        let client = test_client("client-1", "Jordan Patient");
+        let mut coverage_editor = medical_recursive_base_dashboard();
+        coverage_editor.clients = vec![client.clone()];
+        coverage_editor.draft_client = ClientDraft::from_client(&client);
+        coverage_editor.coverages = vec![coverage.clone()];
+        coverage_editor.coverage_draft =
+            CoverageDraft::try_from(&coverage).expect("coverage draft");
+        coverage_editor.execute_workspace_command(":coverage edit");
+        coverage_editor
+    }
+
+    #[test]
+    fn medical_coverage_editor_render_snapshot() {
+        let coverage_editor = medical_coverage_snapshot_dashboard();
+        insta::assert_snapshot!(
+            "medical_workspace_coverage_editor_120x32",
+            render_dashboard_lines_at(&coverage_editor, 120, 32)
+        );
+    }
+
+    #[test]
+    fn medical_card_comparison_render_snapshot() {
+        let mut coverage_editor = medical_coverage_snapshot_dashboard();
+        let mut card_document = patient_file(
+            "document-card",
+            "Fake Medicare card front",
+            "insurance_card",
+            "/tmp/fake-card.jpg",
+        );
+        card_document.sha256 = Some("a".repeat(64));
+        card_document.content_sha256 = Some("a".repeat(64));
+        card_document.existence_status = "present".to_string();
+        coverage_editor.documents = vec![card_document];
+        coverage_editor.execute_workspace_command(":coverage card");
+        insta::assert_snapshot!(
+            "medical_workspace_card_comparison_120x32",
+            render_dashboard_lines_at(&coverage_editor, 120, 32)
+        );
+    }
+
+    #[test]
+    fn medical_agent_composer_render_snapshot() {
+        let mut composer = medical_recursive_base_dashboard();
+        composer.focus_medical_agent_workpane();
+        type_text(
+            &mut composer,
+            "Draft assessment\nKeep goals measurable\nFlag missing evidence",
+        );
+        insta::assert_snapshot!(
+            "medical_workspace_agent_composer_160x45",
+            render_dashboard_lines_at(&composer, 160, 45)
+        );
+    }
+
+    #[test]
+    fn medical_draft_recovery_render_snapshot() {
+        let mut recovery = medical_recursive_base_dashboard();
+        recovery.set_draft_recovery_available(true);
+        recovery.focus_medical_agent_workpane();
+        insta::assert_snapshot!(
+            "medical_workspace_draft_recovery_120x32",
+            render_dashboard_lines_at(&recovery, 120, 32)
+        );
+    }
+
     #[test]
     fn medical_proposal_comparison_render_snapshots() {
         let dashboard = WorkspaceDashboard {
@@ -24245,6 +24592,49 @@ mod tests {
             Some("version-client-1")
         );
         assert!(params.note.is_none());
+    }
+
+    #[test]
+    fn chart_changeset_builder_includes_only_changed_normalized_coverage_with_version() {
+        let client = test_client("client-1", "Jordan Patient");
+        let coverage = test_coverage(
+            "coverage-primary",
+            "client-1",
+            CoveragePriority::Primary,
+            WorkspaceBillingReadiness::Unverified,
+        );
+        let mut dashboard = WorkspaceDashboard {
+            clients: vec![client.clone()],
+            coverages: vec![coverage.clone()],
+            draft_client: ClientDraft::from_client(&client),
+            coverage_draft: CoverageDraft::try_from(&coverage).expect("coverage draft"),
+            ..WorkspaceDashboard::new(WorkspaceProfile::Medical)
+        };
+
+        assert_eq!(
+            dashboard
+                .build_chart_changeset_params()
+                .expect("unchanged coverage should compare"),
+            None
+        );
+
+        dashboard.coverage_draft.plan_name = "Updated Fake Plan".to_string();
+        let expected_coverage = WorkspaceCoverageUpsertParams::from(&dashboard.coverage_draft);
+        let params = dashboard
+            .build_chart_changeset_params()
+            .expect("coverage changeset should build")
+            .expect("changed coverage should create a changeset");
+
+        assert_eq!(params.coverage, Some(expected_coverage));
+        assert!(params.client.is_none());
+        assert!(params.note.is_none());
+        assert_eq!(
+            params
+                .expected_versions
+                .as_ref()
+                .and_then(|versions| versions.coverage.as_deref()),
+            Some("version-coverage-primary")
+        );
     }
 
     #[test]
@@ -26324,17 +26714,36 @@ mod tests {
             id: id.to_string(),
             version: format!("version-{id}"),
             display_name: display_name.to_string(),
+            legal_first_name: None,
+            legal_middle_name: None,
+            legal_last_name: None,
+            legal_suffix: None,
             preferred_name: None,
+            previous_name: None,
             date_of_birth: None,
             sex_or_gender: None,
+            administrative_sex: None,
+            preferred_language: None,
+            interpreter_required: false,
             external_id: None,
             record_start_date: None,
             record_end_date: None,
             summary: String::new(),
             primary_phone: None,
+            primary_phone_use: None,
             secondary_phone: None,
+            secondary_phone_use: None,
             email: None,
+            primary_email: None,
+            secondary_email: None,
             preferred_contact_method: None,
+            address_line_1: None,
+            address_line_2: None,
+            city: None,
+            state_or_province: None,
+            postal_code: None,
+            country: None,
+            address_use: None,
             emergency_contact_name: None,
             emergency_contact_relationship: None,
             emergency_contact_phone: None,
@@ -26350,6 +26759,46 @@ mod tests {
             archived_at: None,
             created_at: 0,
             updated_at: 0,
+        }
+    }
+
+    fn test_coverage(
+        id: &str,
+        client_id: &str,
+        priority: CoveragePriority,
+        billing_readiness: WorkspaceBillingReadiness,
+    ) -> WorkspaceCoverage {
+        WorkspaceCoverage {
+            id: id.to_string(),
+            version: format!("version-{id}"),
+            client_id: client_id.to_string(),
+            priority: priority.number(),
+            payer_name: Some("Fake Medicare".to_string()),
+            plan_name: Some("Fake Plan A".to_string()),
+            member_id: Some("1EG4TE5MK73".to_string()),
+            group_number: Some("GRP-1".to_string()),
+            coverage_type: Some("Medicare".to_string()),
+            coverage_status: Some("active".to_string()),
+            effective_date: Some("2026-01-01".to_string()),
+            termination_date: None,
+            patient_relationship_to_subscriber: Some("self".to_string()),
+            subscriber_first_name: Some("Jordan".to_string()),
+            subscriber_middle_name: Some("Q".to_string()),
+            subscriber_last_name: Some("Patient".to_string()),
+            subscriber_suffix: None,
+            subscriber_date_of_birth: Some("1980-01-02".to_string()),
+            subscriber_administrative_sex: Some("X".to_string()),
+            subscriber_address_same_as_patient: true,
+            subscriber_address_line_1: None,
+            subscriber_address_line_2: None,
+            subscriber_city: None,
+            subscriber_state_or_province: None,
+            subscriber_postal_code: None,
+            subscriber_country: None,
+            coverage_notes: Some("Synthetic coverage for local tests.".to_string()),
+            billing_readiness,
+            created_at: 1,
+            updated_at: 1,
         }
     }
 
@@ -26831,17 +27280,24 @@ mod tests {
         }
 
         let mut new_patient_draft = WorkspaceDashboard::new(WorkspaceProfile::Medical);
-        new_patient_draft.execute_workspace_command(":patient new");
+        assert_eq!(
+            new_patient_draft.execute_workspace_command(":patient new"),
+            WorkspaceDashboardAction::StartNewClient
+        );
+        new_patient_draft.start_new_client();
 
         let mut sample_daily_note_draft = medical_recursive_base_dashboard();
-        sample_daily_note_draft.execute_workspace_command(":note new daily");
+        assert_eq!(
+            sample_daily_note_draft.execute_workspace_command(":note new daily"),
+            WorkspaceDashboardAction::StartNewNote
+        );
+        sample_daily_note_draft.start_new_note();
         for c in "SOAP fake sample note: patient tolerated exercise.".chars() {
             sample_daily_note_draft.handle_key_event(KeyEvent::from(KeyCode::Char(c)));
         }
 
         let mut wrong_pane_file_drop_blocked = medical_recursive_base_dashboard();
         wrong_pane_file_drop_blocked.focus = WorkspaceFocus::Demographics;
-        wrong_pane_file_drop_blocked.demographics_field = DemographicsField::DisplayName;
         wrong_pane_file_drop_blocked.handle_paste("/tmp/fake-dropped-scan.png".to_string());
 
         let mut contact_edit_missing = medical_recursive_base_dashboard();
@@ -26864,12 +27320,18 @@ mod tests {
         contact_edit_complete.execute_workspace_command(":emergency contact edit");
 
         let mut coverage_edit_complete = medical_recursive_base_dashboard();
-        coverage_edit_complete.draft_client.payer_name = "Fake Medicare".to_string();
-        coverage_edit_complete.draft_client.plan_name = "Fake Plan A".to_string();
-        coverage_edit_complete.draft_client.member_id = "MED-777".to_string();
-        coverage_edit_complete.draft_client.group_number = "GRP-1".to_string();
-        coverage_edit_complete.draft_client.coverage_type = "Medicare".to_string();
-        coverage_edit_complete.draft_client.coverage_status = "active".to_string();
+        coverage_edit_complete.coverage_draft =
+            CoverageDraft::new("client-1", CoveragePriority::Primary);
+        coverage_edit_complete.coverage_draft.id = Some("coverage-primary".to_string());
+        coverage_edit_complete.coverage_draft.version = Some("coverage-version-1".to_string());
+        coverage_edit_complete.coverage_draft.payer_name = "Fake Medicare".to_string();
+        coverage_edit_complete.coverage_draft.plan_name = "Fake Plan A".to_string();
+        coverage_edit_complete.coverage_draft.member_id = "MED-777".to_string();
+        coverage_edit_complete.coverage_draft.group_number = "GRP-1".to_string();
+        coverage_edit_complete.coverage_draft.coverage_type = "Medicare".to_string();
+        coverage_edit_complete.coverage_draft.coverage_status = "active".to_string();
+        coverage_edit_complete.coverage_draft.billing_readiness =
+            WorkspaceBillingReadiness::Unverified;
         coverage_edit_complete.execute_workspace_command(":coverage edit");
 
         let mut command_palette = medical_recursive_base_dashboard();

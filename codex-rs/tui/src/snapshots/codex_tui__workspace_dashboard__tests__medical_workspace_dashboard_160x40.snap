@@ -10,22 +10,22 @@ Patient: Jordan Patient  DOB: blank  MRN: blank  Contact: Missing contact  Cover
 │0 active patients; local only   ││Next                                                                          ││Jordan...; Save first eval                  │
 │No saved patients yet.          ││  ● Next: Save first eval                                                     ││[Pending]  History  Audit  ←/→              │
 │New patient: :patient new       ││                                                                              ││                                            │
-│                                ││Intake Checklist                                                              ││Mode: > Input |   Packet |   Returned       │
-│                                ││  [ ] Demographics - missing DOB or Patient ID / MRN                          ││  ● draft: No instructions drafted          │
-│                                ││  [ ] Emergency contact - missing                                             ││  ● context: 0 files | 0 text | 0 clips     │
-│                                ││  [ ] Coverage - missing                                                      ││  ● plan: not sent                          │
-│                                ││  [ ] ID card - missing                                                       ││  ● returned: none                          │
-│                                ││  [ ] Insurance card - missing                                                ││                                            │
-└────────────────────────────────┘│  [ ] Referral - missing                                                      ││  ● review: :agent preview, then Ctrl-G     │
-┌Patient Notes───────────────────┐│  [ ] Allergies - not recorded                                                ││  No upload/OCR/payer action/auto-apply.    │
-│Patient Notes                   ││  [ ] Note - needs save                                                       ││                                            │
-│  Visit note [unsaved]          ││                                                                              ││                                            │
-│  Working draft; Ctrl-S saves it││                                                                              ││                                            │
-│to the chart.                   ││                                                                              ││                                            │
-│  Medical, communication, and   ││                                                                              ││                                            │
+│                                ││Intake Checklist                                                              ││Local Coach                                 │
+│                                ││  [ ] Demographics - missing DOB or Patient ID / MRN                          ││  Start with the patient                    │
+│                                ││  [ ] Emergency contact - missing                                             ││  Open an existing patient or save the new  │
+│                                ││  [ ] Coverage - missing                                                      ││patient before building agent context.      │
+│                                ││  [ ] ID card - missing                                                       ││  ● next: Save patient                      │
+│                                ││  [ ] Insurance card - missing                                                ││  Guidance only; no model call and no chart │
+└────────────────────────────────┘│  [ ] Referral - missing                                                      ││mutation.                                   │
+┌Patient Notes───────────────────┐│  [ ] Allergies - not recorded                                                ││                                            │
+│Patient Notes                   ││  [ ] Note - needs save                                                       ││Mode: > Input |   Packet |   Returned       │
+│  Visit note [unsaved]          ││                                                                              ││  ● draft: No instructions drafted          │
+│  Working draft; Ctrl-S saves it││                                                                              ││  ● context: 0 files | 0 text | 0 clips     │
+│to the chart.                   ││                                                                              ││  ● plan: not sent                          │
+│  Medical, communication, and   ││                                                                              ││  ● returned: none                          │
 │admin notes appear here.        ││                                                                              ││                                            │
-│                                ││                                                                              ││                                            │
-│                                ││                                                                              ││                                            │
+│                                ││                                                                              ││  ● review: :agent preview, then Ctrl-G     │
+│                                ││                                                                              ││  No upload/OCR/payer action/auto-apply.    │
 └────────────────────────────────┘│                                                                              ││                                            │
 ┌Uploaded Documents──────────────┐│                                                                              ││                                            │
 │Uploaded Documents              ││                                                                              ││                                            │

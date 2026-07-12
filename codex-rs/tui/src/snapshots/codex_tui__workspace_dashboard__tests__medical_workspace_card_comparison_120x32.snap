@@ -1,0 +1,36 @@
+---
+source: tui/src/workspace_dashboard.rs
+expression: "render_dashboard_lines_at(&coverage_editor, 120, 32)"
+---
+Medical Workspace
+Patient: Jordan Patient  DOB: blank  MRN: blank  Contact: Missing contact  Coverage: 1/3 · mismatch  Encounter: No
+ EXPLORER                      PATIENT CHART
+┌Patient Directory───────────┐┌Coverage Editor─────────────────────────────────────────────────────────────────────────┐
+│Local search: /             ││Human Coverage Card Comparison                                                          │
+│1 active patient; local only││Primary · Fake Medicare / Fake Plan A · member ending MK73 · MISMATCH · billing/export  │
+│New: :patient new; /        ││blocked                                                                                 │
+│searches.                   ││Type the identity exactly as printed on the card, then confirm it. No OCR or model      │
+│> Jordan Patient  DOB blank ││inference is used.                                                                      │
+│MRN blank  active           ││This creates an append-only audit record pinned to the current patient and coverage     │
+│                            ││versions.                                                                               │
+│                            ││Selected source: Fake Medicare card front                                               │
+└────────────────────────────┘│                                                                                        │
+┌Patient Notes───────────────┐│> Source card document ID: document-card                                                │
+│Patient Notes               ││  Compare against: Beneficiary on card                                                  │
+│  New note                  ││  Printed first name: required                                                          │
+│  No patient notes yet. Use ││  Printed middle name: optional                                                         │
+│:note new.                  ││  Printed last name: required                                                           │
+│  Medical, communication,   ││  Printed suffix: optional                                                              │
+│and admin notes appear here.││  Printed member ID: required                                                           │
+└────────────────────────────┘│  Confirmed by: local clinician                                                         │
+┌Uploaded Documents──────────┐│                                                                                        │
+│Uploaded Documents          ││Space cycles source/toggles subject · Ctrl-S records · Esc discards this unsaved        │
+│1 files                     ││comparison                                                                              │
+│Paste/drop JPG/PDF. S...    ││No OCR/model extraction, eligibility check, payer message, claim, submission, or remote │
+│                            ││upload.                                                                                 │
+│  • Fake Medicare card ...  ││                                                                                        │
+│                            ││                                                                                        │
+│                            ││                                                                                        │
+│                            ││                                                                                        │
+└────────────────────────────┘└────────────────────────────────────────────────────────────────────────────────────────┘
+Focus: Card Verify | Keys: ↑/↓ field  Space source/subject  Ctrl-S record  Esc discard  Ctrl-P actions

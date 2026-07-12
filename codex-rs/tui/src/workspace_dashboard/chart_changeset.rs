@@ -174,6 +174,9 @@ impl PendingChartChangeset {
         if params.client.is_some() {
             labels.push("demographics");
         }
+        if params.coverage.is_some() {
+            labels.push("coverage");
+        }
         if params.safety_item.is_some() {
             labels.push("safety");
         }
@@ -201,6 +204,7 @@ impl PendingChartChangeset {
     pub(super) fn expected_guard_count(&self) -> usize {
         let Some(WorkspaceChartExpectedVersions {
             client,
+            coverage,
             safety_item,
             encounter,
             document,
@@ -213,6 +217,7 @@ impl PendingChartChangeset {
         };
         [
             client,
+            coverage,
             safety_item,
             encounter,
             document,
@@ -229,6 +234,7 @@ impl PendingChartChangeset {
         self.merge_target() == Some(WorkspaceChartEntityKind::Note)
             && self.params.note.is_some()
             && self.params.client.is_none()
+            && self.params.coverage.is_none()
             && self.params.safety_item.is_none()
             && self.params.encounter.is_none()
             && self.params.document.is_none()
@@ -261,6 +267,7 @@ mod tests {
             source_turn_id: None,
             client_id: Some("client-1".to_string()),
             client: None,
+            coverage: None,
             expected_versions: None,
             safety_item: None,
             encounter: None,
