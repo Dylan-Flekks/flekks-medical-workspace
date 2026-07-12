@@ -10,6 +10,7 @@ mod workspace_agent;
 mod workspace_chart_commit;
 mod workspace_drafts;
 mod workspace_guides;
+mod workspace_policy;
 mod workspace_record_version;
 
 pub use agent_job::AgentJob;
@@ -120,6 +121,9 @@ pub use workspace_guides::WorkspaceGuideRunFinish;
 pub use workspace_guides::WorkspaceGuideRunOutcome;
 pub use workspace_guides::WorkspaceGuideRunStart;
 pub use workspace_guides::WorkspaceGuideRunStatus;
+pub use workspace_policy::WorkspaceDataClassification;
+pub use workspace_policy::WorkspaceDataPolicyStatus;
+pub use workspace_policy::WorkspaceSyntheticProvisionOutcome;
 
 pub(crate) use agent_job::AgentJobItemRow;
 pub(crate) use agent_job::AgentJobRow;
