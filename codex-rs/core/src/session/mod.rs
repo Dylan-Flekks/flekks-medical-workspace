@@ -891,7 +891,11 @@ impl Codex {
     /// Use sparingly: prefer `submit()` so Codex is responsible for generating
     /// unique IDs for each submission.
     pub async fn submit_with_id(&self, mut sub: Submission) -> CodexResult<()> {
-        if sub.trace.is_none() && !self.session.model_tool_mode_is_isolated().await {
+        if self.session.model_tool_mode_is_isolated().await {
+            model_isolation::validate_submission(&self.session, &sub)
+                .await
+                .map_err(CodexErr::InvalidRequest)?;
+        } else if sub.trace.is_none() {
             sub.trace = current_span_w3c_trace_context();
         }
         self.tx_sub

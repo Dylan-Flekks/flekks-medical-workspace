@@ -200,6 +200,12 @@ pub struct StartThreadOptions {
     pub supports_openai_form_elicitation: bool,
 }
 
+#[derive(Clone, Copy)]
+enum ThreadPublication {
+    Immediate,
+    Deferred,
+}
+
 fn originator_from_service_name(service_name: Option<&str>) -> Option<String> {
     let service_name = service_name?.trim();
     for originator in ["codex_work_desktop", "codex_work_web", "codex_work_mobile"] {
@@ -681,14 +687,62 @@ impl ThreadManager {
         &self,
         options: StartThreadOptions,
     ) -> CodexResult<NewThread> {
-        self.start_thread_with_options_and_fork_source(options, /*forked_from_thread_id*/ None)
-            .await
+        self.start_thread_with_options_and_publication(
+            options,
+            /*forked_from_thread_id*/ None,
+            ThreadPublication::Immediate,
+        )
+        .await
+    }
+
+    /// Constructs a fresh isolated thread without exposing it through manager lookups.
+    ///
+    /// The caller must establish ownership and then call
+    /// [`Self::publish_isolated_thread`] before returning the thread ID to a client.
+    pub async fn start_isolated_thread_unpublished(
+        &self,
+        options: StartThreadOptions,
+    ) -> CodexResult<NewThread> {
+        if !matches!(&options.initial_history, InitialHistory::New) {
+            return Err(CodexErr::InvalidRequest(
+                "deferred isolated publication requires fresh thread history".to_string(),
+            ));
+        }
+        if !options
+            .thread_extension_init
+            .get::<ModelToolMode>()
+            .is_some_and(|mode| mode.is_isolated())
+        {
+            return Err(CodexErr::InvalidRequest(
+                "deferred thread publication is restricted to isolated model mode".to_string(),
+            ));
+        }
+        self.start_thread_with_options_and_publication(
+            options,
+            /*forked_from_thread_id*/ None,
+            ThreadPublication::Deferred,
+        )
+        .await
     }
 
     async fn start_thread_with_options_and_fork_source(
         &self,
         options: StartThreadOptions,
         forked_from_thread_id: Option<ThreadId>,
+    ) -> CodexResult<NewThread> {
+        self.start_thread_with_options_and_publication(
+            options,
+            forked_from_thread_id,
+            ThreadPublication::Immediate,
+        )
+        .await
+    }
+
+    async fn start_thread_with_options_and_publication(
+        &self,
+        options: StartThreadOptions,
+        forked_from_thread_id: Option<ThreadId>,
+        publication: ThreadPublication,
     ) -> CodexResult<NewThread> {
         let agent_control = self.agent_control_for_config(&options.config);
         let (resumed_session_source, resumed_thread_source) = options
@@ -697,7 +751,7 @@ impl ThreadManager {
             .unwrap_or_else(|| (self.state.session_source.clone(), None));
         let session_source = options.session_source.unwrap_or(resumed_session_source);
         let thread_source = options.thread_source.or(resumed_thread_source);
-        Box::pin(self.state.spawn_thread_with_source(
+        Box::pin(self.state.spawn_thread_with_source_and_publication(
             options.config,
             options.initial_history,
             options.history_mode,
@@ -717,8 +771,25 @@ impl ThreadManager {
             options.thread_extension_init,
             options.supports_openai_form_elicitation,
             /*user_shell_override*/ None,
+            publication,
         ))
         .await
+    }
+
+    /// Publishes a prepared isolated thread while the caller holds its ownership lock.
+    pub async fn publish_isolated_thread(&self, thread: &NewThread) -> CodexResult<()> {
+        if !thread
+            .thread
+            .config_snapshot()
+            .await
+            .model_tool_mode
+            .is_isolated()
+        {
+            return Err(CodexErr::InvalidRequest(
+                "only isolated threads support deferred publication".to_string(),
+            ));
+        }
+        self.state.publish_prepared_thread(thread).await
     }
 
     // TODO(jif) merge with fork_agent
@@ -1539,6 +1610,55 @@ impl ThreadManagerState {
         supports_openai_form_elicitation: bool,
         user_shell_override: Option<crate::shell::Shell>,
     ) -> CodexResult<NewThread> {
+        self.spawn_thread_with_source_and_publication(
+            config,
+            initial_history,
+            history_mode,
+            allow_provider_model_fallback,
+            auth_manager,
+            agent_control,
+            session_source,
+            parent_thread_id,
+            forked_from_thread_id,
+            thread_source,
+            dynamic_tools,
+            metrics_service_name,
+            inherited_environments,
+            inherited_exec_policy,
+            parent_trace,
+            environments,
+            thread_extension_init,
+            supports_openai_form_elicitation,
+            user_shell_override,
+            ThreadPublication::Immediate,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn spawn_thread_with_source_and_publication(
+        &self,
+        config: Config,
+        initial_history: InitialHistory,
+        history_mode: Option<ThreadHistoryMode>,
+        allow_provider_model_fallback: bool,
+        auth_manager: Arc<AuthManager>,
+        agent_control: AgentControl,
+        session_source: SessionSource,
+        parent_thread_id: Option<ThreadId>,
+        forked_from_thread_id: Option<ThreadId>,
+        thread_source: Option<ThreadSource>,
+        dynamic_tools: Vec<codex_protocol::dynamic_tools::DynamicToolSpec>,
+        metrics_service_name: Option<String>,
+        inherited_environments: Option<TurnEnvironmentSnapshot>,
+        inherited_exec_policy: Option<Arc<crate::exec_policy::ExecPolicyManager>>,
+        parent_trace: Option<W3cTraceContext>,
+        environments: Vec<TurnEnvironmentSelection>,
+        thread_extension_init: ExtensionDataInit,
+        supports_openai_form_elicitation: bool,
+        user_shell_override: Option<crate::shell::Shell>,
+        publication: ThreadPublication,
+    ) -> CodexResult<NewThread> {
         let is_resumed_thread = matches!(&initial_history, InitialHistory::Resumed(_));
         if let InitialHistory::Resumed(resumed) = &initial_history {
             let mut threads = self.threads.write().await;
@@ -1668,15 +1788,25 @@ impl ThreadManagerState {
         }))
         .await?;
         let new_thread = self
-            .finalize_thread_spawn(codex, thread_id, tracked_session_source)
+            .prepare_thread_spawn(codex, thread_id, tracked_session_source)
             .await?;
+        if matches!(publication, ThreadPublication::Immediate)
+            && let Err(error) = self.publish_prepared_thread(&new_thread).await
+        {
+            if let Err(shutdown_error) = new_thread.thread.shutdown_and_wait().await {
+                warn!(
+                    "failed to shut down unpublished duplicate thread {thread_id}: {shutdown_error}"
+                );
+            }
+            return Err(error);
+        }
         if is_resumed_thread {
             new_thread.thread.emit_thread_resume_lifecycle().await;
         }
         Ok(new_thread)
     }
 
-    async fn finalize_thread_spawn(
+    async fn prepare_thread_spawn(
         &self,
         codex: Codex,
         thread_id: ThreadId,
@@ -1693,30 +1823,29 @@ impl ThreadManagerState {
             }
         };
 
-        {
-            let mut threads = self.threads.write().await;
-            if let std::collections::hash_map::Entry::Vacant(e) = threads.entry(thread_id) {
-                let thread = Arc::new(CodexThread::new(
-                    codex,
-                    session_configured.clone(),
-                    session_configured.rollout_path.clone(),
-                    session_source,
-                ));
-                e.insert(thread.clone());
-                return Ok(NewThread {
-                    thread_id,
-                    thread,
-                    session_configured,
-                });
-            }
-        }
+        Ok(NewThread {
+            thread_id,
+            thread: Arc::new(CodexThread::new(
+                codex,
+                session_configured.clone(),
+                session_configured.rollout_path.clone(),
+                session_source,
+            )),
+            session_configured,
+        })
+    }
 
-        if let Err(err) = codex.shutdown_and_wait().await {
-            warn!("failed to shut down duplicate thread {thread_id}: {err}");
+    async fn publish_prepared_thread(&self, thread: &NewThread) -> CodexResult<()> {
+        let mut threads = self.threads.write().await;
+        if let std::collections::hash_map::Entry::Vacant(entry) = threads.entry(thread.thread_id) {
+            entry.insert(Arc::clone(&thread.thread));
+            Ok(())
+        } else {
+            Err(CodexErr::InvalidRequest(format!(
+                "thread {} is already running",
+                thread.thread_id
+            )))
         }
-        Err(CodexErr::InvalidRequest(format!(
-            "thread {thread_id} is already running"
-        )))
     }
 
     pub(crate) fn notify_thread_created(&self, thread_id: ThreadId) {

@@ -36,6 +36,7 @@ use codex_model_provider_info::create_oss_provider_with_base_url;
 use codex_otel::SessionTelemetry;
 use codex_protocol::ThreadId;
 use codex_protocol::auth::AuthMode;
+use codex_protocol::config_types::ModelProviderAuthInfo;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
@@ -756,6 +757,79 @@ fn auth_request_telemetry_context_tracks_attached_auth_and_retry_phase() {
     assert!(auth_context.retry_after_unauthorized);
     assert_eq!(auth_context.recovery_mode, Some("managed"));
     assert_eq!(auth_context.recovery_phase, Some("refresh_token"));
+}
+
+#[tokio::test]
+async fn isolated_model_client_snapshots_auth_without_ambient_recovery_manager() {
+    let auth_manager =
+        AuthManager::from_auth_for_testing(CodexAuth::create_dummy_chatgpt_auth_for_testing());
+    let expected_auth = auth_manager.auth_cached().expect("test auth should exist");
+    let client = ModelClient::new_isolated(
+        Arc::clone(&auth_manager),
+        ThreadId::new(),
+        ModelProviderInfo::create_openai_provider(Some(CHATGPT_CODEX_BASE_URL.to_string())),
+        HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
+    )
+    .expect("isolated OpenAI auth snapshot should be supported");
+
+    assert!(client.auth_manager().is_none());
+    assert!(matches!(
+        client.state.unauthorized_recovery_policy,
+        super::UnauthorizedRecoveryPolicy::Disabled
+    ));
+    let setup = client
+        .current_client_setup()
+        .await
+        .expect("isolated static auth should resolve");
+    let actual_auth = setup.auth.expect("isolated auth snapshot should exist");
+    assert_eq!(actual_auth.auth_mode(), expected_auth.auth_mode());
+    assert_eq!(actual_auth.get_account_id(), expected_auth.get_account_id());
+}
+
+#[tokio::test]
+async fn isolated_model_client_rejects_missing_openai_auth_snapshot() {
+    let codex_home = TempDir::new().expect("temporary Codex home");
+    let auth_manager = Arc::new(
+        AuthManager::new(
+            codex_home.path().to_path_buf(),
+            /*enable_codex_api_key_env*/ false,
+            AuthCredentialsStoreMode::File,
+            /*forced_chatgpt_workspace_id*/ None,
+            /*chatgpt_base_url*/ None,
+            AuthKeyringBackendKind::default(),
+            /*auth_route_config*/ None,
+        )
+        .await,
+    );
+
+    let error = ModelClient::new_isolated(
+        auth_manager,
+        ThreadId::new(),
+        ModelProviderInfo::create_openai_provider(Some(CHATGPT_CODEX_BASE_URL.to_string())),
+        HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
+    )
+    .expect_err("isolated model client must fail before an unauthenticated request");
+    assert!(error.to_string().contains("cached OpenAI auth snapshot"));
+}
+
+#[test]
+fn isolated_model_client_rejects_command_backed_provider_auth() {
+    let auth_manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("unused"));
+    let mut provider =
+        create_oss_provider_with_base_url("https://example.com/v1", WireApi::Responses);
+    provider.auth = Some(
+        serde_json::from_value::<ModelProviderAuthInfo>(json!({"command": "must-not-run"}))
+            .expect("provider auth fixture should deserialize"),
+    );
+
+    let error = ModelClient::new_isolated(
+        auth_manager,
+        ThreadId::new(),
+        provider,
+        HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
+    )
+    .expect_err("isolated model client must reject command-backed auth");
+    assert!(error.to_string().contains("provider `auth`"));
 }
 
 #[test]

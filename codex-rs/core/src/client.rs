@@ -125,6 +125,7 @@ use codex_login::auth_env_telemetry::collect_auth_env_telemetry;
 use codex_model_provider::AgentIdentitySessionFallback;
 use codex_model_provider::ProviderAuthScope;
 use codex_model_provider::SharedModelProvider;
+use codex_model_provider::auth_provider_from_auth;
 use codex_model_provider::create_model_provider;
 #[cfg(test)]
 use codex_model_provider_info::DEFAULT_WEBSOCKET_CONNECT_TIMEOUT_MS;
@@ -199,6 +200,8 @@ fn session_telemetry_for_request(
 struct ModelClientState {
     thread_id: ThreadId,
     provider: SharedModelProvider,
+    isolated_auth: Option<IsolatedAuthSnapshot>,
+    unauthorized_recovery_policy: UnauthorizedRecoveryPolicy,
     auth_env_telemetry: AuthEnvTelemetry,
     session_source: SessionSource,
     originator: String,
@@ -213,6 +216,29 @@ struct ModelClientState {
     disable_websockets: AtomicBool,
     agent_identity_session_fallback: AgentIdentitySessionFallback,
     cached_websocket_session: StdMutex<WebsocketSession>,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum UnauthorizedRecoveryPolicy {
+    Enabled,
+    Disabled,
+}
+
+impl UnauthorizedRecoveryPolicy {
+    fn enabled(self) -> bool {
+        matches!(self, Self::Enabled)
+    }
+}
+
+#[derive(Clone)]
+struct IsolatedAuthSnapshot {
+    auth: CodexAuth,
+}
+
+impl std::fmt::Debug for IsolatedAuthSnapshot {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("IsolatedAuthSnapshot(<redacted>)")
+    }
 }
 
 /// Resolved API client setup for a single request attempt.
@@ -401,6 +427,32 @@ fn sideband_websocket_auth_headers(api_auth: &dyn AuthProvider) -> ApiHeaderMap 
     headers
 }
 
+fn uses_ambient_openai_auth(provider: &ModelProviderInfo) -> bool {
+    provider.requires_openai_auth
+        && provider.env_key.is_none()
+        && provider.experimental_bearer_token.is_none()
+        && provider.auth.is_none()
+        && provider.aws.is_none()
+}
+
+fn validate_isolated_provider_auth(provider: &ModelProviderInfo) -> Result<()> {
+    let unsupported = [
+        ("env_key", provider.env_key.is_some()),
+        (
+            "experimental_bearer_token",
+            provider.experimental_bearer_token.is_some(),
+        ),
+        ("auth", provider.auth.is_some()),
+        ("aws", provider.aws.is_some()),
+    ];
+    if let Some((field, _)) = unsupported.into_iter().find(|(_, present)| *present) {
+        return Err(CodexErr::InvalidRequest(format!(
+            "isolated model mode does not accept provider `{field}` credentials or overrides"
+        )));
+    }
+    Ok(())
+}
+
 impl ModelClient {
     /// Creates the one-shot transport used by an isolated session.
     ///
@@ -411,14 +463,34 @@ impl ModelClient {
     pub(crate) fn new_isolated(
         auth_manager: Arc<AuthManager>,
         thread_id: ThreadId,
-        provider_info: ModelProviderInfo,
+        mut provider_info: ModelProviderInfo,
         http_client_factory: HttpClientFactory,
-    ) -> Self {
-        let model_provider = create_model_provider(provider_info, Some(auth_manager));
-        Self {
+    ) -> Result<Self> {
+        validate_isolated_provider_auth(&provider_info)?;
+        provider_info.query_params = None;
+        provider_info.http_headers = None;
+        provider_info.env_http_headers = None;
+        let isolated_auth = if uses_ambient_openai_auth(&provider_info) {
+            Some(IsolatedAuthSnapshot {
+                auth: auth_manager.auth_cached().ok_or_else(|| {
+                    CodexErr::InvalidRequest(
+                        "isolated model mode requires an already-cached OpenAI auth snapshot"
+                            .to_string(),
+                    )
+                })?,
+            })
+        } else {
+            None
+        };
+        // Never retain the ambient AuthManager here. In particular, an
+        // isolated 401 must not invoke an app-server ExternalAuth bridge.
+        let model_provider = create_model_provider(provider_info, /*auth_manager*/ None);
+        Ok(Self {
             state: Arc::new(ModelClientState {
                 thread_id,
                 provider: model_provider,
+                isolated_auth,
+                unauthorized_recovery_policy: UnauthorizedRecoveryPolicy::Disabled,
                 auth_env_telemetry: AuthEnvTelemetry::default(),
                 session_source: SessionSource::Unknown,
                 originator: "isolated".to_string(),
@@ -437,7 +509,7 @@ impl ModelClient {
             agent_identity_policy: AgentIdentityAuthPolicy::JwtOnly,
             prompt_cache_key_override: None,
             http_client_factory,
-        }
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -475,6 +547,8 @@ impl ModelClient {
             state: Arc::new(ModelClientState {
                 thread_id,
                 provider: model_provider,
+                isolated_auth: None,
+                unauthorized_recovery_policy: UnauthorizedRecoveryPolicy::Enabled,
                 auth_env_telemetry,
                 session_source,
                 originator,
@@ -973,6 +1047,19 @@ impl ModelClient {
     /// This centralizes setup used by both prewarm and normal request paths so they stay in
     /// lockstep when auth/provider resolution changes.
     async fn current_client_setup(&self) -> Result<CurrentClientSetup> {
+        if let Some(isolated_auth) = self.state.isolated_auth.as_ref() {
+            let auth = isolated_auth.auth.clone();
+            return Ok(CurrentClientSetup {
+                api_provider: self
+                    .state
+                    .provider
+                    .info()
+                    .to_api_provider(Some(auth.auth_mode()))?,
+                api_auth: auth_provider_from_auth(&auth),
+                auth: Some(auth),
+                agent_identity_telemetry: None,
+            });
+        }
         let auth = self.state.provider.auth().await;
         let api_provider = self.state.provider.api_provider().await?;
         let resolved_auth = self
@@ -1435,10 +1522,16 @@ impl ModelClientSession {
         responses_metadata: &CodexResponsesMetadata,
         inference_trace: &InferenceTraceContext,
     ) -> Result<ResponseStream> {
+        let unauthorized_recovery_enabled =
+            self.client.state.unauthorized_recovery_policy.enabled();
         let auth_manager = self.client.state.provider.auth_manager();
-        let mut auth_recovery = auth_manager
-            .as_ref()
-            .map(AuthManager::unauthorized_recovery);
+        let mut auth_recovery = if unauthorized_recovery_enabled {
+            auth_manager
+                .as_ref()
+                .map(AuthManager::unauthorized_recovery)
+        } else {
+            None
+        };
         let mut pending_retry = PendingUnauthorizedRetry::default();
         loop {
             let client_setup = self.client.current_client_setup().await?;
@@ -1503,7 +1596,7 @@ impl ModelClientSession {
                 }
                 Err(ApiError::Transport(
                     unauthorized_transport @ TransportError::Http { status, .. },
-                )) if status == StatusCode::UNAUTHORIZED => {
+                )) if status == StatusCode::UNAUTHORIZED && unauthorized_recovery_enabled => {
                     let response_debug_context =
                         extract_response_debug_context(&unauthorized_transport);
                     inference_trace_attempt.record_failed(
@@ -1565,11 +1658,17 @@ impl ModelClientSession {
         request_trace: Option<W3cTraceContext>,
         inference_trace: &InferenceTraceContext,
     ) -> Result<WebsocketStreamOutcome> {
+        let unauthorized_recovery_enabled =
+            self.client.state.unauthorized_recovery_policy.enabled();
         let auth_manager = self.client.state.provider.auth_manager();
 
-        let mut auth_recovery = auth_manager
-            .as_ref()
-            .map(AuthManager::unauthorized_recovery);
+        let mut auth_recovery = if unauthorized_recovery_enabled {
+            auth_manager
+                .as_ref()
+                .map(AuthManager::unauthorized_recovery)
+        } else {
+            None
+        };
         let mut pending_retry = PendingUnauthorizedRetry::default();
         loop {
             let client_setup = self.client.current_client_setup().await?;
@@ -1632,7 +1731,7 @@ impl ModelClientSession {
                 }
                 Err(ApiError::Transport(
                     unauthorized_transport @ TransportError::Http { status, .. },
-                )) if status == StatusCode::UNAUTHORIZED => {
+                )) if status == StatusCode::UNAUTHORIZED && unauthorized_recovery_enabled => {
                     pending_retry = PendingUnauthorizedRetry::from_recovery(
                         handle_unauthorized(
                             unauthorized_transport,
