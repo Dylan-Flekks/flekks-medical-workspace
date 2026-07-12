@@ -470,6 +470,9 @@ impl Session {
         self: &Arc<Self>,
         sub_id: String,
     ) {
+        if self.model_tool_mode_is_isolated().await {
+            return;
+        }
         if !self.input_queue.has_trigger_turn_mailbox_items().await {
             return;
         }

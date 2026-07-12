@@ -26,6 +26,7 @@ use codex_core::thread_store_from_config;
 use codex_exec_server::CreateDirectoryOptions;
 use codex_exec_server::ExecutorFileSystem;
 use codex_exec_server::RemoveOptions;
+use codex_extension_api::ExtensionDataInit;
 use codex_extension_api::ExtensionRegistry;
 use codex_extension_api::LoadUserInstructionsFuture;
 use codex_extension_api::UserInstructionsProvider;
@@ -36,6 +37,7 @@ use codex_login::CodexAuth;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::built_in_model_providers;
 use codex_models_manager::bundled_models_response;
+use codex_protocol::config_types::ModelToolMode;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ModelsResponse;
@@ -307,6 +309,7 @@ pub struct TestCodexBuilder {
     supports_openai_form_elicitation: bool,
     external_time_provider: Option<Arc<dyn TimeProvider>>,
     code_mode_host_program: Option<PathBuf>,
+    initial_model_tool_mode: Option<ModelToolMode>,
 }
 
 impl TestCodexBuilder {
@@ -315,6 +318,17 @@ impl TestCodexBuilder {
         T: FnOnce(&mut Config) + Send + 'static,
     {
         self.config_mutators.push(Box::new(mutator));
+        self
+    }
+
+    pub fn with_initial_model_tool_mode(mut self, mode: ModelToolMode) -> Self {
+        if mode.is_isolated() {
+            self.config_mutators.push(Box::new(|config| {
+                config.ephemeral = true;
+                config.workspace_roots.clear();
+            }));
+        }
+        self.initial_model_tool_mode = Some(mode);
         self
     }
 
@@ -690,7 +704,18 @@ impl TestCodexBuilder {
                 .await?
             }
             (None, None) => {
-                let environments = thread_manager.default_environment_selections(&config.cwd);
+                let environments = if self
+                    .initial_model_tool_mode
+                    .is_some_and(ModelToolMode::is_isolated)
+                {
+                    Default::default()
+                } else {
+                    thread_manager.default_environment_selections(&config.cwd)
+                };
+                let mut thread_extension_init = ExtensionDataInit::default();
+                if let Some(model_tool_mode) = self.initial_model_tool_mode {
+                    thread_extension_init.insert(model_tool_mode);
+                }
                 Box::pin(
                     thread_manager.start_thread_with_options(StartThreadOptions {
                         config: config.clone(),
@@ -703,7 +728,7 @@ impl TestCodexBuilder {
                         metrics_service_name: None,
                         parent_trace: None,
                         environments,
-                        thread_extension_init: Default::default(),
+                        thread_extension_init,
                         supports_openai_form_elicitation: self.supports_openai_form_elicitation,
                     }),
                 )
@@ -1259,6 +1284,7 @@ pub fn test_codex() -> TestCodexBuilder {
         supports_openai_form_elicitation: false,
         external_time_provider: None,
         code_mode_host_program: None,
+        initial_model_tool_mode: None,
     }
 }
 

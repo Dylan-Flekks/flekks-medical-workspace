@@ -949,6 +949,13 @@ impl TurnRequestProcessor {
                             Some(AnalyticsJsonRpcError::TurnSteer(turn_steer_error)),
                         )
                     }
+                    SteerInputError::IsolatedMode => (
+                        "isolated model mode does not accept steering input".to_string(),
+                        None,
+                        Some(AnalyticsJsonRpcError::TurnSteer(
+                            TurnSteerRequestError::NoActiveTurn,
+                        )),
+                    ),
                     SteerInputError::EmptyInput => (
                         "input must not be empty".to_string(),
                         None,

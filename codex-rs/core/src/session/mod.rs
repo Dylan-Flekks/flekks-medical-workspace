@@ -206,6 +206,7 @@ mod inject;
 mod input_queue;
 mod mcp;
 mod mcp_runtime;
+mod model_isolation;
 pub(crate) mod multi_agents;
 mod review;
 mod rollout_budget;
@@ -248,6 +249,7 @@ pub enum SteerInputError {
     NoActiveTurn(Vec<UserInput>),
     ExpectedTurnMismatch { expected: String, actual: String },
     ActiveTurnNotSteerable { turn_kind: NonSteerableTurnKind },
+    IsolatedMode,
     EmptyInput,
 }
 
@@ -274,6 +276,10 @@ impl SteerInputError {
                     }),
                 }
             }
+            Self::IsolatedMode => ErrorEvent {
+                message: "isolated model mode does not accept steering input".to_string(),
+                codex_error_info: Some(CodexErrorInfo::BadRequest),
+            },
             Self::EmptyInput => ErrorEvent {
                 message: "input must not be empty".to_string(),
                 codex_error_info: Some(CodexErrorInfo::BadRequest),
@@ -338,7 +344,6 @@ use codex_otel::SessionTelemetry;
 use codex_otel::THREAD_STARTED_METRIC;
 use codex_otel::TelemetryAuthMode;
 use codex_protocol::config_types::CollaborationMode;
-use codex_protocol::config_types::ModelToolMode;
 use codex_protocol::config_types::Personality;
 use codex_protocol::config_types::ReasoningSummary as ReasoningSummaryConfig;
 use codex_protocol::config_types::WindowsSandboxLevel;
@@ -535,6 +540,23 @@ impl Codex {
             external_time_provider,
             inherited_multi_agent_version,
         } = args;
+        let model_tool_mode =
+            model_isolation::initial_model_tool_mode(&conversation_history, &thread_extension_init);
+        model_isolation::validate_thread_creation(
+            model_tool_mode,
+            model_isolation::IsolatedThreadCreation {
+                config: &config,
+                initial_history: &conversation_history,
+                session_source: &session_source,
+                forked_from_thread_id_present: forked_from_thread_id.is_some(),
+                parent_thread_id_present: parent_thread_id.is_some(),
+                thread_source: thread_source.as_ref(),
+                dynamic_tools: &dynamic_tools,
+                inherited_environments: inherited_environments.as_ref(),
+                environment_selections: &environment_selections,
+                thread_extension_init: &thread_extension_init,
+            },
+        )?;
         let (tx_sub, rx_sub) = async_channel::bounded(SUBMISSION_CHANNEL_CAPACITY);
         let (tx_event, rx_event) = async_channel::unbounded();
 
@@ -609,11 +631,6 @@ impl Codex {
         let history_mode = conversation_history.get_history_mode(
             requested_history_mode.unwrap_or_else(|| thread_store.default_history_mode()),
         );
-        let model_tool_mode = thread_extension_init
-            .get::<ModelToolMode>()
-            .map(|mode| *mode)
-            .or_else(|| conversation_history.get_latest_model_tool_mode())
-            .unwrap_or_default();
         config
             .validate_multi_agent_v2_config()
             .map_err(|err| CodexErr::InvalidRequest(err.to_string()))?;
@@ -3893,6 +3910,16 @@ impl Session {
         client_user_message_id: Option<String>,
         responsesapi_client_metadata: Option<HashMap<String, String>>,
     ) -> Result<String, SteerInputError> {
+        if self
+            .state
+            .lock()
+            .await
+            .session_configuration
+            .model_tool_mode
+            .is_isolated()
+        {
+            return Err(SteerInputError::IsolatedMode);
+        }
         let mut active = self.active_turn.lock().await;
         let Some(active_turn) = active.as_mut() else {
             return Err(SteerInputError::NoActiveTurn(input));

@@ -264,6 +264,18 @@ pub(super) async fn user_input_or_turn_inner(
     }
     sess.maybe_emit_model_warnings_for_turn(current_context.as_ref())
         .await;
+    if current_context.model_tool_mode.is_isolated() {
+        spawn_fresh_user_turn(
+            sess,
+            &current_context,
+            items,
+            additional_context,
+            client_user_message_id,
+            responsesapi_client_metadata,
+        )
+        .await;
+        return;
+    }
     match sess
         .steer_input(
             items.clone(),
@@ -278,36 +290,13 @@ pub(super) async fn user_input_or_turn_inner(
             current_context.session_telemetry.user_prompt(&items);
         }
         Err(SteerInputError::NoActiveTurn(items)) => {
-            if let Some(responsesapi_client_metadata) = responsesapi_client_metadata {
-                current_context
-                    .turn_metadata_state
-                    .set_responsesapi_client_metadata(responsesapi_client_metadata);
-            }
-            current_context.session_telemetry.user_prompt(&items);
-            sess.refresh_mcp_servers_if_requested(
+            spawn_fresh_user_turn(
+                sess,
                 &current_context,
-                Some(sess.mcp_elicitation_reviewer()),
-            )
-            .await;
-            let additional_context_input = {
-                let mut state = sess.state.lock().await;
-                state.additional_context.merge(additional_context)
-            };
-            let mut task_input = additional_context_input
-                .into_iter()
-                .map(ResponseItem::from)
-                .map(TurnInput::ResponseItem)
-                .collect::<Vec<_>>();
-            if !items.is_empty() {
-                task_input.push(TurnInput::UserInput {
-                    content: items,
-                    client_id: client_user_message_id,
-                });
-            }
-            sess.spawn_task(
-                Arc::clone(&current_context),
-                task_input,
-                crate::tasks::RegularTask::new(),
+                items,
+                additional_context,
+                client_user_message_id,
+                responsesapi_client_metadata,
             )
             .await;
         }
@@ -321,6 +310,48 @@ pub(super) async fn user_input_or_turn_inner(
     }
 }
 
+async fn spawn_fresh_user_turn(
+    sess: &Arc<Session>,
+    current_context: &Arc<super::TurnContext>,
+    items: Vec<codex_protocol::user_input::UserInput>,
+    additional_context: std::collections::BTreeMap<
+        String,
+        codex_protocol::protocol::AdditionalContextEntry,
+    >,
+    client_user_message_id: Option<String>,
+    responsesapi_client_metadata: Option<std::collections::HashMap<String, String>>,
+) {
+    if let Some(responsesapi_client_metadata) = responsesapi_client_metadata {
+        current_context
+            .turn_metadata_state
+            .set_responsesapi_client_metadata(responsesapi_client_metadata);
+    }
+    current_context.session_telemetry.user_prompt(&items);
+    sess.refresh_mcp_servers_if_requested(current_context, Some(sess.mcp_elicitation_reviewer()))
+        .await;
+    let additional_context_input = {
+        let mut state = sess.state.lock().await;
+        state.additional_context.merge(additional_context)
+    };
+    let mut task_input = additional_context_input
+        .into_iter()
+        .map(ResponseItem::from)
+        .map(TurnInput::ResponseItem)
+        .collect::<Vec<_>>();
+    if !items.is_empty() {
+        task_input.push(TurnInput::UserInput {
+            content: items,
+            client_id: client_user_message_id,
+        });
+    }
+    sess.spawn_task(
+        Arc::clone(current_context),
+        task_input,
+        crate::tasks::RegularTask::new(),
+    )
+    .await;
+}
+
 /// Queues an inter-agent message, then lets the shared pending-work scheduler
 /// decide whether an idle session should start a regular turn.
 pub async fn inter_agent_communication(
@@ -328,6 +359,9 @@ pub async fn inter_agent_communication(
     sub_id: String,
     communication: InterAgentCommunication,
 ) {
+    if sess.model_tool_mode_is_isolated().await {
+        return;
+    }
     let trigger_turn = communication.trigger_turn;
     sess.input_queue
         .enqueue_mailbox_communication(communication)
@@ -758,6 +792,18 @@ pub(super) async fn submission_loop(
         debug!(?sub, "Submission");
         let dispatch_span = submission_dispatch_span(&sub);
         let should_exit = async {
+            if let Err(message) = super::model_isolation::validate_submission(&sess, &sub.op).await
+            {
+                sess.send_event_raw(Event {
+                    id: sub.id.clone(),
+                    msg: EventMsg::Error(ErrorEvent {
+                        message,
+                        codex_error_info: Some(CodexErrorInfo::BadRequest),
+                    }),
+                })
+                .await;
+                return false;
+            }
             match sub.op.clone() {
                 Op::Interrupt => {
                     interrupt(&sess).await;

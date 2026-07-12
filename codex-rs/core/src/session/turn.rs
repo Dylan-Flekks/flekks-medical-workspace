@@ -41,6 +41,8 @@ use crate::responses_retry::ResponsesStreamRequest;
 use crate::responses_retry::handle_retryable_response_stream_error;
 use crate::session::PreviousTurnSettings;
 use crate::session::TurnInput;
+use crate::session::model_isolation;
+use crate::session::model_isolation::ModelOutputStage;
 use crate::session::session::Session;
 use crate::session::step_context::StepContext;
 use crate::session::turn_context::TurnContext;
@@ -82,7 +84,6 @@ use codex_features::Feature;
 use codex_git_utils::get_git_repo_root_with_fs;
 use codex_protocol::config_types::AutoCompactTokenLimitScope;
 use codex_protocol::config_types::ModeKind;
-use codex_protocol::config_types::ModelToolMode;
 use codex_protocol::config_types::ServiceTier;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result as CodexResult;
@@ -1155,6 +1156,9 @@ async fn run_sampling_request(
             turn_context.as_ref(),
             base_instructions.clone(),
         );
+        // A terminal completion may release only output buffered by this same
+        // response attempt; failed streams must not leak state into retries.
+        let mut isolated_output_state = model_isolation::IsolatedOutputState::default();
         let err = match try_run_sampling_request(
             tool_runtime.clone(),
             Arc::clone(&sess),
@@ -1165,6 +1169,7 @@ async fn run_sampling_request(
             Arc::clone(&turn_diff_tracker),
             &prompt,
             cancellation_token.child_token(),
+            &mut isolated_output_state,
         )
         .await
         {
@@ -1221,7 +1226,7 @@ pub(crate) async fn built_tools(
     cancellation_token: &CancellationToken,
 ) -> CodexResult<Arc<ToolRouter>> {
     let turn_context = step_context.turn.as_ref();
-    if turn_context.model_tool_mode == ModelToolMode::Disabled {
+    if turn_context.model_tool_mode.tools_disabled() {
         return Ok(Arc::new(ToolRouter::from_parts(
             crate::tools::registry::ToolRegistry::default(),
             Vec::new(),
@@ -1360,37 +1365,6 @@ pub(crate) async fn built_tools(
 struct SamplingRequestResult {
     needs_follow_up: bool,
     last_agent_message: Option<String>,
-}
-
-fn reject_tool_like_output_when_disabled(
-    turn_context: &TurnContext,
-    item: &ResponseItem,
-) -> CodexResult<()> {
-    let tool_like = match item {
-        ResponseItem::AdditionalTools { .. }
-        | ResponseItem::LocalShellCall { .. }
-        | ResponseItem::FunctionCall { .. }
-        | ResponseItem::ToolSearchCall { .. }
-        | ResponseItem::FunctionCallOutput { .. }
-        | ResponseItem::CustomToolCall { .. }
-        | ResponseItem::CustomToolCallOutput { .. }
-        | ResponseItem::ToolSearchOutput { .. }
-        | ResponseItem::WebSearchCall { .. }
-        | ResponseItem::ImageGenerationCall { .. }
-        | ResponseItem::CompactionTrigger {}
-        | ResponseItem::Other => true,
-        ResponseItem::Message { .. }
-        | ResponseItem::AgentMessage { .. }
-        | ResponseItem::Reasoning { .. }
-        | ResponseItem::Compaction { .. }
-        | ResponseItem::ContextCompaction { .. } => false,
-    };
-    if turn_context.model_tool_mode == ModelToolMode::Disabled && tool_like {
-        return Err(CodexErr::InvalidRequest(
-            "model returned a tool item while model tool mode is disabled".to_string(),
-        ));
-    }
-    Ok(())
 }
 
 /// Ephemeral per-response state for streaming a single proposed plan.
@@ -1986,6 +1960,7 @@ async fn try_run_sampling_request(
     turn_diff_tracker: SharedTurnDiffTracker,
     prompt: &Prompt,
     cancellation_token: CancellationToken,
+    isolated_output_state: &mut model_isolation::IsolatedOutputState,
 ) -> CodexResult<SamplingRequestResult> {
     feedback_tags!(
         model = turn_context.model_info.slug.clone(),
@@ -2035,8 +2010,10 @@ async fn try_run_sampling_request(
     let plan_mode = turn_context.collaboration_mode.mode == ModeKind::Plan;
     let mut assistant_message_stream_parsers = AssistantMessageStreamParsers::new(plan_mode);
     let mut plan_mode_state = plan_mode.then(|| PlanModeStreamState::new(&turn_context.sub_id));
-    let defer_streamed_turn_items_for_contributors =
-        !sess.services.extensions.turn_item_contributors().is_empty();
+    // Isolated output must not reach clients before the completed assistant
+    // message passes the byte, JSON, and strict-schema gates.
+    let defer_streamed_turn_items_for_contributors = turn_context.model_tool_mode.is_isolated()
+        || !sess.services.extensions.turn_item_contributors().is_empty();
     let mut active_item_is_streaming_to_client = false;
     let receiving_span = trace_span!("receiving_stream");
     let outcome: CodexResult<SamplingRequestResult> = loop {
@@ -2086,7 +2063,20 @@ async fn try_run_sampling_request(
                 if turn_context.item_ids_enabled() {
                     assign_missing_streamed_response_item_id(&mut item, active_item.as_ref());
                 }
-                reject_tool_like_output_when_disabled(&turn_context, &item)?;
+                model_isolation::validate_model_output(
+                    turn_context.model_tool_mode,
+                    &item,
+                    ModelOutputStage::Completed,
+                    turn_context.final_output_json_schema.as_ref(),
+                    isolated_output_state,
+                )?;
+                if turn_context.model_tool_mode.is_isolated() {
+                    active_item.take();
+                    active_item_is_streaming_to_client = false;
+                    // Reasoning is allowed during sampling but intentionally
+                    // not exposed or persisted by a bounded isolated turn.
+                    continue;
+                }
                 if let Some((_, mut consumer)) = active_tool_argument_diff_consumer.take()
                     && let Ok(Some(event)) = consumer.finish()
                 {
@@ -2184,7 +2174,13 @@ async fn try_run_sampling_request(
                 if turn_context.item_ids_enabled() {
                     assign_missing_streamed_response_item_id(&mut item, /*active_item*/ None);
                 }
-                reject_tool_like_output_when_disabled(&turn_context, &item)?;
+                model_isolation::validate_model_output(
+                    turn_context.model_tool_mode,
+                    &item,
+                    ModelOutputStage::Added,
+                    turn_context.final_output_json_schema.as_ref(),
+                    isolated_output_state,
+                )?;
                 if let ResponseItem::CustomToolCall {
                     call_id,
                     name,
@@ -2321,6 +2317,30 @@ async fn try_run_sampling_request(
                 end_turn,
                 ..
             } => {
+                let isolated_assistant = model_isolation::take_validated_assistant_output(
+                    turn_context.model_tool_mode,
+                    isolated_output_state,
+                    end_turn,
+                )?;
+                if let Some(item) = isolated_assistant {
+                    let mut ctx = HandleOutputCtx {
+                        sess: sess.clone(),
+                        turn_context: turn_context.clone(),
+                        turn_store: Arc::clone(&turn_store),
+                        tool_runtime: tool_runtime.clone(),
+                        cancellation_token: cancellation_token.child_token(),
+                    };
+                    let output_result = handle_output_item_done(&mut ctx, item, None).await?;
+                    if output_result.tool_future.is_some() || output_result.needs_follow_up {
+                        return Err(CodexErr::InvalidRequest(
+                            "isolated model output unexpectedly requested follow-up work"
+                                .to_string(),
+                        ));
+                    }
+                    if let Some(agent_message) = output_result.last_agent_message {
+                        last_agent_message = Some(agent_message);
+                    }
+                }
                 flush_assistant_text_segments_all(
                     &sess,
                     &turn_context,

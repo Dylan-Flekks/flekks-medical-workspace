@@ -1,4 +1,6 @@
+use codex_core::TryStartTurnIfIdleRejectionReason;
 use codex_protocol::config_types::ModelToolMode;
+use codex_protocol::items::TurnItem;
 use codex_protocol::protocol::CodexErrorInfo;
 use codex_protocol::protocol::ConversationStartParams;
 use codex_protocol::protocol::EventMsg;
@@ -36,6 +38,146 @@ fn user_turn(text: &str, model_tool_mode: Option<ModelToolMode>) -> Op {
             ..Default::default()
         },
     }
+}
+
+fn isolated_user_turn(text: &str) -> Op {
+    Op::UserInput {
+        items: vec![UserInput::Text {
+            text: text.to_string(),
+            text_elements: Vec::new(),
+        }],
+        final_output_json_schema: Some(json!({
+            "type": "object",
+            "properties": {"hint": {"type": "string"}},
+            "required": ["hint"],
+            "additionalProperties": false
+        })),
+        responsesapi_client_metadata: None,
+        additional_context: Default::default(),
+        thread_settings: Default::default(),
+    }
+}
+
+async fn collect_through_turn_complete(
+    codex: &codex_core::CodexThread,
+) -> anyhow::Result<Vec<EventMsg>> {
+    let mut events = Vec::new();
+    loop {
+        let event = codex.next_event().await?.msg;
+        let turn_complete = matches!(event, EventMsg::TurnComplete(_));
+        events.push(event);
+        if turn_complete {
+            return Ok(events);
+        }
+    }
+}
+
+fn agent_item_event_counts(events: &[EventMsg]) -> (usize, usize) {
+    let started = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                EventMsg::ItemStarted(event)
+                    if matches!(&event.item, TurnItem::AgentMessage(_))
+            )
+        })
+        .count();
+    let completed = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                EventMsg::ItemCompleted(event)
+                    if matches!(&event.item, TurnItem::AgentMessage(_))
+            )
+        })
+        .count();
+    (started, completed)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn isolated_mode_releases_valid_output_only_after_terminal_completion() -> anyhow::Result<()>
+{
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    responses::mount_sse_once(
+        &server,
+        sse(vec![
+            ev_response_created("resp-isolated"),
+            ev_assistant_message("msg-isolated", r#"{"hint":"Save first"}"#),
+            ev_completed("resp-isolated"),
+        ]),
+    )
+    .await;
+    let mut builder = test_codex().with_initial_model_tool_mode(ModelToolMode::Isolated);
+    let test = builder.build(&server).await?;
+
+    let idle_start_error = test
+        .codex
+        .try_start_turn_if_idle(vec![responses::user_message_item("extension input")])
+        .await
+        .expect_err("isolated mode must reject automatic idle work");
+    assert_eq!(
+        idle_start_error.reason(),
+        TryStartTurnIfIdleRejectionReason::IsolatedMode
+    );
+
+    test.codex
+        .submit(isolated_user_turn("deidentified packet"))
+        .await?;
+    let events = collect_through_turn_complete(&test.codex).await?;
+
+    assert_eq!(agent_item_event_counts(&events), (1, 1));
+    let turn_complete = events
+        .iter()
+        .find_map(|event| match event {
+            EventMsg::TurnComplete(completed) => Some(completed),
+            _ => None,
+        })
+        .expect("turn complete event");
+    assert!(turn_complete.error.is_none());
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn isolated_mode_drops_buffered_output_when_terminal_completion_requests_follow_up()
+-> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let mut completed = ev_completed("resp-isolated");
+    completed["response"]["end_turn"] = json!(false);
+    responses::mount_sse_once(
+        &server,
+        sse(vec![
+            ev_response_created("resp-isolated"),
+            ev_assistant_message("msg-isolated", r#"{"hint":"Do not release"}"#),
+            completed,
+        ]),
+    )
+    .await;
+    let mut builder = test_codex().with_initial_model_tool_mode(ModelToolMode::Isolated);
+    let test = builder.build(&server).await?;
+
+    test.codex
+        .submit(isolated_user_turn("deidentified packet"))
+        .await?;
+    let events = collect_through_turn_complete(&test.codex).await?;
+
+    assert_eq!(agent_item_event_counts(&events), (0, 0));
+    let turn_complete = events
+        .iter()
+        .find_map(|event| match event {
+            EventMsg::TurnComplete(completed) => Some(completed),
+            _ => None,
+        })
+        .expect("turn complete event");
+    assert!(turn_complete.error.is_some());
+
+    Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
