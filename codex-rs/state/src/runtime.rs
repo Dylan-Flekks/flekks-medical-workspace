@@ -87,6 +87,7 @@ mod workspace_coverage_identity;
 mod workspace_draft_close;
 mod workspace_drafts;
 mod workspace_guides;
+mod workspace_policy;
 
 pub use external_agent_config_imports::ExternalAgentConfigImportDetailsRecord;
 pub use external_agent_config_imports::ExternalAgentConfigImportFailureRecord;
