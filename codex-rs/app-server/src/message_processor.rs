@@ -395,7 +395,7 @@ impl MessageProcessor {
             state_db.clone(),
             Arc::clone(&goal_service),
         );
-        let workspace_processor = WorkspaceRequestProcessor::new(state_db.clone());
+        let workspace_processor = WorkspaceRequestProcessor::new(state_db.clone(), config.as_ref());
         let thread_processor = ThreadRequestProcessor::new(
             auth_manager.clone(),
             Arc::clone(&thread_manager),
@@ -1176,6 +1176,12 @@ impl MessageProcessor {
             }
             ClientRequest::WorkspaceContextGet { params, .. } => {
                 self.workspace_processor.context_get(params).await
+            }
+            ClientRequest::WorkspaceDataPolicyRead { params, .. } => {
+                self.workspace_processor.data_policy_read(params).await
+            }
+            ClientRequest::WorkspaceDataPolicyProvision { params, .. } => {
+                self.workspace_processor.data_policy_provision(params).await
             }
             ClientRequest::WorkspaceDraftCheckpointCreate { params, .. } => {
                 self.workspace_processor
