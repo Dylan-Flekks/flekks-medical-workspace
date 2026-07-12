@@ -10,9 +10,15 @@ use sqlx::sqlite::SqliteConnectOptions;
 use std::borrow::Cow;
 
 async fn test_runtime() -> std::sync::Arc<StateRuntime> {
-    StateRuntime::init(unique_temp_dir(), "test-provider".to_string())
+    let runtime = StateRuntime::init(unique_temp_dir(), "test-provider".to_string())
         .await
-        .expect("state db should initialize")
+        .expect("state db should initialize");
+    runtime
+        .workspace()
+        .provision_synthetic_workspace("state agent test fixture")
+        .await
+        .expect("test workspace should be classified synthetic");
+    runtime
 }
 
 async fn seed_client_note(
@@ -203,6 +209,11 @@ async fn workspace_agent_run_preserves_packet_revision_and_source_manifest() {
         .expect("packet authorization contract source");
     assert!(contract_source.snapshot_json.contains("authorizedScope"));
     assert!(contract_source.snapshot_json.contains("expectedOutputKind"));
+    assert!(
+        contract_source
+            .snapshot_json
+            .contains(r#""dataClassification":"synthetic""#)
+    );
     assert_eq!(
         contract_source.content_sha256,
         format!(
@@ -1036,6 +1047,90 @@ async fn workspace_authorized_context_reader_returns_hashed_patient_owned_record
         manifest.len(),
         5,
         "packet envelope + packet contract + visit + two note snapshots"
+    );
+}
+
+#[tokio::test]
+async fn workspace_agent_source_continuations_reject_unclassified_legacy_run_without_writes() {
+    let runtime = test_runtime().await;
+    let (client, note) = seed_client_note(&runtime).await;
+    runtime
+        .workspace()
+        .upsert_encounter(crate::WorkspaceEncounterUpsert {
+            client_id: client.id.clone(),
+            kind: "therapy".to_string(),
+            title: "Synthetic legacy visit".to_string(),
+            status: "completed".to_string(),
+            ..Default::default()
+        })
+        .await
+        .expect("encounter should save");
+    let packet = runtime
+        .workspace()
+        .prepare_context_packet(packet_create(&client, &note))
+        .await
+        .expect("packet should prepare");
+    let run = runtime
+        .workspace()
+        .start_agent_run(run_start(&packet))
+        .await
+        .expect("classified run should start");
+    let sources_before = runtime
+        .workspace()
+        .list_agent_run_sources(&run.id)
+        .await
+        .expect("source manifest should list");
+
+    let mut connection = runtime
+        .workspace()
+        .pool
+        .acquire()
+        .await
+        .expect("policy corruption fixture connection");
+    sqlx::query("DROP TRIGGER workspace_data_policy_restrict_update")
+        .execute(&mut *connection)
+        .await
+        .expect("drop policy update guard fixture");
+    sqlx::query("PRAGMA ignore_check_constraints = ON")
+        .execute(&mut *connection)
+        .await
+        .expect("policy corruption fixture mode");
+    sqlx::query("UPDATE workspace_data_policy SET data_classification = 'unclassified', classified_at_ms = NULL, classified_by = NULL")
+        .execute(&mut *connection)
+        .await
+        .expect("legacy unclassified policy fixture");
+
+    let error = runtime
+        .workspace()
+        .read_authorized_agent_context(crate::WorkspaceAgentContextReadRequest {
+            run_id: run.id.clone(),
+            category: "visit_history".to_string(),
+            max_records: Some(10),
+        })
+        .await
+        .expect_err("unclassified legacy run must not read context");
+    assert!(error.to_string().contains("explicit synthetic"));
+    let error = runtime
+        .workspace()
+        .record_agent_run_source(crate::WorkspaceAgentRunSourceCreate {
+            run_id: run.id.clone(),
+            source_entity_type: "note_revision".to_string(),
+            source_entity_id: note.id,
+            source_revision: Some(1),
+            display_label: "Rejected legacy source".to_string(),
+            snapshot_json: r#"{"synthetic":true}"#.to_string(),
+            access_purpose: "policy gate regression".to_string(),
+        })
+        .await
+        .expect_err("unclassified legacy run must not record sources");
+    assert!(error.to_string().contains("explicit synthetic"));
+    assert_eq!(
+        runtime
+            .workspace()
+            .list_agent_run_sources(&run.id)
+            .await
+            .expect("rejected read must preserve sources"),
+        sources_before
     );
 }
 

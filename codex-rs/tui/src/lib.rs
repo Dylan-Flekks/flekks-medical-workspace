@@ -512,6 +512,17 @@ pub(crate) async fn start_embedded_app_server_for_picker(
     config: &Config,
 ) -> color_eyre::Result<AppServerSession> {
     let state_db = init_state_db_for_app_server_target(config, &AppServerTarget::Embedded).await?;
+    if let Some(state_db) = state_db.as_ref() {
+        state_db
+            .workspace()
+            .provision_synthetic_workspace("TUI embedded app-server test fixture")
+            .await
+            .map_err(|error| {
+                color_eyre::eyre::eyre!(
+                    "failed to classify embedded TUI test workspace as synthetic: {error:#}"
+                )
+            })?;
+    }
     start_app_server_for_picker(
         config,
         &AppServerTarget::Embedded,

@@ -75,6 +75,10 @@ async fn workspace_guides_persist_exact_envelopes_finish_and_paginate_without_la
         started.run.request_envelope["safety"]["modelToolMode"],
         "disabled"
     );
+    assert_eq!(
+        started.run.request_envelope["safety"]["dataClassification"],
+        "synthetic"
+    );
 
     let replayed: WorkspaceGuideRunStartResponse =
         request(&mut server, "workspace/guide/run/start", params).await?;
@@ -269,6 +273,16 @@ async fn workspace_guides_persist_exact_envelopes_finish_and_paginate_without_la
 pub(super) async fn server() -> Result<(TempDir, TestAppServer)> {
     let codex_home = TempDir::new()?;
     create_config_toml(codex_home.path())?;
+    let state_db = codex_state::StateRuntime::init(
+        codex_home.path().to_path_buf(),
+        "mock_provider".to_string(),
+    )
+    .await?;
+    state_db
+        .workspace()
+        .provision_synthetic_workspace("app-server workspace guide test fixture")
+        .await?;
+    drop(state_db);
     let mut server = TestAppServer::builder()
         .with_codex_home(codex_home.path())
         .without_auto_env()

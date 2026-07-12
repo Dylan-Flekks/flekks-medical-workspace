@@ -14,6 +14,7 @@ pub(super) fn request_envelope(
     run_id: &str,
     input: &crate::WorkspaceGuideRunStart,
     request: Value,
+    data_classification: crate::WorkspaceDataClassification,
 ) -> GuideResult<(String, String)> {
     let value = serde_json::json!({
         "schemaVersion": GUIDE_SCHEMA_VERSION,
@@ -30,6 +31,7 @@ pub(super) fn request_envelope(
             "readOnly": true,
             "canonicalChartWrites": false,
             "modelToolMode": "disabled",
+            "dataClassification": data_classification.as_str(),
         },
         "request": request,
     });
