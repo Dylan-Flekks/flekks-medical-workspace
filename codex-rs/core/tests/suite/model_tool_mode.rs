@@ -1,7 +1,15 @@
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
+use codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID;
+use codex_config::types::McpServerConfig;
+use codex_config::types::McpServerTransportConfig;
 use codex_core::TryStartTurnIfIdleRejectionReason;
+use codex_core::config::CurrentTimeReminderConfig;
 use codex_core::test_support::EmptyUserInstructionsProvider;
+use codex_features::CurrentTimeSource;
+use codex_features::Feature;
 use codex_protocol::config_types::ModelToolMode;
 use codex_protocol::items::TurnItem;
 use codex_protocol::protocol::CodexErrorInfo;
@@ -149,6 +157,19 @@ async fn isolated_mode_releases_valid_output_only_after_terminal_completion() ->
     let events = collect_through_turn_complete(&test.codex).await?;
 
     assert_eq!(agent_item_event_counts(&events), (1, 1));
+    let completed_output = events
+        .iter()
+        .find_map(|event| match event {
+            EventMsg::ItemCompleted(event) => match &event.item {
+                TurnItem::AgentMessage(message) => message.content.first(),
+                _ => None,
+            },
+            _ => None,
+        })
+        .map(|content| match content {
+            codex_protocol::items::AgentMessageContent::Text { text } => text.as_str(),
+        });
+    assert_eq!(completed_output, Some(r#"{"hint":"Save first"}"#));
     let turn_complete = events
         .iter()
         .find_map(|event| match event {
@@ -158,7 +179,17 @@ async fn isolated_mode_releases_valid_output_only_after_terminal_completion() ->
         .expect("turn complete event");
     assert!(turn_complete.error.is_none());
 
-    let body = response_mock.single_request().body_json();
+    let request = response_mock.single_request();
+    assert_eq!(request.header("OpenAI-Beta"), None);
+    assert_eq!(request.header("x-codex-beta-features"), None);
+    assert_eq!(request.header("x-oai-attestation"), None);
+    assert_eq!(request.header("x-codex-installation-id"), None);
+    assert_eq!(
+        request.header("x-responsesapi-include-timing-metrics"),
+        None
+    );
+    assert_eq!(request.header("x-openai-subagent"), None);
+    let body = request.body_json();
     assert_eq!(body["instructions"], json!(ISOLATED_BASE_INSTRUCTIONS));
     assert_eq!(body["tools"], json!([]));
     assert_eq!(body["parallel_tool_calls"], json!(false));
@@ -170,6 +201,81 @@ async fn isolated_mode_releases_valid_output_only_after_terminal_completion() ->
     let serialized = body.to_string();
     assert!(!serialized.contains(HOST_INSTRUCTION_SENTINEL));
     assert!(!serialized.contains(test.config.cwd.as_path().to_string_lossy().as_ref()));
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn isolated_startup_ignores_external_clock_and_shell_discovery() -> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let mut builder = test_codex()
+        .with_initial_model_tool_mode(ModelToolMode::Isolated)
+        .with_config(|config| {
+            config
+                .features
+                .enable(Feature::CurrentTimeReminder)
+                .expect("test config should allow current time reminders");
+            config
+                .features
+                .enable(Feature::ShellZshFork)
+                .expect("test config should allow zsh fork");
+            config.current_time_reminder = Some(CurrentTimeReminderConfig {
+                clock_source: CurrentTimeSource::External,
+                ..CurrentTimeReminderConfig::default()
+            });
+            config.zsh_path = None;
+        });
+
+    let _test = builder.build(&server).await?;
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn isolated_startup_does_not_start_configured_mcp_servers() -> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let mut builder = test_codex()
+        .with_initial_model_tool_mode(ModelToolMode::Isolated)
+        .with_config(|config| {
+            let mut servers = config.mcp_servers.get().clone();
+            servers.insert(
+                "must-not-start".to_string(),
+                McpServerConfig {
+                    auth: Default::default(),
+                    transport: McpServerTransportConfig::Stdio {
+                        command: "definitely-not-a-real-mcp-binary".to_string(),
+                        args: Vec::new(),
+                        env: None,
+                        env_vars: Vec::new(),
+                        cwd: None,
+                    },
+                    environment_id: DEFAULT_MCP_SERVER_ENVIRONMENT_ID.to_string(),
+                    enabled: true,
+                    required: true,
+                    supports_parallel_tool_calls: false,
+                    disabled_reason: None,
+                    startup_timeout_sec: Some(Duration::from_millis(1)),
+                    tool_timeout_sec: None,
+                    default_tools_approval_mode: None,
+                    enabled_tools: None,
+                    disabled_tools: None,
+                    scopes: None,
+                    oauth: None,
+                    oauth_resource: None,
+                    tools: HashMap::new(),
+                },
+            );
+            config
+                .mcp_servers
+                .set(servers)
+                .expect("test MCP configuration should be accepted");
+        });
+
+    let _test = builder.build(&server).await?;
 
     Ok(())
 }

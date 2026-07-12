@@ -204,6 +204,7 @@ pub(crate) mod context_window;
 mod handlers;
 mod inject;
 mod input_queue;
+mod isolated_startup;
 mod mcp;
 mod mcp_runtime;
 mod model_isolation;
@@ -496,16 +497,20 @@ impl Codex {
             }
             (false, None) => None,
         };
-        let thread_spawn_span = info_span!("thread_spawn", otel.name = "thread_spawn");
-        if let Some(trace) = parent_trace.as_ref() {
-            let _ = set_parent_from_w3c_trace_context(&thread_spawn_span, trace);
-        }
-        Self::spawn_internal(CodexSpawnArgs {
+        let args = CodexSpawnArgs {
             parent_trace,
             ..args
-        })
-        .instrument(thread_spawn_span)
-        .await
+        };
+        if isolated {
+            return Self::spawn_internal(args).await;
+        }
+        let thread_spawn_span = info_span!("thread_spawn", otel.name = "thread_spawn");
+        if let Some(trace) = args.parent_trace.as_ref() {
+            let _ = set_parent_from_w3c_trace_context(&thread_spawn_span, trace);
+        }
+        Self::spawn_internal(args)
+            .instrument(thread_spawn_span)
+            .await
     }
 
     async fn spawn_internal(args: CodexSpawnArgs) -> CodexResult<CodexSpawnOk> {
@@ -700,11 +705,15 @@ impl Codex {
             },
         };
         let fast_mode_enabled = config.features.enabled(Feature::FastMode);
-        let initial_service_tier_warning = unsupported_service_tier_warning(
-            config.service_tier.as_deref(),
-            fast_mode_enabled,
-            &model_info,
-        );
+        let initial_service_tier_warning = if isolated {
+            None
+        } else {
+            unsupported_service_tier_warning(
+                config.service_tier.as_deref(),
+                fast_mode_enabled,
+                &model_info,
+            )
+        };
         let service_tier =
             get_service_tier(config.service_tier.clone(), fast_mode_enabled, &model_info);
         let session_configuration = SessionConfiguration {
@@ -740,7 +749,11 @@ impl Codex {
             metrics_service_name: if isolated { None } else { metrics_service_name },
             app_server_client_name: None,
             app_server_client_version: None,
-            session_source,
+            session_source: if isolated {
+                SessionSource::Unknown
+            } else {
+                session_source
+            },
             history_mode,
             forked_from_thread_id,
             parent_thread_id,
@@ -758,7 +771,12 @@ impl Codex {
         let session_source_clone = session_configuration.session_source.clone();
         let (agent_status_tx, agent_status_rx) = watch::channel(AgentStatus::PendingInit);
 
-        let session = Box::pin(Session::new(
+        let agent_control = if isolated {
+            AgentControl::default()
+        } else {
+            agent_control
+        };
+        let session_init = Session::new(
             session_configuration,
             config.clone(),
             user_instructions,
@@ -786,9 +804,15 @@ impl Codex {
             attestation_provider,
             external_time_provider,
             multi_agent_version,
-        ))
-        .await
-        .map_err(|e| {
+        );
+        let session_result = if isolated {
+            Box::pin(session_init).await
+        } else {
+            Box::pin(session_init)
+                .instrument(info_span!("session_init", otel.name = "session_init"))
+                .await
+        };
+        let session = session_result.map_err(|e| {
             error!("Failed to create session: {e:#}");
             map_session_init_error(&e, &config.codex_home)
         })?;
@@ -805,9 +829,14 @@ impl Codex {
         // This task will run until Op::Shutdown is received.
         let session_for_loop = Arc::clone(&session);
         let session_loop_handle = tokio::spawn(async move {
-            submission_loop(session_for_loop, config, rx_sub)
-                .instrument(info_span!("session_loop", thread_id = %thread_id))
-                .await;
+            let session_loop = submission_loop(session_for_loop, config, rx_sub);
+            if isolated {
+                session_loop.await;
+            } else {
+                session_loop
+                    .instrument(info_span!("session_loop", thread_id = %thread_id))
+                    .await;
+            }
         });
         let codex = Codex {
             tx_sub,
@@ -862,7 +891,7 @@ impl Codex {
     /// Use sparingly: prefer `submit()` so Codex is responsible for generating
     /// unique IDs for each submission.
     pub async fn submit_with_id(&self, mut sub: Submission) -> CodexResult<()> {
-        if sub.trace.is_none() {
+        if sub.trace.is_none() && !self.session.model_tool_mode_is_isolated().await {
             sub.trace = current_span_w3c_trace_context();
         }
         self.tx_sub
