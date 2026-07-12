@@ -491,7 +491,6 @@ impl Session {
         state.session_configuration.originator.clone()
     }
 
-    #[instrument(name = "session_init", level = "info", skip_all)]
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn new(
         mut session_configuration: SessionConfiguration,
@@ -522,12 +521,36 @@ impl Session {
         external_time_provider: Option<Arc<dyn TimeProvider>>,
         multi_agent_version: Option<MultiAgentVersion>,
     ) -> anyhow::Result<Arc<Self>> {
+        let isolated = session_configuration.model_tool_mode.is_isolated();
+        if isolated {
+            anyhow::ensure!(
+                matches!(initial_history, InitialHistory::New),
+                "isolated startup requires fresh history"
+            );
+            return super::isolated_startup::new(super::isolated_startup::IsolatedSessionInit {
+                session_configuration,
+                config,
+                installation_id,
+                auth_manager,
+                models_manager,
+                exec_policy,
+                tx_event,
+                agent_status,
+                skills_service,
+                plugins_manager,
+                mcp_manager,
+                code_mode_session_provider,
+                thread_extension_init,
+                agent_control,
+                thread_store,
+            })
+            .await;
+        }
         debug!(
             "Configuring session: model={}; provider={:?}",
             session_configuration.collaboration_mode.model(),
             session_configuration.provider
         );
-        let isolated = session_configuration.model_tool_mode.is_isolated();
         let forked_from_id = session_configuration
             .forked_from_thread_id
             .or_else(|| initial_history.forked_from_id());
@@ -1211,7 +1234,7 @@ impl Session {
                     rollout_path,
                 }),
             })
-            .chain(post_session_configured_events.into_iter());
+            .chain(post_session_configured_events);
             for event in events {
                 sess.send_event_raw(event).await;
             }

@@ -1576,27 +1576,41 @@ impl ThreadManagerState {
             )
             .await
         };
-        let parent_rollout_thread_trace = self
-            .parent_rollout_thread_trace_for_source(&session_source, &initial_history)
-            .await;
-        let tracked_session_source = session_source.clone();
-        let multi_agent_version = self
-            .initial_multi_agent_version_for_spawn(
+        let isolated = requested_model_tool_mode.is_isolated();
+        let parent_rollout_thread_trace = if isolated {
+            codex_rollout_trace::ThreadTraceContext::disabled()
+        } else {
+            self.parent_rollout_thread_trace_for_source(&session_source, &initial_history)
+                .await
+        };
+        let tracked_session_source = if isolated {
+            SessionSource::Unknown
+        } else {
+            session_source.clone()
+        };
+        let multi_agent_version = if isolated {
+            Some(MultiAgentVersion::Disabled)
+        } else {
+            self.initial_multi_agent_version_for_spawn(
                 &initial_history,
                 Some(&session_source),
                 parent_thread_id,
                 forked_from_thread_id,
             )
-            .await;
-        let originator = self
-            .effective_originator(
+            .await
+        };
+        let originator = if isolated {
+            "isolated".to_string()
+        } else {
+            self.effective_originator(
                 &initial_history,
                 metrics_service_name.as_deref(),
                 &session_source,
                 parent_thread_id,
                 forked_from_thread_id,
             )
-            .await;
+            .await
+        };
         let CodexSpawnOk {
             codex, thread_id, ..
         } = Box::pin(Codex::spawn(CodexSpawnArgs {
@@ -1621,19 +1635,35 @@ impl ThreadManagerState {
             originator,
             agent_control,
             dynamic_tools,
-            metrics_service_name,
+            metrics_service_name: if isolated { None } else { metrics_service_name },
             inherited_environments,
             inherited_exec_policy,
             parent_rollout_thread_trace,
             user_shell_override,
-            parent_trace,
+            parent_trace: if isolated { None } else { parent_trace },
             environment_selections: environments,
             thread_extension_init,
-            supports_openai_form_elicitation,
-            analytics_events_client: self.analytics_events_client.clone(),
+            supports_openai_form_elicitation: if isolated {
+                false
+            } else {
+                supports_openai_form_elicitation
+            },
+            analytics_events_client: if isolated {
+                None
+            } else {
+                self.analytics_events_client.clone()
+            },
             thread_store: Arc::clone(&self.thread_store),
-            attestation_provider: self.attestation_provider.clone(),
-            external_time_provider: self.external_time_provider.clone(),
+            attestation_provider: if isolated {
+                None
+            } else {
+                self.attestation_provider.clone()
+            },
+            external_time_provider: if isolated {
+                None
+            } else {
+                self.external_time_provider.clone()
+            },
             inherited_multi_agent_version: multi_agent_version,
         }))
         .await?;

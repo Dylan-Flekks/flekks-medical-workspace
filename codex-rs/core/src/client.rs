@@ -402,6 +402,44 @@ fn sideband_websocket_auth_headers(api_auth: &dyn AuthProvider) -> ApiHeaderMap 
 }
 
 impl ModelClient {
+    /// Creates the one-shot transport used by an isolated session.
+    ///
+    /// This path intentionally avoids ambient auth-environment telemetry, agent identity,
+    /// attestation, websocket reuse, beta headers, request compression, and feature-derived
+    /// request metadata. Provider allowlisting remains an independent prerequisite for callers
+    /// that provision isolated sessions.
+    pub(crate) fn new_isolated(
+        auth_manager: Arc<AuthManager>,
+        thread_id: ThreadId,
+        provider_info: ModelProviderInfo,
+        http_client_factory: HttpClientFactory,
+    ) -> Self {
+        let model_provider = create_model_provider(provider_info, Some(auth_manager));
+        Self {
+            state: Arc::new(ModelClientState {
+                thread_id,
+                provider: model_provider,
+                auth_env_telemetry: AuthEnvTelemetry::default(),
+                session_source: SessionSource::Unknown,
+                originator: "isolated".to_string(),
+                model_verbosity: None,
+                enable_request_compression: false,
+                include_timing_metrics: false,
+                beta_features_header: None,
+                item_ids_enabled: false,
+                concurrent_reasoning_summaries_enabled: false,
+                include_attestation: false,
+                attestation_provider: None,
+                disable_websockets: AtomicBool::new(true),
+                agent_identity_session_fallback: AgentIdentitySessionFallback::default(),
+                cached_websocket_session: StdMutex::new(WebsocketSession::default()),
+            }),
+            agent_identity_policy: AgentIdentityAuthPolicy::JwtOnly,
+            prompt_cache_key_override: None,
+            http_client_factory,
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     /// Creates a new session-scoped `ModelClient`.
     ///

@@ -270,12 +270,14 @@ impl CodexThread {
         trace: Option<W3cTraceContext>,
         client_user_message_id: Option<String>,
     ) -> CodexResult<String> {
-        self.codex
-            .session
-            .services
-            .agent_control
-            .ensure_execution_capacity_for_op(self.session_configured.thread_id, &op)
-            .await?;
+        if !self.codex.session.model_tool_mode_is_isolated().await {
+            self.codex
+                .session
+                .services
+                .agent_control
+                .ensure_execution_capacity_for_op(self.session_configured.thread_id, &op)
+                .await?;
+        }
         self.codex
             .submit_user_input_with_client_user_message_id(op, trace, client_user_message_id)
             .await
