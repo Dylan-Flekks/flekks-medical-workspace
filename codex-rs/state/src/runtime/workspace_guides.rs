@@ -23,6 +23,8 @@ use self::errors::validation;
 use self::input_validation::normalized_optional;
 use self::input_validation::validate_finish_metadata;
 use self::input_validation::validate_start;
+use super::workspace_policy::WorkspacePolicyRequirementError;
+use super::workspace_policy::require_synthetic_workspace;
 
 mod checkpoint;
 mod envelopes;
@@ -79,10 +81,25 @@ impl WorkspaceStore {
         })?;
 
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let policy = require_synthetic_workspace(&mut tx)
+            .await
+            .map_err(|error| match error {
+                WorkspacePolicyRequirementError::NotSynthetic => {
+                    crate::WorkspaceGuideError::Validation {
+                        message: error.to_string(),
+                    }
+                }
+                WorkspacePolicyRequirementError::Integrity(error) => {
+                    crate::WorkspaceGuideError::Storage {
+                        message: error.to_string(),
+                    }
+                }
+            })?;
         if let Some(existing) =
             run_by_key(&mut tx, &input.session_id, &input.idempotency_key).await?
         {
-            let (envelope, hash) = request_envelope(&existing.id, &input, request)?;
+            let (envelope, hash) =
+                request_envelope(&existing.id, &input, request, policy.data_classification)?;
             if existing.client_id != input.client_id.trim()
                 || existing.source_checkpoint_id != input.source_checkpoint_id.trim()
                 || existing.source_checkpoint_revision != input.source_checkpoint_revision
@@ -126,7 +143,8 @@ impl WorkspaceStore {
         }
 
         let id = Uuid::new_v4().to_string();
-        let (envelope, envelope_hash) = request_envelope(&id, &input, request)?;
+        let (envelope, envelope_hash) =
+            request_envelope(&id, &input, request, policy.data_classification)?;
         let now_ms = datetime_to_epoch_millis(Utc::now());
         sqlx::query(
             r#"

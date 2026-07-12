@@ -43,13 +43,19 @@ fn finish_input() -> crate::WorkspaceGuideRunFinish {
 #[test]
 fn workspace_guide_envelopes_accept_exact_limits_and_reject_one_byte_over() {
     let input = start_input();
-    let (empty_request, _) = request_envelope(FIXED_RUN_ID, &input, json!({"text": ""}))
-        .expect("empty request should fit");
+    let (empty_request, _) = request_envelope(
+        FIXED_RUN_ID,
+        &input,
+        json!({"text": ""}),
+        crate::WorkspaceDataClassification::Synthetic,
+    )
+    .expect("empty request should fit");
     let request_fill = envelopes::MAX_REQUEST_BYTES - empty_request.len();
     let (request, _) = request_envelope(
         FIXED_RUN_ID,
         &input,
         json!({"text": "x".repeat(request_fill)}),
+        crate::WorkspaceDataClassification::Synthetic,
     )
     .expect("request at byte limit should fit");
     assert_eq!(request.len(), envelopes::MAX_REQUEST_BYTES);
@@ -57,6 +63,7 @@ fn workspace_guide_envelopes_accept_exact_limits_and_reject_one_byte_over() {
         FIXED_RUN_ID,
         &input,
         json!({"text": "x".repeat(request_fill + 1)}),
+        crate::WorkspaceDataClassification::Synthetic,
     )
     .expect_err("request over byte limit should fail");
     assert_eq!(error.kind(), "validation");
@@ -263,6 +270,11 @@ async fn persisted_fixture() -> (
     let runtime = StateRuntime::init(unique_temp_dir(), "test-provider".to_string())
         .await
         .expect("state db should initialize");
+    runtime
+        .workspace()
+        .provision_synthetic_workspace("state guide limits test fixture")
+        .await
+        .expect("test workspace should be classified synthetic");
     let client = runtime
         .workspace()
         .upsert_client(crate::WorkspaceClientUpsert {
