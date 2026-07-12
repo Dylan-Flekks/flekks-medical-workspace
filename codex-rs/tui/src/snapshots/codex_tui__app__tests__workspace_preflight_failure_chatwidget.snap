@@ -1,0 +1,8 @@
+---
+source: tui/src/app/tests.rs
+expression: rendered
+---
+
+■ Failed to open workspace: medical workspace is unclassified
+and this process lacks synthetic provisioning authority; restart
+with `just medical-workspace` (no chart data was changed)

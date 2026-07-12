@@ -6291,6 +6291,31 @@ async fn side_backtrack_rejection_reports_unavailable_message_snapshot() {
 }
 
 #[tokio::test]
+async fn workspace_preflight_failure_chatwidget_snapshot() {
+    let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
+    let message = super::event_dispatch::workspace_open_error_message(
+        crate::app_server_session::workspace_data_policy::LOCAL_UNCONFIGURED_MESSAGE,
+    );
+
+    app.chat_widget.add_error_message(message);
+
+    let cell = match app_event_rx.try_recv() {
+        Ok(AppEvent::InsertHistoryCell(cell)) => cell,
+        other => panic!("expected InsertHistoryCell event, got {other:?}"),
+    };
+    let width = 64;
+    let height = 6;
+    let backend = crate::test_backend::VT100Backend::new(width, height);
+    let mut terminal =
+        crate::custom_terminal::Terminal::with_options(backend).expect("workspace error terminal");
+    terminal.set_viewport_area(ratatui::layout::Rect::new(0, 0, width, height));
+    crate::insert_history::insert_history_lines(&mut terminal, cell.display_lines(/*width*/ width))
+        .expect("workspace error history should render");
+    let rendered = terminal.backend().vt100().screen().contents();
+    assert_app_snapshot!("workspace_preflight_failure_chatwidget", rendered);
+}
+
+#[tokio::test]
 async fn workspace_close_preserves_unsaved_dashboard_draft() {
     let mut app = make_test_app().await;
     let mut dashboard = WorkspaceDashboard::default();

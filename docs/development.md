@@ -10,9 +10,21 @@ just medical-workspace
 
 Run `/workspacemedical` when the TUI opens. Use only synthetic records and files.
 
-For a manual debug build, run `cargo build -p codex-cli` from `codex-rs`, set a
-readable terminal size with `stty cols 160 rows 45`, then launch
-`./target/debug/codex`.
+The supported launcher sets both `CODEX_SQLITE_HOME` and the higher-precedence
+`sqlite_home` CLI override, then lets the TUI provision an empty database
+through the app-server policy API. It defaults to
+`$HOME/.codex/flekks-medical-synthetic`. An alternate location must be an
+absolute directory reserved only for synthetic medical workspace SQLite state;
+do not use another Codex SQLite home:
+
+```bash
+FLEKKS_MEDICAL_WORKSPACE_SQLITE_HOME=/absolute/private/path just medical-workspace
+```
+
+For a manual debug build, run `cargo build -p codex-cli` from `codex-rs`, then
+launch through `../scripts/run_medical_workspace.sh`. A plain `cargo run` may
+inspect an already-classified synthetic store, but it cannot classify a new
+store and the TUI will refuse its first workspace mutation.
 
 ## Focused tests
 

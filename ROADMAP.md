@@ -26,7 +26,7 @@ The project is intentionally public before it is finished so contributors can he
 
 ## Synthetic-data and security program
 
-- Enforce synthetic workspace mode ([#10](https://github.com/Dylan-Flekks/flekks-medical-workspace/issues/10)).
+- Enforce synthetic workspace mode ([#10](https://github.com/Dylan-Flekks/flekks-medical-workspace/issues/10)). Implemented for the supported launcher, TUI preflight/mutation facade, and every model-visible run/context path; broader third-party app-server mutation gating remains.
 - Remove absolute paths from agent-visible packets.
 - Add purge, retention, permissions, and bounded file processing.
 - Design authenticated identity, encryption, access control, and telemetry isolation before any real-data discussion ([#12](https://github.com/Dylan-Flekks/flekks-medical-workspace/issues/12)).
