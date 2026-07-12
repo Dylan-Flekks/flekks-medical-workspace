@@ -133,6 +133,7 @@ pub use model::WorkspacePatientSafetyItem;
 pub use model::WorkspacePatientSafetyItemUpsert;
 pub use model::WorkspacePracticeLibraryFilter;
 pub use model::WorkspacePracticeLibraryItem;
+pub use model::WorkspaceSyntheticProvisionError;
 pub use model::WorkspaceSyntheticProvisionOutcome;
 pub use model::WorkspaceTask;
 pub use model::WorkspaceTaskPriority;

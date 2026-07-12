@@ -35,6 +35,10 @@ async fn synthetic_provisioning_is_explicit_durable_and_idempotent() {
         .provision_synthetic_workspace(&oversized)
         .await
         .expect_err("oversized provenance must fail");
+    assert!(matches!(
+        &error,
+        crate::WorkspaceSyntheticProvisionError::Validation { .. }
+    ));
     assert!(error.to_string().contains("256 byte limit"));
     assert_eq!(
         runtime
@@ -112,6 +116,10 @@ async fn every_workspace_domain_table_blocks_api_and_direct_provisioning() {
             .provision_synthetic_workspace("API fixture")
             .await
             .expect_err("domain data must block API provisioning");
+        assert!(matches!(
+            &error,
+            crate::WorkspaceSyntheticProvisionError::Validation { .. }
+        ));
         assert!(
             error.to_string().contains("workspace records exist"),
             "unexpected {table} error: {error}"
