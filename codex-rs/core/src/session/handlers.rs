@@ -326,9 +326,16 @@ async fn spawn_fresh_user_turn(
             .turn_metadata_state
             .set_responsesapi_client_metadata(responsesapi_client_metadata);
     }
-    current_context.session_telemetry.user_prompt(&items);
-    sess.refresh_mcp_servers_if_requested(current_context, Some(sess.mcp_elicitation_reviewer()))
+    if !current_context.model_tool_mode.is_isolated() {
+        current_context.session_telemetry.user_prompt(&items);
+    }
+    if !current_context.model_tool_mode.is_isolated() {
+        sess.refresh_mcp_servers_if_requested(
+            current_context,
+            Some(sess.mcp_elicitation_reviewer()),
+        )
         .await;
+    }
     let additional_context_input = {
         let mut state = sess.state.lock().await;
         state.additional_context.merge(additional_context)
@@ -789,21 +796,20 @@ pub(super) async fn submission_loop(
     // To break out of this loop, send Op::Shutdown.
     let mut shutdown_received = false;
     while let Ok(sub) = rx_sub.recv().await {
-        debug!(?sub, "Submission");
+        if let Err(message) = super::model_isolation::validate_submission(&sess, &sub).await {
+            sess.send_event_raw(Event {
+                id: sub.id.clone(),
+                msg: EventMsg::Error(ErrorEvent {
+                    message,
+                    codex_error_info: Some(CodexErrorInfo::BadRequest),
+                }),
+            })
+            .await;
+            continue;
+        }
+        debug!(submission.id = %sub.id, codex.op = sub.op.kind(), "Submission");
         let dispatch_span = submission_dispatch_span(&sub);
         let should_exit = async {
-            if let Err(message) = super::model_isolation::validate_submission(&sess, &sub.op).await
-            {
-                sess.send_event_raw(Event {
-                    id: sub.id.clone(),
-                    msg: EventMsg::Error(ErrorEvent {
-                        message,
-                        codex_error_info: Some(CodexErrorInfo::BadRequest),
-                    }),
-                })
-                .await;
-                return false;
-            }
             match sub.op.clone() {
                 Op::Interrupt => {
                     interrupt(&sess).await;

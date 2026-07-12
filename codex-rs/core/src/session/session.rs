@@ -527,6 +527,7 @@ impl Session {
             session_configuration.collaboration_mode.model(),
             session_configuration.provider
         );
+        let isolated = session_configuration.model_tool_mode.is_isolated();
         let forked_from_id = session_configuration
             .forked_from_thread_id
             .or_else(|| initial_history.forked_from_id());
@@ -835,7 +836,7 @@ impl Session {
                 account_email.clone(),
                 auth_mode,
                 originator.clone(),
-                config.otel.log_user_prompt,
+                !isolated && config.otel.log_user_prompt,
                 terminal_type.clone(),
                 session_configuration.session_source.clone(),
             )
@@ -860,7 +861,7 @@ impl Session {
                 /*inc*/ 1,
                 &[(
                     "is_git",
-                    if get_git_repo_root(session_configuration.cwd()).is_some() {
+                    if !isolated && get_git_repo_root(session_configuration.cwd()).is_some() {
                         "true"
                     } else {
                         "false"

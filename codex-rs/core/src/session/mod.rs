@@ -479,8 +479,14 @@ const CYBER_SAFETY_URL: &str = "https://developers.openai.com/codex/concepts/cyb
 impl Codex {
     /// Spawn a new [`Codex`] and initialize the session.
     pub(crate) async fn spawn(args: CodexSpawnArgs) -> CodexResult<CodexSpawnOk> {
-        let parent_trace = match args.parent_trace {
-            Some(trace) => {
+        let isolated = model_isolation::initial_model_tool_mode(
+            &args.conversation_history,
+            &args.thread_extension_init,
+        )
+        .is_isolated();
+        let parent_trace = match (isolated, args.parent_trace) {
+            (true, _) => None,
+            (false, Some(trace)) => {
                 if codex_otel::context_from_w3c_trace_context(&trace).is_some() {
                     Some(trace)
                 } else {
@@ -488,7 +494,7 @@ impl Codex {
                     None
                 }
             }
-            None => None,
+            (false, None) => None,
         };
         let thread_spawn_span = info_span!("thread_spawn", otel.name = "thread_spawn");
         if let Some(trace) = parent_trace.as_ref() {
@@ -546,6 +552,7 @@ impl Codex {
             model_tool_mode,
             model_isolation::IsolatedThreadCreation {
                 config: &config,
+                allow_provider_model_fallback,
                 initial_history: &conversation_history,
                 session_source: &session_source,
                 forked_from_thread_id_present: forked_from_thread_id.is_some(),
@@ -553,10 +560,26 @@ impl Codex {
                 thread_source: thread_source.as_ref(),
                 dynamic_tools: &dynamic_tools,
                 inherited_environments: inherited_environments.as_ref(),
+                inherited_exec_policy_present: inherited_exec_policy.is_some(),
+                user_shell_override_present: user_shell_override.is_some(),
+                requested_history_mode_present: requested_history_mode.is_some(),
                 environment_selections: &environment_selections,
                 thread_extension_init: &thread_extension_init,
             },
         )?;
+        let isolated = model_tool_mode.is_isolated();
+        let thread_extension_init = if isolated {
+            let mut isolated_init = ExtensionDataInit::default();
+            isolated_init.insert(model_tool_mode);
+            isolated_init
+        } else {
+            thread_extension_init
+        };
+        let extensions = if isolated {
+            codex_extension_api::empty_extension_registry()
+        } else {
+            extensions
+        };
         let (tx_sub, rx_sub) = async_channel::bounded(SUBMISSION_CHANNEL_CAPACITY);
         let (tx_event, rx_event) = async_channel::unbounded();
 
@@ -564,27 +587,33 @@ impl Codex {
             instructions: user_instructions,
             warnings: user_instruction_provider_warnings,
         } = user_instructions;
+        let (user_instructions, user_instruction_provider_warnings) = if isolated {
+            (None, Vec::new())
+        } else {
+            (user_instructions, user_instruction_provider_warnings)
+        };
         // TODO(anp) pull startup_warnings out of Config
         config
             .startup_warnings
             .extend(user_instruction_provider_warnings);
-        let exec_policy = if crate::guardian::is_guardian_reviewer_source(&session_source) {
-            // Guardian review should rely on the built-in shell safety checks,
-            // not on caller-provided exec-policy rules that could shape the
-            // reviewer or silently auto-approve commands.
-            Arc::new(ExecPolicyManager::default())
-        } else if let Some(exec_policy) = &inherited_exec_policy {
-            Arc::clone(exec_policy)
-        } else {
-            Arc::new(
-                ExecPolicyManager::load(&config.config_layer_stack)
-                    .await
-                    .map_err(|err| CodexErr::Fatal(format!("failed to load rules: {err}")))?,
-            )
-        };
+        let exec_policy =
+            if isolated || crate::guardian::is_guardian_reviewer_source(&session_source) {
+                // Guardian review should rely on the built-in shell safety checks,
+                // not on caller-provided exec-policy rules that could shape the
+                // reviewer or silently auto-approve commands.
+                Arc::new(ExecPolicyManager::default())
+            } else if let Some(exec_policy) = &inherited_exec_policy {
+                Arc::clone(exec_policy)
+            } else {
+                Arc::new(
+                    ExecPolicyManager::load(&config.config_layer_stack)
+                        .await
+                        .map_err(|err| CodexErr::Fatal(format!("failed to load rules: {err}")))?,
+                )
+            };
 
         let config = Arc::new(config);
-        let refresh_strategy = if session_source.is_non_root_agent() {
+        let refresh_strategy = if isolated || session_source.is_non_root_agent() {
             codex_models_manager::manager::RefreshStrategy::Offline
         } else {
             codex_models_manager::manager::RefreshStrategy::OnlineIfUncached
@@ -626,19 +655,33 @@ impl Codex {
         let model_info = models_manager
             .get_model_info(model.as_str(), &config.to_models_manager_config())
             .await;
-        let multi_agent_version =
-            resolve_multi_agent_version(&conversation_history, inherited_multi_agent_version);
+        if isolated && model_info.used_fallback_model_metadata {
+            return Err(CodexErr::InvalidRequest(
+                "isolated model mode requires pinned model metadata".to_string(),
+            ));
+        }
+        let multi_agent_version = if isolated {
+            Some(MultiAgentVersion::Disabled)
+        } else {
+            resolve_multi_agent_version(&conversation_history, inherited_multi_agent_version)
+        };
         let history_mode = conversation_history.get_history_mode(
             requested_history_mode.unwrap_or_else(|| thread_store.default_history_mode()),
         );
-        config
-            .validate_multi_agent_v2_config()
-            .map_err(|err| CodexErr::InvalidRequest(err.to_string()))?;
-        let base_instructions = config
-            .base_instructions
-            .clone()
-            .or_else(|| conversation_history.get_base_instructions().map(|s| s.text))
-            .unwrap_or_else(|| model_info.get_model_instructions(config.personality));
+        if !isolated {
+            config
+                .validate_multi_agent_v2_config()
+                .map_err(|err| CodexErr::InvalidRequest(err.to_string()))?;
+        }
+        let base_instructions = if isolated {
+            model_isolation::ISOLATED_BASE_INSTRUCTIONS.to_string()
+        } else {
+            config
+                .base_instructions
+                .clone()
+                .or_else(|| conversation_history.get_base_instructions().map(|s| s.text))
+                .unwrap_or_else(|| model_info.get_model_instructions(config.personality))
+        };
 
         // Dynamic tools are defined at thread start and persisted in rollout session metadata.
         let dynamic_tools = if dynamic_tools.is_empty() {
@@ -669,11 +712,19 @@ impl Codex {
             collaboration_mode,
             model_reasoning_summary: config.model_reasoning_summary,
             service_tier,
-            developer_instructions: config.developer_instructions.clone(),
-            personality: config.personality,
+            developer_instructions: if isolated {
+                None
+            } else {
+                config.developer_instructions.clone()
+            },
+            personality: if isolated { None } else { config.personality },
             model_tool_mode,
             base_instructions,
-            compact_prompt: config.compact_prompt.clone(),
+            compact_prompt: if isolated {
+                None
+            } else {
+                config.compact_prompt.clone()
+            },
             approval_policy: config.permissions.approval_policy.clone(),
             approvals_reviewer: config.approvals_reviewer,
             permission_profile_state: session_permission_profile_state_from_config(&config)?,
@@ -686,7 +737,7 @@ impl Codex {
             codex_home: config.codex_home.clone(),
             thread_name: None,
             original_config_do_not_use: Arc::clone(&config),
-            metrics_service_name,
+            metrics_service_name: if isolated { None } else { metrics_service_name },
             app_server_client_name: None,
             app_server_client_version: None,
             session_source,
@@ -694,9 +745,13 @@ impl Codex {
             forked_from_thread_id,
             parent_thread_id,
             thread_source,
-            originator,
+            originator: if isolated {
+                "isolated".to_string()
+            } else {
+                originator
+            },
             dynamic_tools,
-            user_shell_override,
+            user_shell_override: if isolated { None } else { user_shell_override },
         };
 
         // Generate a unique ID for the lifetime of this Codex session.
@@ -2921,6 +2976,15 @@ impl Session {
         self: &Arc<Self>,
         turn_context: Arc<TurnContext>,
     ) -> Arc<StepContext> {
+        if turn_context.model_tool_mode.is_isolated() {
+            return Arc::new(StepContext::new(
+                Arc::clone(&turn_context),
+                TurnEnvironmentSnapshot::default(),
+                Vec::new(),
+                self.services.latest_mcp_runtime(),
+                None,
+            ));
+        }
         let deferred_executor_enabled = turn_context
             .config
             .features

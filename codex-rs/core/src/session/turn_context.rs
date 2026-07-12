@@ -2,6 +2,7 @@ use super::*;
 use crate::environment_selection::TurnEnvironmentSnapshot;
 use crate::shell_snapshot::ShellSnapshotFile;
 use codex_core_skills::HostSkillsSnapshot;
+use codex_core_skills::SkillLoadOutcome;
 use codex_file_system::FileSystemSandboxContext;
 use codex_model_provider::SharedModelProvider;
 use codex_model_provider::create_model_provider;
@@ -510,7 +511,12 @@ impl Session {
         let auth_manager_for_context = auth_manager.clone();
         let provider_for_context = create_model_provider(provider, auth_manager);
         let session_telemetry_for_context = session_telemetry;
-        let available_models = models_manager.try_list_models().unwrap_or_default();
+        let isolated = session_configuration.model_tool_mode.is_isolated();
+        let available_models = if isolated {
+            Vec::new()
+        } else {
+            models_manager.try_list_models().unwrap_or_default()
+        };
         let unified_exec_shell_mode = UnifiedExecShellMode::for_session(
             codex_tools::unified_exec_feature_mode_for_features(per_turn_config.features.get()),
             crate::tools::tool_user_shell_type(user_shell),
@@ -525,20 +531,34 @@ impl Session {
             &model_info,
         );
         let per_turn_config = Arc::new(per_turn_config);
-        let turn_metadata_state = Arc::new(TurnMetadataState::new(
-            session_id.to_string(),
-            thread_id.to_string(),
-            session_configuration.forked_from_thread_id,
-            session_configuration.parent_thread_id,
-            &session_configuration.session_source,
-            session_configuration.thread_source.clone(),
-            sub_id.clone(),
-            cwd.clone(),
-            &session_configuration.permission_profile(),
-            session_configuration.windows_sandbox_level,
-            network.is_some(),
-        ));
-        let (current_date, timezone) = local_time_context();
+        let turn_metadata_state = Arc::new(if isolated {
+            TurnMetadataState::new_isolated(
+                session_id.to_string(),
+                thread_id.to_string(),
+                sub_id.clone(),
+                cwd.clone(),
+            )
+        } else {
+            TurnMetadataState::new(
+                session_id.to_string(),
+                thread_id.to_string(),
+                session_configuration.forked_from_thread_id,
+                session_configuration.parent_thread_id,
+                &session_configuration.session_source,
+                session_configuration.thread_source.clone(),
+                sub_id.clone(),
+                cwd.clone(),
+                &session_configuration.permission_profile(),
+                session_configuration.windows_sandbox_level,
+                network.is_some(),
+            )
+        });
+        let (current_date, timezone) = if isolated {
+            (None, None)
+        } else {
+            let (current_date, timezone) = local_time_context();
+            (Some(current_date), Some(timezone))
+        };
         let extension_data = Arc::new(codex_extension_api::ExtensionData::new(sub_id.clone()));
         extension_data.insert(skills_snapshot.clone());
         TurnContext {
@@ -559,8 +579,8 @@ impl Session {
             environments,
             #[allow(deprecated)]
             cwd,
-            current_date: Some(current_date),
-            timezone: Some(timezone),
+            current_date,
+            timezone,
             app_server_client_name: session_configuration.app_server_client_name.clone(),
             developer_instructions: session_configuration.developer_instructions.clone(),
             collaboration_mode: session_configuration.collaboration_mode.clone(),
@@ -691,7 +711,12 @@ impl Session {
         final_output_json_schema: Option<Option<Value>>,
         multi_agent_runtime: TurnMultiAgentRuntime,
     ) -> Arc<TurnContext> {
-        let turn_environments = self.services.turn_environments.snapshot().await;
+        let isolated = session_configuration.model_tool_mode.is_isolated();
+        let turn_environments = if isolated {
+            TurnEnvironmentSnapshot::default()
+        } else {
+            self.services.turn_environments.snapshot().await
+        };
         let primary_turn_environment = turn_environments.primary().cloned();
         // TODO(anp): Migrate per-turn config and legacy TurnContext cwd consumers to PathUri so
         // a foreign primary environment does not fall back to the session's host cwd.
@@ -700,7 +725,7 @@ impl Session {
             .and_then(|turn_environment| turn_environment.cwd().to_abs_path().ok())
             .unwrap_or_else(|| session_configuration.cwd().clone());
         let per_turn_config = Self::build_per_turn_config(&session_configuration, cwd.clone());
-        {
+        if !isolated {
             let mcp_runtime = self.services.latest_mcp_runtime();
             let mcp_connection_manager = mcp_runtime.manager();
             mcp_connection_manager.set_approval_policy(&session_configuration.approval_policy);
@@ -716,39 +741,49 @@ impl Session {
                 &per_turn_config.to_models_manager_config(),
             )
             .await;
-        self.services
-            .thread_extension_data
-            .insert(model_info.clone());
+        if !isolated {
+            self.services
+                .thread_extension_data
+                .insert(model_info.clone());
+        }
 
-        let multi_agent_version = match multi_agent_runtime {
-            TurnMultiAgentRuntime::ResolveAndStore => {
-                self.resolve_multi_agent_version_for_model(&model_info, &per_turn_config)
+        let multi_agent_version = if isolated {
+            MultiAgentVersion::Disabled
+        } else {
+            match multi_agent_runtime {
+                TurnMultiAgentRuntime::ResolveAndStore => {
+                    self.resolve_multi_agent_version_for_model(&model_info, &per_turn_config)
+                }
+                TurnMultiAgentRuntime::Preview => self
+                    .multi_agent_version()
+                    .or(model_info.multi_agent_version)
+                    .unwrap_or_else(|| per_turn_config.multi_agent_version_from_features()),
             }
-            TurnMultiAgentRuntime::Preview => self
-                .multi_agent_version()
-                .or(model_info.multi_agent_version)
-                .unwrap_or_else(|| per_turn_config.multi_agent_version_from_features()),
         };
-        let plugins_input = per_turn_config.plugins_config_input();
-        let plugin_outcome = self
-            .services
-            .plugins_manager
-            .plugins_for_config(&plugins_input)
-            .await;
-        let effective_skill_roots = plugin_outcome.effective_plugin_skill_roots();
-        let plugin_skill_snapshots = self
-            .services
-            .plugins_manager
-            .plugin_skill_snapshots_for_config(&plugins_input);
-        let skills_input = skills_load_input_from_config(&per_turn_config, effective_skill_roots)
-            .with_plugin_skill_snapshots(plugin_skill_snapshots);
-        let fs = primary_turn_environment
-            .map(|turn_environment| turn_environment.environment.get_filesystem());
-        let skills_snapshot = self
-            .services
-            .skills_service
-            .snapshot_for_config(&skills_input, fs)
-            .await;
+        let skills_snapshot = if isolated {
+            HostSkillsSnapshot::new(Arc::new(SkillLoadOutcome::default()))
+        } else {
+            let plugins_input = per_turn_config.plugins_config_input();
+            let plugin_outcome = self
+                .services
+                .plugins_manager
+                .plugins_for_config(&plugins_input)
+                .await;
+            let effective_skill_roots = plugin_outcome.effective_plugin_skill_roots();
+            let plugin_skill_snapshots = self
+                .services
+                .plugins_manager
+                .plugin_skill_snapshots_for_config(&plugins_input);
+            let skills_input =
+                skills_load_input_from_config(&per_turn_config, effective_skill_roots)
+                    .with_plugin_skill_snapshots(plugin_skill_snapshots);
+            let fs = primary_turn_environment
+                .map(|turn_environment| turn_environment.environment.get_filesystem());
+            self.services
+                .skills_service
+                .snapshot_for_config(&skills_input, fs)
+                .await
+        };
         let mut turn_context: TurnContext = Self::make_turn_context(
             self.thread_id(),
             self.session_id(),
@@ -763,16 +798,20 @@ impl Session {
             per_turn_config,
             model_info,
             &self.services.models_manager,
-            self.services
-                .network_proxy
-                .load_full()
-                .as_ref()
-                .and_then(|started_proxy| {
-                    Self::managed_network_proxy_active_for_permission_profile(
-                        &session_configuration.permission_profile(),
-                    )
-                    .then(|| started_proxy.proxy())
-                }),
+            if isolated {
+                None
+            } else {
+                self.services
+                    .network_proxy
+                    .load_full()
+                    .as_ref()
+                    .and_then(|started_proxy| {
+                        Self::managed_network_proxy_active_for_permission_profile(
+                            &session_configuration.permission_profile(),
+                        )
+                        .then(|| started_proxy.proxy())
+                    })
+            },
             turn_environments,
             cwd,
             sub_id,
@@ -784,10 +823,11 @@ impl Session {
             turn_context.final_output_json_schema = final_schema;
         }
         let turn_context = Arc::new(turn_context);
-        if turn_context
-            .environments
-            .single_local_environment_cwd()
-            .is_some()
+        if !isolated
+            && turn_context
+                .environments
+                .single_local_environment_cwd()
+                .is_some()
         {
             turn_context.turn_metadata_state.spawn_git_enrichment_task();
         }

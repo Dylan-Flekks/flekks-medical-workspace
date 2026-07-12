@@ -336,9 +336,11 @@ impl Session {
             .turn_timing_state
             .mark_turn_started(started_at)
             .await;
-        turn_context
-            .turn_metadata_state
-            .set_turn_started_at_unix_ms(turn_started_at_unix_ms);
+        if !turn_context.model_tool_mode.is_isolated() {
+            turn_context
+                .turn_metadata_state
+                .set_turn_started_at_unix_ms(turn_started_at_unix_ms);
+        }
         let token_usage_at_turn_start = self.total_token_usage().await.unwrap_or_default();
 
         let cancellation_token = CancellationToken::new();

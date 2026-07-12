@@ -103,6 +103,32 @@ pub(crate) struct TurnMetadataState {
 }
 
 impl TurnMetadataState {
+    pub(crate) fn new_isolated(
+        session_id: String,
+        thread_id: String,
+        turn_id: String,
+        cwd: AbsolutePathBuf,
+    ) -> Self {
+        Self {
+            cwd,
+            repo_root: None,
+            session_id,
+            thread_id,
+            forked_from_thread_id: None,
+            parent_thread_id: None,
+            subagent_header: None,
+            subagent_kind: None,
+            thread_source: None,
+            turn_id,
+            sandbox: None,
+            enriched_workspaces: Arc::new(RwLock::new(None)),
+            turn_started_at_unix_ms: Arc::new(RwLock::new(None)),
+            responsesapi_client_metadata: Arc::new(RwLock::new(BTreeMap::new())),
+            user_input_requested_during_turn: Arc::new(AtomicBool::new(false)),
+            enrichment_task: Arc::new(Mutex::new(None)),
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         session_id: String,

@@ -149,6 +149,32 @@ pub(crate) async fn run_turn(
     prewarmed_client_session: Option<ModelClientSession>,
     cancellation_token: CancellationToken,
 ) -> CodexResult<Option<String>> {
+    if turn_context.model_tool_mode.is_isolated() {
+        drop(prewarmed_client_session);
+        return match run_isolated_turn(
+            Arc::clone(&sess),
+            Arc::clone(&turn_context),
+            turn_extension_data,
+            input,
+            cancellation_token,
+        )
+        .await
+        {
+            Ok(last_agent_message) => Ok(last_agent_message),
+            Err(err @ CodexErr::TurnAborted) => Err(err),
+            Err(err) => {
+                let error = err.to_codex_protocol_error();
+                sess.emit_turn_error_lifecycle(turn_context.as_ref(), error.clone())
+                    .await;
+                sess.send_event(
+                    &turn_context,
+                    EventMsg::Error(err.to_error_event(/*message_prefix*/ None)),
+                )
+                .await;
+                Ok(None)
+            }
+        };
+    }
     let mut client_session =
         prewarmed_client_session.unwrap_or_else(|| sess.services.model_client.new_session());
     // TODO(ccunningham): Pre-turn compaction runs before context updates and the
@@ -459,6 +485,53 @@ pub(crate) async fn run_turn(
     }
 
     Ok(last_agent_message)
+}
+
+async fn run_isolated_turn(
+    sess: Arc<Session>,
+    turn_context: Arc<TurnContext>,
+    turn_extension_data: Arc<codex_extension_api::ExtensionData>,
+    input: Vec<TurnInput>,
+    cancellation_token: CancellationToken,
+) -> CodexResult<Option<String>> {
+    let [TurnInput::UserInput { content, client_id }] = input.as_slice() else {
+        return Err(CodexErr::InvalidRequest(
+            "isolated model mode requires one direct user input".to_string(),
+        ));
+    };
+    model_isolation::validate_user_input(content).map_err(CodexErr::InvalidRequest)?;
+    let pristine_input = sess.response_item_from_user_input(content.clone());
+    sess.record_user_prompt_and_emit_turn_item(&turn_context, content, client_id.clone())
+        .await;
+
+    let step_context = sess.capture_step_context(Arc::clone(&turn_context)).await;
+    let turn_diff_tracker = Arc::new(tokio::sync::Mutex::new(
+        TurnDiffTracker::with_environment_display_roots(Vec::new()),
+    ));
+    let mut client_session = sess.services.model_client.new_session();
+    let window_id = sess.current_window_id().await;
+    let responses_metadata = turn_context.turn_metadata_state.to_responses_metadata(
+        String::new(),
+        window_id,
+        CodexResponsesRequestKind::Turn,
+    );
+    let (result, _) = run_sampling_request(
+        Arc::clone(&sess),
+        step_context,
+        turn_extension_data,
+        turn_diff_tracker,
+        &mut client_session,
+        &responses_metadata,
+        vec![pristine_input],
+        cancellation_token,
+    )
+    .await?;
+    if result.needs_follow_up {
+        return Err(CodexErr::InvalidRequest(
+            "isolated model mode cannot continue sampling".to_string(),
+        ));
+    }
+    Ok(result.last_agent_message)
 }
 
 #[instrument(level = "trace", skip_all)]
@@ -1092,7 +1165,8 @@ pub(crate) fn build_prompt(
     Prompt {
         input,
         tools: router.model_visible_specs(),
-        parallel_tool_calls: turn_context.model_info.supports_parallel_tool_calls,
+        parallel_tool_calls: !turn_context.model_tool_mode.is_isolated()
+            && turn_context.model_info.supports_parallel_tool_calls,
         base_instructions,
         output_schema: turn_context.final_output_json_schema.clone(),
         output_schema_strict: !crate::guardian::is_guardian_reviewer_source(
@@ -1132,13 +1206,21 @@ async fn run_sampling_request(
         Arc::clone(&step_context),
         Arc::clone(&turn_diff_tracker),
     );
-    let _code_mode_worker = sess.services.code_mode_service.start_turn_worker(
-        &sess,
-        Arc::clone(&step_context),
-        Arc::clone(&router),
-        Arc::clone(&turn_diff_tracker),
-    );
-    let max_retries = turn_context.provider.info().stream_max_retries();
+    let _code_mode_worker = if turn_context.model_tool_mode.is_isolated() {
+        None
+    } else {
+        Some(sess.services.code_mode_service.start_turn_worker(
+            &sess,
+            Arc::clone(&step_context),
+            Arc::clone(&router),
+            Arc::clone(&turn_diff_tracker),
+        ))
+    };
+    let max_retries = if turn_context.model_tool_mode.is_isolated() {
+        0
+    } else {
+        turn_context.provider.info().stream_max_retries()
+    };
     let mut retries = 0;
     let mut initial_input = Some(input);
     let mut original_input = None;
@@ -1962,6 +2044,12 @@ async fn try_run_sampling_request(
     cancellation_token: CancellationToken,
     isolated_output_state: &mut model_isolation::IsolatedOutputState,
 ) -> CodexResult<SamplingRequestResult> {
+    if turn_context.model_tool_mode.is_isolated() && turn_context.model_info.use_responses_lite {
+        return Err(CodexErr::InvalidRequest(
+            "isolated model mode does not support Responses Lite framing".to_string(),
+        ));
+    }
+    model_isolation::validate_prompt(turn_context.model_tool_mode, prompt)?;
     feedback_tags!(
         model = turn_context.model_info.slug.clone(),
         approval_policy = turn_context.approval_policy.value(),
@@ -2056,6 +2144,18 @@ async fn try_run_sampling_request(
             .session_telemetry
             .record_responses(&handle_responses, &event);
         record_turn_ttft_metric(&turn_context, &event).await;
+
+        if turn_context.model_tool_mode.is_isolated()
+            && !matches!(
+                &event,
+                ResponseEvent::Created
+                    | ResponseEvent::OutputItemDone(_)
+                    | ResponseEvent::OutputItemAdded(_)
+                    | ResponseEvent::Completed { .. }
+            )
+        {
+            continue;
+        }
 
         match event {
             ResponseEvent::Created => {}
@@ -2323,23 +2423,9 @@ async fn try_run_sampling_request(
                     end_turn,
                 )?;
                 if let Some(item) = isolated_assistant {
-                    let mut ctx = HandleOutputCtx {
-                        sess: sess.clone(),
-                        turn_context: turn_context.clone(),
-                        turn_store: Arc::clone(&turn_store),
-                        tool_runtime: tool_runtime.clone(),
-                        cancellation_token: cancellation_token.child_token(),
-                    };
-                    let output_result = handle_output_item_done(&mut ctx, item, None).await?;
-                    if output_result.tool_future.is_some() || output_result.needs_follow_up {
-                        return Err(CodexErr::InvalidRequest(
-                            "isolated model output unexpectedly requested follow-up work"
-                                .to_string(),
-                        ));
-                    }
-                    if let Some(agent_message) = output_result.last_agent_message {
-                        last_agent_message = Some(agent_message);
-                    }
+                    last_agent_message = raw_assistant_output_text_from_item(&item);
+                    sess.record_response_item_and_emit_turn_item(&turn_context, item)
+                        .await;
                 }
                 flush_assistant_text_segments_all(
                     &sess,
