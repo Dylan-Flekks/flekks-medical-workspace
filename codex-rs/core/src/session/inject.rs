@@ -7,6 +7,7 @@ use crate::state::ActiveTurn;
 use crate::state::TurnState;
 use crate::tasks::RegularTask;
 use codex_protocol::config_types::ModeKind;
+use codex_protocol::config_types::ModelToolMode;
 use codex_protocol::models::ResponseItem;
 use std::sync::Arc;
 
@@ -22,6 +23,13 @@ impl Session {
     ) -> Result<(), Vec<ResponseItem>> {
         let mut active = self.active_turn.lock().await;
         match active.as_mut() {
+            Some(active_turn)
+                if active_turn.task.as_ref().is_some_and(|task| {
+                    task.turn_context.model_tool_mode == ModelToolMode::WorkspaceContextOnly
+                }) =>
+            {
+                Err(input)
+            }
             Some(active_turn) => {
                 self.input_queue
                     .extend_pending_input_for_turn_state(
@@ -148,6 +156,9 @@ impl Session {
         let Err(items) = self.inject_if_running(items).await else {
             return;
         };
+        if self.active_turn_model_tool_mode().await == Some(ModelToolMode::WorkspaceContextOnly) {
+            return;
+        }
         let default_turn_context;
         let turn_context = match current_turn_context {
             Some(turn_context) => turn_context,

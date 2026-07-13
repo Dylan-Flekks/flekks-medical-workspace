@@ -86,9 +86,18 @@ pub enum Verbosity {
 #[strum(serialize_all = "camelCase")]
 #[ts(rename_all = "camelCase")]
 pub enum ModelToolMode {
+    /// Use the normal tool surface configured for the thread and turn.
     #[default]
     Default,
+    /// Persistently disable every model-visible and executable tool for regular sampling.
     Disabled,
+    /// Restrict exactly one medical handoff turn to the submitted run's
+    /// `workspace_context_read` function.
+    ///
+    /// This mode is valid only as a `turn/start` override. It filters prior-turn history and
+    /// extension context, suppresses hooks, rejects non-text input and every other tool, and is
+    /// never restored as a persistent mode from rollout history.
+    WorkspaceContextOnly,
 }
 
 #[derive(

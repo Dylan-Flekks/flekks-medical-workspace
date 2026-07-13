@@ -39,9 +39,7 @@ impl MedicalKeyContext {
             Self::Documents => {
                 "↑/↓ file  ←/→ fold  Enter detail  Space agent  Tab/⇧Tab pane  Ctrl-P commands"
             }
-            Self::PatientField => {
-                "Enter edit  Ctrl-S save  Tab/⇧Tab pane  Ctrl-P actions"
-            }
+            Self::PatientField => "Enter edit  Ctrl-S save  Tab/⇧Tab pane  Ctrl-P actions",
             Self::CoverageEditor => {
                 "↑/↓ field  ←/→ priority  Space toggle  Ctrl-S save  Ctrl-P actions"
             }
@@ -88,9 +86,7 @@ impl MedicalKeyContext {
             Self::PatientNotes => "↑/↓ note  Tab/⇧Tab pane  Ctrl-P commands",
             Self::Documents => "↑/↓ file  ←/→ fold  Tab/⇧Tab pane  Ctrl-P commands",
             Self::PatientField => "Enter  ↑↓ field  Ctrl-S  Ctrl-P commands  Tab pane",
-            Self::WorkflowEditor => {
-                "Enter next  ↑/↓ field  Ctrl-S  Ctrl-P actions  Tab pane"
-            }
+            Self::WorkflowEditor => "Enter next  ↑/↓ field  Ctrl-S  Ctrl-P actions  Tab pane",
             Self::CoverageEditor => "↑/↓ field  ←/→ priority  Ctrl-S  Ctrl-P actions",
             Self::CardVerification => "↑/↓ field  Ctrl-S record  Esc discard  Ctrl-P actions",
             Self::NoteTitle => "↑/↓ stay  Enter body  Tab/⇧Tab pane  Ctrl-P commands",

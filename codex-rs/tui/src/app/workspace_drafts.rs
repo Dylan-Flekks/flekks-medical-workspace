@@ -88,9 +88,7 @@ impl WorkspaceDraftRuntime {
 impl App {
     pub(super) fn workspace_draft_recovery_needs_retry(&self) -> bool {
         self.workspace_draft_runtime.enabled
-            && !self
-                .workspace_draft_runtime
-                .recovery_discovery_complete
+            && !self.workspace_draft_runtime.recovery_discovery_complete
     }
 
     pub(super) fn workspace_draft_recovery_pending(&self) -> bool {
@@ -224,9 +222,7 @@ impl App {
         app_server: &mut AppServerSession,
     ) {
         if !self.workspace_draft_runtime.enabled
-            || !self
-                .workspace_draft_runtime
-                .recovery_discovery_complete
+            || !self.workspace_draft_runtime.recovery_discovery_complete
         {
             return;
         }
@@ -237,11 +233,7 @@ impl App {
             // Frame scheduling coalesces an immediate redraw with any later deadline. Re-arm the
             // current generation after every premature draw so UI refreshes cannot swallow the
             // debounce wakeup that persists the local recovery checkpoint.
-            if let Some(remaining) = self
-                .workspace_draft_runtime
-                .state
-                .autosave_remaining(token)
-            {
+            if let Some(remaining) = self.workspace_draft_runtime.state.autosave_remaining(token) {
                 tui.frame_requester()
                     .schedule_frame_in(remaining.max(std::time::Duration::from_millis(1)));
             }
@@ -274,10 +266,7 @@ impl App {
             ));
             return Ok(());
         }
-        if !self
-            .workspace_draft_runtime
-            .recovery_discovery_complete
-        {
+        if !self.workspace_draft_runtime.recovery_discovery_complete {
             return Err(color_eyre::eyre::eyre!(
                 "local recovery discovery must succeed before creating a checkpoint; reopen the workspace to retry"
             ));
@@ -324,8 +313,7 @@ impl App {
                 "recovered local draft changed during explicit restore"
             ));
         }
-        self.workspace_draft_runtime
-            .adopt_recovered_scope(&adopted);
+        self.workspace_draft_runtime.adopt_recovered_scope(&adopted);
         self.workspace_draft_runtime.observed = Some(adopted);
         self.workspace_draft_runtime.scheduled_token = None;
         self.set_workspace_draft_recovery_available(false);

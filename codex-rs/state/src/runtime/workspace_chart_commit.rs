@@ -126,10 +126,7 @@ WHERE idempotency_key = ?
                     let legacy_json = legacy_request_json(&request)?;
                     let pre_upgrade_matches = legacy_json.as_ref().is_some_and(|legacy_json| {
                         stored_hash
-                            == chart_commit_hash(
-                                LEGACY_CHART_COMMIT_HASH_PREFIX,
-                                legacy_json,
-                            )
+                            == chart_commit_hash(LEGACY_CHART_COMMIT_HASH_PREFIX, legacy_json)
                             && stored_request_json == *legacy_json
                     });
                     let transitional_matches = stored_hash

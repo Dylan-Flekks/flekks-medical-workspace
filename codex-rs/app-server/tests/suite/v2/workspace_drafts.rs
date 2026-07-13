@@ -502,11 +502,7 @@ async fn create_checkpoint(
     request(server, "workspace/draft/checkpoint/create", params).await
 }
 
-fn checkpoint_params(
-    client_id: &str,
-    current: &WorkspaceDraftCheckpoint,
-    draft: Value,
-) -> Value {
+fn checkpoint_params(client_id: &str, current: &WorkspaceDraftCheckpoint, draft: Value) -> Value {
     json!({
         "sessionId": current.session_id,
         "clientId": client_id,

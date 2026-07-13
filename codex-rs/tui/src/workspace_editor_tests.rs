@@ -69,10 +69,7 @@ fn scrolling_keeps_the_cursor_inside_the_editor_viewport() {
 fn reset_clears_kill_yank_history_between_patient_scopes() {
     let editor = WorkspaceEditor::new();
     editor.reset("patient A private text");
-    let text = editor.input(
-        "patient A private text",
-        KeyEvent::from(KeyCode::Home),
-    );
+    let text = editor.input("patient A private text", KeyEvent::from(KeyCode::Home));
     let _ = editor.input(
         &text,
         KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL),

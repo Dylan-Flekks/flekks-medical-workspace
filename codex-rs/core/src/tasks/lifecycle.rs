@@ -1,4 +1,4 @@
-use codex_extension_api::ExtensionData;
+use codex_protocol::config_types::ModelToolMode;
 use codex_protocol::protocol::CodexErrorInfo;
 use codex_protocol::protocol::TokenUsage;
 use codex_protocol::protocol::TurnAbortReason;
@@ -12,6 +12,9 @@ impl Session {
         turn_context: &TurnContext,
         token_usage_at_turn_start: &TokenUsage,
     ) {
+        if turn_context.model_tool_mode == ModelToolMode::WorkspaceContextOnly {
+            return;
+        }
         for contributor in self.services.extensions.turn_lifecycle_contributors() {
             contributor
                 .on_turn_start(codex_extension_api::TurnStartInput {
@@ -26,13 +29,16 @@ impl Session {
         }
     }
 
-    pub(super) async fn emit_turn_stop_lifecycle(&self, turn_store: &ExtensionData) {
+    pub(super) async fn emit_turn_stop_lifecycle(&self, turn_context: &TurnContext) {
+        if turn_context.model_tool_mode == ModelToolMode::WorkspaceContextOnly {
+            return;
+        }
         for contributor in self.services.extensions.turn_lifecycle_contributors() {
             contributor
                 .on_turn_stop(codex_extension_api::TurnStopInput {
                     session_store: &self.services.session_extension_data,
                     thread_store: &self.services.thread_extension_data,
-                    turn_store,
+                    turn_store: turn_context.extension_data.as_ref(),
                 })
                 .await;
         }
@@ -60,6 +66,9 @@ impl Session {
         reason: TurnAbortReason,
         turn_context: &TurnContext,
     ) {
+        if turn_context.model_tool_mode == ModelToolMode::WorkspaceContextOnly {
+            return;
+        }
         for contributor in self.services.extensions.turn_lifecycle_contributors() {
             contributor
                 .on_turn_abort(codex_extension_api::TurnAbortInput {
@@ -78,6 +87,9 @@ impl Session {
         turn_context: &TurnContext,
         error: CodexErrorInfo,
     ) {
+        if turn_context.model_tool_mode == ModelToolMode::WorkspaceContextOnly {
+            return;
+        }
         for contributor in self.services.extensions.turn_lifecycle_contributors() {
             contributor
                 .on_turn_error(codex_extension_api::TurnErrorInput {

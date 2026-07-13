@@ -175,14 +175,13 @@ impl WorkspaceRequestProcessor {
             ));
         }
         let requested_id = empty_to_none(params.id.clone());
-        let existing = match requested_id.as_deref() {
-            Some(id) => state_db
-                .workspace()
-                .get_client(id)
-                .await
-                .map_err(|err| internal_error(format!("failed to read workspace client: {err}")))?,
-            None => None,
-        };
+        let existing =
+            match requested_id.as_deref() {
+                Some(id) => state_db.workspace().get_client(id).await.map_err(|err| {
+                    internal_error(format!("failed to read workspace client: {err}"))
+                })?,
+                None => None,
+            };
         let expected_version = empty_to_none(params.expected_version.clone());
         if existing.is_some() && expected_version.is_none() {
             return Err(invalid_request(

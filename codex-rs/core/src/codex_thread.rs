@@ -284,6 +284,17 @@ impl CodexThread {
         self.codex.set_thread_memory_mode(mode).await
     }
 
+    /// Returns the tool mode captured by the currently running turn, if any.
+    pub async fn active_turn_model_tool_mode(&self) -> Option<ModelToolMode> {
+        self.codex.session.active_turn_model_tool_mode().await
+    }
+
+    /// Returns whether this thread has permanently opted out of memory generation because it has
+    /// persisted a restricted medical-context turn.
+    pub fn workspace_context_only_memory_tainted(&self) -> bool {
+        self.codex.session.workspace_context_only_memory_tainted()
+    }
+
     pub async fn steer_input(
         &self,
         input: Vec<UserInput>,
@@ -476,6 +487,12 @@ impl CodexThread {
         if items.is_empty() {
             return Err(CodexErr::InvalidRequest(
                 "items must not be empty".to_string(),
+            ));
+        }
+        if self.active_turn_model_tool_mode().await == Some(ModelToolMode::WorkspaceContextOnly) {
+            return Err(CodexErr::InvalidRequest(
+                "cannot inject response items while a workspaceContextOnly turn is active"
+                    .to_string(),
             ));
         }
 

@@ -248,6 +248,7 @@ pub enum SteerInputError {
     NoActiveTurn(Vec<UserInput>),
     ExpectedTurnMismatch { expected: String, actual: String },
     ActiveTurnNotSteerable { turn_kind: NonSteerableTurnKind },
+    WorkspaceContextOnlyTurn,
     EmptyInput,
 }
 
@@ -274,6 +275,10 @@ impl SteerInputError {
                     }),
                 }
             }
+            Self::WorkspaceContextOnlyTurn => ErrorEvent {
+                message: "cannot steer a workspaceContextOnly turn".to_string(),
+                codex_error_info: Some(CodexErrorInfo::BadRequest),
+            },
             Self::EmptyInput => ErrorEvent {
                 message: "input must not be empty".to_string(),
                 codex_error_info: Some(CodexErrorInfo::BadRequest),
@@ -536,6 +541,15 @@ impl Codex {
             external_time_provider,
             inherited_multi_agent_version,
         } = args;
+        if thread_extension_init
+            .get::<ModelToolMode>()
+            .is_some_and(|mode| *mode == ModelToolMode::WorkspaceContextOnly)
+        {
+            return Err(CodexErr::InvalidRequest(
+                "workspaceContextOnly modelToolMode is valid only as a user-turn override"
+                    .to_string(),
+            ));
+        }
         let (tx_sub, rx_sub) = async_channel::bounded(SUBMISSION_CHANNEL_CAPACITY);
         let (tx_event, rx_event) = async_channel::unbounded();
 
@@ -1526,9 +1540,13 @@ impl Session {
         &self,
         updates: SessionSettingsUpdate,
     ) -> ConstraintResult<()> {
-        let notify_config_contributors = !self.services.extensions.config_contributors().is_empty();
+        let has_config_contributors = !self.services.extensions.config_contributors().is_empty();
         let (previous_config, new_config, permission_profile_changed) = {
             let mut state = self.state.lock().await;
+            let notify_config_contributors = has_config_contributors
+                && updates.model_tool_mode != Some(ModelToolMode::WorkspaceContextOnly)
+                && state.session_configuration.model_tool_mode
+                    != ModelToolMode::WorkspaceContextOnly;
             let updated = match state.session_configuration.apply(&updates) {
                 Ok(updated) => updated,
                 Err(err) => {
@@ -1774,6 +1792,7 @@ impl Session {
     /// Persist the event to rollout and send it to clients.
     pub(crate) async fn send_event(&self, turn_context: &TurnContext, msg: EventMsg) {
         let legacy_source = msg.clone();
+        let trace_event = turn_context.model_tool_mode != ModelToolMode::WorkspaceContextOnly;
         let should_emit_workflow_status = matches!(
             &legacy_source,
             EventMsg::TurnStarted(_) | EventMsg::TurnComplete(_)
@@ -1790,17 +1809,20 @@ impl Session {
                 .await
                 .replace(error.clone());
         }
-        self.services
-            .rollout_thread_trace
-            .record_codex_turn_event(&turn_context.sub_id, &legacy_source);
-        self.services
-            .rollout_thread_trace
-            .record_tool_call_event(turn_context.sub_id.clone(), &legacy_source);
+        if trace_event {
+            self.services
+                .rollout_thread_trace
+                .record_codex_turn_event(&turn_context.sub_id, &legacy_source);
+            self.services
+                .rollout_thread_trace
+                .record_tool_call_event(turn_context.sub_id.clone(), &legacy_source);
+        }
         let event = Event {
             id: turn_context.sub_id.clone(),
             msg,
         };
-        self.send_event_raw(event).await;
+        self.send_event_raw_with_persistence_and_trace(event, /*persist*/ true, trace_event)
+            .await;
         self.maybe_notify_parent_of_terminal_turn(turn_context, &legacy_source)
             .await;
         self.maybe_mirror_event_text_to_realtime(&legacy_source)
@@ -1810,14 +1832,21 @@ impl Session {
 
         let show_raw_agent_reasoning = self.show_raw_agent_reasoning();
         for legacy in legacy_source.as_legacy_events(show_raw_agent_reasoning) {
-            self.services
-                .rollout_thread_trace
-                .record_tool_call_event(turn_context.sub_id.clone(), &legacy);
+            if trace_event {
+                self.services
+                    .rollout_thread_trace
+                    .record_tool_call_event(turn_context.sub_id.clone(), &legacy);
+            }
             let legacy_event = Event {
                 id: turn_context.sub_id.clone(),
                 msg: legacy,
             };
-            self.send_event_raw(legacy_event).await;
+            self.send_event_raw_with_persistence_and_trace(
+                legacy_event,
+                /*persist*/ true,
+                trace_event,
+            )
+            .await;
         }
         if should_emit_workflow_status {
             self.emit_workflow_status_snapshots(turn_context).await;
@@ -1977,14 +2006,26 @@ impl Session {
     }
 
     async fn send_event_raw_with_persistence(&self, event: Event, persist: bool) {
+        self.send_event_raw_with_persistence_and_trace(event, persist, /*trace*/ true)
+            .await;
+    }
+
+    async fn send_event_raw_with_persistence_and_trace(
+        &self,
+        event: Event,
+        persist: bool,
+        trace: bool,
+    ) {
         // Persist the event into rollout storage; the store applies its persistence policy.
         if persist {
             let rollout_items = vec![RolloutItem::EventMsg(event.msg.clone())];
             self.persist_rollout_items(&rollout_items).await;
         }
-        self.services
-            .rollout_thread_trace
-            .record_protocol_event(&event.msg);
+        if trace {
+            self.services
+                .rollout_thread_trace
+                .record_protocol_event(&event.msg);
+        }
         self.deliver_event_raw(event).await;
     }
 
@@ -2058,6 +2099,14 @@ impl Session {
             .and_then(|turn| turn.task.as_ref())
             .filter(|task| task.turn_context.sub_id == sub_id)
             .map(|task| Arc::clone(&task.turn_context))
+    }
+
+    pub(crate) async fn active_turn_model_tool_mode(&self) -> Option<ModelToolMode> {
+        let active = self.active_turn.lock().await;
+        active
+            .as_ref()
+            .and_then(|turn| turn.task.as_ref())
+            .map(|task| task.turn_context.model_tool_mode)
     }
 
     async fn active_turn_context_and_cancellation_token(
@@ -2855,6 +2904,9 @@ impl Session {
         step_context: &step_context::StepContext,
     ) -> Arc<WorldState> {
         let turn_context = step_context.turn.as_ref();
+        if turn_context.model_tool_mode == ModelToolMode::WorkspaceContextOnly {
+            return Arc::clone(previous_world_state);
+        }
         // Render model-visible state from the same step used to build and run tools.
         let world_state = Arc::new(self.build_world_state_for_step(step_context).await);
         // Derive the model update and persisted patch from the same two snapshots.
@@ -2904,7 +2956,9 @@ impl Session {
         } else {
             turn_context.environments.clone()
         };
-        if deferred_executor_enabled {
+        if deferred_executor_enabled
+            && turn_context.model_tool_mode != ModelToolMode::WorkspaceContextOnly
+        {
             self.services
                 .agents_md_manager
                 .refresh(&turn_context.config, &environments)
@@ -2914,13 +2968,16 @@ impl Session {
         let selected_capability_roots = self
             .resolve_selected_capability_roots_for_step(&environments)
             .await;
-        let mcp = self
-            .mcp_runtime_for_step(
+        let mcp = if turn_context.model_tool_mode == ModelToolMode::WorkspaceContextOnly {
+            self.services.latest_mcp_runtime()
+        } else {
+            self.mcp_runtime_for_step(
                 turn_context.as_ref(),
                 &environments,
                 &selected_capability_roots,
             )
-            .await;
+            .await
+        };
         Arc::new(StepContext::new(
             turn_context,
             environments,
@@ -3141,6 +3198,9 @@ impl Session {
         &self,
         turn_context: &TurnContext,
     ) -> Vec<ResponseItem> {
+        if turn_context.model_tool_mode == ModelToolMode::WorkspaceContextOnly {
+            return Vec::new();
+        }
         let mut developer_sections = Vec::new();
         let mut contextual_user_sections = Vec::new();
         let mut separate_developer_sections = Vec::new();
@@ -3302,7 +3362,9 @@ impl Session {
                     .push(PersonalitySpecInstructions::new(personality_message).render());
             }
         }
-        if turn_context.config.include_skill_instructions {
+        if turn_context.model_tool_mode != ModelToolMode::WorkspaceContextOnly
+            && turn_context.config.include_skill_instructions
+        {
             let available_skills = build_available_skills(
                 turn_context.turn_skills.snapshot.outcome(),
                 default_skill_metadata_budget(turn_context.model_info.context_window),
@@ -3328,73 +3390,80 @@ impl Session {
                 developer_sections.push(skills_instructions.render());
             }
         }
-        let loaded_plugins = self
-            .services
-            .plugins_manager
-            .plugins_for_config(&turn_context.config.plugins_config_input())
-            .await;
-        let recommended_plugin_candidates =
-            if crate::tools::spec_plan::tool_suggest_enabled(turn_context) {
-                let auth = self.services.auth_manager.auth().await;
-                let plugins_config = turn_context.config.plugins_config_input();
-                self.services
-                    .plugins_manager
-                    .recommended_plugin_candidates_for_config(RecommendedPluginCandidatesInput {
-                        plugins_config: &plugins_config,
-                        loaded_plugins: &loaded_plugins,
-                        auth: auth.as_ref(),
-                        disabled_tools: &turn_context.config.tool_suggest.disabled_tools,
-                        app_server_client_name: turn_context.app_server_client_name.as_deref(),
+        if turn_context.model_tool_mode != ModelToolMode::WorkspaceContextOnly {
+            let loaded_plugins = self
+                .services
+                .plugins_manager
+                .plugins_for_config(&turn_context.config.plugins_config_input())
+                .await;
+            let recommended_plugin_candidates =
+                if crate::tools::spec_plan::tool_suggest_enabled(turn_context) {
+                    let auth = self.services.auth_manager.auth().await;
+                    let plugins_config = turn_context.config.plugins_config_input();
+                    self.services
+                        .plugins_manager
+                        .recommended_plugin_candidates_for_config(
+                            RecommendedPluginCandidatesInput {
+                                plugins_config: &plugins_config,
+                                loaded_plugins: &loaded_plugins,
+                                auth: auth.as_ref(),
+                                disabled_tools: &turn_context.config.tool_suggest.disabled_tools,
+                                app_server_client_name: turn_context
+                                    .app_server_client_name
+                                    .as_deref(),
+                            },
+                        )
+                        .await
+                } else {
+                    None
+                };
+            if let Some(recommended_plugins) = recommended_plugin_candidates
+                .as_deref()
+                .and_then(RecommendedPluginsInstructions::from_plugins)
+            {
+                contextual_user_sections.push(recommended_plugins.render());
+            }
+            let context_contributors = self.services.extensions.context_contributors().to_vec();
+            for contributor in &context_contributors {
+                for fragment in contributor
+                    .contribute_thread_context(
+                        &self.services.session_extension_data,
+                        &self.services.thread_extension_data,
+                    )
+                    .await
+                {
+                    push_prompt_fragment(
+                        fragment,
+                        &mut developer_sections,
+                        &mut contextual_user_sections,
+                        &mut separate_developer_sections,
+                    );
+                }
+            }
+            for contributor in &context_contributors {
+                for fragment in contributor
+                    .contribute_turn_context(TurnContextContributionInput {
+                        thread_id: self.thread_id(),
+                        turn_id: turn_context.sub_id.as_str(),
+                        session_store: &self.services.session_extension_data,
+                        thread_store: &self.services.thread_extension_data,
+                        turn_store: turn_context.extension_data.as_ref(),
+                        model_context_window: turn_context.model_context_window(),
                     })
                     .await
-            } else {
-                None
-            };
-        if let Some(recommended_plugins) = recommended_plugin_candidates
-            .as_deref()
-            .and_then(RecommendedPluginsInstructions::from_plugins)
-        {
-            contextual_user_sections.push(recommended_plugins.render());
-        }
-        let context_contributors = self.services.extensions.context_contributors().to_vec();
-        for contributor in &context_contributors {
-            for fragment in contributor
-                .contribute_thread_context(
-                    &self.services.session_extension_data,
-                    &self.services.thread_extension_data,
-                )
-                .await
-            {
-                push_prompt_fragment(
-                    fragment,
-                    &mut developer_sections,
-                    &mut contextual_user_sections,
-                    &mut separate_developer_sections,
-                );
-            }
-        }
-        for contributor in &context_contributors {
-            for fragment in contributor
-                .contribute_turn_context(TurnContextContributionInput {
-                    thread_id: self.thread_id(),
-                    turn_id: turn_context.sub_id.as_str(),
-                    session_store: &self.services.session_extension_data,
-                    thread_store: &self.services.thread_extension_data,
-                    turn_store: turn_context.extension_data.as_ref(),
-                    model_context_window: turn_context.model_context_window(),
-                })
-                .await
-            {
-                push_prompt_fragment(
-                    fragment,
-                    &mut developer_sections,
-                    &mut contextual_user_sections,
-                    &mut separate_developer_sections,
-                );
+                {
+                    push_prompt_fragment(
+                        fragment,
+                        &mut developer_sections,
+                        &mut contextual_user_sections,
+                        &mut separate_developer_sections,
+                    );
+                }
             }
         }
         // This is full-context metadata. Steady-state context diffs should not re-emit it.
-        if turn_context.config.features.enabled(Feature::TokenBudget)
+        if turn_context.model_tool_mode != ModelToolMode::WorkspaceContextOnly
+            && turn_context.config.features.enabled(Feature::TokenBudget)
             && turn_context.model_context_window().is_some()
         {
             let mcp_result = mcp
@@ -3596,6 +3665,15 @@ impl Session {
         step_context: &StepContext,
     ) -> Arc<WorldState> {
         let turn_context = step_context.turn.as_ref();
+        if turn_context.model_tool_mode == ModelToolMode::WorkspaceContextOnly {
+            self.mark_workspace_context_only_memory_tainted();
+            // The restricted TurnContext and permanent memory taint are durably persisted before
+            // task spawn in `user_input_or_turn_inner`. Do not append the marker a second time.
+            // This turn intentionally receives no canonical initial context. Do not advance the
+            // model-visible reference baseline or the next ordinary turn could incorrectly take
+            // the diff path and omit developer instructions or other initial-only context.
+            return Arc::new(WorldState::default());
+        }
         let reference_context_item = {
             let state = self.state.lock().await;
             state.reference_context_item()
@@ -3708,7 +3786,9 @@ impl Session {
                 state.token_info()
             };
             let budget_result = self.record_rollout_budget_usage(token_usage);
-            if let Some(token_info) = token_info.as_ref() {
+            if turn_context.model_tool_mode != ModelToolMode::WorkspaceContextOnly
+                && let Some(token_info) = token_info.as_ref()
+            {
                 for contributor in self.services.extensions.token_usage_contributors() {
                     contributor
                         .on_token_usage(
@@ -3900,6 +3980,10 @@ impl Session {
                 expected: expected_turn_id.to_string(),
                 actual: active_turn_id.clone(),
             });
+        }
+
+        if active_task.turn_context.model_tool_mode == ModelToolMode::WorkspaceContextOnly {
+            return Err(SteerInputError::WorkspaceContextOnlyTurn);
         }
 
         match active_task.kind {

@@ -23,6 +23,8 @@ use crate::tools::hook_names::HookToolName;
 use crate::tools::lifecycle::notify_tool_finish;
 use crate::tools::lifecycle::notify_tool_start;
 use crate::tools::tool_dispatch_trace::ToolDispatchTrace;
+use crate::tools::workspace_context_only::tool_error_for_logging;
+use crate::tools::workspace_context_only::tool_log_payload;
 use crate::util::error_or_panic;
 use codex_extension_api::ToolCallOutcome;
 use codex_protocol::models::FunctionCallOutputPayload;
@@ -444,7 +446,8 @@ impl ToolRegistry {
             Some(tool) => tool,
             None => {
                 let message = unsupported_tool_call_message(&invocation.payload, &tool_name);
-                let log_payload = invocation.payload.log_payload();
+                let log_payload =
+                    tool_log_payload(invocation.turn.model_tool_mode, &invocation.payload);
                 otel.tool_result_with_tags(
                     tool_name_flat.as_ref(),
                     &call_id_owned,
@@ -475,7 +478,8 @@ impl ToolRegistry {
         }
         if !tool.matches_kind(&invocation.payload) {
             let message = format!("tool {tool_name} invoked with incompatible payload");
-            let log_payload = invocation.payload.log_payload();
+            let log_payload =
+                tool_log_payload(invocation.turn.model_tool_mode, &invocation.payload);
             otel.tool_result_with_tags(
                 tool_name_flat.as_ref(),
                 &call_id_owned,
@@ -540,8 +544,10 @@ impl ToolRegistry {
         }
 
         let response_cell = tokio::sync::Mutex::new(None);
+        let original_error_cell = tokio::sync::Mutex::new(None);
         let invocation_for_tool = invocation.clone();
-        let log_payload = invocation.payload.log_payload();
+        let model_tool_mode = invocation.turn.model_tool_mode;
+        let log_payload = tool_log_payload(invocation.turn.model_tool_mode, &invocation.payload);
 
         let result = otel
             .log_tool_result_with_tags(
@@ -553,6 +559,7 @@ impl ToolRegistry {
                 || {
                     let tool = tool.clone();
                     let response_cell = &response_cell;
+                    let original_error_cell = &original_error_cell;
                     async move {
                         match handle_any_tool(tool.as_ref(), invocation_for_tool).await {
                             Ok(result) => {
@@ -562,12 +569,24 @@ impl ToolRegistry {
                                 *guard = Some(result);
                                 Ok((preview, success))
                             }
-                            Err(err) => Err(err),
+                            Err(err) => {
+                                let (logged_error, original_error) =
+                                    tool_error_for_logging(model_tool_mode, err);
+                                if let Some(original_error) = original_error {
+                                    *original_error_cell.lock().await = Some(original_error);
+                                }
+                                Err(logged_error)
+                            }
                         }
                     }
                 },
             )
             .await;
+        let result = match (result, original_error_cell.lock().await.take()) {
+            (Err(_), Some(original_error)) => Err(original_error),
+            (result, None) => result,
+            (Ok(_), Some(_)) => unreachable!("successful tool call stored an original error"),
+        };
         let success = match &result {
             Ok((_, success)) => *success,
             Err(_) => false,

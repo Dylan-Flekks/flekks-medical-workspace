@@ -76,10 +76,7 @@ fn coverage_commit(
     }
 }
 
-async fn card_document(
-    runtime: &StateRuntime,
-    client_id: &str,
-) -> crate::WorkspaceDocument {
+async fn card_document(runtime: &StateRuntime, client_id: &str) -> crate::WorkspaceDocument {
     runtime
         .workspace()
         .upsert_document(WorkspaceDocumentUpsert {
@@ -145,16 +142,18 @@ async fn card_match_stays_current_for_contact_edits_and_stales_for_identity_edit
         .await
         .expect("matching verification should save")
         .verification;
-    assert_eq!(verification.match_result, WorkspaceCoverageMatchResult::Match);
-    assert_eq!(verification.observed_member_id.as_deref(), Some("1EG4TE5MK73"));
+    assert_eq!(
+        verification.match_result,
+        WorkspaceCoverageMatchResult::Match
+    );
+    assert_eq!(
+        verification.observed_member_id.as_deref(),
+        Some("1EG4TE5MK73")
+    );
 
     runtime
         .workspace()
-        .upsert_client(patient(
-            Some(client.id.clone()),
-            "Test",
-            "312-555-0199",
-        ))
+        .upsert_client(patient(Some(client.id.clone()), "Test", "312-555-0199"))
         .await
         .expect("contact-only edit should save");
     let after_contact = runtime
@@ -213,7 +212,10 @@ async fn card_match_stays_current_for_contact_edits_and_stales_for_identity_edit
         .await
         .expect("mismatch should remain auditable")
         .verification;
-    assert_eq!(mismatch.match_result, WorkspaceCoverageMatchResult::Mismatch);
+    assert_eq!(
+        mismatch.match_result,
+        WorkspaceCoverageMatchResult::Mismatch
+    );
     assert_eq!(mismatch.mismatch_fields, vec!["lastName"]);
 
     let note_result = runtime
@@ -293,13 +295,11 @@ async fn readiness_snapshot_remains_consistent_across_a_concurrent_coverage_comm
         .await
         .expect("snapshot coverage read")
         .expect("snapshot coverage");
-    let snapshot_client = super::super::workspace_chart_commit_sql::client(
-        &mut snapshot_tx,
-        &client.id,
-    )
-    .await
-    .expect("snapshot patient read")
-    .expect("snapshot patient");
+    let snapshot_client =
+        super::super::workspace_chart_commit_sql::client(&mut snapshot_tx, &client.id)
+            .await
+            .expect("snapshot patient read")
+            .expect("snapshot patient");
 
     let update = WorkspaceCoverageUpsert {
         id: Some(coverage.id.clone()),
@@ -547,11 +547,7 @@ async fn legacy_client_update_cannot_rewrite_structured_primary() {
             .await
             .expect("structured source kind");
     assert_eq!(source_kind, "structured");
-    let mut legacy_update = patient(
-        Some(client.id.clone()),
-        "Projection",
-        "312-555-0199",
-    );
+    let mut legacy_update = patient(Some(client.id.clone()), "Projection", "312-555-0199");
     legacy_update.payer_name = Some("Stale Legacy Payer".to_string());
     legacy_update.member_id = Some("STALE-LEGACY".to_string());
     runtime

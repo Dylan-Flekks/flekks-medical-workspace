@@ -2,12 +2,16 @@ use super::session::Session;
 use super::turn_context::TurnContext;
 use crate::context::ContextualUserFragment;
 use codex_features::Feature;
+use codex_protocol::config_types::ModelToolMode;
 
 pub(super) async fn maybe_record(
     sess: &Session,
     turn_context: &TurnContext,
     tokens_until_compaction: Option<i64>,
 ) {
+    if turn_context.model_tool_mode == ModelToolMode::WorkspaceContextOnly {
+        return;
+    }
     if !turn_context.config.features.enabled(Feature::TokenBudget) {
         return;
     }

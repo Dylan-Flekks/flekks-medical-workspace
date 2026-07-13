@@ -69,8 +69,7 @@ impl WorkspaceStore {
             .ok_or_else(|| anyhow::anyhow!("workspace coverage patient was not found"))?;
         let mut snapshots = Vec::with_capacity(coverages.len());
         for coverage in coverages {
-            let readiness =
-                coverage_billing_readiness_in_tx(&mut tx, &client, &coverage).await?;
+            let readiness = coverage_billing_readiness_in_tx(&mut tx, &client, &coverage).await?;
             snapshots.push((coverage, readiness));
         }
         tx.commit().await?;
@@ -78,9 +77,7 @@ impl WorkspaceStore {
     }
 
     pub async fn get_coverage(&self, id: &str) -> anyhow::Result<Option<WorkspaceCoverage>> {
-        let query = format!(
-            "SELECT {COVERAGE_COLUMNS} FROM workspace_coverages WHERE id = ?"
-        );
+        let query = format!("SELECT {COVERAGE_COLUMNS} FROM workspace_coverages WHERE id = ?");
         sqlx::query(sqlx::AssertSqlSafe(query))
             .bind(id)
             .fetch_optional(self.pool.as_ref())
@@ -135,17 +132,17 @@ impl WorkspaceStore {
         let client = super::workspace_chart_commit_sql::client(&mut tx, &coverage.client_id)
             .await?
             .ok_or_else(|| anyhow::anyhow!("workspace coverage patient was not found"))?;
-        let document = super::workspace_chart_commit_sql::document(
-            &mut tx,
-            &input.source_document_id,
-        )
-        .await?
-        .filter(|document| {
-            document.client_id == coverage.client_id && document.archived_at.is_none()
-        })
-        .ok_or_else(|| {
-            anyhow::anyhow!("workspace insurance-card document was not found for this patient")
-        })?;
+        let document =
+            super::workspace_chart_commit_sql::document(&mut tx, &input.source_document_id)
+                .await?
+                .filter(|document| {
+                    document.client_id == coverage.client_id && document.archived_at.is_none()
+                })
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "workspace insurance-card document was not found for this patient"
+                    )
+                })?;
         if !eligible_card_document(&document) {
             anyhow::bail!(
                 "workspace insurance-card document must be a present patient-scoped local reference with insurance-card kind and a SHA-256 content snapshot"
@@ -167,8 +164,7 @@ impl WorkspaceStore {
             anyhow::bail!("workspace coverage verification card document changed after form open");
         }
         let medicare = coverage_is_medicare(&coverage);
-        if medicare && input.compared_subject != WorkspaceCoverageVerificationSubject::Beneficiary
-        {
+        if medicare && input.compared_subject != WorkspaceCoverageVerificationSubject::Beneficiary {
             anyhow::bail!("Medicare card identity must be compared with the beneficiary");
         }
         if !medicare
@@ -196,7 +192,9 @@ impl WorkspaceStore {
                 .as_deref()
                 .is_none_or(|value| !valid_mbi(value))
             {
-                anyhow::bail!("Medicare Beneficiary Identifier must use the 11-character CMS format");
+                anyhow::bail!(
+                    "Medicare Beneficiary Identifier must use the 11-character CMS format"
+                );
             }
         }
 
@@ -473,9 +471,7 @@ pub(super) async fn coverage_in_tx(
     tx: &mut Transaction<'_, Sqlite>,
     id: &str,
 ) -> anyhow::Result<Option<WorkspaceCoverage>> {
-    let query = format!(
-        "SELECT {COVERAGE_COLUMNS} FROM workspace_coverages WHERE id = ?"
-    );
+    let query = format!("SELECT {COVERAGE_COLUMNS} FROM workspace_coverages WHERE id = ?");
     sqlx::query(sqlx::AssertSqlSafe(query))
         .bind(id)
         .fetch_optional(&mut **tx)
@@ -687,8 +683,7 @@ fn verification_from_row(
         client_id: row.try_get("client_id")?,
         source_document_id: row.try_get("source_document_id")?,
         source_document_version: row.try_get("source_document_version")?,
-        source_document_content_sha256: row
-            .try_get("source_document_content_sha256")?,
+        source_document_content_sha256: row.try_get("source_document_content_sha256")?,
         compared_subject: parse_subject(row.try_get::<String, _>("compared_subject")?.as_str())?,
         observed_first_name: row.try_get("observed_first_name")?,
         observed_middle_name: row.try_get("observed_middle_name")?,
@@ -701,9 +696,7 @@ fn verification_from_row(
         patient_version,
         coverage_version,
         match_result: parse_match_result(row.try_get::<String, _>("match_result")?.as_str())?,
-        mismatch_fields: serde_json::from_str(&row.try_get::<String, _>(
-            "mismatch_fields_json",
-        )?)?,
+        mismatch_fields: serde_json::from_str(&row.try_get::<String, _>("mismatch_fields_json")?)?,
         actor: row.try_get("actor")?,
         content_sha256: row.try_get("content_sha256")?,
         created_at: epoch_millis_to_datetime(row.try_get("created_at_ms")?)?,
@@ -737,10 +730,7 @@ fn eligible_card_document(document: &crate::WorkspaceDocument) -> bool {
 fn is_insurance_card_kind(value: &str) -> bool {
     matches!(
         value.trim().to_ascii_lowercase().as_str(),
-        "insurance_card"
-            | "insurance-card"
-            | "insurance card"
-            | "medicare insurance card image"
+        "insurance_card" | "insurance-card" | "insurance card" | "medicare insurance card image"
     )
 }
 
@@ -750,9 +740,7 @@ fn document_content_sha256(document: &crate::WorkspaceDocument) -> Option<String
         .as_deref()
         .or(document.sha256.as_deref())
         .map(str::trim)
-        .filter(|value| {
-            value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
-        })
+        .filter(|value| value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
         .map(str::to_ascii_lowercase)
 }
 

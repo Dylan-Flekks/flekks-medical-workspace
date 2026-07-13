@@ -165,7 +165,8 @@ async fn coverage_rpc_round_trips_structured_demographics_and_card_verification(
 }
 
 #[tokio::test]
-async fn direct_client_update_uses_cas_and_patch_semantics_without_touching_coverage() -> Result<()> {
+async fn direct_client_update_uses_cas_and_patch_semantics_without_touching_coverage() -> Result<()>
+{
     let codex_home = TempDir::new()?;
     create_config_toml(codex_home.path())?;
     let mut server = TestAppServer::builder()
@@ -351,12 +352,7 @@ async fn create_verification(
     server: &mut TestAppServer,
     params: Value,
 ) -> Result<WorkspaceCoverageVerificationCreateResponse> {
-    send_response(
-        server,
-        "workspace/coverage/verification/create",
-        params,
-    )
-    .await
+    send_response(server, "workspace/coverage/verification/create", params).await
 }
 
 async fn upsert_document(

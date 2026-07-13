@@ -5949,6 +5949,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         input_queue: super::input_queue::InputQueue::new(),
         guardian_review_session: crate::guardian::GuardianReviewSessionManager::default(),
         services,
+        workspace_context_only_memory_tainted: std::sync::atomic::AtomicBool::new(false),
         next_internal_sub_id: AtomicU64::new(0),
     };
 
@@ -8085,6 +8086,7 @@ where
         input_queue: super::input_queue::InputQueue::new(),
         guardian_review_session: crate::guardian::GuardianReviewSessionManager::default(),
         services,
+        workspace_context_only_memory_tainted: std::sync::atomic::AtomicBool::new(false),
         next_internal_sub_id: AtomicU64::new(0),
     });
 

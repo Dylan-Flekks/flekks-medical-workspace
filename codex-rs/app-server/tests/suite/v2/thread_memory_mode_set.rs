@@ -2,7 +2,9 @@ use anyhow::Result;
 use app_test_support::TestAppServer;
 use app_test_support::create_fake_rollout;
 use app_test_support::create_mock_responses_server_repeating_assistant;
+use app_test_support::rollout_path;
 use app_test_support::to_response;
+use codex_app_server_protocol::JSONRPCError;
 use codex_app_server_protocol::JSONRPCResponse;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ThreadMemoryMode;
@@ -11,8 +13,12 @@ use codex_app_server_protocol::ThreadMemoryModeSetResponse;
 use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::ThreadStartResponse;
 use codex_protocol::ThreadId;
+use codex_protocol::protocol::RolloutItem;
+use codex_protocol::protocol::RolloutLine;
+use codex_protocol::protocol::TurnContextItem;
 use codex_state::StateRuntime;
 use pretty_assertions::assert_eq;
+use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -106,6 +112,84 @@ async fn thread_memory_mode_set_updates_stored_thread_state() -> Result<()> {
 
     let memory_mode = state_db.get_thread_memory_mode(thread_uuid).await?;
     assert_eq!(memory_mode.as_deref(), Some("enabled"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn thread_memory_mode_set_rejects_workspace_context_only_stored_thread() -> Result<()> {
+    const FILENAME_TS: &str = "2025-01-06T08-45-00";
+
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    let codex_home = TempDir::new()?;
+    create_config_toml(codex_home.path(), &server.uri())?;
+    let state_db = init_state_db(codex_home.path()).await?;
+    let thread_id = create_fake_rollout(
+        codex_home.path(),
+        FILENAME_TS,
+        "2025-01-06T08:45:00Z",
+        "Stored restricted thread preview",
+        Some("mock_provider"),
+        /*git_info*/ None,
+    )?;
+    let thread_uuid = ThreadId::from_string(&thread_id)?;
+    append_workspace_context_only_turn_context(&rollout_path(
+        codex_home.path(),
+        FILENAME_TS,
+        &thread_id,
+    ))?;
+
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .without_auto_env()
+        .build()
+        .await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+
+    let set_id = mcp
+        .send_thread_memory_mode_set_request(ThreadMemoryModeSetParams {
+            thread_id,
+            mode: ThreadMemoryMode::Enabled,
+        })
+        .await?;
+    let error: JSONRPCError = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_error_message(RequestId::Integer(set_id)),
+    )
+    .await??;
+
+    assert_eq!(
+        error.error.message,
+        "thread memory cannot be enabled after a workspaceContextOnly turn has been persisted"
+    );
+    assert_eq!(
+        state_db
+            .get_thread_memory_mode(thread_uuid)
+            .await?
+            .as_deref(),
+        Some("polluted")
+    );
+    Ok(())
+}
+
+fn append_workspace_context_only_turn_context(path: &Path) -> Result<()> {
+    let turn_context: TurnContextItem = serde_json::from_value(serde_json::json!({
+        "cwd": "/",
+        "approval_policy": "never",
+        "sandbox_policy": { "type": "danger-full-access" },
+        "model": "mock-model",
+        "model_tool_mode": "workspaceContextOnly",
+        "summary": "auto"
+    }))?;
+    let line = RolloutLine {
+        timestamp: "2025-01-06T08:45:01Z".to_string(),
+        ordinal: None,
+        item: RolloutItem::TurnContext(turn_context),
+    };
+    writeln!(
+        std::fs::OpenOptions::new().append(true).open(path)?,
+        "{}",
+        serde_json::to_string(&line)?
+    )?;
     Ok(())
 }
 

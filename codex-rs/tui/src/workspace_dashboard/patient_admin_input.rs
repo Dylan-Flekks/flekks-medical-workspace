@@ -246,9 +246,7 @@ impl WorkspaceDashboard {
         let next = current.map_or(0, |index| (index + 1) % eligible.len());
         let (document_id, document_version, document_title) = &eligible[next];
         draft.source_document_id.clone_from(document_id);
-        draft
-            .expected_document_version
-            .clone_from(document_version);
+        draft.expected_document_version.clone_from(document_version);
         self.status = format!(
             "Selected source card document: {}.",
             compact_preview(document_title, 56)

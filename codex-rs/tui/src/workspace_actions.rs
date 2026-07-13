@@ -1080,10 +1080,9 @@ pub(crate) fn action_for_command(
                 return Some(WorkspaceActionId::EmergencyContactEdit);
             }
             "coverage edit" | "edit coverage" => return Some(WorkspaceActionId::CoverageEdit),
-            "coverage verify"
-            | "verify coverage"
-            | "compare coverage card"
-            | "card compare" => return Some(WorkspaceActionId::CoverageVerify),
+            "coverage verify" | "verify coverage" | "compare coverage card" | "card compare" => {
+                return Some(WorkspaceActionId::CoverageVerify);
+            }
             "draft restore" | "restore draft" | "restore local draft" => {
                 return Some(WorkspaceActionId::RestoreLocalDraft);
             }

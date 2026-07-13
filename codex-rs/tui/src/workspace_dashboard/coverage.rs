@@ -369,7 +369,6 @@ impl CardVerificationDraft {
         }
         None
     }
-
 }
 
 impl From<&CardVerificationDraft> for WorkspaceCoverageVerificationCreateParams {

@@ -36,11 +36,9 @@ pub(super) async fn fetch_existing(
     Ok(ExistingRecords {
         client,
         coverage: match request.coverage.as_ref() {
-            Some(input) => super::workspace_coverage::coverage_in_tx(
-                tx,
-                id(&input.id, "coverage")?,
-            )
-            .await?,
+            Some(input) => {
+                super::workspace_coverage::coverage_in_tx(tx, id(&input.id, "coverage")?).await?
+            }
             None => None,
         },
         safety_item: match request.safety_item.as_ref() {
@@ -79,13 +77,7 @@ pub(super) fn validate_existing_ownership(
     client_id: &str,
 ) -> Result<(), WorkspaceChartCommitError> {
     if let Some(value) = existing.coverage.as_ref() {
-        validate_owner(
-            "coverage",
-            &value.id,
-            &value.client_id,
-            false,
-            client_id,
-        )?;
+        validate_owner("coverage", &value.id, &value.client_id, false, client_id)?;
     }
     if let Some(value) = existing.safety_item.as_ref() {
         validate_owner(
@@ -228,7 +220,10 @@ pub(super) async fn validate_relations(
         .bind(coverage.priority)
         .fetch_optional(&mut **tx)
         .await?;
-        if occupied.as_deref().is_some_and(|id| Some(id) != coverage.id.as_deref()) {
+        if occupied
+            .as_deref()
+            .is_some_and(|id| Some(id) != coverage.id.as_deref())
+        {
             return validation(format!(
                 "workspace coverage priority {} is already occupied for this patient",
                 coverage.priority

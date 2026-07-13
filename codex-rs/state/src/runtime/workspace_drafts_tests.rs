@@ -239,19 +239,19 @@ async fn workspace_draft_append_cas_allows_one_concurrent_owner_and_exact_retry(
     let owner_b = append_input(&client, &first, "Owner B");
 
     let (result_a, result_b) = tokio::join!(
-        runtime
-            .workspace()
-            .create_draft_checkpoint(owner_a.clone()),
-        runtime
-            .workspace()
-            .create_draft_checkpoint(owner_b.clone()),
+        runtime.workspace().create_draft_checkpoint(owner_a.clone()),
+        runtime.workspace().create_draft_checkpoint(owner_b.clone()),
     );
     let (winner, winner_request, loser_error) = match (result_a, result_b) {
         (Ok(winner), Err(error)) => (winner, owner_a, error),
         (Err(error), Ok(winner)) => (winner, owner_b, error),
         results => panic!("exactly one concurrent append should win, got {results:?}"),
     };
-    assert!(loser_error.to_string().contains("current checkpoint changed"));
+    assert!(
+        loser_error
+            .to_string()
+            .contains("current checkpoint changed")
+    );
 
     let replay = save(&runtime, winner_request).await;
     assert!(replay.replayed);

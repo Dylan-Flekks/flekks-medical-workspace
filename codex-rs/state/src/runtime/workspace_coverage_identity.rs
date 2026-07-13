@@ -26,8 +26,18 @@ pub(super) fn compare_card_identity(
         ),
     };
     let mut mismatches = Vec::new();
-    push_mismatch(&mut mismatches, "firstName", first, &input.observed_first_name);
-    push_mismatch(&mut mismatches, "middleName", middle, &input.observed_middle_name);
+    push_mismatch(
+        &mut mismatches,
+        "firstName",
+        first,
+        &input.observed_first_name,
+    );
+    push_mismatch(
+        &mut mismatches,
+        "middleName",
+        middle,
+        &input.observed_middle_name,
+    );
     push_mismatch(&mut mismatches, "lastName", last, &input.observed_last_name);
     push_mismatch(&mut mismatches, "suffix", suffix, &input.observed_suffix);
     let expected_member = if medicare {
@@ -82,9 +92,7 @@ pub(super) fn coverage_incomplete(
     {
         return true;
     }
-    if !coverage_is_medicare(coverage)
-        && coverage.patient_relationship_to_subscriber.is_none()
-    {
+    if !coverage_is_medicare(coverage) && coverage.patient_relationship_to_subscriber.is_none() {
         return true;
     }
     let dependent_incomplete = coverage
@@ -124,9 +132,7 @@ pub(super) fn coverage_is_medicare(coverage: &WorkspaceCoverage) -> bool {
     .any(|value| value.to_ascii_lowercase().contains("medicare"))
 }
 
-pub(super) fn patient_identity_version(
-    client: &crate::WorkspaceClient,
-) -> anyhow::Result<String> {
+pub(super) fn patient_identity_version(client: &crate::WorkspaceClient) -> anyhow::Result<String> {
     let identity = serde_json::to_vec(&json!({
         "legalFirstName": &client.legal_first_name,
         "legalMiddleName": &client.legal_middle_name,

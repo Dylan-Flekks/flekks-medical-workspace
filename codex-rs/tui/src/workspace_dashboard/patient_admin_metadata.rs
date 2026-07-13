@@ -343,9 +343,7 @@ impl PatientAdminMetadata {
     }
 }
 
-pub(super) fn patient_admin_metadata_for_client(
-    client: &WorkspaceClient,
-) -> PatientAdminMetadata {
+pub(super) fn patient_admin_metadata_for_client(client: &WorkspaceClient) -> PatientAdminMetadata {
     PatientAdminMetadata::from_client(client)
 }
 

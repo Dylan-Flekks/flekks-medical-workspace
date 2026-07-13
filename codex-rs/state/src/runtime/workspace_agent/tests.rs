@@ -135,6 +135,134 @@ fn result_create(
 }
 
 #[tokio::test]
+async fn workspace_agent_turn_claim_enforces_exact_prompt_and_execution_provenance() {
+    let runtime = test_runtime().await;
+    let (client, note) = seed_client_note(&runtime).await;
+    let packet = runtime
+        .workspace()
+        .prepare_context_packet(packet_create(&client, &note))
+        .await
+        .expect("packet should prepare");
+    let run = runtime
+        .workspace()
+        .start_agent_run(run_start(&packet))
+        .await
+        .expect("run should start");
+    let prompt = crate::render_workspace_agent_handoff_prompt(
+        &crate::WorkspaceAgentHandoffPromptInput::from(&packet),
+        Some(&run.id),
+    );
+    let execution = crate::WorkspaceAgentExecutionBinding {
+        run_id: run.id.clone(),
+        source_thread_id: "thread-synthetic".to_string(),
+        source_turn_id: "turn-synthetic".to_string(),
+        provider: "test-provider".to_string(),
+        model: "test-model".to_string(),
+    };
+
+    for (label, claim) in [
+        (
+            "prompt",
+            crate::WorkspaceAgentTurnClaim {
+                execution: execution.clone(),
+                prompt: format!("{prompt}\nextra instructions"),
+            },
+        ),
+        (
+            "thread",
+            crate::WorkspaceAgentTurnClaim {
+                execution: crate::WorkspaceAgentExecutionBinding {
+                    source_thread_id: "different-thread".to_string(),
+                    ..execution.clone()
+                },
+                prompt: prompt.clone(),
+            },
+        ),
+        (
+            "provider",
+            crate::WorkspaceAgentTurnClaim {
+                execution: crate::WorkspaceAgentExecutionBinding {
+                    provider: "different-provider".to_string(),
+                    ..execution.clone()
+                },
+                prompt: prompt.clone(),
+            },
+        ),
+        (
+            "model",
+            crate::WorkspaceAgentTurnClaim {
+                execution: crate::WorkspaceAgentExecutionBinding {
+                    model: "different-model".to_string(),
+                    ..execution.clone()
+                },
+                prompt: prompt.clone(),
+            },
+        ),
+    ] {
+        let result = runtime.workspace().claim_agent_turn(claim).await;
+        assert!(result.is_err(), "{label} mismatch should fail");
+    }
+
+    let claimed = runtime
+        .workspace()
+        .claim_agent_turn(crate::WorkspaceAgentTurnClaim {
+            execution: execution.clone(),
+            prompt: prompt.clone(),
+        })
+        .await
+        .expect("exact claim should succeed");
+    assert_eq!(claimed, execution);
+
+    runtime
+        .workspace()
+        .read_authorized_agent_context_for_execution(
+            crate::WorkspaceAgentContextReadRequest {
+                run_id: run.id.clone(),
+                category: "visit_history".to_string(),
+                max_records: Some(5),
+            },
+            crate::WorkspaceAgentExecutionBinding {
+                source_turn_id: "different-turn".to_string(),
+                ..execution.clone()
+            },
+        )
+        .await
+        .expect_err("a context read from another turn must be denied");
+
+    let context = runtime
+        .workspace()
+        .read_authorized_agent_context_for_execution(
+            crate::WorkspaceAgentContextReadRequest {
+                run_id: run.id.clone(),
+                category: "visit_history".to_string(),
+                max_records: Some(5),
+            },
+            execution.clone(),
+        )
+        .await
+        .expect("claimed execution should read authorized context");
+    assert_eq!(context.run_id, run.id);
+
+    runtime
+        .workspace()
+        .claim_agent_turn(crate::WorkspaceAgentTurnClaim { execution, prompt })
+        .await
+        .expect_err("a claimed run must not authorize a second model turn");
+    let audit = runtime
+        .workspace()
+        .list_audit_events("agent_run", &run.id)
+        .await
+        .expect("claim audit should list");
+    assert_eq!(
+        audit
+            .iter()
+            .filter(|event| event.action == "turn_claimed")
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
 async fn workspace_agent_run_preserves_packet_revision_and_source_manifest() {
     let runtime = test_runtime().await;
     let (client, note) = seed_client_note(&runtime).await;

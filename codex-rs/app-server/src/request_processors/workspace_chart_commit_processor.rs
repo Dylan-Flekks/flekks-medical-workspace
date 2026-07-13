@@ -28,9 +28,7 @@ impl WorkspaceRequestProcessor {
                 .workspace()
                 .get_client(client_id)
                 .await
-                .map_err(|err| {
-                    internal_error(format!("failed to read workspace client: {err}"))
-                })?,
+                .map_err(|err| internal_error(format!("failed to read workspace client: {err}")))?,
             (Some(_), None) | (None, _) => None,
         };
 

@@ -1,9 +1,6 @@
 use super::*;
 
-fn patched_text(
-    patch: Option<Option<String>>,
-    existing: Option<&String>,
-) -> Option<String> {
+fn patched_text(patch: Option<Option<String>>, existing: Option<&String>) -> Option<String> {
     match patch {
         Some(value) => empty_to_none(value),
         None => existing.cloned(),
@@ -28,7 +25,7 @@ pub(super) fn state_client_upsert(
             }
             primary
         }
-        None => legacy_email.clone().or_else(|| {
+        None => legacy_email.or_else(|| {
             existing.and_then(|client| {
                 client
                     .primary_email
@@ -105,10 +102,7 @@ pub(super) fn state_client_upsert(
             value.address_line_2,
             existing.and_then(|client| client.address_line_2.as_ref()),
         ),
-        city: patched_text(
-            value.city,
-            existing.and_then(|client| client.city.as_ref()),
-        ),
+        city: patched_text(value.city, existing.and_then(|client| client.city.as_ref())),
         state_or_province: patched_text(
             value.state_or_province,
             existing.and_then(|client| client.state_or_province.as_ref()),

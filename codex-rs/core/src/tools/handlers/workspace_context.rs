@@ -9,13 +9,28 @@ use crate::tools::registry::CoreToolRuntime;
 use crate::tools::registry::ToolExecutor;
 use chrono::DateTime;
 use chrono::Utc;
-use codex_tools::JsonToolOutput;
+use codex_protocol::models::FunctionCallOutputBody;
+use codex_protocol::models::FunctionCallOutputPayload;
+use codex_protocol::models::ResponseInputItem;
 use codex_tools::ToolName;
+use codex_tools::ToolOutput;
 use codex_tools::ToolSpec;
 use serde::Deserialize;
 use serde::Serialize;
 
-pub struct WorkspaceContextReadHandler;
+pub struct WorkspaceContextReadHandler {
+    expected_execution: Option<codex_state::WorkspaceAgentExecutionBinding>,
+}
+
+impl WorkspaceContextReadHandler {
+    pub(crate) fn bound_to_execution(
+        execution: codex_state::WorkspaceAgentExecutionBinding,
+    ) -> Self {
+        Self {
+            expected_execution: Some(execution),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -79,6 +94,7 @@ impl ToolExecutor<ToolInvocation> for WorkspaceContextReadHandler {
     }
 
     fn handle(&self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'_> {
+        let expected_execution = self.expected_execution.clone();
         Box::pin(async move {
             let ToolInvocation {
                 session, payload, ..
@@ -97,20 +113,65 @@ impl ToolExecutor<ToolInvocation> for WorkspaceContextReadHandler {
                     "workspace store is unavailable for this session".to_string(),
                 )
             })?;
-            let result = read_workspace_context(state_db, args).await?;
+            let result =
+                read_workspace_context(state_db, args, expected_execution.as_ref()).await?;
+            let source_count = result.sources.len();
             let value = serde_json::to_value(result).map_err(|err| {
                 FunctionCallError::Fatal(format!("failed to serialize workspace context: {err}"))
             })?;
-            Ok(boxed_tool_output(JsonToolOutput::new(value)))
+            Ok(boxed_tool_output(WorkspaceContextReadToolOutput {
+                value,
+                source_count,
+            }))
         })
     }
 }
 
 impl CoreToolRuntime for WorkspaceContextReadHandler {}
 
+struct WorkspaceContextReadToolOutput {
+    value: serde_json::Value,
+    source_count: usize,
+}
+
+impl ToolOutput for WorkspaceContextReadToolOutput {
+    fn log_preview(&self) -> String {
+        format!(
+            "workspace_context_read completed with {} source snapshot(s); clinical content redacted",
+            self.source_count
+        )
+    }
+
+    fn success_for_logging(&self) -> bool {
+        true
+    }
+
+    fn contains_external_context(&self) -> bool {
+        true
+    }
+
+    fn to_response_item(&self, call_id: &str, _payload: &ToolPayload) -> ResponseInputItem {
+        ResponseInputItem::FunctionCallOutput {
+            call_id: call_id.to_string(),
+            output: FunctionCallOutputPayload {
+                body: FunctionCallOutputBody::Text(self.value.to_string()),
+                success: Some(true),
+            },
+        }
+    }
+
+    fn code_mode_result(&self, _payload: &ToolPayload) -> serde_json::Value {
+        serde_json::json!({
+            "source_count": self.source_count,
+            "clinical_content_redacted": true,
+        })
+    }
+}
+
 async fn read_workspace_context(
     state_db: crate::StateDbHandle,
     args: WorkspaceContextReadArgs,
+    expected_execution: Option<&codex_state::WorkspaceAgentExecutionBinding>,
 ) -> Result<WorkspaceContextReadResult, FunctionCallError> {
     let run_id = args.run_id.trim();
     if run_id.is_empty() {
@@ -118,16 +179,29 @@ async fn read_workspace_context(
             "run_id must not be empty".to_string(),
         ));
     }
+    if expected_execution.is_some_and(|execution| run_id != execution.run_id) {
+        return Err(FunctionCallError::RespondToModel(
+            "workspace_context_read run_id does not match the current restricted turn".to_string(),
+        ));
+    }
 
-    let context = state_db
-        .workspace()
-        .read_authorized_agent_context(codex_state::WorkspaceAgentContextReadRequest {
-            run_id: run_id.to_string(),
-            category: args.category.as_str().to_string(),
-            max_records: args.limit,
-        })
-        .await
-        .map_err(read_error)?;
+    let request = codex_state::WorkspaceAgentContextReadRequest {
+        run_id: run_id.to_string(),
+        category: args.category.as_str().to_string(),
+        max_records: args.limit,
+    };
+    let context = if let Some(execution) = expected_execution {
+        state_db
+            .workspace()
+            .read_authorized_agent_context_for_execution(request, execution.clone())
+            .await
+    } else {
+        state_db
+            .workspace()
+            .read_authorized_agent_context(request)
+            .await
+    }
+    .map_err(read_error)?;
     Ok(WorkspaceContextReadResult {
         run_id: context.run_id,
         packet_id: context.packet_id,
@@ -273,7 +347,7 @@ mod tests {
                 expected_client_id: client.id.clone(),
                 expected_context_envelope_sha256: packet.context_envelope_sha256,
                 run_kind: "agent".to_string(),
-                idempotency_key: "core-tool-context-test".to_string(),
+                idempotency_key: format!("core-tool-context-test-{}", packet.id),
                 provider: "test-provider".to_string(),
                 model: "test-model".to_string(),
                 actor: "Clinician Example".to_string(),
@@ -299,6 +373,40 @@ mod tests {
         );
     }
 
+    #[test]
+    fn workspace_context_read_tool_output_redacts_generic_observability_surfaces() {
+        let clinical_marker = "synthetic-clinical-content-must-not-be-logged";
+        let output = WorkspaceContextReadToolOutput {
+            value: serde_json::json!({
+                "run_id": "run-capability-must-not-be-logged",
+                "sources": [{"snapshot_json": clinical_marker}],
+            }),
+            source_count: 1,
+        };
+        let payload = ToolPayload::Function {
+            arguments: r#"{"run_id":"run-capability-must-not-be-logged"}"#.to_string(),
+        };
+
+        let preview = output.log_preview();
+        assert_eq!(
+            preview,
+            "workspace_context_read completed with 1 source snapshot(s); clinical content redacted"
+        );
+        assert!(!preview.contains(clinical_marker));
+        assert!(output.contains_external_context());
+        assert_eq!(
+            output.code_mode_result(&payload),
+            serde_json::json!({
+                "source_count": 1,
+                "clinical_content_redacted": true,
+            })
+        );
+
+        let response = output.to_response_item("call-1", &payload);
+        let serialized = serde_json::to_string(&response).expect("response should serialize");
+        assert!(serialized.contains(clinical_marker));
+    }
+
     #[tokio::test]
     async fn workspace_context_read_returns_authorized_hashed_sources() {
         let (_temp, state_db) = test_state_db().await;
@@ -312,6 +420,7 @@ mod tests {
                 category: WorkspaceContextCategory::VisitHistory,
                 limit: Some(4),
             },
+            None,
         )
         .await
         .expect("authorized context read should succeed");
@@ -365,6 +474,7 @@ mod tests {
                 category: WorkspaceContextCategory::VisitHistory,
                 limit: None,
             },
+            None,
         )
         .await
         .expect_err("missing run should be denied");
@@ -377,6 +487,7 @@ mod tests {
                 category: WorkspaceContextCategory::ProgressNotes,
                 limit: None,
             },
+            None,
         )
         .await
         .expect_err("category omitted from packet must be denied");
@@ -402,6 +513,7 @@ mod tests {
                 category: WorkspaceContextCategory::VisitHistory,
                 limit: None,
             },
+            None,
         )
         .await
         .expect_err("terminal run should be denied");
@@ -421,6 +533,7 @@ mod tests {
                 category: WorkspaceContextCategory::VisitHistory,
                 limit: None,
             },
+            None,
         )
         .await;
 
@@ -428,5 +541,40 @@ mod tests {
             panic!("expected empty run_id to be rejected");
         };
         assert_eq!(message, "run_id must not be empty");
+    }
+
+    #[tokio::test]
+    async fn restricted_workspace_context_read_rejects_a_previous_authorized_run() {
+        let (_temp, state_db) = test_state_db().await;
+        let (_previous_client, _previous_note, _previous_encounter, previous_run) =
+            seed_authorized_run(&state_db, &["visit_history"]).await;
+        let (_current_client, _current_note, _current_encounter, current_run) =
+            seed_authorized_run(&state_db, &["visit_history"]).await;
+        let current_execution = codex_state::WorkspaceAgentExecutionBinding {
+            run_id: current_run.id,
+            source_thread_id: "thread-current".to_string(),
+            source_turn_id: "turn-current".to_string(),
+            provider: "test-provider".to_string(),
+            model: "test-model".to_string(),
+        };
+
+        let result = read_workspace_context(
+            state_db,
+            WorkspaceContextReadArgs {
+                run_id: previous_run.id,
+                category: WorkspaceContextCategory::VisitHistory,
+                limit: None,
+            },
+            Some(&current_execution),
+        )
+        .await;
+
+        let Err(FunctionCallError::RespondToModel(message)) = result else {
+            panic!("expected cross-run context read to be rejected");
+        };
+        assert_eq!(
+            message,
+            "workspace_context_read run_id does not match the current restricted turn"
+        );
     }
 }

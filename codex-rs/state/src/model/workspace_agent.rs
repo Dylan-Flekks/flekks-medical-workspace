@@ -103,6 +103,26 @@ pub struct WorkspaceAgentContextReadRequest {
     pub max_records: Option<u32>,
 }
 
+/// Immutable execution identity for one claimed medical agent turn.
+///
+/// This is checked again for every model-facing context read so a run id cannot be moved to a
+/// different thread, turn, provider, or model after the claim succeeds.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WorkspaceAgentExecutionBinding {
+    pub run_id: String,
+    pub source_thread_id: String,
+    pub source_turn_id: String,
+    pub provider: String,
+    pub model: String,
+}
+
+/// Exact generated prompt and execution identity claimed before a restricted turn may sample.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WorkspaceAgentTurnClaim {
+    pub execution: WorkspaceAgentExecutionBinding,
+    pub prompt: String,
+}
+
 /// Exact state snapshots read for an authorized agent run.
 ///
 /// Each source is an immutable access row containing the exact serialized

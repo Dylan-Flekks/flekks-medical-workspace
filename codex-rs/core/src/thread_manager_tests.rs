@@ -13,6 +13,7 @@ use codex_models_manager::manager::RefreshStrategy;
 use codex_protocol::ResponseItemId;
 use codex_protocol::capabilities::CapabilityRootLocation;
 use codex_protocol::capabilities::SelectedCapabilityRoot;
+use codex_protocol::config_types::ModelToolMode;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ReasoningItemReasoningSummary;
 use codex_protocol::models::ResponseItem;
@@ -37,6 +38,48 @@ use tempfile::tempdir;
 use wiremock::MockServer;
 
 const TEST_INSTALLATION_ID: &str = "11111111-1111-4111-8111-111111111111";
+
+#[tokio::test]
+async fn model_tool_mode_workspace_context_only_is_rejected_at_session_init() {
+    let temp_dir = tempdir().expect("tempdir");
+    let mut config = test_config().await;
+    config.codex_home = temp_dir.path().join("codex-home").abs();
+    config.cwd = config.codex_home.abs();
+    std::fs::create_dir_all(&config.codex_home).expect("create codex home");
+
+    let manager = ThreadManager::with_models_provider_and_home_for_tests(
+        CodexAuth::from_api_key("dummy"),
+        config.model_provider.clone(),
+        config.codex_home.to_path_buf(),
+        Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+    );
+    let mut thread_extension_init = codex_extension_api::ExtensionDataInit::new();
+    thread_extension_init.insert(ModelToolMode::WorkspaceContextOnly);
+    let result = manager
+        .start_thread_with_options(StartThreadOptions {
+            config,
+            allow_provider_model_fallback: false,
+            initial_history: InitialHistory::New,
+            history_mode: None,
+            session_source: None,
+            thread_source: None,
+            dynamic_tools: Vec::new(),
+            metrics_service_name: None,
+            parent_trace: None,
+            environments: Vec::new(),
+            thread_extension_init,
+            supports_openai_form_elicitation: false,
+        })
+        .await;
+
+    let Err(CodexErr::InvalidRequest(message)) = result else {
+        panic!("workspaceContextOnly must not persist at session init");
+    };
+    assert_eq!(
+        message,
+        "workspaceContextOnly modelToolMode is valid only as a user-turn override"
+    );
+}
 
 struct FakeAgentGraphStore {
     root_thread_id: ThreadId,

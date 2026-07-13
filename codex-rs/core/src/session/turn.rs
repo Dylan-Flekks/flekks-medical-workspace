@@ -64,6 +64,7 @@ use crate::tools::router::ToolSuggestPresentation;
 use crate::tools::router::extension_tool_executors;
 use crate::tools::spec_plan::search_tool_enabled;
 use crate::tools::spec_plan::tool_suggest_enabled;
+use crate::tools::workspace_context_only;
 use crate::turn_diff_tracker::TurnDiffTracker;
 use crate::turn_timing::record_turn_ttft_metric;
 use crate::util::error_or_panic;
@@ -228,7 +229,9 @@ pub(crate) async fn run_turn(
         // Note that pending_input would be something like a message the user
         // submitted through the UI while the model was running. Though the UI
         // may support this, the model might not.
-        let pending_input = if can_drain_pending_input {
+        let pending_input = if turn_context.model_tool_mode == ModelToolMode::WorkspaceContextOnly {
+            Vec::new()
+        } else if can_drain_pending_input {
             sess.input_queue.get_pending_input(&sess.active_turn).await
         } else {
             Vec::new()
@@ -239,12 +242,14 @@ pub(crate) async fn run_turn(
         }
 
         let window_id = sess.current_window_id().await;
-        super::rollout_budget::maybe_record_reminder(
-            sess.as_ref(),
-            turn_context.as_ref(),
-            &window_id,
-        )
-        .await;
+        if turn_context.model_tool_mode != ModelToolMode::WorkspaceContextOnly {
+            super::rollout_budget::maybe_record_reminder(
+                sess.as_ref(),
+                turn_context.as_ref(),
+                &window_id,
+            )
+            .await;
+        }
 
         // Capture once so context, advertised tools, and tool calls share one request view.
         let step_context = match next_step_context.take() {
@@ -252,12 +257,14 @@ pub(crate) async fn run_turn(
             None => sess.capture_step_context(Arc::clone(&turn_context)).await,
         };
         let sampling_request_result: CodexResult<_> = async {
-            super::time_reminder::maybe_record_current_time_reminder(
-                sess.as_ref(),
-                turn_context.as_ref(),
-                &window_id,
-            )
-            .await?;
+            if turn_context.model_tool_mode != ModelToolMode::WorkspaceContextOnly {
+                super::time_reminder::maybe_record_current_time_reminder(
+                    sess.as_ref(),
+                    turn_context.as_ref(),
+                    &window_id,
+                )
+                .await?;
+            }
 
             if turn_context
                 .config
@@ -305,7 +312,11 @@ pub(crate) async fn run_turn(
                 can_drain_pending_input = true;
                 let (has_pending_input, token_status, estimated_token_count) = async {
                     let has_pending_input =
-                        sess.input_queue.has_pending_input(&sess.active_turn).await;
+                        if turn_context.model_tool_mode == ModelToolMode::WorkspaceContextOnly {
+                            false
+                        } else {
+                            sess.input_queue.has_pending_input(&sess.active_turn).await
+                        };
                     let token_status = super::context_window::context_window_token_status(
                         sess.as_ref(),
                         turn_context.as_ref(),
@@ -337,15 +348,18 @@ pub(crate) async fn run_turn(
                     "post sampling token usage"
                 );
 
-                super::token_budget::maybe_record(
-                    sess.as_ref(),
-                    turn_context.as_ref(),
-                    token_status.tokens_until_compaction,
-                )
-                .await;
+                if turn_context.model_tool_mode != ModelToolMode::WorkspaceContextOnly {
+                    super::token_budget::maybe_record(
+                        sess.as_ref(),
+                        turn_context.as_ref(),
+                        token_status.tokens_until_compaction,
+                    )
+                    .await;
+                }
 
                 // as long as compaction works well in getting us way below the token limit, we shouldn't worry about being in an infinite loop.
-                if needs_follow_up
+                if turn_context.model_tool_mode != ModelToolMode::WorkspaceContextOnly
+                    && needs_follow_up
                     && (sess.take_new_context_window_request().await || token_limit_reached)
                 {
                     if let Err(err) = run_auto_compact(
@@ -517,6 +531,9 @@ async fn build_skills_and_plugins(
     cancellation_token: &CancellationToken,
 ) -> Option<(Vec<ResponseItem>, HashSet<String>)> {
     let turn_context = step_context.turn.as_ref();
+    if turn_context.model_tool_mode == ModelToolMode::WorkspaceContextOnly {
+        return Some((Vec::new(), HashSet::new()));
+    }
     // Guardian input embeds the parent transcript as untrusted evidence. Do not interpret skill or
     // plugin mentions from that generated prompt as requests to inject additional instructions.
     if crate::guardian::is_guardian_reviewer_source(&turn_context.session_source) {
@@ -802,6 +819,9 @@ async fn run_pre_sampling_compact(
     turn_context: &Arc<TurnContext>,
     client_session: &mut ModelClientSession,
 ) -> CodexResult<()> {
+    if turn_context.model_tool_mode == ModelToolMode::WorkspaceContextOnly {
+        return Ok(());
+    }
     maybe_run_previous_model_inline_compact(sess, turn_context, client_session).await?;
     let token_status =
         super::context_window::context_window_token_status(sess.as_ref(), turn_context.as_ref())
@@ -963,6 +983,11 @@ async fn run_auto_compact(
     phase: CompactionPhase,
 ) -> CodexResult<()> {
     let turn_context = &step_context.turn;
+    if turn_context.model_tool_mode == ModelToolMode::WorkspaceContextOnly {
+        return Err(CodexErr::InvalidRequest(
+            "compaction is unavailable during a workspaceContextOnly turn".to_string(),
+        ));
+    }
     if turn_context.config.features.enabled(Feature::TokenBudget) {
         // Compaction is the reset request, so force a new context window
         // instead of consuming a pending `new_context` tool request.
@@ -1132,12 +1157,16 @@ async fn run_sampling_request(
         Arc::clone(&step_context),
         Arc::clone(&turn_diff_tracker),
     );
-    let _code_mode_worker = sess.services.code_mode_service.start_turn_worker(
-        &sess,
-        Arc::clone(&step_context),
-        Arc::clone(&router),
-        Arc::clone(&turn_diff_tracker),
-    );
+    let _code_mode_worker = if turn_context.model_tool_mode == ModelToolMode::WorkspaceContextOnly {
+        None
+    } else {
+        sess.services.code_mode_service.start_turn_worker(
+            &sess,
+            Arc::clone(&step_context),
+            Arc::clone(&router),
+            Arc::clone(&turn_diff_tracker),
+        )
+    };
     let max_retries = turn_context.provider.info().stream_max_retries();
     let mut retries = 0;
     let mut initial_input = Some(input);
@@ -1150,6 +1179,11 @@ async fn run_sampling_request(
                 .await
                 .for_prompt(&turn_context.model_info.input_modalities)
         };
+        let prompt_input = workspace_context_only::filter_prompt_input(
+            turn_context.model_tool_mode,
+            &turn_context.sub_id,
+            prompt_input,
+        );
         let prompt = build_prompt(
             prompt_input,
             router.as_ref(),
@@ -1222,11 +1256,17 @@ pub(crate) async fn built_tools(
     cancellation_token: &CancellationToken,
 ) -> CodexResult<Arc<ToolRouter>> {
     let turn_context = step_context.turn.as_ref();
-    if turn_context.model_tool_mode == ModelToolMode::Disabled {
-        return Ok(Arc::new(ToolRouter::from_parts(
-            crate::tools::registry::ToolRegistry::default(),
-            Vec::new(),
-        )));
+    match turn_context.model_tool_mode {
+        ModelToolMode::Default => {}
+        ModelToolMode::Disabled => {
+            return Ok(Arc::new(ToolRouter::from_parts(
+                crate::tools::registry::ToolRegistry::default(),
+                Vec::new(),
+            )));
+        }
+        ModelToolMode::WorkspaceContextOnly => {
+            return workspace_context_only::build_router(turn_context);
+        }
     }
     let mcp_connection_manager = step_context.mcp.manager();
     let has_mcp_servers = mcp_connection_manager.has_servers();
@@ -1361,37 +1401,6 @@ pub(crate) async fn built_tools(
 struct SamplingRequestResult {
     needs_follow_up: bool,
     last_agent_message: Option<String>,
-}
-
-fn reject_tool_like_output_when_disabled(
-    turn_context: &TurnContext,
-    item: &ResponseItem,
-) -> CodexResult<()> {
-    let tool_like = match item {
-        ResponseItem::AdditionalTools { .. }
-        | ResponseItem::LocalShellCall { .. }
-        | ResponseItem::FunctionCall { .. }
-        | ResponseItem::ToolSearchCall { .. }
-        | ResponseItem::FunctionCallOutput { .. }
-        | ResponseItem::CustomToolCall { .. }
-        | ResponseItem::CustomToolCallOutput { .. }
-        | ResponseItem::ToolSearchOutput { .. }
-        | ResponseItem::WebSearchCall { .. }
-        | ResponseItem::ImageGenerationCall { .. }
-        | ResponseItem::CompactionTrigger {}
-        | ResponseItem::Other => true,
-        ResponseItem::Message { .. }
-        | ResponseItem::AgentMessage { .. }
-        | ResponseItem::Reasoning { .. }
-        | ResponseItem::Compaction { .. }
-        | ResponseItem::ContextCompaction { .. } => false,
-    };
-    if turn_context.model_tool_mode == ModelToolMode::Disabled && tool_like {
-        return Err(CodexErr::InvalidRequest(
-            "model returned a tool item while model tool mode is disabled".to_string(),
-        ));
-    }
-    Ok(())
 }
 
 /// Ephemeral per-response state for streaming a single proposed plan.
@@ -1892,7 +1901,11 @@ async fn handle_assistant_item_done_in_plan_mode(
         let mut finalized_facts = None;
         if let Some(finalized_turn_item) = finalize_non_tool_response_item(
             sess,
-            TurnItemContributorPolicy::Run(turn_store),
+            if turn_context.model_tool_mode == ModelToolMode::WorkspaceContextOnly {
+                TurnItemContributorPolicy::Skip
+            } else {
+                TurnItemContributorPolicy::Run(turn_store)
+            },
             item,
             /*plan_mode*/ true,
         )
@@ -1994,11 +2007,7 @@ async fn try_run_sampling_request(
         auth_mode = sess.services.auth_manager.auth_mode(),
         features = sess.features.enabled_features(),
     );
-    let inference_trace = sess.services.rollout_thread_trace.inference_trace_context(
-        turn_context.sub_id.as_str(),
-        turn_context.model_info.slug.as_str(),
-        turn_context.provider.info().name.as_str(),
-    );
+    let inference_trace = inference_trace_context_for_turn(sess.as_ref(), turn_context.as_ref());
     let sampling_timing_guard = turn_context.turn_timing_state.begin_sampling();
     let uses_sequential_cutoff_reasoning_summaries = turn_context
         .config
@@ -2034,8 +2043,9 @@ async fn try_run_sampling_request(
     let plan_mode = turn_context.collaboration_mode.mode == ModeKind::Plan;
     let mut assistant_message_stream_parsers = AssistantMessageStreamParsers::new(plan_mode);
     let mut plan_mode_state = plan_mode.then(|| PlanModeStreamState::new(&turn_context.sub_id));
-    let defer_streamed_turn_items_for_contributors =
-        !sess.services.extensions.turn_item_contributors().is_empty();
+    let defer_streamed_turn_items_for_contributors = turn_context.model_tool_mode
+        != ModelToolMode::WorkspaceContextOnly
+        && !sess.services.extensions.turn_item_contributors().is_empty();
     let mut active_item_is_streaming_to_client = false;
     let receiving_span = trace_span!("receiving_stream");
     let outcome: CodexResult<SamplingRequestResult> = loop {
@@ -2085,7 +2095,7 @@ async fn try_run_sampling_request(
                 if turn_context.item_ids_enabled() {
                     assign_missing_streamed_response_item_id(&mut item, active_item.as_ref());
                 }
-                reject_tool_like_output_when_disabled(&turn_context, &item)?;
+                workspace_context_only::validate_model_output(turn_context.model_tool_mode, &item)?;
                 if let Some((_, mut consumer)) = active_tool_argument_diff_consumer.take()
                     && let Ok(Some(event)) = consumer.finish()
                 {
@@ -2172,7 +2182,10 @@ async fn try_run_sampling_request(
                 }
                 needs_follow_up |= output_result.needs_follow_up;
                 // todo: remove before stabilizing multi-agent v2
-                if preempt_for_mailbox_mail && sess.input_queue.has_pending_mailbox_items().await {
+                if turn_context.model_tool_mode != ModelToolMode::WorkspaceContextOnly
+                    && preempt_for_mailbox_mail
+                    && sess.input_queue.has_pending_mailbox_items().await
+                {
                     break Ok(SamplingRequestResult {
                         needs_follow_up: true,
                         last_agent_message,
@@ -2183,7 +2196,7 @@ async fn try_run_sampling_request(
                 if turn_context.item_ids_enabled() {
                     assign_missing_streamed_response_item_id(&mut item, /*active_item*/ None);
                 }
-                reject_tool_like_output_when_disabled(&turn_context, &item)?;
+                workspace_context_only::validate_model_output(turn_context.model_tool_mode, &item)?;
                 if let ResponseItem::CustomToolCall {
                     call_id,
                     name,
@@ -2534,6 +2547,21 @@ async fn try_run_sampling_request(
     }
 
     outcome
+}
+
+fn inference_trace_context_for_turn(
+    sess: &Session,
+    turn_context: &TurnContext,
+) -> codex_rollout_trace::InferenceTraceContext {
+    if turn_context.model_tool_mode == ModelToolMode::WorkspaceContextOnly {
+        codex_rollout_trace::InferenceTraceContext::disabled()
+    } else {
+        sess.services.rollout_thread_trace.inference_trace_context(
+            turn_context.sub_id.as_str(),
+            turn_context.model_info.slug.as_str(),
+            turn_context.provider.info().name.as_str(),
+        )
+    }
 }
 
 pub(crate) fn get_last_assistant_message_from_turn(responses: &[ResponseItem]) -> Option<String> {

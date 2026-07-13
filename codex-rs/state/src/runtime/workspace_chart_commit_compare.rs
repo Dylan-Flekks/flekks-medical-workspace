@@ -81,16 +81,14 @@ pub(super) fn coverage(
         && existing.coverage_status == input.coverage_status
         && existing.effective_date == input.effective_date
         && existing.termination_date == input.termination_date
-        && existing.patient_relationship_to_subscriber
-            == input.patient_relationship_to_subscriber
+        && existing.patient_relationship_to_subscriber == input.patient_relationship_to_subscriber
         && existing.subscriber_first_name == input.subscriber_first_name
         && existing.subscriber_middle_name == input.subscriber_middle_name
         && existing.subscriber_last_name == input.subscriber_last_name
         && existing.subscriber_suffix == input.subscriber_suffix
         && existing.subscriber_date_of_birth == input.subscriber_date_of_birth
         && existing.subscriber_administrative_sex == input.subscriber_administrative_sex
-        && existing.subscriber_address_same_as_patient
-            == input.subscriber_address_same_as_patient
+        && existing.subscriber_address_same_as_patient == input.subscriber_address_same_as_patient
         && existing.subscriber_address_line_1 == input.subscriber_address_line_1
         && existing.subscriber_address_line_2 == input.subscriber_address_line_2
         && existing.subscriber_city == input.subscriber_city

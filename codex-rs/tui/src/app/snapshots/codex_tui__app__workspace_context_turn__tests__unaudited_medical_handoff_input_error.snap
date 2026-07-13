@@ -1,0 +1,5 @@
+---
+source: tui/src/app/workspace_context_turn_tests.rs
+expression: rendered
+---
+■ Medical context handoff was held: remove inline attachments, skills, and mentions, then select audited files in the context packet.

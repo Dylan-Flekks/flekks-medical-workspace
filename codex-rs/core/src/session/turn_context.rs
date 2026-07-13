@@ -2,6 +2,7 @@ use super::*;
 use crate::environment_selection::TurnEnvironmentSnapshot;
 use crate::shell_snapshot::ShellSnapshotFile;
 use codex_core_skills::HostSkillsSnapshot;
+use codex_core_skills::SkillLoadOutcome;
 use codex_file_system::FileSystemSandboxContext;
 use codex_model_provider::SharedModelProvider;
 use codex_model_provider::create_model_provider;
@@ -590,7 +591,9 @@ impl Session {
         sub_id: String,
         updates: SessionSettingsUpdate,
     ) -> CodexResult<Arc<TurnContext>> {
-        let notify_config_contributors = !self.services.extensions.config_contributors().is_empty();
+        let notify_config_contributors = updates.model_tool_mode
+            != Some(ModelToolMode::WorkspaceContextOnly)
+            && !self.services.extensions.config_contributors().is_empty();
         let update_result: CodexResult<_> = {
             let mut state = self.state.lock().await;
             match state.session_configuration.clone().apply(&updates) {
@@ -729,26 +732,31 @@ impl Session {
                 .or(model_info.multi_agent_version)
                 .unwrap_or_else(|| per_turn_config.multi_agent_version_from_features()),
         };
-        let plugins_input = per_turn_config.plugins_config_input();
-        let plugin_outcome = self
-            .services
-            .plugins_manager
-            .plugins_for_config(&plugins_input)
-            .await;
-        let effective_skill_roots = plugin_outcome.effective_plugin_skill_roots();
-        let plugin_skill_snapshots = self
-            .services
-            .plugins_manager
-            .plugin_skill_snapshots_for_config(&plugins_input);
-        let skills_input = skills_load_input_from_config(&per_turn_config, effective_skill_roots)
-            .with_plugin_skill_snapshots(plugin_skill_snapshots);
-        let fs = primary_turn_environment
-            .map(|turn_environment| turn_environment.environment.get_filesystem());
-        let skills_snapshot = self
-            .services
-            .skills_service
-            .snapshot_for_config(&skills_input, fs)
-            .await;
+        let skills_snapshot =
+            if session_configuration.model_tool_mode == ModelToolMode::WorkspaceContextOnly {
+                HostSkillsSnapshot::new(Arc::new(SkillLoadOutcome::default()))
+            } else {
+                let plugins_input = per_turn_config.plugins_config_input();
+                let plugin_outcome = self
+                    .services
+                    .plugins_manager
+                    .plugins_for_config(&plugins_input)
+                    .await;
+                let effective_skill_roots = plugin_outcome.effective_plugin_skill_roots();
+                let plugin_skill_snapshots = self
+                    .services
+                    .plugins_manager
+                    .plugin_skill_snapshots_for_config(&plugins_input);
+                let skills_input =
+                    skills_load_input_from_config(&per_turn_config, effective_skill_roots)
+                        .with_plugin_skill_snapshots(plugin_skill_snapshots);
+                let fs = primary_turn_environment
+                    .map(|turn_environment| turn_environment.environment.get_filesystem());
+                self.services
+                    .skills_service
+                    .snapshot_for_config(&skills_input, fs)
+                    .await
+            };
         let mut turn_context: TurnContext = Self::make_turn_context(
             self.thread_id(),
             self.session_id(),
@@ -784,10 +792,11 @@ impl Session {
             turn_context.final_output_json_schema = final_schema;
         }
         let turn_context = Arc::new(turn_context);
-        if turn_context
-            .environments
-            .single_local_environment_cwd()
-            .is_some()
+        if turn_context.model_tool_mode != ModelToolMode::WorkspaceContextOnly
+            && turn_context
+                .environments
+                .single_local_environment_cwd()
+                .is_some()
         {
             turn_context.turn_metadata_state.spawn_git_enrichment_task();
         }

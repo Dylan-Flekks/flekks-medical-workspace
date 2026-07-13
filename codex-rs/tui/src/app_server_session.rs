@@ -4,6 +4,7 @@
 //! request/response plumbing out of `App` and `ChatWidget`.
 
 mod fs;
+mod turn_start;
 mod workspace_coverage;
 mod workspace_drafts;
 
@@ -106,7 +107,6 @@ use codex_app_server_protocol::ThreadUnsubscribeResponse;
 use codex_app_server_protocol::Turn;
 use codex_app_server_protocol::TurnInterruptParams;
 use codex_app_server_protocol::TurnInterruptResponse;
-use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::TurnStartResponse;
 use codex_app_server_protocol::TurnSteerParams;
 use codex_app_server_protocol::TurnSteerResponse;
@@ -202,6 +202,7 @@ use codex_app_server_protocol::WorkspaceTaskUpsertResponse;
 use codex_otel::TelemetryAuthMode;
 use codex_protocol::ThreadId;
 use codex_protocol::approvals::GuardianAssessmentEvent;
+use codex_protocol::config_types::ModelToolMode;
 use codex_protocol::config_types::SERVICE_TIER_DEFAULT_REQUEST_VALUE;
 use codex_protocol::models::ActivePermissionProfile;
 use codex_protocol::models::PermissionProfile;
@@ -218,6 +219,8 @@ use color_eyre::eyre::Result;
 use color_eyre::eyre::WrapErr;
 use std::collections::HashMap;
 use std::path::PathBuf;
+
+use self::turn_start::TurnStartRequest;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -1342,37 +1345,29 @@ impl AppServerSession {
         collaboration_mode: Option<codex_protocol::config_types::CollaborationMode>,
         personality: Option<codex_protocol::config_types::Personality>,
         output_schema: Option<serde_json::Value>,
+        model_tool_mode: Option<ModelToolMode>,
     ) -> Result<TurnStartResponse> {
         let request_id = self.next_request_id();
-        let (sandbox_policy, permissions) =
-            turn_permissions_overrides(permissions_override, cwd.as_path());
+        let params = TurnStartRequest {
+            thread_id,
+            items,
+            cwd,
+            approval_policy,
+            approvals_reviewer,
+            permissions_override,
+            workspace_roots,
+            model,
+            effort,
+            summary,
+            service_tier,
+            collaboration_mode,
+            personality,
+            output_schema,
+            model_tool_mode,
+        }
+        .into_params();
         self.client
-            .request_typed(ClientRequest::TurnStart {
-                request_id,
-                params: TurnStartParams {
-                    thread_id: thread_id.to_string(),
-                    client_user_message_id: None,
-                    input: items,
-                    responsesapi_client_metadata: None,
-                    additional_context: None,
-                    environments: None,
-                    cwd: Some(cwd),
-                    runtime_workspace_roots: Some(workspace_roots.to_vec()),
-                    approval_policy: Some(approval_policy),
-                    approvals_reviewer: Some(approvals_reviewer.into()),
-                    sandbox_policy,
-                    permissions,
-                    model: Some(model),
-                    service_tier,
-                    effort,
-                    summary,
-                    personality,
-                    output_schema,
-                    model_tool_mode: None,
-                    collaboration_mode,
-                    multi_agent_mode: None,
-                },
-            })
+            .request_typed(ClientRequest::TurnStart { request_id, params })
             .await
             .wrap_err("turn/start failed in TUI")
     }

@@ -1,9 +1,9 @@
 mod chart_changeset;
+mod client_draft;
 mod coach;
 mod coverage;
 mod coverage_actions;
 mod coverage_render;
-mod client_draft;
 mod footer;
 mod patient_admin_fields;
 mod patient_admin_input;
@@ -47,29 +47,19 @@ use crate::workspace_context_assembly::edi_transaction_label;
 use crate::workspace_context_assembly::edi_transaction_label_from_text;
 use crate::workspace_context_assembly::provider_file_reference_summary;
 use crate::workspace_context_assembly::provider_reviewed_text_summary;
-use crate::workspace_editor::WorkspaceEditor;
 use crate::workspace_draft::MedicalWorkspaceWorkingDraftInput;
 use crate::workspace_draft::MedicalWorkspaceWorkingDraftV1;
 use crate::workspace_draft::WorkspaceDraftError;
+use crate::workspace_editor::WorkspaceEditor;
 use chart_changeset::ChartChangesetPurpose;
 use chart_changeset::ChartChangesetReviewState;
 use chart_changeset::PendingChartChangeset;
+use chrono::DateTime;
+use chrono::Utc;
 use client_draft::ClientDraft;
 use coach::WorkspaceCoachAdvice;
 use coach::WorkspaceCoachState;
 use coach::workspace_coach_advice;
-use coverage::CARD_VERIFICATION_ENTRY_HELP;
-use coverage::CardVerificationDraft;
-use coverage::CoverageDraft;
-use coverage::CoverageField;
-use coverage::CoveragePriority;
-use coverage::billing_readiness_label;
-use coverage::billing_readiness_summary;
-use coverage::verification_subject_label;
-use coverage_actions::coverage_draft_has_input;
-use coverage_render::CardVerificationField;
-use chrono::DateTime;
-use chrono::Utc;
 use codex_app_server_client::TypedRequestError;
 use codex_app_server_protocol::WorkspaceAgentResult;
 use codex_app_server_protocol::WorkspaceAgentResultCreateParams;
@@ -129,6 +119,16 @@ use codex_app_server_protocol::WorkspaceTaskStatus;
 use codex_app_server_protocol::WorkspaceTaskStatusUpdateParams;
 use codex_app_server_protocol::WorkspaceTaskUpsertParams;
 use color_eyre::eyre::Result;
+use coverage::CARD_VERIFICATION_ENTRY_HELP;
+use coverage::CardVerificationDraft;
+use coverage::CoverageDraft;
+use coverage::CoverageField;
+use coverage::CoveragePriority;
+use coverage::billing_readiness_label;
+use coverage::billing_readiness_summary;
+use coverage::verification_subject_label;
+use coverage_actions::coverage_draft_has_input;
+use coverage_render::CardVerificationField;
 use crossterm::cursor::SetCursorStyle;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
@@ -138,13 +138,13 @@ use footer::MedicalKeyContext;
 use footer::compose_legacy_footer;
 use footer::compose_medical_footer;
 use footer::compose_mode_footer;
+use image::GenericImageView;
+use image::imageops::FilterType;
 use patient_admin_fields::DemographicsField;
 use patient_admin_fields::PatientAdminEditMode;
 use patient_admin_fields::PatientAdminField;
 use patient_admin_metadata::patient_admin_metadata_for_client;
 use patient_admin_metadata::patient_admin_metadata_for_draft;
-use image::GenericImageView;
-use image::imageops::FilterType;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Constraint;
 use ratatui::layout::Direction;
@@ -2122,9 +2122,7 @@ impl ChartDraftSnapshot {
             dashboard.draft_note.current_revision = current_revision;
             dashboard.select_encounter_for_active_note();
         }
-        dashboard
-            .note_body_editor
-            .reset(&dashboard.draft_note.body);
+        dashboard.note_body_editor.reset(&dashboard.draft_note.body);
     }
 }
 
@@ -2546,8 +2544,7 @@ impl WorkspaceDashboard {
                 .iter()
                 .find(|coverage| coverage.id == coverage_id)
                 .ok_or_else(|| {
-                    "The loaded coverage version is unavailable; reload before saving."
-                        .to_string()
+                    "The loaded coverage version is unavailable; reload before saving.".to_string()
                 })?;
             let canonical_upsert = WorkspaceCoverageUpsertParams::from(
                 &CoverageDraft::try_from(canonical).map_err(|error| error.to_string())?,
@@ -8027,10 +8024,9 @@ impl WorkspaceDashboard {
             WorkspaceFocus::NoteTitle => {
                 Some(cursor_at_text_end(inner, 0, 0, &self.draft_note.title))
             }
-            WorkspaceFocus::NoteBody => {
-                self.note_body_editor
-                    .cursor_pos(&self.draft_note.body, inner)
-            }
+            WorkspaceFocus::NoteBody => self
+                .note_body_editor
+                .cursor_pos(&self.draft_note.body, inner),
             WorkspaceFocus::Workflow => self.cursor_pos_in_workflow_inner(inner),
             WorkspaceFocus::Agent => self.cursor_pos_in_agent_workpane_inner(inner),
             WorkspaceFocus::Clients | WorkspaceFocus::Notes | WorkspaceFocus::PatientFiles => None,
@@ -8039,10 +8035,8 @@ impl WorkspaceDashboard {
 
     fn cursor_pos_in_agent_workpane_inner(&self, inner: Rect) -> Option<(u16, u16)> {
         if self.agent_request.is_active() {
-            let (_, _, editor_rect) = self.agent_request_composer_rects(
-                inner,
-                /*compact_summary*/ inner.height <= 1,
-            )?;
+            let (_, _, editor_rect) = self
+                .agent_request_composer_rects(inner, /*compact_summary*/ inner.height <= 1)?;
             return self
                 .agent_request_editor
                 .cursor_pos(&self.agent_request.body, editor_rect);
@@ -8185,7 +8179,8 @@ impl WorkspaceDashboard {
             .data;
         self.coverages.sort_by_key(|coverage| coverage.priority);
         self.load_coverage_draft(coverage_priority);
-        self.reload_coverage_verification_history(app_server).await?;
+        self.reload_coverage_verification_history(app_server)
+            .await?;
         self.notes = app_server.workspace_note_list(client_id).await?.notes;
         self.note_index = preferred_note_id
             .as_deref()
@@ -9152,7 +9147,9 @@ impl WorkspaceDashboard {
                     .iter()
                     .any(coverage_card_document_is_eligible)
                 {
-                    Some("Add a present, hashed local insurance-card reference before comparing it.")
+                    Some(
+                        "Add a present, hashed local insurance-card reference before comparing it.",
+                    )
                 } else {
                     None
                 }
@@ -11287,9 +11284,7 @@ impl WorkspaceDashboard {
             self.agent_workpane_active_lines()
         };
         let composer = self.agent_request_composer_rects(inner, compact_summary);
-        let guidance_rect = composer
-            .map(|(guidance, _, _)| guidance)
-            .unwrap_or(inner);
+        let guidance_rect = composer.map(|(guidance, _, _)| guidance).unwrap_or(inner);
         let visual_line_count = workflow_visual_line_count(&lines, guidance_rect.width);
         let max_scroll = visual_line_count
             .saturating_sub(guidance_rect.height as usize)
@@ -11340,7 +11335,9 @@ impl WorkspaceDashboard {
             return None;
         }
 
-        let logical_lines = text_field_display_lines(&self.agent_request.body).len().max(1);
+        let logical_lines = text_field_display_lines(&self.agent_request.body)
+            .len()
+            .max(1);
         let desired_editor_height = logical_lines.saturating_add(1).clamp(3, 8) as u16;
         let editor_height = if inner.height >= 8 {
             desired_editor_height.min(inner.height.saturating_sub(5))
@@ -11858,12 +11855,10 @@ impl WorkspaceDashboard {
         }
         lines.extend([
             workflow_header_line("Local Coach", WorkflowTone::Ready),
-            Line::from(vec![
-                Span::styled(
-                    format!("  {}", advice.title),
-                    Style::default().add_modifier(Modifier::BOLD),
-                ),
-            ]),
+            Line::from(vec![Span::styled(
+                format!("  {}", advice.title),
+                Style::default().add_modifier(Modifier::BOLD),
+            )]),
             Line::from(format!("  {}", advice.detail)),
             workflow_action_hint_line(format!("next: {}", advice.next)),
             Line::from(Span::styled(
@@ -18577,11 +18572,7 @@ mod tests {
         dashboard.draft_client.contact_notes =
             "Call the fake emergency contact before scheduling.".to_string();
         for viewport in [Rect::new(0, 0, 80, 20), Rect::new(0, 0, 120, 32)] {
-            let rendered = render_dashboard_lines_at(
-                &dashboard,
-                viewport.width,
-                viewport.height,
-            );
+            let rendered = render_dashboard_lines_at(&dashboard, viewport.width, viewport.height);
             assert!(
                 rendered.contains("> Contact notes:"),
                 "selected long-form field should be scrolled into view at {viewport:?}:\n{rendered}"
@@ -18591,9 +18582,7 @@ mod tests {
                 .expect("selected contact field should expose a cursor");
             let editor = match WorkspaceLayoutMode::for_area(viewport) {
                 WorkspaceLayoutMode::Medium => inner_rect(MedicalMediumAreas::new(viewport).main),
-                WorkspaceLayoutMode::Compact => {
-                    inner_rect(MedicalCompactAreas::new(viewport).body)
-                }
+                WorkspaceLayoutMode::Compact => inner_rect(MedicalCompactAreas::new(viewport).body),
                 mode => panic!("unexpected test layout {mode:?}"),
             };
             assert!(rect_contains(editor, cursor));
@@ -18681,8 +18670,7 @@ mod tests {
         );
         tertiary.payer_name = Some("Fake Tertiary".to_string());
         dashboard.coverages = vec![primary, secondary, tertiary];
-        dashboard.coverage_draft =
-            CoverageDraft::new("client-1", CoveragePriority::Primary);
+        dashboard.coverage_draft = CoverageDraft::new("client-1", CoveragePriority::Primary);
         dashboard.patient_admin_edit_mode = None;
         dashboard.focus = WorkspaceFocus::Demographics;
         let summary = render_dashboard_lines_at(&dashboard, 220, 40);
@@ -18786,14 +18774,21 @@ mod tests {
 
         press_consumed(&mut dashboard, KeyCode::Char('x'));
         assert_eq!(dashboard.draft_note.body, original_body);
-        assert!(dashboard.status.contains("Resolve the recoverable local draft"));
+        assert!(
+            dashboard
+                .status
+                .contains("Resolve the recoverable local draft")
+        );
 
         press_consumed(&mut dashboard, KeyCode::Tab);
         assert_eq!(dashboard.focus, WorkspaceFocus::Workflow);
 
         let mut escape = medical_recursive_base_dashboard();
         escape.set_draft_recovery_available(true);
-        assert_eq!(press_key(&mut escape, KeyCode::Esc), WorkspaceDashboardAction::Close);
+        assert_eq!(
+            press_key(&mut escape, KeyCode::Esc),
+            WorkspaceDashboardAction::Close
+        );
 
         let mut commands = medical_recursive_base_dashboard();
         commands.set_draft_recovery_available(true);
@@ -20201,11 +20196,7 @@ mod tests {
                 "cursor {cursor:?} should stay inside {editor:?} at {viewport:?}"
             );
 
-            let rendered = render_dashboard_lines_at(
-                &dashboard,
-                viewport.width,
-                viewport.height,
-            );
+            let rendered = render_dashboard_lines_at(&dashboard, viewport.width, viewport.height);
             let coach_row = rendered
                 .lines()
                 .position(|line| line.contains("Local Coach"))
@@ -22999,7 +22990,10 @@ mod tests {
         press_consumed(&mut dashboard, KeyCode::Up);
         press_consumed(&mut dashboard, KeyCode::Char('X'));
 
-        assert_eq!(dashboard.draft_note.body, format!("{}X{}", "a".repeat(12), "a".repeat(78)));
+        assert_eq!(
+            dashboard.draft_note.body,
+            format!("{}X{}", "a".repeat(12), "a".repeat(78))
+        );
         insta::assert_snapshot!(
             "medical_workspace_multiline_note_editor_80x20",
             render_dashboard_lines_at(&dashboard, 80, 20)
@@ -23488,7 +23482,10 @@ mod tests {
             .lines()
             .position(|line| line.contains("Ask Agent"))
             .expect("pinned Ask Agent composer should render");
-        assert!(coach_row < composer_row, "guidance should precede the composer");
+        assert!(
+            coach_row < composer_row,
+            "guidance should precede the composer"
+        );
         let viewport = Rect::new(0, 0, 160, 45);
         let agent_inner = inner_rect(MedicalLargeAreas::new(viewport).agent);
         let (_, _, editor_rect) = dashboard

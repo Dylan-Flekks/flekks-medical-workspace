@@ -6398,6 +6398,7 @@ fn medical_workspace_context_bridge_inserts_structured_prompt_and_returns_to_age
 -> Result<()> {
     run_workspace_dashboard_runtime_test(Box::pin(async {
         let mut app = make_test_app().await;
+        app.active_thread_id = Some(ThreadId::new());
         let codex_home = tempdir()?;
         app.config.codex_home = codex_home.path().to_path_buf().abs();
         app.config.sqlite_home = codex_home.path().to_path_buf();
@@ -6450,9 +6451,121 @@ fn medical_workspace_context_bridge_inserts_structured_prompt_and_returns_to_age
 }
 
 #[test]
+fn medical_workspace_context_bridge_rejects_without_active_thread() -> Result<()> {
+    run_workspace_dashboard_runtime_test(Box::pin(async {
+        let mut app = make_test_app().await;
+        let codex_home = tempdir()?;
+        app.config.codex_home = codex_home.path().to_path_buf().abs();
+        app.config.sqlite_home = codex_home.path().to_path_buf();
+        let mut app_server =
+            Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
+        let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+        dashboard.load(&mut app_server).await?;
+        dashboard.set_context_for_tests(
+            "No Thread Testpatient",
+            "Visit note",
+            "Synthetic context that must not start a run.",
+        );
+        dashboard.save(&mut app_server).await?;
+        let client_id = dashboard
+            .client_id_for_tests()
+            .expect("saved client")
+            .to_string();
+        let note_id = dashboard.note_id_for_tests().map(str::to_string);
+        app.workspace_dashboard = Some(dashboard);
+        app.workspace_dashboard_visible = true;
+
+        app.send_workspace_context_to_agent(&mut app_server).await?;
+
+        assert!(app.workspace_dashboard_active());
+        assert!(app.pending_workspace_agent_capture.is_none());
+        assert!(app.chat_widget.composer_text_with_pending().is_empty());
+        assert_eq!(
+            app.workspace_dashboard
+                .as_ref()
+                .expect("medical dashboard remains open")
+                .context_packet_count_for_tests(),
+            0
+        );
+        let runs = app_server
+            .workspace_agent_run_list(WorkspaceAgentRunListParams {
+                client_id,
+                note_id,
+                packet_id: None,
+                limit: Some(10),
+            })
+            .await?
+            .runs;
+        assert!(runs.is_empty());
+        app_server.shutdown().await?;
+        Ok(())
+    }))
+}
+
+#[test]
+fn medical_workspace_context_bridge_rejects_preexisting_composer_before_packet_or_run() -> Result<()>
+{
+    run_workspace_dashboard_runtime_test(Box::pin(async {
+        let mut app = make_test_app().await;
+        app.active_thread_id = Some(ThreadId::new());
+        let codex_home = tempdir()?;
+        app.config.codex_home = codex_home.path().to_path_buf().abs();
+        app.config.sqlite_home = codex_home.path().to_path_buf();
+        let mut app_server =
+            Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
+        let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+        dashboard.load(&mut app_server).await?;
+        dashboard.set_context_for_tests(
+            "Composer Guard Testpatient",
+            "Visit note",
+            "Synthetic context that must not create a packet or run.",
+        );
+        dashboard.save(&mut app_server).await?;
+        let client_id = dashboard
+            .client_id_for_tests()
+            .expect("saved client")
+            .to_string();
+        let note_id = dashboard.note_id_for_tests().map(str::to_string);
+        app.workspace_dashboard = Some(dashboard);
+        app.workspace_dashboard_visible = true;
+        app.chat_widget
+            .set_composer_text("unrelated draft".to_string(), Vec::new(), Vec::new());
+
+        app.send_workspace_context_to_agent(&mut app_server).await?;
+
+        assert!(app.workspace_dashboard_active());
+        assert!(app.pending_workspace_agent_capture.is_none());
+        assert_eq!(
+            app.chat_widget.composer_text_with_pending(),
+            "unrelated draft"
+        );
+        assert_eq!(
+            app.workspace_dashboard
+                .as_ref()
+                .expect("medical dashboard remains open")
+                .context_packet_count_for_tests(),
+            0
+        );
+        let runs = app_server
+            .workspace_agent_run_list(WorkspaceAgentRunListParams {
+                client_id,
+                note_id,
+                packet_id: None,
+                limit: Some(10),
+            })
+            .await?
+            .runs;
+        assert!(runs.is_empty());
+        app_server.shutdown().await?;
+        Ok(())
+    }))
+}
+
+#[test]
 fn medical_workspace_first_eval_round_trip_stays_packet_scoped_and_review_pending() -> Result<()> {
     run_workspace_dashboard_runtime_test(Box::pin(async {
         let mut app = make_test_app().await;
+        app.active_thread_id = Some(ThreadId::new());
         let codex_home = tempdir()?;
         app.config.codex_home = codex_home.path().to_path_buf().abs();
         app.config.sqlite_home = codex_home.path().to_path_buf();
@@ -6829,6 +6942,7 @@ fn medical_workspace_first_eval_round_trip_stays_packet_scoped_and_review_pendin
 fn medical_workspace_second_handoff_cancels_and_replaces_pending_run() -> Result<()> {
     run_workspace_dashboard_runtime_test(Box::pin(async {
         let mut app = make_test_app().await;
+        app.active_thread_id = Some(ThreadId::new());
         let codex_home = tempdir()?;
         app.config.codex_home = codex_home.path().to_path_buf().abs();
         app.config.sqlite_home = codex_home.path().to_path_buf();
@@ -6939,6 +7053,85 @@ fn medical_workspace_second_handoff_cancels_and_replaces_pending_run() -> Result
             .next()
             .map(|run| run.status);
         assert_eq!(replacement_status.as_deref(), Some("canceled"));
+        app_server.shutdown().await?;
+        Ok(())
+    }))
+}
+
+#[test]
+fn medical_workspace_pending_handoff_does_not_replace_edited_composer() -> Result<()> {
+    run_workspace_dashboard_runtime_test(Box::pin(async {
+        let mut app = make_test_app().await;
+        app.active_thread_id = Some(ThreadId::new());
+        let codex_home = tempdir()?;
+        app.config.codex_home = codex_home.path().to_path_buf().abs();
+        app.config.sqlite_home = codex_home.path().to_path_buf();
+        let mut app_server =
+            Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
+        let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+        dashboard.load(&mut app_server).await?;
+        dashboard.set_context_for_tests(
+            "Edited Composer Testpatient",
+            "Daily note",
+            "Synthetic draft for pending handoff composer coverage.",
+        );
+        dashboard.save(&mut app_server).await?;
+        app.workspace_dashboard = Some(dashboard);
+        app.workspace_dashboard_visible = true;
+
+        app.send_workspace_context_to_agent(&mut app_server).await?;
+        let packet = app
+            .workspace_dashboard
+            .as_ref()
+            .and_then(WorkspaceDashboard::first_context_packet_for_tests)
+            .expect("first submitted packet")
+            .clone();
+        let run_id = app
+            .pending_workspace_agent_capture
+            .as_ref()
+            .expect("first pending capture")
+            .run_id()
+            .to_string();
+        app.chat_widget.set_composer_text(
+            "unrelated edited draft".to_string(),
+            Vec::new(),
+            Vec::new(),
+        );
+        app.workspace_dashboard_visible = true;
+
+        app.send_workspace_context_to_agent(&mut app_server).await?;
+
+        assert!(app.workspace_dashboard_active());
+        assert_eq!(
+            app.chat_widget.composer_text_with_pending(),
+            "unrelated edited draft"
+        );
+        assert_eq!(
+            app.pending_workspace_agent_capture
+                .as_ref()
+                .expect("original capture remains pending")
+                .run_id(),
+            run_id
+        );
+        assert_eq!(
+            app.workspace_dashboard
+                .as_ref()
+                .expect("medical dashboard remains open")
+                .context_packet_count_for_tests(),
+            1
+        );
+        let runs = app_server
+            .workspace_agent_run_list(WorkspaceAgentRunListParams {
+                client_id: packet.client_id,
+                note_id: packet.note_id,
+                packet_id: None,
+                limit: Some(10),
+            })
+            .await?
+            .runs;
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].id, run_id);
+        assert_eq!(runs[0].status, "running");
         app_server.shutdown().await?;
         Ok(())
     }))
@@ -7852,6 +8045,7 @@ fn workspace_context_packet_replay_stays_historical_after_daily_chart_changes() 
         app_server
             .workspace_client_upsert(WorkspaceClientUpsertParams {
                 id: Some(patient.id.clone()),
+                expected_version: Some(patient.version.clone()),
                 display_name: "Riley PacketHistory".to_string(),
                 preferred_name: Some("Riley".to_string()),
                 date_of_birth: Some("1972-04-05".to_string()),

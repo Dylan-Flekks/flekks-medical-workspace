@@ -9,6 +9,7 @@ use crate::tools::context::ToolCallSource;
 use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolOutput;
 use crate::tools::context::ToolPayload;
+use codex_protocol::config_types::ModelToolMode;
 use codex_rollout_trace::ExecutionStatus;
 use codex_rollout_trace::ToolDispatchInvocation;
 use codex_rollout_trace::ToolDispatchPayload;
@@ -18,17 +19,22 @@ use codex_rollout_trace::ToolDispatchTraceContext;
 
 /// Keeps registry early-return paths paired with trace end events.
 pub(crate) struct ToolDispatchTrace {
-    context: ToolDispatchTraceContext,
+    context: Option<ToolDispatchTraceContext>,
 }
 
 impl ToolDispatchTrace {
     pub(crate) fn start(invocation: &ToolInvocation) -> Self {
+        if invocation.turn.model_tool_mode == ModelToolMode::WorkspaceContextOnly {
+            return Self { context: None };
+        }
         let context = invocation
             .session
             .services
             .rollout_thread_trace
             .start_tool_dispatch_trace(|| tool_dispatch_invocation(invocation));
-        Self { context }
+        Self {
+            context: Some(context),
+        }
     }
 
     pub(crate) fn record_completed(
@@ -38,7 +44,10 @@ impl ToolDispatchTrace {
         payload: &ToolPayload,
         result: &dyn ToolOutput,
     ) {
-        if !self.context.is_enabled() {
+        let Some(context) = self.context.as_ref() else {
+            return;
+        };
+        if !context.is_enabled() {
             return;
         }
 
@@ -51,11 +60,13 @@ impl ToolDispatchTrace {
         } else {
             ExecutionStatus::Failed
         };
-        self.context.record_completed(status, result_payload);
+        context.record_completed(status, result_payload);
     }
 
     pub(crate) fn record_failed(&self, error: &FunctionCallError) {
-        self.context.record_failed(error);
+        if let Some(context) = self.context.as_ref() {
+            context.record_failed(error);
+        }
     }
 }
 

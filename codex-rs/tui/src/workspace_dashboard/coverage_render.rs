@@ -1,5 +1,5 @@
-use super::*;
 use super::patient_admin_render::patient_admin_editor_field_line;
+use super::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum CardVerificationField {
@@ -159,7 +159,11 @@ impl WorkspaceDashboard {
                     WorkspaceCoverageMatchResult::Match => "MATCH",
                     WorkspaceCoverageMatchResult::Mismatch => "MISMATCH",
                 };
-                let stale = if verification.is_stale { " · stale" } else { "" };
+                let stale = if verification.is_stale {
+                    " · stale"
+                } else {
+                    ""
+                };
                 let mismatches = if verification.mismatch_fields.is_empty() {
                     String::new()
                 } else {
@@ -183,10 +187,7 @@ impl WorkspaceDashboard {
     }
 
     fn coverage_priority_tabs_line(&self) -> Line<'static> {
-        let mut spans = vec![Span::styled(
-            "Priority: ",
-            Style::default().fg(Color::Gray),
-        )];
+        let mut spans = vec![Span::styled("Priority: ", Style::default().fg(Color::Gray))];
         for (index, priority) in CoveragePriority::ALL.into_iter().enumerate() {
             if index > 0 {
                 spans.push(Span::raw("  "));
@@ -245,8 +246,9 @@ impl WorkspaceDashboard {
             let value = self.card_verification_field_value(field);
             let empty_label = match field {
                 CardVerificationField::ComparedSubject => "beneficiary",
-                CardVerificationField::PrintedMiddleName
-                | CardVerificationField::PrintedSuffix => "optional",
+                CardVerificationField::PrintedMiddleName | CardVerificationField::PrintedSuffix => {
+                    "optional"
+                }
                 _ => "required",
             };
             lines.push(patient_admin_editor_field_line(
@@ -270,10 +272,7 @@ impl WorkspaceDashboard {
         lines
     }
 
-    pub(super) fn card_verification_field_value(
-        &self,
-        field: CardVerificationField,
-    ) -> String {
+    pub(super) fn card_verification_field_value(&self, field: CardVerificationField) -> String {
         let Some(draft) = self.card_verification_draft.as_ref() else {
             return String::new();
         };
@@ -292,9 +291,7 @@ impl WorkspaceDashboard {
     }
 }
 
-pub(super) fn billing_readiness_short_label(
-    readiness: WorkspaceBillingReadiness,
-) -> &'static str {
+pub(super) fn billing_readiness_short_label(readiness: WorkspaceBillingReadiness) -> &'static str {
     match readiness {
         WorkspaceBillingReadiness::Match => "match",
         WorkspaceBillingReadiness::Mismatch => "mismatch",

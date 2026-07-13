@@ -2,6 +2,8 @@
 
 use std::collections::HashSet;
 
+use codex_protocol::models::local_image_label_text;
+
 use super::user_messages::remap_colliding_paste_placeholders;
 use super::*;
 
@@ -126,10 +128,15 @@ impl ChatWidget {
     }
 
     pub(crate) fn enqueue_rejected_steer(&mut self) -> bool {
+        if self.move_pending_steer_to_rejected() {
+            return true;
+        }
+        tracing::warn!("received active-turn-not-steerable error without a matching pending steer");
+        false
+    }
+
+    fn move_pending_steer_to_rejected(&mut self) -> bool {
         let Some(pending_steer) = self.input_queue.pending_steers.pop_front() else {
-            tracing::warn!(
-                "received active-turn-not-steerable error without a matching pending steer"
-            );
             return false;
         };
         self.input_queue
@@ -140,6 +147,63 @@ impl ChatWidget {
             .push_back(pending_steer.history_record);
         self.refresh_pending_input_preview();
         true
+    }
+
+    /// Restore an app-level user turn when its pending-steer bookkeeping was unavailable.
+    ///
+    /// Normal running-turn submissions move from the pending-steer queue to the rejected queue.
+    /// The composer fallback keeps a restricted medical handoff recoverable if app-server
+    /// active-turn state arrives before the matching ChatWidget lifecycle update.
+    pub(crate) fn preserve_rejected_user_turn(&mut self, items: &[UserInput]) {
+        if self.move_pending_steer_to_rejected() {
+            return;
+        }
+        self.input_queue.user_turn_pending_start = false;
+        let display = Self::user_message_display_from_inputs(items);
+        let mut text = display.message;
+        let mut text_elements = display.text_elements;
+        let remote_image_count = display.remote_image_urls.len();
+        for idx in 0..display.local_images.len() {
+            let placeholder = local_image_label_text(remote_image_count + idx + 1);
+            if text_elements
+                .iter()
+                .any(|element| element.placeholder(&text) == Some(placeholder.as_str()))
+            {
+                continue;
+            }
+            let start = text.find(&placeholder).unwrap_or_else(|| {
+                if text
+                    .chars()
+                    .last()
+                    .is_some_and(|character| !character.is_whitespace())
+                {
+                    text.push(' ');
+                }
+                let start = text.len();
+                text.push_str(&placeholder);
+                start
+            });
+            text_elements.push(TextElement::new(
+                (start..start + placeholder.len()).into(),
+                Some(placeholder),
+            ));
+        }
+        let local_images = display
+            .local_images
+            .into_iter()
+            .enumerate()
+            .map(|(idx, path)| LocalImageAttachment {
+                placeholder: local_image_label_text(remote_image_count + idx + 1),
+                path,
+            })
+            .collect();
+        self.restore_user_message_to_composer(UserMessage {
+            text,
+            local_images,
+            remote_image_urls: display.remote_image_urls,
+            text_elements,
+            mention_bindings: Vec::new(),
+        });
     }
 
     /// Handle a turn aborted due to user interrupt (Esc), budget exhaustion,

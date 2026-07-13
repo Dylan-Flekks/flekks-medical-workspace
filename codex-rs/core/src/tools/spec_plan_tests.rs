@@ -690,12 +690,12 @@ async fn environment_tools_follow_the_step_context() {
 }
 
 #[tokio::test]
-async fn workspace_context_read_follows_host_context() {
+async fn workspace_context_read_is_absent_from_every_normal_tool_plan() {
     let feature_disabled = probe(|turn| {
         set_feature(turn, Feature::Goals, /*enabled*/ false);
     })
     .await;
-    feature_disabled.assert_visible_contains(&["workspace_context_read"]);
+    feature_disabled.assert_visible_lacks(&["workspace_context_read"]);
 
     let host_disabled = probe(|turn| {
         let mut config = (*turn.config).clone();
@@ -706,7 +706,7 @@ async fn workspace_context_read_follows_host_context() {
     host_disabled.assert_visible_lacks(&["workspace_context_read"]);
 
     let enabled = probe(|_| {}).await;
-    enabled.assert_visible_contains(&["workspace_context_read"]);
+    enabled.assert_visible_lacks(&["workspace_context_read"]);
 
     let review_thread = probe(|turn| {
         turn.session_source = SessionSource::SubAgent(SubAgentSource::Review);

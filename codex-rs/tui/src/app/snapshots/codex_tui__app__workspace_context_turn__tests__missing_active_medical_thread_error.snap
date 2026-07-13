@@ -1,0 +1,5 @@
+---
+source: tui/src/app/workspace_context_turn_tests.rs
+expression: rendered
+---
+■ Medical context handoff needs an active Codex thread. Open or resume a thread, then submit the packet again.

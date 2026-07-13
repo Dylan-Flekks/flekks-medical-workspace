@@ -44,7 +44,16 @@ See [Agent proposal workflow](docs/agent-proposal-workflow.md),
 - Explicit packet selection for multimodal file metadata and human-reviewed excerpts.
 - Durable prepared packets, idempotent agent runs, immutable packet-source snapshots, review-pending results, revision-bound proposals, and append-only clinician decisions.
 - Patient-rooted atomic chart changesets with optimistic note revisions, opaque entity-version guards, durable idempotency receipts, exact-request retry, explicit note-only reconciliation, and fail-closed discard/reload for broader stale drafts.
-- A model-visible `workspace_context_read` tool restricted to a running packet ID and explicitly authorized visit-history or progress-note categories; returned note bodies are byte-bounded and local-path tokens are redacted before immutable snapshot hashing.
+- A one-turn medical handoff boundary that exposes only `workspace_context_read`, binds that reader
+  to the submitted run and its explicitly authorized visit-history or progress-note categories,
+  excludes prior-turn transcript data, skills, plugins, extension context, and hooks, then restores
+  the live harness's previous tool mode. The boundary requires a persisted root thread with an
+  exact packet-id, envelope-hash, run-id, thread, and model binding; it rejects inline attachments,
+  out-of-band additional context, steering, compaction, review, realtime startup, and shell-command
+  escape paths. The thread is permanently excluded from Codex memory generation, and a later
+  resume or fork fails closed to no-tool mode. Selected files therefore stay inside the audited
+  packet path. Returned note bodies are byte-bounded and local-path tokens are redacted before
+  immutable snapshot hashing; generic logs and telemetry receive redacted tool arguments/results.
 - Automatic packet-id/hash turn binding and review-pending capture of the final agent answer with thread/turn provenance.
 - A responsive three-zone Explorer / Patient Chart / Agent Work layout with Pending, History, and Audit views.
 - Conventional multiline note and Agent-request editing, plus deterministic local workflow hints

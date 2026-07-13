@@ -11,6 +11,7 @@ use codex_app_server_protocol::UserInput;
 use codex_config::types::ApprovalsReviewer;
 use codex_protocol::approvals::GuardianAssessmentEvent;
 use codex_protocol::config_types::CollaborationMode;
+use codex_protocol::config_types::ModelToolMode;
 use codex_protocol::config_types::Personality;
 use codex_protocol::config_types::ReasoningSummary as ReasoningSummaryConfig;
 use codex_protocol::config_types::WindowsSandboxLevel;
@@ -44,6 +45,7 @@ pub(crate) enum AppCommand {
         final_output_json_schema: Option<Value>,
         collaboration_mode: Option<CollaborationMode>,
         personality: Option<Personality>,
+        model_tool_mode: Option<ModelToolMode>,
     },
     OverrideTurnContext {
         cwd: Option<PathBuf>,
@@ -158,7 +160,19 @@ impl AppCommand {
             final_output_json_schema,
             collaboration_mode,
             personality,
+            model_tool_mode: None,
         }
+    }
+
+    pub(crate) fn set_user_turn_model_tool_mode(&mut self, mode: ModelToolMode) -> bool {
+        let Self::UserTurn {
+            model_tool_mode, ..
+        } = self
+        else {
+            return false;
+        };
+        *model_tool_mode = Some(mode);
+        true
     }
 
     #[allow(clippy::too_many_arguments)]

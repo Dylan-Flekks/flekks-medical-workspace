@@ -267,7 +267,7 @@ if payload.get("prompt") == {blocked_prompt_json}:
     Ok(())
 }
 
-fn write_session_start_and_user_prompt_submit_order_hooks(home: &Path) -> Result<()> {
+pub(super) fn write_session_start_and_user_prompt_submit_order_hooks(home: &Path) -> Result<()> {
     let session_start_script_path = home.join("session_start_order_hook.py");
     let user_prompt_submit_script_path = home.join("user_prompt_submit_order_hook.py");
     let log_path = home.join("hook_order_log.jsonl");
@@ -1038,7 +1038,7 @@ fn read_user_prompt_submit_hook_inputs(home: &Path) -> Result<Vec<serde_json::Va
         .collect()
 }
 
-fn read_hook_order_inputs(home: &Path) -> Result<Vec<serde_json::Value>> {
+pub(super) fn read_hook_order_inputs(home: &Path) -> Result<Vec<serde_json::Value>> {
     read_hook_inputs_from_log(home.join("hook_order_log.jsonl").as_path())
 }
 

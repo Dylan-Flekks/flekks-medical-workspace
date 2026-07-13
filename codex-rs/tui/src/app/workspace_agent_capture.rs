@@ -18,7 +18,9 @@ pub(super) struct PendingWorkspaceAgentCapture {
     client_id: String,
     note_id: Option<String>,
     context_envelope_sha256: String,
-    expected_thread_id: Option<String>,
+    expected_prompt: String,
+    model: String,
+    expected_thread_id: String,
     bound_thread_id: Option<String>,
     bound_turn_id: Option<String>,
     last_final_answer: Option<String>,
@@ -26,25 +28,37 @@ pub(super) struct PendingWorkspaceAgentCapture {
 }
 
 impl PendingWorkspaceAgentCapture {
-    pub(super) fn new(packet: &WorkspaceContextPacket, run: &WorkspaceAgentRun) -> Self {
-        Self {
+    pub(super) fn try_new(
+        packet: &WorkspaceContextPacket,
+        run: &WorkspaceAgentRun,
+        expected_prompt: String,
+    ) -> std::result::Result<Self, &'static str> {
+        let expected_thread_id = run
+            .source_thread_id
+            .clone()
+            .ok_or("medical agent run is missing its source thread")?;
+        let model = run
+            .model
+            .clone()
+            .ok_or("medical agent run is missing its model")?;
+        Ok(Self {
             packet_id: packet.id.clone(),
             run_id: run.id.clone(),
             client_id: packet.client_id.clone(),
             note_id: packet.note_id.clone(),
             context_envelope_sha256: packet.context_envelope_sha256.clone(),
-            expected_thread_id: run.source_thread_id.clone(),
+            expected_prompt,
+            model,
+            expected_thread_id,
             bound_thread_id: None,
             bound_turn_id: None,
             last_final_answer: None,
             last_legacy_message: None,
-        }
+        })
     }
 
-    fn thread_is_allowed(&self, thread_id: &str) -> bool {
-        self.expected_thread_id
-            .as_deref()
-            .is_none_or(|expected| expected == thread_id)
+    pub(super) fn thread_is_allowed(&self, thread_id: &str) -> bool {
+        self.expected_thread_id == thread_id
     }
 
     fn turn_is_bound(&self, thread_id: &str, turn_id: &str) -> bool {
@@ -54,6 +68,24 @@ impl PendingWorkspaceAgentCapture {
 
     pub(super) fn run_id(&self) -> &str {
         &self.run_id
+    }
+
+    pub(super) fn submission_matches(&self, content: &[UserInput]) -> bool {
+        matches!(
+            content,
+            [UserInput::Text {
+                text,
+                text_elements,
+            }] if text == &self.expected_prompt && text_elements.is_empty()
+        )
+    }
+
+    pub(super) fn prompt_matches(&self, prompt: &str) -> bool {
+        self.expected_prompt == prompt
+    }
+
+    pub(super) fn model_matches(&self, model: &str) -> bool {
+        self.model == model
     }
 
     fn reviewable_body(&self) -> Option<String> {
@@ -70,7 +102,7 @@ impl PendingWorkspaceAgentCapture {
             return;
         }
         if let ThreadItem::UserMessage { content, .. } = item
-            && user_content_matches_packet(content, &self.packet_id, &self.context_envelope_sha256)
+            && self.submission_matches(content)
         {
             self.bound_thread_id = Some(thread_id.to_string());
             self.bound_turn_id = Some(turn_id.to_string());
@@ -97,11 +129,7 @@ impl PendingWorkspaceAgentCapture {
             && matches!(
                 item,
                 ThreadItem::UserMessage { content, .. }
-                    if !user_content_matches_packet(
-                        content,
-                        &self.packet_id,
-                        &self.context_envelope_sha256,
-                    )
+                    if !self.submission_matches(content)
             )
     }
 }
@@ -209,9 +237,8 @@ impl App {
                     return Some(WorkspaceAgentCaptureOutcome::Failed {
                         pending,
                         status: "canceled",
-                        error_summary:
-                            "the submitted user message did not contain the prepared packet id and hash"
-                                .to_string(),
+                        error_summary: "the submitted user message did not exactly match the generated medical handoff prompt"
+                            .to_string(),
                     });
                 }
                 pending.observe_item(
@@ -230,9 +257,8 @@ impl App {
                     return Some(WorkspaceAgentCaptureOutcome::Failed {
                         pending,
                         status: "canceled",
-                        error_summary:
-                            "the submitted user message did not contain the prepared packet id and hash"
-                                .to_string(),
+                        error_summary: "the submitted user message did not exactly match the generated medical handoff prompt"
+                            .to_string(),
                     });
                 }
                 pending.observe_item(
@@ -292,18 +318,6 @@ impl App {
     }
 }
 
-fn user_content_matches_packet(content: &[UserInput], packet_id: &str, packet_hash: &str) -> bool {
-    let mut has_packet_id = false;
-    let mut has_packet_hash = false;
-    for input in content {
-        if let UserInput::Text { text, .. } = input {
-            has_packet_id |= text.contains(packet_id);
-            has_packet_hash |= text.contains(packet_hash);
-        }
-    }
-    has_packet_id && has_packet_hash
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -315,7 +329,9 @@ mod tests {
             client_id: "client-1".to_string(),
             note_id: Some("note-1".to_string()),
             context_envelope_sha256: "hash-1".to_string(),
-            expected_thread_id: Some("thread-1".to_string()),
+            expected_prompt: "exact generated prompt".to_string(),
+            model: "test-model".to_string(),
+            expected_thread_id: "thread-1".to_string(),
             bound_thread_id: Some("thread-1".to_string()),
             bound_turn_id: Some("turn-1".to_string()),
             last_final_answer: None,
@@ -372,5 +388,31 @@ mod tests {
         );
 
         assert_eq!(pending.reviewable_body(), None);
+    }
+
+    #[test]
+    fn submission_binding_requires_exact_generated_prompt() {
+        let pending = pending_capture();
+        let exact = UserInput::Text {
+            text: "exact generated prompt".to_string(),
+            text_elements: Vec::new(),
+        };
+
+        assert!(pending.submission_matches(std::slice::from_ref(&exact)));
+        assert!(!pending.submission_matches(&[UserInput::Text {
+            text: "exact generated prompt\nappended text".to_string(),
+            text_elements: Vec::new(),
+        }]));
+        assert!(!pending.submission_matches(&[
+            exact,
+            UserInput::Text {
+                text: "second text item".to_string(),
+                text_elements: Vec::new(),
+            },
+        ]));
+        assert!(!pending.submission_matches(&[UserInput::Text {
+            text: "packet-1 hash-1 run-1".to_string(),
+            text_elements: Vec::new(),
+        }]));
     }
 }

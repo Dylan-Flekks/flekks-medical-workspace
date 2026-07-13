@@ -9268,11 +9268,29 @@
     },
     "ModelToolMode": {
       "description": "Controls whether a regular model sampling turn may discover or call tools.",
-      "enum": [
-        "default",
-        "disabled"
-      ],
-      "type": "string"
+      "oneOf": [
+        {
+          "description": "Use the normal tool surface configured for the thread and turn.",
+          "enum": [
+            "default"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Persistently disable every model-visible and executable tool for regular sampling.",
+          "enum": [
+            "disabled"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Restrict exactly one medical handoff turn to the submitted run's `workspace_context_read` function.\n\nThis mode is valid only as a `turn/start` override. It filters prior-turn history and extension context, suppresses hooks, rejects non-text input and every other tool, and is never restored as a persistent mode from rollout history.",
+          "enum": [
+            "workspaceContextOnly"
+          ],
+          "type": "string"
+        }
+      ]
     },
     "ModelUpgradeInfo": {
       "properties": {

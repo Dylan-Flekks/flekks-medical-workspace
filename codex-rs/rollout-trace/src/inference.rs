@@ -99,6 +99,11 @@ impl InferenceTraceContext {
         }
     }
 
+    /// Returns whether this handle will persist inference request and response payloads.
+    pub fn is_enabled(&self) -> bool {
+        matches!(self.state, InferenceTraceContextState::Enabled(_))
+    }
+
     /// Builds an enabled context for all upstream attempts made by one Codex turn.
     pub fn enabled(
         writer: Arc<TraceWriter>,

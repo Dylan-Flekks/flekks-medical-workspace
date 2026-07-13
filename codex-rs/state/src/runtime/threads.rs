@@ -1,6 +1,7 @@
 use super::*;
 use crate::SortDirection;
 use codex_protocol::protocol::SessionSource;
+use codex_protocol::protocol::rollout_items_contain_workspace_context_only_turn;
 use std::sync::atomic::AtomicI64;
 use std::sync::atomic::Ordering;
 
@@ -1237,6 +1238,10 @@ SELECT
 }
 
 pub(super) fn extract_memory_mode(items: &[RolloutItem]) -> Option<String> {
+    if rollout_items_contain_workspace_context_only_turn(items) {
+        return Some("polluted".to_string());
+    }
+
     items.iter().rev().find_map(|item| match item {
         RolloutItem::SessionMeta(meta_line) => meta_line.meta.memory_mode.clone(),
         RolloutItem::ResponseItem(_)
@@ -1427,6 +1432,7 @@ mod tests {
     use codex_protocol::protocol::SessionMetaLine;
     use codex_protocol::protocol::SessionSource;
     use codex_protocol::protocol::ThreadHistoryMode;
+    use codex_protocol::protocol::TurnContextItem;
     use pretty_assertions::assert_eq;
     use serde_json::json;
     use std::path::PathBuf;
@@ -2203,6 +2209,50 @@ mod tests {
             .await
             .expect("memory mode should load");
         assert_eq!(memory_mode.as_deref(), Some("polluted"));
+    }
+
+    #[tokio::test]
+    async fn apply_rollout_items_marks_workspace_context_only_history_polluted() -> Result<()> {
+        let codex_home = unique_temp_dir();
+        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
+            .await
+            .expect("state db should initialize");
+        let thread_id =
+            ThreadId::from_string("00000000-0000-0000-0000-000000000459").expect("valid thread id");
+        let metadata = test_thread_metadata(&codex_home, thread_id, codex_home.clone());
+
+        runtime
+            .upsert_thread_with_creation_memory_mode(&metadata, Some("enabled"))
+            .await?;
+        let restricted_context: TurnContextItem = serde_json::from_value(json!({
+            "cwd": codex_home,
+            "approval_policy": "never",
+            "sandbox_policy": { "type": "danger-full-access" },
+            "model": "gpt-5",
+            "model_tool_mode": "workspaceContextOnly",
+            "summary": "auto"
+        }))?;
+        let builder = ThreadMetadataBuilder::new(
+            thread_id,
+            metadata.rollout_path.clone(),
+            metadata.created_at,
+            SessionSource::Cli,
+        );
+
+        runtime
+            .apply_rollout_items(
+                &builder,
+                &[RolloutItem::TurnContext(restricted_context)],
+                /*new_thread_memory_mode*/ None,
+                /*updated_at_override*/ None,
+            )
+            .await?;
+
+        assert_eq!(
+            runtime.get_thread_memory_mode(thread_id).await?.as_deref(),
+            Some("polluted")
+        );
+        Ok(())
     }
 
     #[tokio::test]

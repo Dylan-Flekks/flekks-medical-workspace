@@ -30,9 +30,7 @@ impl App {
     ) -> Result<AppRunControl> {
         match event {
             AppEvent::OpenWorkspaceDashboard { profile } => {
-                if profile != WorkspaceProfile::Medical
-                    && self.workspace_draft_recovery_pending()
-                {
+                if profile != WorkspaceProfile::Medical && self.workspace_draft_recovery_pending() {
                     self.chat_widget.add_error_message(
                         "A Medical Workspace recovery is pending. Reopen /workspacemedical and explicitly restore or discard it before switching workspace profiles."
                             .to_string(),
@@ -52,9 +50,10 @@ impl App {
                     .as_ref()
                     .is_some_and(|dashboard| dashboard.profile() != profile);
                 if switching_profiles {
-                    let leaving_medical = self.workspace_dashboard.as_ref().is_some_and(|dashboard| {
-                        dashboard.profile() == WorkspaceProfile::Medical
-                    });
+                    let leaving_medical = self
+                        .workspace_dashboard
+                        .as_ref()
+                        .is_some_and(|dashboard| dashboard.profile() == WorkspaceProfile::Medical);
                     if leaving_medical
                         && let Err(error) = self
                             .flush_workspace_draft(
@@ -500,7 +499,9 @@ impl App {
                 self.apply_cancelled_turn_edit(prompt);
             }
             AppEvent::AppendMessageHistoryEntry { thread_id, text } => {
-                self.append_message_history_entry(thread_id, text);
+                if !self.suppress_workspace_context_message_history(thread_id) {
+                    self.append_message_history_entry(thread_id, text);
+                }
             }
             AppEvent::SyncThreadGitBranch { thread_id, branch } => {
                 if let Err(err) = app_server

@@ -99,7 +99,10 @@ pub struct ThreadStartParams {
     pub base_instructions: Option<String>,
     #[ts(optional = nullable)]
     pub developer_instructions: Option<String>,
-    /// Disable every model-visible and executable tool for regular sampling turns on this thread.
+    /// Set the persistent regular-sampling tool mode for this thread.
+    ///
+    /// `workspaceContextOnly` is intentionally rejected here because it is valid only as a
+    /// one-turn `turn/start` override.
     #[experimental("thread/start.modelToolMode")]
     #[ts(optional = nullable)]
     pub model_tool_mode: Option<ModelToolMode>,
@@ -296,7 +299,7 @@ pub struct ThreadSettings {
     pub effort: Option<ReasoningEffort>,
     pub summary: Option<ReasoningSummary>,
     pub collaboration_mode: CollaborationMode,
-    /// Effective tool availability for subsequent regular sampling turns.
+    /// Effective persistent tool availability for subsequent regular sampling turns.
     #[experimental("thread/settings.modelToolMode")]
     #[serde(default)]
     pub model_tool_mode: ModelToolMode,

@@ -604,6 +604,7 @@ async fn recorder_omits_ordinals_from_legacy_rollouts() -> std::io::Result<()> {
             "test_originator".to_string(),
             BaseInstructions::default(),
             Vec::new(),
+            Default::default(),
         ),
     )
     .await?;

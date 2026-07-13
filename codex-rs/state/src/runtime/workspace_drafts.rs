@@ -398,15 +398,15 @@ async fn replay_matches_expected_predecessor(
     current: &WorkspaceDraftCheckpointRow,
     expected: &ExpectedCurrentCheckpoint<'_>,
 ) -> anyhow::Result<bool> {
-    if existing.id != current.id
-        || expected.revision.checked_add(1) != Some(existing.revision)
-    {
+    if existing.id != current.id || expected.revision.checked_add(1) != Some(existing.revision) {
         return Ok(false);
     }
-    Ok(checkpoint_by_revision(tx, &existing.session_id, expected.revision)
-        .await?
-        .as_ref()
-        .is_some_and(|checkpoint| checkpoint_matches_expected(checkpoint, expected)))
+    Ok(
+        checkpoint_by_revision(tx, &existing.session_id, expected.revision)
+            .await?
+            .as_ref()
+            .is_some_and(|checkpoint| checkpoint_matches_expected(checkpoint, expected)),
+    )
 }
 
 fn checkpoint_matches_expected(

@@ -231,6 +231,7 @@ mod thread_routing;
 mod thread_session_state;
 mod thread_settings;
 mod workspace_agent_capture;
+mod workspace_context_turn;
 mod workspace_drafts;
 
 use self::agent_navigation::AgentNavigationDirection;
@@ -1463,11 +1464,12 @@ See the Codex keymap documentation for supported actions and examples."
                         WorkspaceDraftCheckpointTrigger::PacketPreview,
                     )
                     .await
-                    && let Some(dashboard) = self.workspace_dashboard.as_mut() {
-                        dashboard.set_status(format!(
-                            "Packet preview is read-only, but local recovery checkpoint failed: {err}"
-                        ));
-                    }
+                    && let Some(dashboard) = self.workspace_dashboard.as_mut()
+                {
+                    dashboard.set_status(format!(
+                        "Packet preview is read-only, but local recovery checkpoint failed: {err}"
+                    ));
+                }
             }
             WorkspaceDashboardAction::Close => {
                 if self.workspace_draft_recovery_pending() {
@@ -1577,10 +1579,7 @@ See the Codex keymap documentation for supported actions and examples."
                     self.chat_widget
                         .add_error_message(format!("Failed to send workspace context: {err}"));
                 } else {
-                    if let Err(err) = self
-                        .close_workspace_draft_after_handoff(app_server)
-                        .await
-                    {
+                    if let Err(err) = self.close_workspace_draft_after_handoff(app_server).await {
                         self.chat_widget.add_error_message(format!(
                             "Context was handed off, but its local draft session could not be closed: {err}"
                         ));
@@ -1917,14 +1916,16 @@ See the Codex keymap documentation for supported actions and examples."
             }
             WorkspaceDashboardAction::RestoreLocalDraft => {
                 if let Err(err) = self.restore_workspace_draft_recovery().await {
-                    self.chat_widget
-                        .add_error_message(format!("Failed to restore local workspace draft: {err}"));
+                    self.chat_widget.add_error_message(format!(
+                        "Failed to restore local workspace draft: {err}"
+                    ));
                 }
             }
             WorkspaceDashboardAction::DiscardLocalDraft => {
                 if let Err(err) = self.discard_workspace_draft_recovery(app_server).await {
-                    self.chat_widget
-                        .add_error_message(format!("Failed to discard local workspace draft: {err}"));
+                    self.chat_widget.add_error_message(format!(
+                        "Failed to discard local workspace draft: {err}"
+                    ));
                 }
             }
         }
@@ -1953,7 +1954,38 @@ See the Codex keymap documentation for supported actions and examples."
             .workspace_dashboard
             .as_ref()
             .is_some_and(|dashboard| dashboard.profile() == WorkspaceProfile::Medical);
-        let mut replaced_pending_handoff = false;
+        let medical_target_thread_id = if is_medical_handoff {
+            let Some(thread_id) = self.active_thread_id else {
+                if let Some(dashboard) = self.workspace_dashboard.as_mut() {
+                    dashboard.set_status(
+                        workspace_context_turn::WORKSPACE_CONTEXT_NO_ACTIVE_THREAD_MESSAGE,
+                    );
+                }
+                self.chat_widget.add_error_message(
+                    workspace_context_turn::WORKSPACE_CONTEXT_NO_ACTIVE_THREAD_MESSAGE.to_string(),
+                );
+                return Ok(());
+            };
+            Some(thread_id.to_string())
+        } else {
+            None
+        };
+        let existing_composer = self.chat_widget.composer_text_with_pending();
+        let replaces_pending_prompt = self
+            .pending_workspace_agent_capture
+            .as_ref()
+            .is_some_and(|pending| pending.prompt_matches(&existing_composer));
+        if is_medical_handoff && !existing_composer.trim().is_empty() && !replaces_pending_prompt {
+            if let Some(dashboard) = self.workspace_dashboard.as_mut() {
+                dashboard.set_status(
+                    workspace_context_turn::WORKSPACE_CONTEXT_COMPOSER_NOT_EMPTY_MESSAGE,
+                );
+            }
+            self.chat_widget.add_error_message(
+                workspace_context_turn::WORKSPACE_CONTEXT_COMPOSER_NOT_EMPTY_MESSAGE.to_string(),
+            );
+            return Ok(());
+        }
         if is_medical_handoff && let Some(pending) = self.pending_workspace_agent_capture.take() {
             let cancel_result = app_server
                 .workspace_agent_run_status_update(WorkspaceAgentRunStatusUpdateParams {
@@ -1968,20 +2000,17 @@ See the Codex keymap documentation for supported actions and examples."
                 self.pending_workspace_agent_capture = Some(pending);
                 return Err(err);
             }
-            replaced_pending_handoff = true;
         }
         let run_provider = Some(self.chat_widget.config_ref().model_provider_id.clone());
         let run_model = self.chat_widget.current_model().to_string();
-        let run_source_thread_id = self
-            .active_thread_id
-            .as_ref()
-            .map(ToString::to_string)
-            .or_else(|| self.chat_widget.thread_id().map(|id| id.to_string()));
         let Some(dashboard) = self.workspace_dashboard.as_mut() else {
             self.workspace_dashboard_visible = false;
             return Ok(());
         };
         let prompt = if dashboard.profile() == WorkspaceProfile::Medical {
+            let target_thread_id = medical_target_thread_id
+                .as_ref()
+                .expect("medical handoff target was validated above");
             let params = match dashboard.context_packet_create_params() {
                 Ok(params) => params,
                 Err(status) => {
@@ -2000,8 +2029,8 @@ See the Codex keymap documentation for supported actions and examples."
                     client_id: Some(prepared_packet.client_id.clone()),
                     context_envelope_sha256: Some(prepared_packet.context_envelope_sha256.clone()),
                     provider: run_provider,
-                    model: Some(run_model),
-                    source_thread_id: run_source_thread_id,
+                    model: Some(run_model.clone()),
+                    source_thread_id: Some(target_thread_id.clone()),
                     source_turn_id: None,
                 })
                 .await?
@@ -2022,16 +2051,50 @@ See the Codex keymap documentation for supported actions and examples."
                         prepared_packet.id
                     )
                 })?;
-            self.pending_workspace_agent_capture =
-                Some(PendingWorkspaceAgentCapture::new(&packet, &run));
             let prompt = packet_scoped_agent_handoff_prompt_for_run(&packet, Some(run.id.as_str()));
+            let pending_capture =
+                PendingWorkspaceAgentCapture::try_new(&packet, &run, prompt.clone())
+                    .map_err(str::to_string)
+                    .and_then(|pending| {
+                        if pending.thread_is_allowed(target_thread_id)
+                            && pending.model_matches(&run_model)
+                        {
+                            Ok(pending)
+                        } else {
+                            Err(
+                        "medical agent run provenance did not match the active thread and model"
+                            .to_string(),
+                    )
+                        }
+                    });
+            let pending_capture = match pending_capture {
+                Ok(pending) => pending,
+                Err(error_summary) => {
+                    if let Err(err) = app_server
+                        .workspace_agent_run_status_update(WorkspaceAgentRunStatusUpdateParams {
+                            run_id: run.id.clone(),
+                            status: "canceled".to_string(),
+                            error_summary: Some(error_summary.clone()),
+                        })
+                        .await
+                    {
+                        tracing::warn!(
+                            error = %err,
+                            run_id = %run.id,
+                            "failed to cancel medical run with invalid provenance"
+                        );
+                    }
+                    return Err(color_eyre::eyre::eyre!(error_summary));
+                }
+            };
+            self.pending_workspace_agent_capture = Some(pending_capture);
             dashboard.mark_agent_context_sent(packet);
             prompt
         } else {
             dashboard.agent_context_prompt()
         };
 
-        if replaced_pending_handoff
+        if is_medical_handoff
             || self
                 .chat_widget
                 .composer_text_with_pending()

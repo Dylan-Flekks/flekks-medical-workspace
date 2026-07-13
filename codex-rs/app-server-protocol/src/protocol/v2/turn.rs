@@ -143,7 +143,15 @@ pub struct TurnStartParams {
     #[ts(optional = nullable)]
     pub output_schema: Option<JsonValue>,
 
-    /// Disable every model-visible and executable tool for this and subsequent regular sampling turns.
+    /// Override model tool availability.
+    ///
+    /// `disabled` persists for subsequent regular sampling turns. `workspaceContextOnly` is a
+    /// one-turn, fail-closed medical handoff mode: only the submitted run's
+    /// `workspace_context_read` tool is exposed, prior-turn transcript data and extension context
+    /// are excluded, hooks are suppressed, and the previous persistent mode is restored before
+    /// the turn runs. The text input must contain exactly one non-empty `- run_id: ...` line;
+    /// inline images, rich-text spans, skills, plugins, mentions, and `additionalContext` are
+    /// rejected.
     #[experimental("turn/start.modelToolMode")]
     #[ts(optional = nullable)]
     pub model_tool_mode: Option<ModelToolMode>,

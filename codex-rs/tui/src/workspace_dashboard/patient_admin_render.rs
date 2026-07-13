@@ -1,5 +1,5 @@
-use super::*;
 use super::coverage_render::billing_readiness_short_label;
+use super::*;
 
 pub(super) fn patient_admin_editor_field_line(
     label: &str,
@@ -79,20 +79,10 @@ impl WorkspaceDashboard {
         let row = lines
             .iter()
             .position(|line| line_plain_text(line).starts_with(&selected_prefix))?;
-        let visual_row = workflow_visual_row_for_line(
-            &lines,
-            row.min(u16::MAX as usize) as u16,
-            inner.width,
-        );
+        let visual_row =
+            workflow_visual_row_for_line(&lines, row.min(u16::MAX as usize) as u16, inner.width);
         let scroll = visual_row.saturating_add(1).saturating_sub(inner.height);
-        cursor_at_wrapped_line_text_end(
-            inner,
-            &lines,
-            row,
-            scroll as usize,
-            label_len,
-            &value,
-        )
+        cursor_at_wrapped_line_text_end(inner, &lines, row, scroll as usize, label_len, &value)
     }
 
     pub(super) fn patient_admin_editor_lines(
@@ -122,7 +112,10 @@ impl WorkspaceDashboard {
                 Style::default().add_modifier(Modifier::BOLD),
             )),
         ];
-        lines.push(Line::from(format!("Legal/card name: {}", admin.legal_name_summary())));
+        lines.push(Line::from(format!(
+            "Legal/card name: {}",
+            admin.legal_name_summary()
+        )));
         lines.push(Line::from(format!("Contact: {}", admin.contact_summary())));
         lines.push(Line::from(format!("Address: {}", admin.address_summary())));
         lines.push(Line::from(Span::styled(
@@ -290,7 +283,10 @@ impl WorkspaceDashboard {
                 };
                 format!(
                     "{short_priority} {} [{}]",
-                    compact_preview(coverage.payer_name.as_deref().unwrap_or("payer missing"), 18),
+                    compact_preview(
+                        coverage.payer_name.as_deref().unwrap_or("payer missing"),
+                        18
+                    ),
                     billing_readiness_short_label(coverage.billing_readiness)
                 )
             })

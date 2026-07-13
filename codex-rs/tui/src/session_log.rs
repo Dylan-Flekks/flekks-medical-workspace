@@ -8,7 +8,7 @@ use std::sync::OnceLock;
 
 use crate::app_command::AppCommand;
 use crate::legacy_core::config::Config;
-use serde::Serialize;
+use codex_protocol::config_types::ModelToolMode;
 use serde_json::json;
 
 use crate::app_event::AppEvent;
@@ -203,18 +203,54 @@ pub(crate) fn log_inbound_app_event(event: &AppEvent) {
                 "ts": now_ts(),
                 "dir": "to_tui",
                 "kind": "app_event",
-                "variant": format!("{other:?}").split('(').next().unwrap_or("app_event"),
+                "variant": app_event_variant_name(other),
             });
             LOGGER.write_json_line(value);
         }
     }
 }
 
+fn app_event_variant_name(event: &AppEvent) -> String {
+    let debug_name = format!("{event:?}");
+    debug_name
+        .split(|character: char| character == '(' || character == '{' || character.is_whitespace())
+        .next()
+        .filter(|name| !name.is_empty())
+        .unwrap_or("app_event")
+        .to_string()
+}
+
 pub(crate) fn log_outbound_op(op: &AppCommand) {
     if !LOGGER.is_enabled() {
         return;
     }
-    write_record("from_tui", "op", op);
+    let value = json!({
+        "ts": now_ts(),
+        "dir": "from_tui",
+        "kind": "op",
+        "payload": outbound_op_payload(op),
+    });
+    LOGGER.write_json_line(value);
+}
+
+fn outbound_op_payload(op: &AppCommand) -> serde_json::Value {
+    match op {
+        AppCommand::UserTurn {
+            items,
+            model_tool_mode: Some(ModelToolMode::WorkspaceContextOnly),
+            ..
+        } => json!({
+            "variant": "UserTurn",
+            "model_tool_mode": "workspaceContextOnly",
+            "input_item_count": items.len(),
+            "payload_redacted": true,
+        }),
+        _ => serde_json::to_value(op).unwrap_or_else(|err| {
+            json!({
+                "serialization_error": err.to_string(),
+            })
+        }),
+    }
 }
 
 pub(crate) fn log_session_end() {
@@ -229,15 +265,6 @@ pub(crate) fn log_session_end() {
     LOGGER.write_json_line(value);
 }
 
-fn write_record<T>(dir: &str, kind: &str, obj: &T)
-where
-    T: Serialize,
-{
-    let value = json!({
-        "ts": now_ts(),
-        "dir": dir,
-        "kind": kind,
-        "payload": obj,
-    });
-    LOGGER.write_json_line(value);
-}
+#[cfg(test)]
+#[path = "session_log_tests.rs"]
+mod tests;

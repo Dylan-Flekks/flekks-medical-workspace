@@ -33,8 +33,8 @@ impl WorkspaceRequestProcessor {
             )
             .await
             .map_err(|err| invalid_request(format!("failed to list workspace coverage: {err}")))?;
-        let next_cursor = (coverages.len() > limit as usize)
-            .then(|| coverages[limit as usize - 1].0.id.clone());
+        let next_cursor =
+            (coverages.len() > limit as usize).then(|| coverages[limit as usize - 1].0.id.clone());
         coverages.truncate(limit as usize);
         let mut data = Vec::with_capacity(coverages.len());
         for (coverage, readiness) in coverages {
@@ -217,9 +217,7 @@ fn api_verification_from_state(
         patient_version: value.patient_version,
         coverage_version: value.coverage_version,
         match_result: match value.match_result {
-            codex_state::WorkspaceCoverageMatchResult::Match => {
-                WorkspaceCoverageMatchResult::Match
-            }
+            codex_state::WorkspaceCoverageMatchResult::Match => WorkspaceCoverageMatchResult::Match,
             codex_state::WorkspaceCoverageMatchResult::Mismatch => {
                 WorkspaceCoverageMatchResult::Mismatch
             }
@@ -249,12 +247,8 @@ fn api_readiness(value: codex_state::WorkspaceBillingReadiness) -> WorkspaceBill
     match value {
         codex_state::WorkspaceBillingReadiness::Match => WorkspaceBillingReadiness::Match,
         codex_state::WorkspaceBillingReadiness::Mismatch => WorkspaceBillingReadiness::Mismatch,
-        codex_state::WorkspaceBillingReadiness::Unverified => {
-            WorkspaceBillingReadiness::Unverified
-        }
+        codex_state::WorkspaceBillingReadiness::Unverified => WorkspaceBillingReadiness::Unverified,
         codex_state::WorkspaceBillingReadiness::Stale => WorkspaceBillingReadiness::Stale,
-        codex_state::WorkspaceBillingReadiness::Incomplete => {
-            WorkspaceBillingReadiness::Incomplete
-        }
+        codex_state::WorkspaceBillingReadiness::Incomplete => WorkspaceBillingReadiness::Incomplete,
     }
 }

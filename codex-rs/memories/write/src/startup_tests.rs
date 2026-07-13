@@ -29,6 +29,7 @@ use codex_protocol::protocol::Op;
 use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::RolloutLine;
 use codex_protocol::protocol::SessionSource;
+use codex_protocol::protocol::TurnContextItem;
 use codex_state::Phase2JobClaimOutcome;
 use core_test_support::responses::ResponseMock;
 use core_test_support::responses::ResponsesRequest;
@@ -46,6 +47,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tempfile::TempDir;
+use tokio::io::AsyncWriteExt;
 use tokio::time::Duration;
 use tokio::time::Instant;
 
@@ -458,6 +460,131 @@ async fn memories_startup_phase1_explicit_model_override_drives_request_model() 
 }
 
 #[tokio::test]
+async fn memories_stage1_revalidates_claim_eligibility_before_sampling() -> anyhow::Result<()> {
+    const FORBIDDEN_MARKER: &str = "workspace-context-only-marker-must-never-be-sampled";
+
+    let server = start_mock_server().await;
+    let home = Arc::new(TempDir::new()?);
+    let test = build_test_codex(&server, Arc::clone(&home)).await?;
+    let provider = Arc::new(MockMemoryModelProvider::new(
+        test.config.model_provider.clone(),
+        Some(test.thread_manager.auth_manager()),
+    ));
+    let db = test
+        .codex
+        .state_db()
+        .ok_or_else(|| anyhow::anyhow!("state db should be enabled for memory startup test"))?;
+    let (context, config) = memory_startup_context_with_provider(&test, provider).await;
+    let request_context = context
+        .stage_one_request_context(
+            config.as_ref(),
+            MOCK_PROVIDER_PHASE_ONE_MODEL,
+            crate::stage_one::REASONING_EFFORT,
+        )
+        .await;
+    let sampler = mount_sse_once(
+        &server,
+        sse(vec![
+            ev_response_created("resp-phase1"),
+            ev_assistant_message(
+                "msg-phase1",
+                r#"{"raw_memory":"forbidden","rollout_summary":"forbidden","rollout_slug":"forbidden"}"#,
+            ),
+            ev_completed("resp-phase1"),
+        ]),
+    )
+    .await;
+
+    let disabled_thread_id = seed_stage1_candidate(
+        db.as_ref(),
+        home.path(),
+        chrono::Utc::now() - chrono::Duration::hours(2),
+        "claim-disabled-after-load",
+    )
+    .await?;
+    let disabled_claim = claim_stage1_candidate(
+        db.as_ref(),
+        disabled_thread_id,
+        test.session_configured.thread_id,
+    )
+    .await?;
+    db.set_thread_memory_mode(disabled_thread_id, "disabled")
+        .await?;
+    append_rollout_marker(
+        disabled_claim.thread.rollout_path.as_path(),
+        FORBIDDEN_MARKER,
+    )
+    .await?;
+    phase1::job::run(
+        context.as_ref(),
+        config.as_ref(),
+        disabled_claim,
+        &request_context,
+    )
+    .await;
+
+    let changed_thread_id = seed_stage1_candidate(
+        db.as_ref(),
+        home.path(),
+        chrono::Utc::now() - chrono::Duration::hours(3),
+        "claim-source-changed-after-load",
+    )
+    .await?;
+    let changed_claim = claim_stage1_candidate(
+        db.as_ref(),
+        changed_thread_id,
+        test.session_configured.thread_id,
+    )
+    .await?;
+    append_rollout_marker(
+        changed_claim.thread.rollout_path.as_path(),
+        FORBIDDEN_MARKER,
+    )
+    .await?;
+    let mut changed_metadata = changed_claim.thread.clone();
+    changed_metadata.updated_at += chrono::Duration::seconds(1);
+    changed_metadata.recency_at = changed_metadata.updated_at;
+    db.upsert_thread(&changed_metadata).await?;
+    phase1::job::run(
+        context.as_ref(),
+        config.as_ref(),
+        changed_claim,
+        &request_context,
+    )
+    .await;
+
+    let restricted_thread_id = seed_stage1_candidate(
+        db.as_ref(),
+        home.path(),
+        chrono::Utc::now() - chrono::Duration::hours(4),
+        "claim-workspace-context-only",
+    )
+    .await?;
+    let restricted_claim = claim_stage1_candidate(
+        db.as_ref(),
+        restricted_thread_id,
+        test.session_configured.thread_id,
+    )
+    .await?;
+    append_workspace_context_only_turn_context(restricted_claim.thread.rollout_path.as_path())
+        .await?;
+    phase1::job::run(
+        context.as_ref(),
+        config.as_ref(),
+        restricted_claim,
+        &request_context,
+    )
+    .await;
+
+    assert!(
+        sampler.requests().is_empty(),
+        "stage-1 sampler must not receive a rollout after memory eligibility or source version changes, or from workspaceContextOnly history"
+    );
+    shutdown_test_codex(&test).await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn memories_startup_phase2_explicit_model_override_drives_request_model() -> anyhow::Result<()>
 {
     let server = start_mock_server().await;
@@ -771,6 +898,86 @@ async fn seed_stage1_candidate(
     db.set_thread_memory_mode(thread_id, "enabled").await?;
 
     Ok(thread_id)
+}
+
+async fn claim_stage1_candidate(
+    db: &codex_state::StateRuntime,
+    thread_id: ThreadId,
+    worker_id: ThreadId,
+) -> anyhow::Result<codex_state::Stage1JobClaim> {
+    let thread = db
+        .get_thread(thread_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("seeded stage-1 candidate was not found"))?;
+    let outcome = db
+        .memories()
+        .try_claim_stage1_job(
+            thread_id,
+            worker_id,
+            thread.updated_at.timestamp(),
+            /*lease_seconds*/ 3_600,
+            /*max_running_jobs*/ 64,
+        )
+        .await?;
+    let ownership_token = match outcome {
+        codex_state::Stage1JobClaimOutcome::Claimed { ownership_token } => ownership_token,
+        other => anyhow::bail!("unexpected stage-1 claim outcome: {other:?}"),
+    };
+    Ok(codex_state::Stage1JobClaim {
+        thread,
+        ownership_token,
+    })
+}
+
+async fn append_rollout_marker(rollout_path: &Path, marker: &str) -> anyhow::Result<()> {
+    let line = RolloutLine {
+        timestamp: chrono::Utc::now().to_rfc3339(),
+        ordinal: None,
+        item: RolloutItem::ResponseItem(ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: marker.to_string(),
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        }),
+    };
+    let encoded = format!("{}\n", serde_json::to_string(&line)?);
+    tokio::fs::OpenOptions::new()
+        .append(true)
+        .open(rollout_path)
+        .await?
+        .write_all(encoded.as_bytes())
+        .await?;
+    Ok(())
+}
+
+async fn append_workspace_context_only_turn_context(rollout_path: &Path) -> anyhow::Result<()> {
+    let cwd = rollout_path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("rollout is missing a parent directory"))?;
+    let turn_context: TurnContextItem = serde_json::from_value(serde_json::json!({
+        "cwd": cwd,
+        "approval_policy": "never",
+        "sandbox_policy": { "type": "danger-full-access" },
+        "model": "mock-model",
+        "model_tool_mode": "workspaceContextOnly",
+        "summary": "auto"
+    }))?;
+    let line = RolloutLine {
+        timestamp: chrono::Utc::now().to_rfc3339(),
+        ordinal: None,
+        item: RolloutItem::TurnContext(turn_context),
+    };
+    let encoded = format!("{}\n", serde_json::to_string(&line)?);
+    tokio::fs::OpenOptions::new()
+        .append(true)
+        .open(rollout_path)
+        .await?
+        .write_all(encoded.as_bytes())
+        .await?;
+    Ok(())
 }
 
 async fn wait_for_single_request(mock: &ResponseMock) -> ResponsesRequest {

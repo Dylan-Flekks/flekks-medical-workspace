@@ -286,9 +286,7 @@ fn checkpoint_completion_only_acknowledges_its_generation_and_reuses_session() {
         (
             second_request.expected_current_checkpoint_id.as_deref(),
             second_request.expected_current_checkpoint_revision,
-            second_request
-                .expected_current_checkpoint_sha256
-                .as_deref(),
+            second_request.expected_current_checkpoint_sha256.as_deref(),
         ),
         (
             Some("checkpoint-1"),

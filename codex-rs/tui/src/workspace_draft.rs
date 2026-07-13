@@ -22,12 +22,15 @@ pub(crate) use state::WorkspaceDraftState;
 // These complete the private facade for callers that want to render persistence
 // state without reaching into the implementation modules.
 #[allow(unused_imports)]
-pub(crate) use model::{
-    MEDICAL_WORKSPACE_DRAFT_KIND, MEDICAL_WORKSPACE_DRAFT_SCHEMA_VERSION,
-    WorkspaceDraftCheckpointMetadata,
-};
+pub(crate) use model::MEDICAL_WORKSPACE_DRAFT_KIND;
 #[allow(unused_imports)]
-pub(crate) use state::{WorkspaceDraftAutosaveSchedule, WorkspaceDraftPersistenceStatus};
+pub(crate) use model::MEDICAL_WORKSPACE_DRAFT_SCHEMA_VERSION;
+#[allow(unused_imports)]
+pub(crate) use model::WorkspaceDraftCheckpointMetadata;
+#[allow(unused_imports)]
+pub(crate) use state::WorkspaceDraftAutosaveSchedule;
+#[allow(unused_imports)]
+pub(crate) use state::WorkspaceDraftPersistenceStatus;
 
 #[cfg(test)]
 #[path = "workspace_draft_tests.rs"]

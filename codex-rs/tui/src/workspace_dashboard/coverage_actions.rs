@@ -2,8 +2,7 @@ use super::*;
 
 pub(super) fn coverage_draft_has_input(draft: &CoverageDraft) -> bool {
     CoverageField::ALL.iter().any(|field| {
-        field.is_toggle()
-            && draft.subscriber_address_same_as_patient
+        field.is_toggle() && draft.subscriber_address_same_as_patient
             || draft
                 .text(*field)
                 .is_some_and(|value| !value.trim().is_empty())
@@ -86,9 +85,7 @@ impl WorkspaceDashboard {
                 .to_string();
     }
 
-    pub(super) fn request_coverage_verification_create(
-        &mut self,
-    ) -> WorkspaceDashboardAction {
+    pub(super) fn request_coverage_verification_create(&mut self) -> WorkspaceDashboardAction {
         if self.dirty {
             self.status =
                 "Close card comparison, save patient/coverage changes, then verify the current versions."
@@ -142,7 +139,8 @@ impl WorkspaceDashboard {
         let priority = CoveragePriority::try_from(priority)
             .map_err(|error| color_eyre::eyre::eyre!(error.to_string()))?;
         self.load_coverage_draft(priority);
-        self.reload_coverage_verification_history(app_server).await?;
+        self.reload_coverage_verification_history(app_server)
+            .await?;
         self.status = format!("Editing {} coverage.", priority.label());
         Ok(())
     }

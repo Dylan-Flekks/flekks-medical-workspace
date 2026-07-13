@@ -21,6 +21,8 @@ use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadSource;
 use codex_protocol::protocol::TurnEnvironmentSelections;
 use std::sync::OnceLock;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use tokio::sync::Semaphore;
 
 /// Context for an initialized model agent
@@ -45,6 +47,9 @@ pub(crate) struct Session {
     pub(crate) input_queue: InputQueue,
     pub(crate) guardian_review_session: GuardianReviewSessionManager,
     pub(crate) services: SessionServices,
+    /// Irreversible, rollout-derived privacy taint for threads that have persisted a restricted
+    /// medical-context turn. Such threads must never become eligible for Codex memory generation.
+    pub(super) workspace_context_only_memory_tainted: AtomicBool,
     pub(super) next_internal_sub_id: AtomicU64,
 }
 
@@ -469,6 +474,16 @@ async fn warm_plugins_and_skills_for_session_init(
 }
 
 impl Session {
+    pub(crate) fn workspace_context_only_memory_tainted(&self) -> bool {
+        self.workspace_context_only_memory_tainted
+            .load(Ordering::Acquire)
+    }
+
+    pub(crate) fn mark_workspace_context_only_memory_tainted(&self) {
+        self.workspace_context_only_memory_tainted
+            .store(true, Ordering::Release);
+    }
+
     /// Returns the concrete identity for this thread.
     pub(crate) fn thread_id(&self) -> ThreadId {
         self.thread_id
@@ -528,6 +543,8 @@ impl Session {
             .parent_thread_id
             .or_else(|| initial_history.get_resumed_parent_thread_id());
         session_configuration.parent_thread_id = parent_thread_id;
+        let workspace_context_only_memory_tainted =
+            initial_history.contains_workspace_context_only_turn();
         let multi_agent_version = multi_agent_version.map(OnceLock::from).unwrap_or_default();
         let initial_multi_agent_version = multi_agent_version.get().copied();
 
@@ -619,7 +636,9 @@ impl Session {
                             metadata: ThreadPersistenceMetadata {
                                 cwd: Some(config.cwd.to_path_buf()),
                                 model_provider: config.model_provider_id.clone(),
-                                memory_mode: if config.memories.generate_memories {
+                                memory_mode: if config.memories.generate_memories
+                                    && !workspace_context_only_memory_tainted
+                                {
                                     ThreadMemoryMode::Enabled
                                 } else {
                                     ThreadMemoryMode::Disabled
@@ -637,7 +656,9 @@ impl Session {
                             metadata: ThreadPersistenceMetadata {
                                 cwd: Some(config.cwd.to_path_buf()),
                                 model_provider: config.model_provider_id.clone(),
-                                memory_mode: if config.memories.generate_memories {
+                                memory_mode: if config.memories.generate_memories
+                                    && !workspace_context_only_memory_tainted
+                                {
                                     ThreadMemoryMode::Enabled
                                 } else {
                                     ThreadMemoryMode::Disabled
@@ -1165,8 +1186,19 @@ impl Session {
                 input_queue: InputQueue::new(),
                 guardian_review_session: GuardianReviewSessionManager::default(),
                 services,
+                workspace_context_only_memory_tainted: AtomicBool::new(
+                    workspace_context_only_memory_tainted,
+                ),
                 next_internal_sub_id: AtomicU64::new(0),
             });
+            if workspace_context_only_memory_tainted
+                && let Some(state_db) = sess.services.state_db.as_ref()
+            {
+                state_db
+                    .memories()
+                    .mark_thread_memory_mode_polluted(thread_id)
+                    .await?;
+            }
             if let Some(network_policy_decider_session) = network_policy_decider_session {
                 let mut guard = network_policy_decider_session.write().await;
                 *guard = Arc::downgrade(&sess);

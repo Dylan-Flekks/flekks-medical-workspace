@@ -15,6 +15,7 @@ use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::TokenUsage;
+use codex_protocol::protocol::rollout_items_contain_workspace_context_only_turn;
 use codex_rollout::INTERACTIVE_SESSION_SOURCES;
 use codex_rollout::should_persist_response_item_for_memories;
 use codex_secrets::redact_secrets;
@@ -22,12 +23,11 @@ use futures::StreamExt;
 use serde::Deserialize;
 use serde_json::Value;
 use serde_json::json;
-use std::path::Path;
 use std::sync::Arc;
 use tracing::info;
 use tracing::warn;
 
-struct JobResult {
+pub(crate) struct JobResult {
     outcome: JobOutcome,
     token_usage: Option<TokenUsage>,
 }
@@ -221,7 +221,7 @@ async fn run_jobs(
         .await
 }
 
-mod job {
+pub(crate) mod job {
     use super::*;
 
     pub(crate) async fn run(
@@ -231,30 +231,23 @@ mod job {
         stage_one_context: &StageOneRequestContext,
     ) -> JobResult {
         let claimed_thread = claim.thread;
-        let (stage_one_output, token_usage) = match sample(
-            context,
-            config,
-            &claimed_thread.rollout_path,
-            &claimed_thread.cwd,
-            stage_one_context,
-        )
-        .await
-        {
-            Ok(output) => output,
-            Err(reason) => {
-                result::failed(
-                    context,
-                    claimed_thread.id,
-                    &claim.ownership_token,
-                    &reason.to_string(),
-                )
-                .await;
-                return JobResult {
-                    outcome: JobOutcome::Failed,
-                    token_usage: None,
-                };
-            }
-        };
+        let (stage_one_output, token_usage) =
+            match sample(context, config, &claimed_thread, stage_one_context).await {
+                Ok(output) => output,
+                Err(reason) => {
+                    result::failed(
+                        context,
+                        claimed_thread.id,
+                        &claim.ownership_token,
+                        &reason.to_string(),
+                    )
+                    .await;
+                    return JobResult {
+                        outcome: JobOutcome::Failed,
+                        token_usage: None,
+                    };
+                }
+            };
 
         if stage_one_output.raw_memory.is_empty() || stage_one_output.rollout_summary.is_empty() {
             return JobResult {
@@ -283,11 +276,16 @@ mod job {
     async fn sample(
         context: &MemoryStartupContext,
         config: &Config,
-        rollout_path: &Path,
-        rollout_cwd: &Path,
+        claimed_thread: &codex_state::ThreadMetadata,
         stage_one_context: &StageOneRequestContext,
     ) -> anyhow::Result<(StageOneOutput, Option<TokenUsage>)> {
+        let rollout_path = claimed_thread.rollout_path.as_path();
+        let rollout_cwd = claimed_thread.cwd.as_path();
         let (rollout_items, _, _) = RolloutRecorder::load_rollout_items(rollout_path).await?;
+        anyhow::ensure!(
+            !rollout_items_contain_workspace_context_only_turn(&rollout_items),
+            "stage-1 source contains a workspaceContextOnly turn"
+        );
         let rollout_contents = serialize_filtered_rollout_response_items(&rollout_items)?;
 
         let mut prompt = Prompt::default();
@@ -311,6 +309,8 @@ mod job {
         prompt.output_schema = Some(output_schema());
         prompt.output_schema_strict = true;
 
+        revalidate_claim_before_sampling(context, claimed_thread).await?;
+
         let (result, token_usage) = context
             .stream_stage_one_prompt(config, &prompt, stage_one_context)
             .await?;
@@ -321,6 +321,29 @@ mod job {
         output.rollout_slug = output.rollout_slug.map(redact_secrets);
 
         Ok((output, token_usage))
+    }
+
+    async fn revalidate_claim_before_sampling(
+        context: &MemoryStartupContext,
+        claimed_thread: &codex_state::ThreadMetadata,
+    ) -> anyhow::Result<()> {
+        let state_db = context.state_db().ok_or_else(|| {
+            anyhow::anyhow!("state db unavailable while revalidating stage-1 claim")
+        })?;
+        let current_thread = state_db
+            .get_thread(claimed_thread.id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("stage-1 source thread disappeared after claim"))?;
+        anyhow::ensure!(
+            current_thread.updated_at == claimed_thread.updated_at,
+            "stage-1 source version changed after claim"
+        );
+        let memory_mode = state_db.get_thread_memory_mode(claimed_thread.id).await?;
+        anyhow::ensure!(
+            memory_mode.as_deref() == Some("enabled"),
+            "stage-1 source memory mode is no longer enabled"
+        );
+        Ok(())
     }
 
     mod result {

@@ -1,6 +1,7 @@
 use super::session::Session;
 use super::turn_context::TurnContext;
 use crate::context::ContextualUserFragment;
+use codex_protocol::config_types::ModelToolMode;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result as CodexResult;
 use codex_protocol::protocol::TokenUsage;
@@ -10,6 +11,9 @@ pub(super) async fn maybe_record_reminder(
     turn_context: &TurnContext,
     window_id: &str,
 ) {
+    if turn_context.model_tool_mode == ModelToolMode::WorkspaceContextOnly {
+        return;
+    }
     let budget = sess.services.agent_control.rollout_budget();
     let Some(reminder) = budget.pending_reminder(sess.thread_id(), window_id) else {
         return;

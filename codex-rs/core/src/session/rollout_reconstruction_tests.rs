@@ -4,6 +4,7 @@ use super::tests::build_world_state_from_turn_context;
 use super::tests::make_session_and_context;
 use codex_protocol::AgentPath;
 use codex_protocol::ThreadId;
+use codex_protocol::config_types::ModelToolMode;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::CompactedItem;
@@ -105,6 +106,29 @@ fn completed_user_turn_rollout(
         },
     )));
     rollout_items
+}
+
+#[tokio::test]
+async fn resumed_workspace_context_only_turn_does_not_seed_reference_context_baseline() {
+    let (session, turn_context) = make_session_and_context().await;
+    let mut restricted_context_item = turn_context.to_turn_context_item();
+    restricted_context_item.model_tool_mode = ModelToolMode::WorkspaceContextOnly;
+    let rollout_items = completed_user_turn_rollout(
+        restricted_context_item,
+        vec![RolloutItem::ResponseItem(user_message(
+            "synthetic restricted packet",
+        ))],
+    );
+
+    session
+        .record_initial_history(InitialHistory::Resumed(ResumedHistory {
+            conversation_id: ThreadId::default(),
+            history: Arc::new(rollout_items),
+            rollout_path: Some(PathBuf::from("/tmp/resume-workspace-context-only.jsonl")),
+        }))
+        .await;
+
+    assert!(session.reference_context_item().await.is_none());
 }
 
 #[tokio::test]

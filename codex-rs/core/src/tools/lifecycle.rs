@@ -2,6 +2,7 @@ use codex_extension_api::ToolCallOutcome;
 use codex_extension_api::ToolCallSource as ExtensionToolCallSource;
 use codex_extension_api::ToolFinishInput;
 use codex_extension_api::ToolStartInput;
+use codex_protocol::config_types::ModelToolMode;
 use codex_tools::ToolName;
 
 use crate::session::session::Session;
@@ -10,6 +11,9 @@ use crate::tools::context::ToolCallSource;
 use crate::tools::context::ToolInvocation;
 
 pub(crate) async fn notify_tool_start(invocation: &ToolInvocation) {
+    if invocation.turn.model_tool_mode == ModelToolMode::WorkspaceContextOnly {
+        return;
+    }
     for contributor in invocation
         .session
         .services
@@ -68,6 +72,9 @@ async fn notify_tool_finish_parts(
     source: ToolCallSource,
     outcome: ToolCallOutcome,
 ) {
+    if turn.model_tool_mode == ModelToolMode::WorkspaceContextOnly {
+        return;
+    }
     for contributor in session.services.extensions.tool_lifecycle_contributors() {
         contributor
             .on_tool_finish(ToolFinishInput {

@@ -2553,6 +2553,15 @@ impl InitialHistory {
         }
     }
 
+    /// Returns whether this history has ever persisted a restricted medical-context turn.
+    ///
+    /// This is a durable privacy taint: unlike the latest effective tool mode, it intentionally
+    /// scans the complete retained rollout and remains true after later ordinary turns or a
+    /// rollback marker.
+    pub fn contains_workspace_context_only_turn(&self) -> bool {
+        rollout_items_contain_workspace_context_only_turn(self.get_rollout_items())
+    }
+
     pub fn get_event_msgs(&self) -> Option<Vec<EventMsg>> {
         match self {
             InitialHistory::New | InitialHistory::Cleared => None,
@@ -2670,11 +2679,15 @@ impl InitialHistory {
             InitialHistory::Forked(items) => items,
         };
         items.iter().rev().find_map(|item| match item {
-            RolloutItem::TurnContext(turn_context) => Some(turn_context.model_tool_mode),
-            RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(event)) => {
-                Some(event.thread_settings.model_tool_mode)
+            RolloutItem::TurnContext(turn_context) => {
+                Some(persistent_model_tool_mode(turn_context.model_tool_mode))
             }
-            RolloutItem::SessionMeta(session_meta) => Some(session_meta.meta.model_tool_mode),
+            RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(event)) => Some(
+                persistent_model_tool_mode(event.thread_settings.model_tool_mode),
+            ),
+            RolloutItem::SessionMeta(session_meta) => Some(persistent_model_tool_mode(
+                session_meta.meta.model_tool_mode,
+            )),
             RolloutItem::ResponseItem(_)
             | RolloutItem::InterAgentCommunication(_)
             | RolloutItem::InterAgentCommunicationMetadata { .. }
@@ -2731,6 +2744,28 @@ impl InitialHistory {
                 })
             }
         }
+    }
+}
+
+/// Returns whether the retained rollout contains any restricted medical-context turn.
+pub fn rollout_items_contain_workspace_context_only_turn(items: &[RolloutItem]) -> bool {
+    items.iter().any(|item| {
+        matches!(
+            item,
+            RolloutItem::TurnContext(turn_context)
+                if turn_context.model_tool_mode == ModelToolMode::WorkspaceContextOnly
+        )
+    })
+}
+
+fn persistent_model_tool_mode(mode: ModelToolMode) -> ModelToolMode {
+    match mode {
+        ModelToolMode::Default => ModelToolMode::Default,
+        ModelToolMode::Disabled => ModelToolMode::Disabled,
+        // This mode is valid only on an individual turn. A durable settings or session-metadata
+        // record containing it is malformed, so resume with tools disabled instead of making the
+        // restricted mode sticky or silently enabling the default tool surface.
+        ModelToolMode::WorkspaceContextOnly => ModelToolMode::Disabled,
     }
 }
 
@@ -6073,11 +6108,36 @@ mod tests {
         assert_eq!(value["summary"], json!("auto"));
         assert!(value.get("model_tool_mode").is_none());
 
-        let mut disabled_item = item;
+        let mut disabled_item = item.clone();
         disabled_item.model_tool_mode = ModelToolMode::Disabled;
         assert_eq!(
             InitialHistory::Forked(vec![RolloutItem::TurnContext(disabled_item)])
                 .get_latest_model_tool_mode(),
+            Some(ModelToolMode::Disabled)
+        );
+
+        let mut restricted_item = item;
+        restricted_item.model_tool_mode = ModelToolMode::WorkspaceContextOnly;
+        assert_eq!(
+            serde_json::to_value(&restricted_item)?["model_tool_mode"],
+            json!("workspaceContextOnly")
+        );
+        let restricted_history = vec![
+            RolloutItem::SessionMeta(SessionMetaLine {
+                meta: SessionMeta::default(),
+                git: None,
+            }),
+            RolloutItem::TurnContext(restricted_item),
+        ];
+        assert!(rollout_items_contain_workspace_context_only_turn(
+            &restricted_history
+        ));
+        assert!(
+            InitialHistory::Forked(restricted_history.clone())
+                .contains_workspace_context_only_turn()
+        );
+        assert_eq!(
+            InitialHistory::Forked(restricted_history).get_latest_model_tool_mode(),
             Some(ModelToolMode::Disabled)
         );
 
@@ -6092,6 +6152,16 @@ mod tests {
             serde_json::to_value(&session_meta)?["model_tool_mode"],
             json!("disabled")
         );
+        assert_eq!(
+            InitialHistory::Forked(vec![RolloutItem::SessionMeta(SessionMetaLine {
+                meta: session_meta.clone(),
+                git: None,
+            })])
+            .get_latest_model_tool_mode(),
+            Some(ModelToolMode::Disabled)
+        );
+
+        session_meta.model_tool_mode = ModelToolMode::WorkspaceContextOnly;
         assert_eq!(
             InitialHistory::Forked(vec![RolloutItem::SessionMeta(SessionMetaLine {
                 meta: session_meta,

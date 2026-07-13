@@ -1,0 +1,5 @@
+---
+source: tui/src/app/workspace_context_turn_tests.rs
+expression: rendered
+---
+■ Medical context handoff was held because structured output is enabled. Clear the output schema, then submit the packet again.

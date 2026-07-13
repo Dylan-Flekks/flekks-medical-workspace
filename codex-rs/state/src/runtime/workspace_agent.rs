@@ -450,9 +450,141 @@ LIMIT ?
         Ok(source)
     }
 
+    /// Atomically claims one running medical agent run for one exact restricted model turn.
+    ///
+    /// The claim is the security boundary below the TUI: direct app-server clients must present
+    /// the canonical packet prompt and must execute on the thread, provider, and model recorded
+    /// when the clinician created the run. Setting `source_turn_id` consumes the run capability so
+    /// it cannot be sampled a second time.
+    pub async fn claim_agent_turn(
+        &self,
+        input: crate::WorkspaceAgentTurnClaim,
+    ) -> anyhow::Result<crate::WorkspaceAgentExecutionBinding> {
+        let execution = normalized_execution_binding(input.execution)?;
+        if input.prompt.is_empty() {
+            anyhow::bail!("workspace agent turn prompt must not be empty");
+        }
+
+        let now_ms = datetime_to_epoch_millis(Utc::now());
+        let mut tx = self.pool.begin().await?;
+        let run = workspace_agent_run_row_by_id(&mut tx, &execution.run_id)
+            .await?
+            .ok_or_else(|| {
+                anyhow::anyhow!("workspace agent run `{}` was not found", execution.run_id)
+            })?;
+        if run.status != "running" {
+            anyhow::bail!(
+                "workspace agent run `{}` is `{}` and cannot claim a model turn",
+                run.id,
+                run.status
+            );
+        }
+        validate_unclaimed_execution_identity(&run, &execution)?;
+        let packet = workspace_context_packet_row_by_id(&mut tx, &run.packet_id)
+            .await?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "workspace context packet `{}` for run `{}` was not found",
+                    run.packet_id,
+                    run.id
+                )
+            })?;
+        validate_run_packet_binding(&run, &packet)?;
+        if packet.status != "submitted" {
+            anyhow::bail!(
+                "workspace context packet `{}` is `{}` and cannot authorize a model turn",
+                packet.id,
+                packet.status
+            );
+        }
+        let expected_prompt = crate::render_workspace_agent_handoff_prompt(
+            &crate::WorkspaceAgentHandoffPromptInput {
+                packet_id: packet.id.clone(),
+                client_id: packet.client_id.clone(),
+                encounter_id: packet.encounter_id.clone(),
+                note_id: packet.note_id.clone(),
+                human_request: packet.human_request.clone(),
+                chart_context_summary: packet.chart_context_summary.clone(),
+                context_envelope_json: packet.context_envelope_json.clone(),
+                context_envelope_sha256: packet.context_envelope_sha256.clone(),
+                authorized_scope_json: packet.authorized_scope_json.clone(),
+            },
+            Some(run.id.as_str()),
+        );
+        if input.prompt != expected_prompt {
+            anyhow::bail!(
+                "workspace agent turn prompt does not match the canonical packet handoff"
+            );
+        }
+
+        let claimed = sqlx::query(
+            "UPDATE workspace_agent_runs SET source_turn_id = ?, updated_at_ms = ? WHERE id = ? AND status = 'running' AND source_turn_id IS NULL",
+        )
+        .bind(&execution.source_turn_id)
+        .bind(now_ms)
+        .bind(&run.id)
+        .execute(&mut *tx)
+        .await?;
+        if claimed.rows_affected() != 1 {
+            anyhow::bail!(
+                "workspace agent run `{}` was already claimed or changed concurrently",
+                run.id
+            );
+        }
+
+        let prompt_sha256 = format!("{:x}", Sha256::digest(input.prompt.as_bytes()));
+        insert_audit_event(
+            &mut tx,
+            crate::WorkspaceAuditEventCreate {
+                entity_type: "agent_run".to_string(),
+                entity_id: run.id,
+                action: "turn_claimed".to_string(),
+                actor: "agent".to_string(),
+                actor_kind: "agent".to_string(),
+                source: "state".to_string(),
+                client_id: Some(run.client_id),
+                note_id: run.note_id,
+                source_thread_id: Some(execution.source_thread_id.clone()),
+                source_turn_id: Some(execution.source_turn_id.clone()),
+                success: true,
+                summary: "restricted medical context turn claimed".to_string(),
+                metadata_json: Some(
+                    serde_json::json!({
+                        "provider": &execution.provider,
+                        "model": &execution.model,
+                        "prompt_sha256": prompt_sha256,
+                    })
+                    .to_string(),
+                ),
+                ..Default::default()
+            },
+            now_ms,
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(execution)
+    }
+
     pub async fn read_authorized_agent_context(
         &self,
         input: crate::WorkspaceAgentContextReadRequest,
+    ) -> anyhow::Result<crate::WorkspaceAgentContextRead> {
+        self.read_authorized_agent_context_inner(input, None).await
+    }
+
+    pub async fn read_authorized_agent_context_for_execution(
+        &self,
+        input: crate::WorkspaceAgentContextReadRequest,
+        execution: crate::WorkspaceAgentExecutionBinding,
+    ) -> anyhow::Result<crate::WorkspaceAgentContextRead> {
+        self.read_authorized_agent_context_inner(input, Some(execution))
+            .await
+    }
+
+    async fn read_authorized_agent_context_inner(
+        &self,
+        input: crate::WorkspaceAgentContextReadRequest,
+        execution: Option<crate::WorkspaceAgentExecutionBinding>,
     ) -> anyhow::Result<crate::WorkspaceAgentContextRead> {
         let category = input.category.trim();
         if !matches!(category, "visit_history" | "progress_notes") {
@@ -472,6 +604,10 @@ LIMIT ?
                 run.id,
                 run.status
             );
+        }
+        if let Some(execution) = execution {
+            let execution = normalized_execution_binding(execution)?;
+            validate_claimed_execution_identity(&run, &execution)?;
         }
         let packet = workspace_context_packet_row_by_id(&mut tx, &run.packet_id)
             .await?
@@ -775,6 +911,84 @@ fn validate_run_packet_binding(
             "workspace agent run `{}` no longer matches its authoritative context packet `{}`",
             run.id,
             packet.id
+        );
+    }
+    Ok(())
+}
+
+fn normalized_execution_binding(
+    mut execution: crate::WorkspaceAgentExecutionBinding,
+) -> anyhow::Result<crate::WorkspaceAgentExecutionBinding> {
+    execution.run_id = execution.run_id.trim().to_string();
+    execution.source_thread_id = execution.source_thread_id.trim().to_string();
+    execution.source_turn_id = execution.source_turn_id.trim().to_string();
+    execution.provider = execution.provider.trim().to_string();
+    execution.model = execution.model.trim().to_string();
+    for (label, value) in [
+        ("run id", execution.run_id.as_str()),
+        ("source thread", execution.source_thread_id.as_str()),
+        ("source turn", execution.source_turn_id.as_str()),
+        ("provider", execution.provider.as_str()),
+        ("model", execution.model.as_str()),
+    ] {
+        if value.is_empty() {
+            anyhow::bail!("workspace agent execution {label} must not be empty");
+        }
+    }
+    Ok(execution)
+}
+
+fn validate_unclaimed_execution_identity(
+    run: &WorkspaceAgentRunRow,
+    execution: &crate::WorkspaceAgentExecutionBinding,
+) -> anyhow::Result<()> {
+    if run.id != execution.run_id {
+        anyhow::bail!("workspace agent execution run does not match the stored run");
+    }
+    let Some(source_thread_id) = run
+        .source_thread_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        anyhow::bail!("workspace agent run is missing its required source thread binding");
+    };
+    if source_thread_id != execution.source_thread_id {
+        anyhow::bail!("workspace agent execution source thread does not match the stored run");
+    }
+    let provider = run.provider.trim();
+    if provider.is_empty() {
+        anyhow::bail!("workspace agent run is missing its required provider binding");
+    }
+    if provider != execution.provider {
+        anyhow::bail!("workspace agent execution provider does not match the stored run");
+    }
+    let model = run.model.trim();
+    if model.is_empty() {
+        anyhow::bail!("workspace agent run is missing its required model binding");
+    }
+    if model != execution.model {
+        anyhow::bail!("workspace agent execution model does not match the stored run");
+    }
+    if run.source_turn_id.is_some() {
+        anyhow::bail!("workspace agent run was already claimed by a model turn");
+    }
+    Ok(())
+}
+
+fn validate_claimed_execution_identity(
+    run: &WorkspaceAgentRunRow,
+    execution: &crate::WorkspaceAgentExecutionBinding,
+) -> anyhow::Result<()> {
+    if run.id != execution.run_id
+        || run.source_thread_id.as_deref().map(str::trim)
+            != Some(execution.source_thread_id.as_str())
+        || run.source_turn_id.as_deref().map(str::trim) != Some(execution.source_turn_id.as_str())
+        || run.provider.trim() != execution.provider
+        || run.model.trim() != execution.model
+    {
+        anyhow::bail!(
+            "workspace agent context read does not match the claimed turn execution identity"
         );
     }
     Ok(())

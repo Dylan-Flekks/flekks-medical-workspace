@@ -29,10 +29,7 @@ impl AppServerSession {
     ) -> Result<WorkspaceCoverageVerificationListResponse> {
         let request_id = self.next_request_id();
         self.client
-            .request_typed(ClientRequest::WorkspaceCoverageVerificationList {
-                request_id,
-                params,
-            })
+            .request_typed(ClientRequest::WorkspaceCoverageVerificationList { request_id, params })
             .await
             .wrap_err("workspace/coverage/verification/list failed in TUI")
     }

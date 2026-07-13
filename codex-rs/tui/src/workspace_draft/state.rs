@@ -64,8 +64,7 @@ struct InFlightCheckpoint {
     draft: MedicalWorkspaceWorkingDraftV1,
 }
 
-#[derive(Debug, Clone)]
-#[derive(Default)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct WorkspaceDraftState {
     client_id: Option<String>,
     scope_generation: u64,
@@ -77,7 +76,6 @@ pub(crate) struct WorkspaceDraftState {
     pending_recovery: Option<RecoverableMedicalWorkspaceDraft>,
     last_failure: Option<(WorkspaceDraftGenerationToken, String)>,
 }
-
 
 impl WorkspaceDraftState {
     pub(crate) fn reset_for_client(&mut self, client_id: impl Into<String>) {
@@ -187,8 +185,7 @@ impl WorkspaceDraftState {
             client_id: draft.client_id.clone(),
             expected_current_checkpoint_id: confirmed
                 .map(|checkpoint| checkpoint.checkpoint_id.clone()),
-            expected_current_checkpoint_revision: confirmed
-                .map(|checkpoint| checkpoint.revision),
+            expected_current_checkpoint_revision: confirmed.map(|checkpoint| checkpoint.revision),
             expected_current_checkpoint_sha256: confirmed
                 .map(|checkpoint| checkpoint.content_sha256.clone()),
             encounter_id: draft.note.encounter_id.clone(),

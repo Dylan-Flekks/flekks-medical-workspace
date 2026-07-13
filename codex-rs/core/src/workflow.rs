@@ -1,3 +1,4 @@
+use codex_protocol::config_types::ModelToolMode;
 use codex_protocol::items::TurnItem;
 use codex_protocol::items::WorkflowStatusItem;
 use codex_protocol::protocol::Event;
@@ -28,6 +29,9 @@ impl Session {
     }
 
     pub(crate) async fn emit_workflow_status_snapshots(&self, turn_context: &TurnContext) {
+        if turn_context.model_tool_mode == ModelToolMode::WorkspaceContextOnly {
+            return;
+        }
         for snapshot in self.collect_workflow_snapshots().await {
             let msg = EventMsg::ItemCompleted(ItemCompletedEvent {
                 thread_id: self.thread_id,

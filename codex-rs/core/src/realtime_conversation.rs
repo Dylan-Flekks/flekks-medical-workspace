@@ -703,10 +703,35 @@ pub(crate) async fn handle_start(
     params: ConversationStartParams,
     model_tool_mode: ModelToolMode,
 ) -> CodexResult<()> {
-    if model_tool_mode == ModelToolMode::Disabled {
+    let restricted_turn_active = {
+        let active_turn = sess.active_turn.lock().await;
+        active_turn
+            .as_ref()
+            .and_then(|active_turn| active_turn.task.as_ref())
+            .is_some_and(|task| {
+                task.turn_context.model_tool_mode == ModelToolMode::WorkspaceContextOnly
+            })
+    };
+    if restricted_turn_active {
         return Err(CodexErr::InvalidRequest(
-            "realtime conversations are unavailable while model tool mode is disabled".to_string(),
+            "realtime conversations are unavailable while a workspaceContextOnly turn is active"
+                .to_string(),
         ));
+    }
+    match model_tool_mode {
+        ModelToolMode::Default => {}
+        ModelToolMode::Disabled => {
+            return Err(CodexErr::InvalidRequest(
+                "realtime conversations are unavailable while model tool mode is disabled"
+                    .to_string(),
+            ));
+        }
+        ModelToolMode::WorkspaceContextOnly => {
+            return Err(CodexErr::InvalidRequest(
+                "realtime conversations are unavailable while model tool mode is workspaceContextOnly"
+                    .to_string(),
+            ));
+        }
     }
     let prepared_start = match prepare_realtime_start(sess, params).await {
         Ok(prepared_start) => prepared_start,
