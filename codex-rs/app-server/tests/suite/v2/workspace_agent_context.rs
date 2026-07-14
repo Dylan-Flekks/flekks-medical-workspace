@@ -10,6 +10,7 @@ use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::ThreadStartResponse;
 use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::UserInput as V2UserInput;
+use codex_app_server_protocol::WorkspaceAgentRunSourceListResponse;
 use codex_app_server_protocol::WorkspaceAgentRunStartResponse;
 use codex_app_server_protocol::WorkspaceClientUpsertResponse;
 use codex_app_server_protocol::WorkspaceContextPacketCreateResponse;
@@ -50,7 +51,6 @@ async fn unclaimed_agent_run_rejects_run_id_only_context_rpc() -> Result<()> {
         "unclaimed-context-rpc",
     )
     .await?;
-
     assert_direct_context_read_denied(&mut fixture.server, &run.id).await?;
     assert!(
         model_server
@@ -165,6 +165,30 @@ async fn claimed_wco_tool_read_succeeds_but_run_id_only_rpc_stays_denied() -> Re
         .context("workspace context tool output should contain sources")?;
     assert_eq!(sources.len(), 1);
     assert_eq!(sources[0]["source_entity_type"], json!("note_revision"));
+
+    let source_list: WorkspaceAgentRunSourceListResponse = request(
+        &mut fixture.server,
+        "workspace/agent/run/source/list",
+        json!({
+            "runId": &run.id,
+            "limit": 10,
+        }),
+    )
+    .await?;
+    let handoff_source = source_list
+        .sources
+        .iter()
+        .find(|source| source.source_entity_type == "handoff_prompt")
+        .context("claimed turn should have a durable handoff-prompt source")?;
+    let redacted_snapshot: Value = serde_json::from_str(&handoff_source.snapshot_json)?;
+    assert_eq!(
+        redacted_snapshot,
+        json!({
+            "schema": "workspace-agent-run-source-redaction-v1",
+            "redacted": true,
+            "storedSnapshotSha256": &handoff_source.content_sha256,
+        })
+    );
 
     assert_direct_context_read_denied(&mut fixture.server, &run.id).await?;
     Ok(())

@@ -140,6 +140,20 @@ impl WorkspaceStore {
             anyhow::bail!("workspace agent run idempotency key must not be empty");
         }
         let run_kind = nonempty_or(&input.run_kind, "agent");
+        let provider = input.provider.trim().to_string();
+        let model = input.model.trim().to_string();
+        let source_thread_id = input
+            .source_thread_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string);
+        let source_turn_id = input
+            .source_turn_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string);
         match run_kind.as_str() {
             "agent" => {
                 if input.source_turn_id.is_some() {
@@ -147,8 +161,23 @@ impl WorkspaceStore {
                         "workspace agent run source turn is server-owned and must be claimed after run start"
                     );
                 }
+                if source_thread_id.is_none() {
+                    anyhow::bail!("workspace agent run source thread must not be empty");
+                }
+                if provider.is_empty() {
+                    anyhow::bail!("workspace agent run provider must not be empty");
+                }
+                if model.is_empty() {
+                    anyhow::bail!("workspace agent run model must not be empty");
+                }
             }
-            "manual_import" => {}
+            "manual_import" => {
+                if source_thread_id.is_some() != source_turn_id.is_some() {
+                    anyhow::bail!(
+                        "workspace manual import source thread and source turn must be provided together"
+                    );
+                }
+            }
             other => anyhow::bail!("unsupported workspace agent run kind `{other}`"),
         }
         let now_ms = datetime_to_epoch_millis(Utc::now());
@@ -240,10 +269,10 @@ INSERT INTO workspace_agent_runs (
         .bind(&packet.context_envelope_sha256)
         .bind(&run_kind)
         .bind(input.idempotency_key.trim())
-        .bind(input.provider.trim())
-        .bind(input.model.trim())
-        .bind(&input.source_thread_id)
-        .bind(&input.source_turn_id)
+        .bind(&provider)
+        .bind(&model)
+        .bind(&source_thread_id)
+        .bind(&source_turn_id)
         .bind(now_ms)
         .bind(now_ms)
         .bind(now_ms)
@@ -320,8 +349,8 @@ INSERT INTO workspace_agent_run_sources (
                 client_id: Some(packet.client_id),
                 encounter_id: packet.encounter_id,
                 note_id: packet.note_id,
-                source_thread_id: input.source_thread_id,
-                source_turn_id: input.source_turn_id,
+                source_thread_id,
+                source_turn_id,
                 success: true,
                 summary: format!("{run_kind} run started"),
                 metadata_json: Some(
@@ -638,26 +667,19 @@ INSERT INTO workspace_agent_run_sources (
         Ok(execution)
     }
 
-    pub async fn read_authorized_agent_context(
-        &self,
-        input: crate::WorkspaceAgentContextReadRequest,
-    ) -> anyhow::Result<crate::WorkspaceAgentContextRead> {
-        self.read_authorized_agent_context_inner(input, None).await
-    }
-
     pub async fn read_authorized_agent_context_for_execution(
         &self,
         input: crate::WorkspaceAgentContextReadRequest,
         execution: crate::WorkspaceAgentExecutionBinding,
     ) -> anyhow::Result<crate::WorkspaceAgentContextRead> {
-        self.read_authorized_agent_context_inner(input, Some(execution))
+        self.read_authorized_agent_context_inner(input, execution)
             .await
     }
 
     async fn read_authorized_agent_context_inner(
         &self,
         input: crate::WorkspaceAgentContextReadRequest,
-        execution: Option<crate::WorkspaceAgentExecutionBinding>,
+        execution: crate::WorkspaceAgentExecutionBinding,
     ) -> anyhow::Result<crate::WorkspaceAgentContextRead> {
         let category = input.category.trim();
         if !matches!(category, "visit_history" | "progress_notes") {
@@ -679,10 +701,8 @@ INSERT INTO workspace_agent_run_sources (
                 run.status
             );
         }
-        if let Some(execution) = execution {
-            let execution = normalized_execution_binding(execution)?;
-            validate_claimed_execution_identity(&run, &execution)?;
-        }
+        let execution = normalized_execution_binding(execution)?;
+        validate_claimed_execution_identity(&run, &execution)?;
         let packet = workspace_context_packet_row_by_id(&mut tx, &run.packet_id)
             .await?
             .ok_or_else(|| {
@@ -804,6 +824,12 @@ ORDER BY accessed_at_ms ASC, id ASC
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty());
+        if run.run_kind == "manual_import" && source_thread_id.is_some() != source_turn_id.is_some()
+        {
+            anyhow::bail!(
+                "workspace manual import source thread and source turn must be provided together"
+            );
+        }
         if let (Some(existing), Some(requested)) =
             (run.source_thread_id.as_deref(), source_thread_id)
             && existing != requested

@@ -85,6 +85,7 @@ async fn unclassified_agent_start_leaves_prepared_packet_and_audits_unchanged() 
             idempotency_key: "policy-rejection".to_string(),
             provider: "test-provider".to_string(),
             model: "test-model".to_string(),
+            source_thread_id: Some("thread-policy-rejection".to_string()),
             actor: "Clinician Example".to_string(),
             ..Default::default()
         })

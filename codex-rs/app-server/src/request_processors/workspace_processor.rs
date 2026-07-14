@@ -2223,6 +2223,16 @@ fn api_workspace_agent_run_from_state(
 fn api_workspace_agent_run_source_from_state(
     value: codex_state::WorkspaceAgentRunSource,
 ) -> codex_app_server_protocol::WorkspaceAgentRunSource {
+    let snapshot_json = if value.source_entity_type == "handoff_prompt" {
+        serde_json::json!({
+            "schema": "workspace-agent-run-source-redaction-v1",
+            "redacted": true,
+            "storedSnapshotSha256": &value.content_sha256,
+        })
+        .to_string()
+    } else {
+        value.snapshot_json
+    };
     codex_app_server_protocol::WorkspaceAgentRunSource {
         id: value.id,
         run_id: value.run_id,
@@ -2230,7 +2240,7 @@ fn api_workspace_agent_run_source_from_state(
         source_entity_id: value.source_entity_id,
         source_revision: value.source_revision,
         display_label: value.display_label,
-        snapshot_json: value.snapshot_json,
+        snapshot_json,
         content_sha256: value.content_sha256,
         access_purpose: value.access_purpose,
         accessed_at: value.accessed_at.timestamp(),

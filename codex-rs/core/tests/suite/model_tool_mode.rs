@@ -104,6 +104,10 @@ async fn canonical_workspace_context_prompt(test: &TestCodex) -> anyhow::Result<
         .codex
         .state_db()
         .ok_or_else(|| anyhow::anyhow!("workspace context test requires SQLite state"))?;
+    state_db
+        .workspace()
+        .provision_synthetic_workspace("core workspaceContextOnly test fixture")
+        .await?;
     let client = state_db
         .workspace()
         .upsert_client(codex_state::WorkspaceClientUpsert {

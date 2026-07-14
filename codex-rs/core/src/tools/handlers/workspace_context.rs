@@ -19,16 +19,14 @@ use serde::Deserialize;
 use serde::Serialize;
 
 pub struct WorkspaceContextReadHandler {
-    expected_execution: Option<codex_state::WorkspaceAgentExecutionBinding>,
+    execution: codex_state::WorkspaceAgentExecutionBinding,
 }
 
 impl WorkspaceContextReadHandler {
     pub(crate) fn bound_to_execution(
         execution: codex_state::WorkspaceAgentExecutionBinding,
     ) -> Self {
-        Self {
-            expected_execution: Some(execution),
-        }
+        Self { execution }
     }
 }
 
@@ -94,7 +92,7 @@ impl ToolExecutor<ToolInvocation> for WorkspaceContextReadHandler {
     }
 
     fn handle(&self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'_> {
-        let expected_execution = self.expected_execution.clone();
+        let execution = self.execution.clone();
         Box::pin(async move {
             let ToolInvocation {
                 session, payload, ..
@@ -113,8 +111,7 @@ impl ToolExecutor<ToolInvocation> for WorkspaceContextReadHandler {
                     "workspace store is unavailable for this session".to_string(),
                 )
             })?;
-            let result =
-                read_workspace_context(state_db, args, expected_execution.as_ref()).await?;
+            let result = read_workspace_context(state_db, args, &execution).await?;
             let source_count = result.sources.len();
             let value = serde_json::to_value(result).map_err(|err| {
                 FunctionCallError::Fatal(format!("failed to serialize workspace context: {err}"))
@@ -171,7 +168,7 @@ impl ToolOutput for WorkspaceContextReadToolOutput {
 async fn read_workspace_context(
     state_db: crate::StateDbHandle,
     args: WorkspaceContextReadArgs,
-    expected_execution: Option<&codex_state::WorkspaceAgentExecutionBinding>,
+    execution: &codex_state::WorkspaceAgentExecutionBinding,
 ) -> Result<WorkspaceContextReadResult, FunctionCallError> {
     let run_id = args.run_id.trim();
     if run_id.is_empty() {
@@ -179,7 +176,7 @@ async fn read_workspace_context(
             "run_id must not be empty".to_string(),
         ));
     }
-    if expected_execution.is_some_and(|execution| run_id != execution.run_id) {
+    if run_id != execution.run_id {
         return Err(FunctionCallError::RespondToModel(
             "workspace_context_read run_id does not match the current restricted turn".to_string(),
         ));
@@ -190,18 +187,11 @@ async fn read_workspace_context(
         category: args.category.as_str().to_string(),
         max_records: args.limit,
     };
-    let context = if let Some(execution) = expected_execution {
-        state_db
-            .workspace()
-            .read_authorized_agent_context_for_execution(request, execution.clone())
-            .await
-    } else {
-        state_db
-            .workspace()
-            .read_authorized_agent_context(request)
-            .await
-    }
-    .map_err(read_error)?;
+    let context = state_db
+        .workspace()
+        .read_authorized_agent_context_for_execution(request, execution.clone())
+        .await
+        .map_err(read_error)?;
     Ok(WorkspaceContextReadResult {
         run_id: context.run_id,
         packet_id: context.packet_id,
@@ -269,6 +259,7 @@ mod tests {
         codex_state::WorkspaceNote,
         codex_state::WorkspaceEncounter,
         codex_state::WorkspaceAgentRun,
+        codex_state::WorkspaceAgentExecutionBinding,
     ) {
         let client = state_db
             .workspace()
@@ -350,17 +341,39 @@ mod tests {
             .start_agent_run(codex_state::WorkspaceAgentRunStart {
                 packet_id: packet.id.clone(),
                 expected_client_id: client.id.clone(),
-                expected_context_envelope_sha256: packet.context_envelope_sha256,
+                expected_context_envelope_sha256: packet.context_envelope_sha256.clone(),
                 run_kind: "agent".to_string(),
                 idempotency_key: format!("core-tool-context-test-{}", packet.id),
                 provider: "test-provider".to_string(),
                 model: "test-model".to_string(),
+                source_thread_id: Some(format!("thread-core-context-{}", packet.id)),
                 actor: "Clinician Example".to_string(),
                 ..Default::default()
             })
             .await
             .expect("run should start");
-        (client, note, encounter, run)
+        let execution = codex_state::WorkspaceAgentExecutionBinding {
+            run_id: run.id.clone(),
+            source_thread_id: run
+                .source_thread_id
+                .clone()
+                .expect("agent run should preserve its source thread"),
+            source_turn_id: format!("turn-core-context-{}", run.id),
+            provider: run.provider.clone(),
+            model: run.model.clone(),
+        };
+        state_db
+            .workspace()
+            .claim_agent_turn(codex_state::WorkspaceAgentTurnClaim {
+                execution: execution.clone(),
+                prompt: codex_state::render_workspace_agent_handoff_prompt(
+                    &codex_state::WorkspaceAgentHandoffPromptInput::from(&packet),
+                    Some(&run.id),
+                ),
+            })
+            .await
+            .expect("run should claim its execution binding");
+        (client, note, encounter, run, execution)
     }
 
     #[test]
@@ -415,7 +428,7 @@ mod tests {
     #[tokio::test]
     async fn workspace_context_read_returns_authorized_hashed_sources() {
         let (_temp, state_db) = test_state_db().await;
-        let (client, note, encounter, run) =
+        let (client, note, encounter, run, execution) =
             seed_authorized_run(&state_db, &["visit_history", "progress_notes"]).await;
 
         let result = read_workspace_context(
@@ -425,7 +438,7 @@ mod tests {
                 category: WorkspaceContextCategory::VisitHistory,
                 limit: Some(4),
             },
-            None,
+            &execution,
         )
         .await
         .expect("authorized context read should succeed");
@@ -469,7 +482,7 @@ mod tests {
     #[tokio::test]
     async fn workspace_context_read_denies_missing_terminal_or_unscoped_run() {
         let (_temp, state_db) = test_state_db().await;
-        let (_client, _note, _encounter, run) =
+        let (_client, _note, _encounter, run, execution) =
             seed_authorized_run(&state_db, &["visit_history"]).await;
 
         let missing = read_workspace_context(
@@ -479,7 +492,7 @@ mod tests {
                 category: WorkspaceContextCategory::VisitHistory,
                 limit: None,
             },
-            None,
+            &execution,
         )
         .await
         .expect_err("missing run should be denied");
@@ -492,7 +505,7 @@ mod tests {
                 category: WorkspaceContextCategory::ProgressNotes,
                 limit: None,
             },
-            None,
+            &execution,
         )
         .await
         .expect_err("category omitted from packet must be denied");
@@ -518,7 +531,7 @@ mod tests {
                 category: WorkspaceContextCategory::VisitHistory,
                 limit: None,
             },
-            None,
+            &execution,
         )
         .await
         .expect_err("terminal run should be denied");
@@ -531,6 +544,8 @@ mod tests {
     #[tokio::test]
     async fn workspace_context_read_rejects_empty_run_id() {
         let (_temp, state_db) = test_state_db().await;
+        let (_client, _note, _encounter, _run, execution) =
+            seed_authorized_run(&state_db, &["visit_history"]).await;
         let result = read_workspace_context(
             state_db,
             WorkspaceContextReadArgs {
@@ -538,7 +553,7 @@ mod tests {
                 category: WorkspaceContextCategory::VisitHistory,
                 limit: None,
             },
-            None,
+            &execution,
         )
         .await;
 
@@ -551,17 +566,15 @@ mod tests {
     #[tokio::test]
     async fn restricted_workspace_context_read_rejects_a_previous_authorized_run() {
         let (_temp, state_db) = test_state_db().await;
-        let (_previous_client, _previous_note, _previous_encounter, previous_run) =
+        let (
+            _previous_client,
+            _previous_note,
+            _previous_encounter,
+            previous_run,
+            _previous_execution,
+        ) = seed_authorized_run(&state_db, &["visit_history"]).await;
+        let (_current_client, _current_note, _current_encounter, _current_run, current_execution) =
             seed_authorized_run(&state_db, &["visit_history"]).await;
-        let (_current_client, _current_note, _current_encounter, current_run) =
-            seed_authorized_run(&state_db, &["visit_history"]).await;
-        let current_execution = codex_state::WorkspaceAgentExecutionBinding {
-            run_id: current_run.id,
-            source_thread_id: "thread-current".to_string(),
-            source_turn_id: "turn-current".to_string(),
-            provider: "test-provider".to_string(),
-            model: "test-model".to_string(),
-        };
 
         let result = read_workspace_context(
             state_db,
@@ -570,7 +583,7 @@ mod tests {
                 category: WorkspaceContextCategory::VisitHistory,
                 limit: None,
             },
-            Some(&current_execution),
+            &current_execution,
         )
         .await;
 

@@ -1362,8 +1362,9 @@ pub struct WorkspaceAgentRunStatusUpdateResponse {
     pub run: Option<WorkspaceAgentRun>,
 }
 
-/// Exact, immutable record returned to one agent run. The snapshot omits local
-/// filesystem paths and is hashed server-side for later audit replay.
+/// Audit projection of an immutable record returned to one agent run. The
+/// canonical handoff-prompt snapshot is redacted at the app-server boundary;
+/// its `content_sha256` continues to identify the exact durable source record.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
@@ -1409,6 +1410,10 @@ pub enum WorkspaceAgentContextCategory {
     ProgressNotes,
 }
 
+/// Denial-only compatibility request for the public app-server RPC. A run id
+/// never authorizes context access; model reads are available only through the
+/// execution-bound `workspace_context_read` tool during the claimed
+/// `workspaceContextOnly` turn.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]

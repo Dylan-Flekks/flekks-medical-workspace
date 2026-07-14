@@ -408,57 +408,6 @@ pub(super) async fn user_input_or_turn_inner(
         return;
     }
     if workspace_context_only {
-        let Some(run_id) = workspace_context_run_id else {
-            unreachable!("restricted run id was parsed before turn setup")
-        };
-        let Some(state_db) = sess.state_db() else {
-            sess.send_event_raw(Event {
-                id: sub_id,
-                msg: EventMsg::Error(ErrorEvent {
-                    message: "workspaceContextOnly turn cannot verify its run contract because SQLite state is unavailable"
-                        .to_string(),
-                    codex_error_info: Some(CodexErrorInfo::Other),
-                }),
-            })
-            .await;
-            return;
-        };
-        let execution = match crate::tools::workspace_context_only::claim_run(
-            state_db,
-            current_context.as_ref(),
-            sess.thread_id().to_string(),
-            sub_id.clone(),
-            run_id,
-            &items,
-        )
-        .await
-        {
-            Ok(execution) => execution,
-            Err(err) => {
-                sess.send_event_raw(Event {
-                    id: sub_id,
-                    msg: EventMsg::Error(ErrorEvent {
-                        message: err.to_string(),
-                        codex_error_info: Some(CodexErrorInfo::BadRequest),
-                    }),
-                })
-                .await;
-                return;
-            }
-        };
-        if let Err(err) =
-            crate::tools::workspace_context_only::bind_run(current_context.as_ref(), execution)
-        {
-            sess.send_event_raw(Event {
-                id: sub_id,
-                msg: EventMsg::Error(ErrorEvent {
-                    message: err.to_string(),
-                    codex_error_info: Some(CodexErrorInfo::Other),
-                }),
-            })
-            .await;
-            return;
-        }
         sess.mark_workspace_context_only_memory_tainted();
         if let Err(err) = persist_thread_memory_mode_update(sess, ThreadMemoryMode::Disabled).await
         {
@@ -537,6 +486,59 @@ pub(super) async fn user_input_or_turn_inner(
                     message: format!(
                         "failed to mark workspaceContextOnly memory state polluted: {err}"
                     ),
+                    codex_error_info: Some(CodexErrorInfo::Other),
+                }),
+            })
+            .await;
+            return;
+        }
+    }
+    if workspace_context_only {
+        let Some(run_id) = workspace_context_run_id else {
+            unreachable!("restricted run id was parsed before turn setup")
+        };
+        let Some(state_db) = sess.state_db() else {
+            sess.send_event_raw(Event {
+                id: sub_id,
+                msg: EventMsg::Error(ErrorEvent {
+                    message: "workspaceContextOnly turn cannot verify its run contract because SQLite state is unavailable"
+                        .to_string(),
+                    codex_error_info: Some(CodexErrorInfo::Other),
+                }),
+            })
+            .await;
+            return;
+        };
+        let execution = match crate::tools::workspace_context_only::claim_run(
+            state_db,
+            current_context.as_ref(),
+            sess.thread_id().to_string(),
+            sub_id.clone(),
+            run_id,
+            &items,
+        )
+        .await
+        {
+            Ok(execution) => execution,
+            Err(err) => {
+                sess.send_event_raw(Event {
+                    id: sub_id,
+                    msg: EventMsg::Error(ErrorEvent {
+                        message: err.to_string(),
+                        codex_error_info: Some(CodexErrorInfo::BadRequest),
+                    }),
+                })
+                .await;
+                return;
+            }
+        };
+        if let Err(err) =
+            crate::tools::workspace_context_only::bind_run(current_context.as_ref(), execution)
+        {
+            sess.send_event_raw(Event {
+                id: sub_id,
+                msg: EventMsg::Error(ErrorEvent {
+                    message: err.to_string(),
                     codex_error_info: Some(CodexErrorInfo::Other),
                 }),
             })
