@@ -5,6 +5,7 @@ use chrono::Utc;
 use sqlx::QueryBuilder;
 use sqlx::Sqlite;
 use sqlx::SqliteConnection;
+use sqlx::Transaction;
 use std::collections::BTreeSet;
 
 pub(super) const WORKSPACE_DOMAIN_TABLES: [&str; 26] = [
@@ -96,6 +97,43 @@ impl WorkspaceStore {
     }
 }
 
+pub(super) async fn require_synthetic_workspace(
+    tx: &mut Transaction<'_, Sqlite>,
+) -> Result<crate::WorkspaceDataPolicyStatus, WorkspacePolicyRequirementError> {
+    let status = read_policy(tx)
+        .await
+        .map_err(WorkspacePolicyRequirementError::Integrity)?;
+    if status.data_classification != crate::WorkspaceDataClassification::Synthetic {
+        return Err(WorkspacePolicyRequirementError::NotSynthetic);
+    }
+    Ok(status)
+}
+
+#[derive(Debug)]
+pub(super) enum WorkspacePolicyRequirementError {
+    NotSynthetic,
+    Integrity(anyhow::Error),
+}
+
+impl std::fmt::Display for WorkspacePolicyRequirementError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotSynthetic => formatter.write_str(
+                "workspace model runs require an explicit synthetic data classification before any workspace records are created",
+            ),
+            Self::Integrity(error) => write!(formatter, "{error}"),
+        }
+    }
+}
+
+impl std::error::Error for WorkspacePolicyRequirementError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::NotSynthetic => None,
+            Self::Integrity(error) => Some(error.as_ref()),
+        }
+    }
+}
 async fn read_policy(
     connection: &mut SqliteConnection,
 ) -> anyhow::Result<crate::WorkspaceDataPolicyStatus> {
@@ -185,3 +223,7 @@ async fn workspace_has_domain_data(connection: &mut SqliteConnection) -> anyhow:
 #[cfg(test)]
 #[path = "workspace_policy_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "workspace_policy_gating_tests.rs"]
+mod gating_tests;

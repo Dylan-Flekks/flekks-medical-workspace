@@ -11,6 +11,11 @@ async fn fixture() -> (
     let runtime = StateRuntime::init(unique_temp_dir(), "test-provider".to_string())
         .await
         .expect("state db should initialize");
+    runtime
+        .workspace()
+        .provision_synthetic_workspace("state guide test fixture")
+        .await
+        .expect("test workspace should be classified synthetic");
     let client = runtime
         .workspace()
         .upsert_client(crate::WorkspaceClientUpsert {
@@ -138,6 +143,7 @@ async fn workspace_guide_run_lifecycle_is_bounded_exact_stale_and_noncanonical()
     assert_eq!(envelope["sourceCheckpoint"]["id"], first.id);
     assert_eq!(envelope["sourceCheckpoint"]["revision"], 1);
     assert_eq!(envelope["safety"]["modelToolMode"], "disabled");
+    assert_eq!(envelope["safety"]["dataClassification"], "synthetic");
     assert_eq!(run.model_tool_mode, "disabled");
     assert_eq!(run.note_id.as_deref(), Some("draft-note"));
     assert_eq!(run.encounter_id, None);

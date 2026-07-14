@@ -253,6 +253,11 @@ mod tests {
             codex_state::StateRuntime::init(temp.path().to_path_buf(), "test-provider".to_string())
                 .await
                 .expect("state db should initialize");
+        state_db
+            .workspace()
+            .provision_synthetic_workspace("core workspace context test fixture")
+            .await
+            .expect("test workspace should be classified synthetic");
         (temp, state_db)
     }
 

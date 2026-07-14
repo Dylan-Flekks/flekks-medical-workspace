@@ -14,6 +14,7 @@ use uuid::Uuid;
 
 use super::workspace::WorkspaceStore;
 use super::workspace::insert_audit_event;
+use super::workspace_policy::require_synthetic_workspace;
 
 impl WorkspaceStore {
     pub async fn prepare_context_packet(
@@ -135,7 +136,8 @@ impl WorkspaceStore {
             anyhow::bail!("workspace agent run idempotency key must not be empty");
         }
         let now_ms = datetime_to_epoch_millis(Utc::now());
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let policy = require_synthetic_workspace(&mut tx).await?;
         let packet = workspace_context_packet_row_by_id(&mut tx, &input.packet_id)
             .await?
             .ok_or_else(|| {
@@ -247,6 +249,9 @@ INSERT INTO workspace_agent_runs (
                 &packet.authorized_scope_json,
             )?,
             "expectedOutputKind": &packet.expected_output_kind,
+            "safety": {
+                "dataClassification": policy.data_classification.as_str(),
+            },
         })
         .to_string();
         let packet_contract_sha256 = format!(
@@ -432,7 +437,8 @@ LIMIT ?
         input: crate::WorkspaceAgentRunSourceCreate,
     ) -> anyhow::Result<crate::WorkspaceAgentRunSource> {
         let now_ms = datetime_to_epoch_millis(Utc::now());
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        require_synthetic_workspace(&mut tx).await?;
         let run = workspace_agent_run_row_by_id(&mut tx, &input.run_id)
             .await?
             .ok_or_else(|| {
@@ -592,7 +598,8 @@ LIMIT ?
         }
 
         let now_ms = datetime_to_epoch_millis(Utc::now());
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        require_synthetic_workspace(&mut tx).await?;
         let run = workspace_agent_run_row_by_id(&mut tx, input.run_id.trim())
             .await?
             .ok_or_else(|| {

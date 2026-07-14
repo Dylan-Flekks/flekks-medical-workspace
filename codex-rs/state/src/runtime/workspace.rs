@@ -4292,9 +4292,15 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     async fn test_runtime() -> std::sync::Arc<StateRuntime> {
-        StateRuntime::init(unique_temp_dir(), "test-provider".to_string())
+        let runtime = StateRuntime::init(unique_temp_dir(), "test-provider".to_string())
             .await
-            .expect("state db should initialize")
+            .expect("state db should initialize");
+        runtime
+            .workspace()
+            .provision_synthetic_workspace("state workspace test fixture")
+            .await
+            .expect("test workspace should be classified synthetic");
+        runtime
     }
 
     #[tokio::test]
