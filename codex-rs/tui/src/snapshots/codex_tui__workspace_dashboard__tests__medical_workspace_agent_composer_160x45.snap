@@ -2,33 +2,33 @@
 source: tui/src/workspace_dashboard.rs
 expression: "render_dashboard_lines_at(&composer, 160, 45)"
 ---
-Medical Workspace  SYNTHETIC DATA ONLY
+Medical Workspace  /workspace-medical  SYNTHETIC DATA ONLY
 Patient: Jordan Patient  DOB: blank  MRN: blank  Contact: Missing contact  Coverage: Missing coverage  Encounter: No encounter
- EXPLORER                          PATIENT CHART                                                                   AGENT WORK
-┌Patient Directory───────────────┐┌Patient Demographics──────────────────────────────────────────────────────────┐┌Agent Work──────────────────────────────────┐
+ EXPLORER                          PATIENT CHART                                                                   CONTEXT PLAN
+┌Patient Directory───────────────┐┌Patient Demographics──────────────────────────────────────────────────────────┐┌Context Plan────────────────────────────────┐
 │Local search: /                 ││Identity: Jordan Patient · preferred not set                                  ││Agent: Jordan...; preview                   │
-│0 active patients; local only   ││Legal/card: legal name missing                                                ││[Pending]  History  Audit  ←/→              │
-│No saved patients yet.          ││DOB: missing · admin sex: missing · MRN: missing                              ││                                            │
-│New patient: :patient new       ││Contact: phone missing; email missing; method not set                         ││Local Coach                                 │
-│                                ││Address: address missing                                                      ││  Choose supporting context                 │
-│                                ││Emergency: name missing; relationship missing; phone missing                  ││  Select only the files, reviewed text, and │
-│                                ││Coverage: P not entered; S not entered; T not entered                         ││clips the agent needs for this request.     │
-│                                ││Enter edits all identity/contact fields · Ctrl-P opens actions                ││  ● next: Mark agent context                │
-│                                │└──────────────────────────────────────────────────────────────────────────────┘│  Guidance only; no model call and no chart │
-│                                │┌Note Title────────────────────────────────────────────────────────────────────┐│mutation.                                   │
-│                                ││Visit note                                                                    ││                                            │
-│                                │└──────────────────────────────────────────────────────────────────────────────┘│Mode: > Input |   Packet |   Returned       │
-└────────────────────────────────┘┌Note Body─────────────────────────────────────────────────────────────────────┐│  ● request: edit the local draft below     │
-┌Patient Notes───────────────────┐│Fake human-entered visit note body.                                           ││  Nothing is sent until Packet review and   │
-│Patient Notes                   ││                                                                              ││Ctrl-G.                                     │
-│  New note                      ││                                                                              ││  Local only; the composer stays pinned     │
-│  No patient notes yet. Use     ││                                                                              ││below guidance.                             │
-│:note new.                      ││                                                                              ││                                            │
-│  Medical, communication, and   ││                                                                              ││  ● context: 0 files | 0 text | 0 clips     │
-│admin notes appear here.        ││                                                                              ││  ● review: :agent preview                  │
+│0 active patients; local only   ││Legal/card: legal name missing                                                ││Codex bridge: building                      │
+│No saved patients yet.          ││DOB: missing · admin sex: missing · MRN: missing                              ││[Current]  History  Audit  ←/→              │
+│New patient: :patient new       ││Contact: phone missing; email missing; method not set                         ││                                            │
+│                                ││Address: address missing                                                      ││Workspace Planner                           │
+│                                ││Emergency: name missing; relationship missing; phone missing                  ││  Choose supporting context                 │
+│                                ││Coverage: P not entered; S not entered; T not entered                         ││  Select only the files, reviewed text, and │
+│                                ││Enter edits all identity/contact fields · Ctrl-P opens actions                ││clips the agent needs for this request.     │
+│                                │└──────────────────────────────────────────────────────────────────────────────┘│  ● next: Mark agent context                │
+│                                │┌Note Title────────────────────────────────────────────────────────────────────┐│  Guidance only; no model call and no chart │
+│                                ││Visit note                                                                    ││mutation.                                   │
+│                                │└──────────────────────────────────────────────────────────────────────────────┘│                                            │
+└────────────────────────────────┘┌Note Body─────────────────────────────────────────────────────────────────────┐│Mode: > Build |   Review |   Returned       │
+┌Patient Notes───────────────────┐│Fake human-entered visit note body.                                           ││  ● request: edit the local draft below     │
+│Patient Notes                   ││                                                                              ││  Nothing is sent until Context Plan review │
+│  New note                      ││                                                                              ││and Ctrl-G.                                 │
+│  No patient notes yet. Use     ││                                                                              ││  Local only; the composer stays pinned     │
+│:note new.                      ││                                                                              ││below guidance.                             │
+│  Medical, communication, and   ││                                                                              ││                                            │
+│admin notes appear here.        ││                                                                              ││  ● context: 0 files | 0 text | 0 clips     │
+│                                ││                                                                              ││  ● review: :agent preview                  │
 │                                ││                                                                              ││Recent History                              │
 │                                ││                                                                              ││  No saved agent work for this note.        │
-│                                ││                                                                              ││                                            │
 └────────────────────────────────┘│                                                                              ││                                            │
 ┌Uploaded Documents──────────────┐│                                                                              ││                                            │
 │Uploaded Documents              ││                                                                              ││                                            │
@@ -40,7 +40,7 @@ Patient: Jordan Patient  DOB: blank  MRN: blank  Contact: Missing contact  Cover
 │                                ││                                                                              ││                                            │
 │                                ││                                                                              ││                                            │
 │                                ││                                                                              ││                                            │
-│                                ││                                                                              ││Ask Agent · local · Enter ↵ · Ctrl-G review │
+│                                ││                                                                              ││Instructions for Codex · local draft · Enter│
 │                                ││                                                                              ││  Draft assessment                          │
 │                                ││                                                                              ││  Keep goals measurable                     │
 │                                ││                                                                              ││  Flag missing evidence                     │

@@ -1,3 +1,4 @@
+use super::workspace_context_plan::normalize_context_plan_metadata;
 use super::*;
 use crate::model::WorkspaceAgentResultRow;
 use crate::model::WorkspaceArtifactDerivativeRow;
@@ -2964,7 +2965,7 @@ ORDER BY created_at_ms DESC
 
     pub async fn create_context_packet(
         &self,
-        input: crate::WorkspaceContextPacketCreate,
+        mut input: crate::WorkspaceContextPacketCreate,
     ) -> anyhow::Result<crate::WorkspaceContextPacket> {
         let id = Uuid::new_v4().to_string();
         let now_ms = datetime_to_epoch_millis(Utc::now());
@@ -2984,6 +2985,8 @@ ORDER BY created_at_ms DESC
             &input.selected_clip_ids_json,
         )
         .await?;
+        let context_plan = normalize_context_plan_metadata(&mut tx, &input).await?;
+        input.context_envelope_json = context_plan.context_envelope_json;
         validate_packet_context_envelope(&input)?;
         let base_note_revision = resolve_packet_base_note_revision(&mut tx, &input).await?;
         let context_envelope_sha256 = context_envelope_sha256(&input.context_envelope_json);
@@ -3047,13 +3050,18 @@ INSERT INTO workspace_context_packets (
     base_note_revision,
     authorized_scope_json,
     expected_output_kind,
+    workspace_profile,
+    plan_schema_version,
+    source_checkpoint_id,
+    source_checkpoint_sha256,
+    readiness_json,
     status,
     created_at_ms,
     sent_at_ms,
     submitted_at_ms,
     canceled_at_ms,
     updated_at_ms
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 RETURNING
     id,
     client_id,
@@ -3073,6 +3081,11 @@ RETURNING
     base_note_revision,
     authorized_scope_json,
     expected_output_kind,
+    workspace_profile,
+    plan_schema_version,
+    source_checkpoint_id,
+    source_checkpoint_sha256,
+    readiness_json,
     status,
     created_at_ms,
     sent_at_ms,
@@ -3099,6 +3112,11 @@ RETURNING
         .bind(base_note_revision)
         .bind(&authorized_scope_json)
         .bind(&expected_output_kind)
+        .bind(&context_plan.workspace_profile)
+        .bind(context_plan.plan_schema_version)
+        .bind(&context_plan.source_checkpoint_id)
+        .bind(&context_plan.source_checkpoint_sha256)
+        .bind(&context_plan.readiness_json)
         .bind(&status)
         .bind(now_ms)
         .bind(now_ms)
@@ -3162,6 +3180,11 @@ SELECT
     base_note_revision,
     authorized_scope_json,
     expected_output_kind,
+    workspace_profile,
+    plan_schema_version,
+    source_checkpoint_id,
+    source_checkpoint_sha256,
+    readiness_json,
     status,
     created_at_ms,
     sent_at_ms,
@@ -3215,6 +3238,11 @@ SELECT
     base_note_revision,
     authorized_scope_json,
     expected_output_kind,
+    workspace_profile,
+    plan_schema_version,
+    source_checkpoint_id,
+    source_checkpoint_sha256,
+    readiness_json,
     status,
     created_at_ms,
     sent_at_ms,
@@ -4079,7 +4107,8 @@ fn string_contains_absolute_path(value: &str) -> bool {
         token.starts_with("~/")
             || token.starts_with("\\\\")
             || token.starts_with("//")
-            || (token.starts_with('/') && token != "/workspacemedical")
+            || (token.starts_with('/')
+                && !matches!(token, "/workspace-medical" | "/workspacemedical"))
     })
 }
 
@@ -4290,6 +4319,17 @@ mod tests {
     use super::*;
     use crate::runtime::test_support::unique_temp_dir;
     use pretty_assertions::assert_eq;
+
+    #[test]
+    fn medical_workspace_command_tokens_are_not_absolute_paths() {
+        assert!(!string_contains_absolute_path(
+            "return to /workspace-medical"
+        ));
+        assert!(!string_contains_absolute_path(
+            "return to /workspacemedical"
+        ));
+        assert!(string_contains_absolute_path("read /tmp/private-record"));
+    }
 
     async fn test_runtime() -> std::sync::Arc<StateRuntime> {
         let runtime = StateRuntime::init(unique_temp_dir(), "test-provider".to_string())

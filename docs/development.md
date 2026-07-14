@@ -8,7 +8,8 @@ Install Git, the Rust toolchain from `codex-rs/rust-toolchain.toml`, and `just`.
 just medical-workspace
 ```
 
-Run `/workspacemedical` when the TUI opens. Use only synthetic records and files.
+Run `/workspace-medical` when the TUI opens. `/workspacemedical` is a hidden compatibility alias.
+Use only synthetic records and files.
 
 For a manual debug build, run `cargo build -p codex-cli` from `codex-rs`, set a
 readable terminal size with `stty cols 160 rows 45`, then launch

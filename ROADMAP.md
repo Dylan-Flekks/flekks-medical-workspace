@@ -17,11 +17,14 @@ The project is intentionally public before it is finished so contributors can he
 - Bind completed agent turns automatically to their prepared runs. Implemented for matching packet id/hash turns; external output uses the explicit recovery import.
 - Persist recommendations and append-only clinician decisions. Implemented for whole-proposal review.
 
-## Three-zone workspace
+## Living context workspace
 
 - Patient/Chart Explorer on the left ([#7](https://github.com/Dylan-Flekks/flekks-medical-workspace/issues/7)).
 - Canonical human chart in the center.
-- Pending, History, and Audit Agent Work on the right ([#8](https://github.com/Dylan-Flekks/flekks-medical-workspace/issues/8)).
+- Context Plan, master-run status, Agent Review, History, and Audit on the right
+  ([#8](https://github.com/Dylan-Flekks/flekks-medical-workspace/issues/8)).
+- Freeze living workspace context into immutable, checkpoint-bound plans for individual master-agent
+  runs while retaining earlier packets and results for audit.
 - IDE-style current-versus-proposed comparison with stale-revision handling ([#9](https://github.com/Dylan-Flekks/flekks-medical-workspace/issues/9)).
 
 ## Synthetic-data and security program

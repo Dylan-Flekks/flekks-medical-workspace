@@ -7,6 +7,7 @@ pub(crate) enum WorkspaceActionId {
     AddendumStart,
     AgentClear,
     AgentInbox,
+    AgentOpenRun,
     AgentPacketInspect,
     AgentPreview,
     AgentRequest,
@@ -145,8 +146,8 @@ impl WorkspaceActionGroup {
     pub(crate) fn title(self) -> &'static str {
         match self {
             Self::Addenda => "Addenda",
-            Self::AgentContext => "Medical Agent Plan and returned work",
-            Self::AgentHandoff => "Medical Agent Plan",
+            Self::AgentContext => "Context Plan and Agent Review",
+            Self::AgentHandoff => "Context Plan submission",
             Self::ClinicalSafety => "Clinical safety",
             Self::Documents => "Files & reviewed text",
             Self::Encounters => "Encounters",
@@ -359,7 +360,7 @@ pub(crate) const WORKSPACE_ACTIONS: &[WorkspaceActionDef] = &[
     },
     WorkspaceActionDef {
         id: WorkspaceActionId::ScopeAgentPacket,
-        label: "Open Medical Agent Plan",
+        label: "Open Context Plan",
         command: "agent handoff",
         shortcut: None,
         group: WorkspaceActionGroup::Scopes,
@@ -823,7 +824,7 @@ pub(crate) const WORKSPACE_ACTIONS: &[WorkspaceActionDef] = &[
     },
     WorkspaceActionDef {
         id: WorkspaceActionId::AgentPreview,
-        label: "Review Packet",
+        label: "Review Context Plan",
         command: "agent preview",
         shortcut: None,
         group: WorkspaceActionGroup::AgentContext,
@@ -838,17 +839,17 @@ pub(crate) const WORKSPACE_ACTIONS: &[WorkspaceActionDef] = &[
         profile: WorkspaceActionProfile::Medical,
     },
     WorkspaceActionDef {
-        id: WorkspaceActionId::AgentPacketInspect,
-        label: "Compare medical plan and result",
-        command: "agent handoff inspect",
+        id: WorkspaceActionId::AgentOpenRun,
+        label: "Open full Codex run",
+        command: "agent open run",
         shortcut: None,
         group: WorkspaceActionGroup::AgentContext,
         profile: WorkspaceActionProfile::Medical,
     },
     WorkspaceActionDef {
         id: WorkspaceActionId::AgentPacketInspect,
-        label: "Compare medical plan and result",
-        command: "agent context inspect",
+        label: "Compare Context Plan and result",
+        command: "agent handoff inspect",
         shortcut: None,
         group: WorkspaceActionGroup::AgentContext,
         profile: WorkspaceActionProfile::Medical,
@@ -919,7 +920,7 @@ pub(crate) const WORKSPACE_ACTIONS: &[WorkspaceActionDef] = &[
     },
     WorkspaceActionDef {
         id: WorkspaceActionId::Handoff,
-        label: "Submit Medical Agent Plan",
+        label: "Submit Context Plan",
         command: "agent send",
         shortcut: None,
         group: WorkspaceActionGroup::AgentHandoff,
@@ -983,7 +984,7 @@ pub(crate) const WORKSPACE_ACTIONS: &[WorkspaceActionDef] = &[
     },
     WorkspaceActionDef {
         id: WorkspaceActionId::Handoff,
-        label: "Submit Medical Agent Plan",
+        label: "Submit Context Plan",
         command: "handoff",
         shortcut: Some("Ctrl-G"),
         group: WorkspaceActionGroup::AgentHandoff,
@@ -1337,6 +1338,9 @@ pub(crate) fn action_for_command(
             | "returned work review"
             | "review codex result" => {
                 return Some(WorkspaceActionId::AgentInbox);
+            }
+            "agent open run" | "open codex run" | "open agent run" => {
+                return Some(WorkspaceActionId::AgentOpenRun);
             }
             "agent handoff inspect"
             | "agent context inspect"

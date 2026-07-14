@@ -28,7 +28,7 @@ The derivative adds or substantially changes:
 
 - regulated workflow and approval/audit primitives;
 - a local SQLite workspace domain for patients, encounters, notes, revisions, files, tasks, safety records, context packets, agent results, proposals, and audits;
-- the `/workspacemedical` full-screen TUI;
+- the `/workspace-medical` full-screen TUI;
 - local patient search and patient/chart navigation;
 - explicit multimodal metadata selection and reviewed text/clip handling;
 - packet-scoped agent handoff and returned-work review;

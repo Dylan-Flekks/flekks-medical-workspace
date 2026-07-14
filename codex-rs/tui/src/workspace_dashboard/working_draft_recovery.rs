@@ -10,7 +10,7 @@ impl WorkspaceDashboard {
         let Some(client_id) = self.draft_client.id.clone() else {
             return Ok(None);
         };
-        MedicalWorkspaceWorkingDraftV1::new(MedicalWorkspaceWorkingDraftInput {
+        let input = MedicalWorkspaceWorkingDraftInput {
             client_id,
             note_id: self.draft_note.id.clone(),
             working_note_id: self.draft_note.working_note_id.clone(),
@@ -26,8 +26,9 @@ impl WorkspaceDashboard {
             selected_file_ids: self.selected_artifact_ids.iter().cloned().collect(),
             selected_reviewed_text_ids: self.selected_derivative_ids.iter().cloned().collect(),
             selected_clip_ids: self.selected_clip_ids.iter().cloned().collect(),
-        })
-        .map(Some)
+        };
+        MedicalWorkspaceWorkingDraftV1::new_with_context_plan(input, self.context_plan_input())
+            .map(Some)
     }
 
     pub(crate) fn apply_recovered_medical_working_draft(

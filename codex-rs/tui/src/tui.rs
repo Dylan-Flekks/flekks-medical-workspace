@@ -771,20 +771,37 @@ impl Tui {
         if self.is_alt_screen_active() {
             return Ok(());
         }
-        let _ = execute!(self.terminal.backend_mut(), EnterAlternateScreen);
+        execute!(self.terminal.backend_mut(), EnterAlternateScreen)?;
         // Enable "alternate scroll" so terminals may translate wheel to arrows
-        let _ = execute!(self.terminal.backend_mut(), EnableAlternateScroll);
-        let _ = execute!(self.terminal.backend_mut(), EnableMouseCapture);
-        if let Ok(size) = self.terminal.size() {
-            self.alt_saved_viewport = Some(self.terminal.viewport_area);
-            self.terminal.set_viewport_area(ratatui::layout::Rect::new(
-                0,
-                0,
-                size.width,
-                size.height,
-            ));
-            let _ = self.terminal.clear();
+        if let Err(err) = execute!(self.terminal.backend_mut(), EnableAlternateScroll) {
+            tracing::debug!(error = %err, "terminal does not support alternate-screen scrolling");
         }
+        if let Err(err) = execute!(self.terminal.backend_mut(), EnableMouseCapture) {
+            tracing::debug!(error = %err, "terminal does not support alternate-screen mouse capture");
+        }
+        let size = match self.terminal.size() {
+            Ok(size) => size,
+            Err(err) => {
+                let _ = execute!(self.terminal.backend_mut(), DisableAlternateScroll);
+                let _ = execute!(self.terminal.backend_mut(), DisableMouseCapture);
+                let _ = execute!(self.terminal.backend_mut(), LeaveAlternateScreen);
+                return Err(err);
+            }
+        };
+        let saved_viewport = self.terminal.viewport_area;
+        self.alt_saved_viewport = Some(saved_viewport);
+        self.terminal
+            .set_viewport_area(ratatui::layout::Rect::new(0, 0, size.width, size.height));
+        if let Err(err) = self.terminal.clear() {
+            self.terminal.set_viewport_area(saved_viewport);
+            self.alt_saved_viewport = None;
+            let _ = execute!(self.terminal.backend_mut(), DisableAlternateScroll);
+            let _ = execute!(self.terminal.backend_mut(), DisableMouseCapture);
+            let _ = execute!(self.terminal.backend_mut(), LeaveAlternateScreen);
+            self.terminal.invalidate_viewport();
+            return Err(err);
+        }
+        self.terminal.invalidate_viewport();
         self.alt_screen_active.store(true, Ordering::Relaxed);
         Ok(())
     }
@@ -795,14 +812,19 @@ impl Tui {
             return Ok(());
         }
         // Disable alternate scroll when leaving alt-screen
-        let _ = execute!(self.terminal.backend_mut(), DisableAlternateScroll);
-        let _ = execute!(self.terminal.backend_mut(), DisableMouseCapture);
-        let _ = execute!(self.terminal.backend_mut(), LeaveAlternateScreen);
+        if let Err(err) = execute!(self.terminal.backend_mut(), DisableAlternateScroll) {
+            tracing::debug!(error = %err, "failed to disable alternate-screen scrolling");
+        }
+        if let Err(err) = execute!(self.terminal.backend_mut(), DisableMouseCapture) {
+            tracing::debug!(error = %err, "failed to disable alternate-screen mouse capture");
+        }
+        let leave_result = execute!(self.terminal.backend_mut(), LeaveAlternateScreen);
         if let Some(saved) = self.alt_saved_viewport.take() {
             self.terminal.set_viewport_area(saved);
         }
+        self.terminal.invalidate_viewport();
         self.alt_screen_active.store(false, Ordering::Relaxed);
-        Ok(())
+        leave_result
     }
 
     pub fn insert_history_lines(&mut self, lines: Vec<Line<'static>>) {

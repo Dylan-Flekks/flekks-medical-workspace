@@ -2,7 +2,7 @@
 source: tui/src/workspace_dashboard.rs
 expression: "render_dashboard_lines_at(&summary, 120, 32)"
 ---
-Medical Workspace  SYNTHETIC DATA ONLY
+Medical Workspace  /workspace-medical  SYNTHETIC DATA ONLY
 Patient: Jordan Patient  DOB: blank  MRN: blank  Contact: Contact on file  Coverage: Missing coverage  Encounter: No
  EXPLORER                      PATIENT CHART
 ┌Patient Directory───────────┐┌Patient Demographics Editor─────────────────────────────────────────────────────────────┐

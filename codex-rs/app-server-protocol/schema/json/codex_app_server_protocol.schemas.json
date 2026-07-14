@@ -22330,6 +22330,15 @@
               "null"
             ]
           },
+          "planSchemaVersion": {
+            "default": 1,
+            "format": "int64",
+            "type": "integer"
+          },
+          "readinessJson": {
+            "default": "{\"version\":1,\"warnings\":[],\"acknowledgements\":[],\"legacy\":true}",
+            "type": "string"
+          },
           "selectedArtifactIdsJson": {
             "type": "string"
           },
@@ -22342,6 +22351,20 @@
           "sentAt": {
             "format": "int64",
             "type": "integer"
+          },
+          "sourceCheckpointId": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sourceCheckpointSha256": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "status": {
             "type": "string"
@@ -22356,6 +22379,10 @@
           "updatedAt": {
             "format": "int64",
             "type": "integer"
+          },
+          "workspaceProfile": {
+            "default": "medical",
+            "type": "string"
           }
         },
         "required": [
@@ -22426,15 +22453,38 @@
               "null"
             ]
           },
+          "planSchemaVersion": {
+            "default": 1,
+            "format": "int64",
+            "type": "integer"
+          },
           "readOnlySafetyConstraints": {
             "items": {
               "type": "string"
             },
             "type": "array"
           },
+          "readinessJson": {
+            "default": "{\"version\":1,\"warnings\":[],\"acknowledgements\":[],\"legacy\":true}",
+            "type": "string"
+          },
           "sentAt": {
             "format": "int64",
             "type": "integer"
+          },
+          "sourceCheckpointId": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sourceCheckpointSha256": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "status": {
             "type": "string"
@@ -22445,6 +22495,10 @@
               "integer",
               "null"
             ]
+          },
+          "workspaceProfile": {
+            "default": "medical",
+            "type": "string"
           }
         },
         "required": [

@@ -4,6 +4,7 @@ use super::workspace_agent_queries::workspace_agent_result_row_by_run;
 use super::workspace_agent_queries::workspace_agent_run_row_by_id;
 use super::workspace_agent_queries::workspace_agent_run_row_by_key;
 use super::workspace_agent_queries::workspace_context_packet_row_by_id;
+use super::workspace_context_plan::validate_context_plan_for_submission;
 use super::*;
 use crate::model::WorkspaceAgentRunRow;
 use crate::model::WorkspaceAgentRunSourceRow;
@@ -73,6 +74,9 @@ impl WorkspaceStore {
                 packet.id,
                 packet.status
             );
+        }
+        if target_status == "submitted" {
+            validate_context_plan_for_submission(&mut tx, &packet).await?;
         }
 
         let actor = nonempty_or(&input.actor, &packet.clinician_actor);
@@ -212,6 +216,7 @@ impl WorkspaceStore {
         }
 
         if packet.status == "prepared" {
+            validate_context_plan_for_submission(&mut tx, &packet).await?;
             sqlx::query(
                 "UPDATE workspace_context_packets SET status = 'submitted', submitted_at_ms = ?, updated_at_ms = ? WHERE id = ? AND status = 'prepared'",
             )
@@ -1212,7 +1217,7 @@ fn token_looks_like_local_path(token: &str) -> bool {
         || token.starts_with("~/")
         || token.starts_with("\\\\")
         || token.starts_with("//")
-        || (token.starts_with('/') && token != "/workspacemedical")
+        || (token.starts_with('/') && !matches!(token, "/workspace-medical" | "/workspacemedical"))
 }
 
 fn redact_local_path_tokens(value: &str) -> (String, bool) {

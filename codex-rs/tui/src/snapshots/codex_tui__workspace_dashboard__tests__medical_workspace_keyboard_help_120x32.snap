@@ -2,7 +2,7 @@
 source: tui/src/workspace_dashboard.rs
 expression: rendered
 ---
-Medical Workspace  SYNTHETIC DATA ONLY
+Medical Workspace  /workspace-medical  SYNTHETIC DATA ONLY
 Patient: No patient selected  DOB: blank  MRN: blank  Contact: Missing contact  Coverage: Missing coverage  Encounter:
  EXPLORER                      PATIENT CHART
 ┌Patient Dir┌Workspace Actions─────────────────────────────────────────────────────────────────────────────┐───────────┐

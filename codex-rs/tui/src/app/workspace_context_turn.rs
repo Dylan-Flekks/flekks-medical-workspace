@@ -11,7 +11,6 @@ pub(super) const WORKSPACE_CONTEXT_ACTIVE_TURN_MESSAGE: &str = "Medical context 
 pub(super) const WORKSPACE_CONTEXT_UNAUDITED_INPUT_MESSAGE: &str = "Medical context handoff was held: remove inline attachments, skills, and mentions, then select audited files in the context packet.";
 pub(super) const WORKSPACE_CONTEXT_BINDING_MISMATCH_MESSAGE: &str = "Medical context handoff was held because its generated prompt changed. Return to the medical workspace and prepare the handoff again.";
 pub(super) const WORKSPACE_CONTEXT_NO_ACTIVE_THREAD_MESSAGE: &str = "Medical context handoff needs an active Codex thread. Open or resume a thread, then submit the packet again.";
-pub(super) const WORKSPACE_CONTEXT_COMPOSER_NOT_EMPTY_MESSAGE: &str = "Medical context handoff was not prepared because the Codex composer already contains unrelated text. Send or clear that draft, then submit the packet again.";
 pub(super) const WORKSPACE_CONTEXT_STRUCTURED_OUTPUT_MESSAGE: &str = "Medical context handoff was held because structured output is enabled. Clear the output schema, then submit the packet again.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]

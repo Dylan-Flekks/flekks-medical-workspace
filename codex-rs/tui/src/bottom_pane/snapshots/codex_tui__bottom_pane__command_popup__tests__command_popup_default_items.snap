@@ -25,7 +25,7 @@ expression: commands
 /init - create an AGENTS.md file with instructions for Codex
 /compact - summarize conversation to prevent hitting the context limit
 /agent - switch the active agent thread
-/workspacemedical - open the medical workspace dashboard
+/workspace-medical - open the auditable medical workspace
 /side - start a side conversation in an ephemeral fork
 /copy - copy last response as markdown
 /raw - toggle raw scrollback mode for copy-friendly terminal selection

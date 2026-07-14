@@ -2,6 +2,7 @@ use super::*;
 use crate::workspace_draft::MEDICAL_WORKSPACE_DRAFT_ACTOR;
 use crate::workspace_draft::MedicalWorkspaceWorkingDraftV1;
 use crate::workspace_draft::RecoverableMedicalWorkspaceDraft;
+use crate::workspace_draft::WorkspaceDraftCheckpointMetadata;
 use crate::workspace_draft::WorkspaceDraftCheckpointStart;
 use crate::workspace_draft::WorkspaceDraftCheckpointTrigger;
 use crate::workspace_draft::WorkspaceDraftCloseDisposition;
@@ -171,10 +172,6 @@ impl WorkspaceDraftRuntime {
         })
     }
 
-    fn reset_after_terminal_close(&mut self, draft: Option<MedicalWorkspaceWorkingDraftV1>) {
-        self.attach_baseline(draft);
-    }
-
     fn adopt_recovered_scope(&mut self, draft: &MedicalWorkspaceWorkingDraftV1) {
         self.scope = Some(WorkspaceDraftScope::from_draft(draft));
     }
@@ -246,6 +243,18 @@ impl App {
             WorkspaceDraftRecoveryMode::ColdStart,
         )
         .await;
+    }
+
+    pub(super) async fn ensure_workspace_draft_runtime_initialized(
+        &mut self,
+        app_server: &mut AppServerSession,
+    ) {
+        if self.workspace_draft_runtime.enabled
+            && self.workspace_draft_runtime.recovery_discovery_complete
+        {
+            return;
+        }
+        self.initialize_workspace_draft_recovery(app_server).await;
     }
 
     pub(super) async fn initialize_workspace_draft_recovery_after_navigation(
@@ -569,6 +578,14 @@ impl App {
         self.workspace_draft_runtime.observed = Some(adopted);
         self.workspace_draft_runtime.scheduled_token = None;
         self.workspace_draft_runtime.cancel_autosave_timer();
+        let checkpoint = self
+            .workspace_draft_runtime
+            .state
+            .confirmed_checkpoint()
+            .cloned();
+        if let Some(dashboard) = self.workspace_dashboard.as_mut() {
+            dashboard.set_source_checkpoint(checkpoint);
+        }
         self.set_workspace_draft_recovery_available(false);
         Ok(())
     }
@@ -599,34 +616,6 @@ impl App {
         if let Some(dashboard) = self.workspace_dashboard.as_mut() {
             dashboard.set_status("Discarded local recovery draft; canonical chart was unchanged.");
         }
-        Ok(())
-    }
-
-    pub(super) async fn close_workspace_draft_after_handoff(
-        &mut self,
-        app_server: &mut AppServerSession,
-    ) -> Result<()> {
-        if !self.workspace_draft_runtime.enabled
-            || self
-                .workspace_draft_runtime
-                .state
-                .confirmed_checkpoint()
-                .is_none()
-        {
-            return Ok(());
-        }
-        let params = self.workspace_draft_runtime.state.exact_close_params(
-            WorkspaceDraftCloseDisposition::Closed,
-            MEDICAL_WORKSPACE_DRAFT_ACTOR,
-            "reviewed context packet handed to master Codex harness",
-        )?;
-        let response = app_server.workspace_draft_session_close(params).await?;
-        self.workspace_draft_runtime
-            .state
-            .confirm_closed(&response.session, WorkspaceDraftCloseDisposition::Closed)?;
-        let current = self.current_medical_working_draft()?;
-        self.workspace_draft_runtime
-            .reset_after_terminal_close(current);
         Ok(())
     }
 
@@ -699,6 +688,9 @@ impl App {
             .workspace_draft_runtime
             .state
             .complete_checkpoint(token, &response)?;
+        if let Some(dashboard) = self.workspace_dashboard.as_mut() {
+            dashboard.set_source_checkpoint(Some(metadata.clone()));
+        }
         self.workspace_draft_runtime.scheduled_token = None;
         self.workspace_draft_runtime.cancel_autosave_timer();
         self.set_workspace_draft_message(Some(format!(
@@ -706,6 +698,15 @@ impl App {
             metadata.revision
         )));
         Ok(())
+    }
+
+    pub(super) fn confirmed_workspace_draft_checkpoint(
+        &self,
+    ) -> Option<WorkspaceDraftCheckpointMetadata> {
+        self.workspace_draft_runtime
+            .state
+            .confirmed_checkpoint()
+            .cloned()
     }
 
     fn current_medical_working_draft(&self) -> Result<Option<MedicalWorkspaceWorkingDraftV1>> {

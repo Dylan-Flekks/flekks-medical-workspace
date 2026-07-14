@@ -1,6 +1,6 @@
 //! Binds a submitted medical context packet to the next matching model turn.
 //!
-//! Captured output is persisted as review-pending Agent Work. This never applies
+//! Captured output is persisted as review-pending Agent Review. This never applies
 //! a proposal or mutates the canonical chart.
 
 use super::*;
@@ -78,10 +78,6 @@ impl PendingWorkspaceAgentCapture {
                 text_elements,
             }] if text == &self.expected_prompt && text_elements.is_empty()
         )
-    }
-
-    pub(super) fn prompt_matches(&self, prompt: &str) -> bool {
-        self.expected_prompt == prompt
     }
 
     pub(super) fn model_matches(&self, model: &str) -> bool {
@@ -183,13 +179,13 @@ impl App {
                         {
                             tracing::warn!(
                                 error = %err,
-                                "saved medical agent result but failed to refresh Agent Work"
+                                "saved medical agent result but failed to refresh Agent Review"
                             );
                         }
                         self.chat_widget.add_info_message(
-                            "Medical agent response saved as review-pending Agent Work."
+                            "Medical agent response saved as review-pending Agent Review."
                                 .to_string(),
-                            Some("Reopen /workspacemedical to compare or reject it.".to_string()),
+                            Some("Reopen /workspace-medical to compare or reject it.".to_string()),
                         );
                     }
                     Err(err) => {
@@ -205,7 +201,7 @@ impl App {
                 status,
                 error_summary,
             } => {
-                if let Err(err) = app_server
+                let run_status_updated = match app_server
                     .workspace_agent_run_status_update(WorkspaceAgentRunStatusUpdateParams {
                         run_id: pending.run_id,
                         status: status.to_string(),
@@ -213,7 +209,22 @@ impl App {
                     })
                     .await
                 {
-                    tracing::warn!(error = %err, "failed to close medical agent run");
+                    Ok(_) => true,
+                    Err(err) => {
+                        tracing::warn!(error = %err, "failed to close medical agent run");
+                        false
+                    }
+                };
+                if run_status_updated
+                    && let Some(dashboard) = self.workspace_dashboard.as_mut()
+                    && let Err(err) = dashboard
+                        .refresh_after_agent_run_ended(app_server, status, &error_summary)
+                        .await
+                {
+                    tracing::warn!(
+                        error = %err,
+                        "closed medical agent run but failed to refresh Context Plan state"
+                    );
                 }
                 self.chat_widget.add_error_message(format!(
                     "Medical agent run did not produce reviewable work: {error_summary}"

@@ -68,6 +68,12 @@ fn pending_capture(thread_id: ThreadId) -> PendingWorkspaceAgentCapture {
         base_note_revision: Some(1),
         authorized_scope_json: "{}".to_string(),
         expected_output_kind: "note_proposal".to_string(),
+        workspace_profile: "medical".to_string(),
+        plan_schema_version: 1,
+        source_checkpoint_id: None,
+        source_checkpoint_sha256: None,
+        readiness_json: r#"{"version":1,"warnings":[],"acknowledgements":[],"legacy":true}"#
+            .to_string(),
         status: "sent".to_string(),
         created_at: 1,
         sent_at: 1,
@@ -240,20 +246,6 @@ fn missing_active_medical_thread_error_snapshot() {
         .join("\n");
 
     insta::assert_snapshot!("missing_active_medical_thread_error", rendered);
-}
-
-#[test]
-fn preexisting_composer_medical_handoff_error_snapshot() {
-    let cell =
-        history_cell::new_error_event(WORKSPACE_CONTEXT_COMPOSER_NOT_EMPTY_MESSAGE.to_string());
-    let rendered = cell
-        .display_lines(/*width*/ 80)
-        .iter()
-        .map(ToString::to_string)
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    insta::assert_snapshot!("preexisting_composer_medical_handoff_error", rendered);
 }
 
 #[test]

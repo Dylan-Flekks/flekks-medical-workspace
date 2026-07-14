@@ -2,43 +2,43 @@
 source: tui/src/workspace_dashboard.rs
 expression: "render_dashboard_lines_at(&summary, 160, 40)"
 ---
-Medical Workspace  SYNTHETIC DATA ONLY
+Medical Workspace  /workspace-medical  SYNTHETIC DATA ONLY
 Patient: Jordan Patient  DOB: blank  MRN: blank  Contact: Contact on file  Coverage: Missing coverage  Encounter: No encounter
- EXPLORER                          PATIENT CHART                                                                   AGENT WORK
-┌Patient Directory───────────────┐┌Patient Demographics──────────────────────────────────────────────────────────┐┌Agent Work──────────────────────────────────┐
+ EXPLORER                          PATIENT CHART                                                                   CONTEXT PLAN
+┌Patient Directory───────────────┐┌Patient Demographics──────────────────────────────────────────────────────────┐┌Context Plan────────────────────────────────┐
 │Local search: /                 ││Identity: Jordan Patient · preferred not set                                  ││Patient Chart: Jordan...; Open encounter    │
-│0 active patients; local only   ││Legal/card: Jordan Q Patient                                                  ││[Pending]  History  Audit  ←/→              │
-│No saved patients yet.          ││DOB: missing · admin sex: missing · MRN: missing                              ││                                            │
-│New patient: :patient new       ││Contact: 555-0101; jordan.fake@example.test; method not set                   ││Local Coach                                 │
-│                                ││Address: 10 Example Street; Exampleville IL 60000                             ││  Choose supporting context                 │
-│                                ││Emergency: Maya Contact; relationship missing; 555-0199                       ││  Select only the files, reviewed text, and │
-│                                ││Coverage: P not entered; S not entered; T not entered                         ││clips the agent needs for this request.     │
-│                                ││Enter edits all identity/contact fields · Ctrl-P opens actions                ││  ● next: Mark agent context                │
-│                                │└──────────────────────────────────────────────────────────────────────────────┘│  Guidance only; no model call and no chart │
-│                                │┌Note Title────────────────────────────────────────────────────────────────────┐│mutation.                                   │
-└────────────────────────────────┘│Visit note                                                                    ││                                            │
-┌Patient Notes───────────────────┐└──────────────────────────────────────────────────────────────────────────────┘│Mode: > Input |   Packet |   Returned       │
-│Patient Notes                   │┌Note Body─────────────────────────────────────────────────────────────────────┐│  ● draft: No instructions drafted          │
-│  New note                      ││Fake human-entered visit note body.                                           ││  ● context: 0 files | 0 text | 0 clips     │
-│  No patient notes yet. Use     ││                                                                              ││  ● plan: not sent                          │
-│:note new.                      ││                                                                              ││  ● returned: none                          │
-│  Medical, communication, and   ││                                                                              ││                                            │
-│admin notes appear here.        ││                                                                              ││  ● review: :agent preview, then Ctrl-G     │
-│                                ││                                                                              ││  No upload/OCR/payer action/auto-apply.    │
+│0 active patients; local only   ││Legal/card: Jordan Q Patient                                                  ││Codex bridge: building                      │
+│No saved patients yet.          ││DOB: missing · admin sex: missing · MRN: missing                              ││[Current]  History  Audit  ←/→              │
+│New patient: :patient new       ││Contact: 555-0101; jordan.fake@example.test; method not set                   ││                                            │
+│                                ││Address: 10 Example Street; Exampleville IL 60000                             ││Workspace Planner                           │
+│                                ││Emergency: Maya Contact; relationship missing; 555-0199                       ││  Choose supporting context                 │
+│                                ││Coverage: P not entered; S not entered; T not entered                         ││  Select only the files, reviewed text, and │
+│                                ││Enter edits all identity/contact fields · Ctrl-P opens actions                ││clips the agent needs for this request.     │
+│                                │└──────────────────────────────────────────────────────────────────────────────┘│  ● next: Mark agent context                │
+│                                │┌Note Title────────────────────────────────────────────────────────────────────┐│  Guidance only; no model call and no chart │
+└────────────────────────────────┘│Visit note                                                                    ││mutation.                                   │
+┌Patient Notes───────────────────┐└──────────────────────────────────────────────────────────────────────────────┘│                                            │
+│Patient Notes                   │┌Note Body─────────────────────────────────────────────────────────────────────┐│Mode: > Build |   Review |   Returned       │
+│  New note                      ││Fake human-entered visit note body.                                           ││  ● draft: No instructions drafted          │
+│  No patient notes yet. Use     ││                                                                              ││  ● context: 0 files | 0 text | 0 clips     │
+│:note new.                      ││                                                                              ││  ● plan: not sent                          │
+│  Medical, communication, and   ││                                                                              ││  ● returned: none                          │
+│admin notes appear here.        ││                                                                              ││  ● readiness: blocked · 1 hard gate(s)     │
 │                                ││                                                                              ││                                            │
-└────────────────────────────────┘│                                                                              ││                                            │
-┌Uploaded Documents──────────────┐│                                                                              ││                                            │
-│Uploaded Documents              ││                                                                              ││                                            │
-│No files yet                    ││                                                                              ││                                            │
-│Paste/drop JPG/PDF. Space...    ││                                                                              ││                                            │
-│                                ││                                                                              ││                                            │
-│                                ││                                                                              ││                                            │
-│                                ││                                                                              ││                                            │
-│                                ││                                                                              ││                                            │
-│                                ││                                                                              ││                                            │
+│                                ││                                                                              ││  ● resolve the listed hard gates before    │
+└────────────────────────────────┘│                                                                              ││Ctrl-G                                      │
+┌Uploaded Documents──────────────┐│                                                                              ││  No upload/OCR/payer action/auto-apply.    │
+│Uploaded Documents              ││                                                                              ││  ● instructions_empty: Add instructions    │
+│No files yet                    ││                                                                              ││describing what Codex should analyze.       │
+│Paste/drop JPG/PDF. Space...    ││                                                                              ││  ● warning: no_supporting_context · No     │
+│                                ││                                                                              ││patient files, reviewed text, or clips are  │
+│                                ││                                                                              ││selected; Codex will receive chart context  │
+│                                ││                                                                              ││only.                                       │
 │                                ││                                                                              ││                                            │
 │                                ││                                                                              ││                                            │
-│                                ││                                                                              ││                                            │
+│                                ││                                                                              ││Instructions for Codex · local draft · Enter│
+│                                ││                                                                              ││  Tell Codex what to analyze; nothing is    │
+│                                ││                                                                              ││  submitted yet.                            │
 │                                ││                                                                              ││                                            │
 └────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────┘└────────────────────────────────────────────┘
 Focus: Demographics | Mode: Patient field | Keys: Enter edit  Ctrl-S save  Tab/⇧Tab pane  Ctrl-P actions | Next: Edit patient data

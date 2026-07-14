@@ -1,3 +1,4 @@
+use super::token_looks_like_local_path;
 use crate::StateRuntime;
 use crate::migrations::WORKSPACE_MIGRATOR;
 use crate::runtime::test_support::unique_temp_dir;
@@ -8,6 +9,13 @@ use sqlx::SqlitePool;
 use sqlx::migrate::Migrator;
 use sqlx::sqlite::SqliteConnectOptions;
 use std::borrow::Cow;
+
+#[test]
+fn medical_workspace_command_tokens_are_not_redacted_as_local_paths() {
+    assert!(!token_looks_like_local_path("/workspace-medical"));
+    assert!(!token_looks_like_local_path("/workspacemedical"));
+    assert!(token_looks_like_local_path("/tmp/private-record"));
+}
 
 async fn test_runtime() -> std::sync::Arc<StateRuntime> {
     let runtime = StateRuntime::init(unique_temp_dir(), "test-provider".to_string())

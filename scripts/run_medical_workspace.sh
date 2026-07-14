@@ -193,7 +193,7 @@ fi
 
 echo "Opening Codex with synthetic-only medical SQLite state at: $sqlite_home"
 echo "The first build compiles the Codex workspace and can take several minutes."
-echo "Enter /workspacemedical after Codex opens."
+echo "Enter /workspace-medical after Codex opens."
 
 cd "$repo_root/codex-rs"
 cargo run --profile dev-small --bin codex -- -c "sqlite_home=$sqlite_home_toml" "$@"

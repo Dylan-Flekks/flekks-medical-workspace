@@ -4,7 +4,8 @@ The design follows an IDE agent-edit model rather than direct database mutation.
 
 ```text
 Clinician draft
-  -> Agent Request / context packet
+  -> living Context Plan
+  -> reviewed, frozen context packet
   -> packet-scoped agent run
   -> recorded source reads
   -> recommendation
@@ -15,17 +16,31 @@ Clinician draft
 
 ## Audit objects
 
-1. **Packet:** who requested what, when, against which patient/note/revision, and which categories were authorized.
-2. **Run:** provider/model, thread/turn, lifecycle, and errors.
-3. **Sources:** the records and exact revisions/snapshots actually returned to the run.
-4. **Result:** generated recommendation and concise review rationale.
-5. **Proposal:** a change against the packet's base note revision.
-6. **Decision:** clinician acceptance, edit, rejection, or selected-copy action.
-7. **Revision:** canonical human-controlled chart state after an accepted decision.
+1. **Plan checkpoint:** the living objective, expected output, selected evidence, readiness, and
+   acknowledged context gaps at review time.
+2. **Packet:** who requested what, when, against which patient/note/revision, and which categories were authorized.
+3. **Run:** provider/model, thread/turn, lifecycle, and errors.
+4. **Sources:** the records and exact revisions/snapshots actually returned to the run.
+5. **Result:** generated recommendation and concise review rationale.
+6. **Proposal:** a change against the packet's base note revision.
+7. **Decision:** clinician acceptance, edit, rejection, or selected-copy action.
+8. **Revision:** canonical human-controlled chart state after an accepted decision.
+
+Each submitted packet also records the workspace profile, plan-schema version, source-checkpoint
+identifier and hash, and structured readiness acknowledgements. That metadata binds the reviewed
+plan to the exact living-workspace checkpoint used for the run.
 
 ## Current vertical-slice boundary
 
-The TUI prepares and submits the packet, starts the durable run, and opens the agent harness. The model-visible `workspace_context_read` tool accepts only that running ID plus an authorized visit-history or progress-note category; patient ownership comes from the run, not model input. Each bounded, path-redacted returned row is frozen and hashed in the source manifest, alongside a separately hashed packet authorization/output contract. A matching user turn is bound by packet id/hash, and its final agent answer is saved automatically as review-pending Agent Work with thread/turn attribution. `:agent result save` remains a clinician-attributed recovery import for externally produced output. Additional clinical source categories and abrupt-restart reconciliation remain roadmap work.
+The TUI maintains a living context plan, freezes it for review, submits the immutable packet, and
+starts the durable master-agent run. The model-visible `workspace_context_read` tool accepts only
+that running ID plus an authorized visit-history or progress-note category; patient ownership comes
+from the run, not model input. Each bounded, path-redacted returned row is frozen and hashed in the
+source manifest, alongside a separately hashed packet authorization/output contract. A matching
+user turn is bound by packet id/hash, and its final agent answer is saved automatically as
+review-pending Agent Review with thread/turn attribution. `:agent result save` remains a
+clinician-attributed recovery import for externally produced output. Additional clinical source
+categories and abrupt-restart reconciliation remain roadmap work.
 
 ## Concurrency rule
 

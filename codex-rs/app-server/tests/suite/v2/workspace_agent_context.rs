@@ -310,6 +310,15 @@ async fn start_agent_run(
         }),
     )
     .await?;
+    assert_eq!(packet.packet.workspace_profile, "medical");
+    assert_eq!(packet.packet.plan_schema_version, 1);
+    assert_eq!(packet.packet.source_checkpoint_id, None);
+    assert_eq!(packet.packet.source_checkpoint_sha256, None);
+    let readiness: Value = serde_json::from_str(&packet.packet.readiness_json)?;
+    assert_eq!(readiness["legacy"], true);
+    let stored_envelope: Value = serde_json::from_str(&packet.packet.context_envelope_json)?;
+    assert_eq!(stored_envelope["workspaceProfile"], "medical");
+    assert_eq!(stored_envelope["contextPlan"]["schemaVersion"], 1);
     let run: WorkspaceAgentRunStartResponse = request(
         server,
         "workspace/agent/run/start",

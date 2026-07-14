@@ -183,11 +183,11 @@ async fn workspace_drafts_checkpoint_validates_client_schema_and_size() {
     );
 
     let mut bad_schema = input(&client, None, "Bad schema");
-    bad_schema.draft_json = r#"{"schemaVersion":2}"#.to_string();
+    bad_schema.draft_json = r#"{"schemaVersion":3}"#.to_string();
     assert!(
         checkpoint_error(&runtime, bad_schema)
             .await
-            .contains("schemaVersion 2")
+            .contains("schemaVersion 3")
     );
 
     let mut oversized = input(&client, None, "Large");

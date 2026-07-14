@@ -4,9 +4,20 @@
 //! state transitions. It never commits canonical chart data or starts agent
 //! work.
 
+mod context_plan;
 mod model;
 mod state;
 
+pub(crate) use context_plan::MEDICAL_CONTEXT_PLAN_SCHEMA_VERSION;
+#[allow(unused_imports)]
+pub(crate) use context_plan::MedicalContextPlanAcknowledgementV2;
+#[allow(unused_imports)]
+pub(crate) use context_plan::MedicalContextPlanAuthorizedCategoryV2;
+pub(crate) use context_plan::MedicalContextPlanAuthorizedScopeV2;
+pub(crate) use context_plan::MedicalContextPlanInput;
+pub(crate) use context_plan::MedicalContextPlanNoteKindV2;
+pub(crate) use context_plan::MedicalContextPlanWarningV2;
+pub(crate) use context_plan::MedicalContextPlanWorkflowV2;
 pub(crate) use model::MEDICAL_WORKSPACE_DRAFT_ACTOR;
 pub(crate) use model::MedicalWorkspaceWorkingDraftInput;
 pub(crate) use model::MedicalWorkspaceWorkingDraftV1;

@@ -2,8 +2,8 @@
 source: tui/src/workspace_dashboard.rs
 expression: "render_dashboard_lines_at(&dashboard, 80, 20)"
 ---
-Medical Workspace  Unsaved  SYNTHETIC DATA ONLY
-Zones: Explorer > [Patient Chart] > Agent Work  Focus: Note Body
+Medical Workspace  Unsaved  /workspace-medical  SYNTHETIC DATA ONLY
+Zones: Explorer > [Patient Chart] > Context Plan  Focus: Note Body
 ┌Note Body─────────────────────────────────────────────────────────────────────┐
 │aaaaaaaaaaaaXaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa│
 │aaaaaaaaaaaaa                                                                 │

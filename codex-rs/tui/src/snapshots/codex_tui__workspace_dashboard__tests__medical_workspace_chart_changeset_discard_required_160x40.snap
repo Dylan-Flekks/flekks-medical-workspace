@@ -2,29 +2,29 @@
 source: tui/src/workspace_dashboard.rs
 expression: "render_dashboard_lines_at(&dashboard, 160, 40)"
 ---
-Medical Workspace  SYNTHETIC DATA ONLY
+Medical Workspace  /workspace-medical  SYNTHETIC DATA ONLY
 Patient: Jordan Patient  DOB: blank  MRN: blank  Contact: Missing contact  Coverage: Missing coverage  Encounter: No encounter
- EXPLORER                          PATIENT CHART                                                                   AGENT WORK
-┌Patient Directory───────────────┐┌Patient Demographics──────────────────────────────────────────────────────────┐┌Agent Work──────────────────────────────────┐
+ EXPLORER                          PATIENT CHART                                                                   CONTEXT PLAN
+┌Patient Directory───────────────┐┌Patient Demographics──────────────────────────────────────────────────────────┐┌Agent Review────────────────────────────────┐
 │Local search: /                 ││Identity: Jordan Patient · preferred not set                                  ││Patient Chart: Jordan...; Save first eval   │
-│1 active patient; local only    ││Legal/card: legal name missing                                                ││[Pending]  History  Audit  ←/→              │
-│New: :patient new; / searches.  ││DOB: missing · admin sex: missing · MRN: missing                              ││                                            │
-│> Jordan Patient  DOB blank  MRN││Contact: phone missing; email missing; method not set                         ││Pending Chart Changeset                     │
-│blank  active                   ││Address: address missing                                                      ││  BLOCKED · Canonical chart refreshed, but  │
-│                                ││Emergency: name missing; relationship missing; phone missing                  ││this stale non...                           │
-│                                ││Coverage: P not entered; S not entered; T not entered                         ││  Changes: demographics                     │
-│                                ││Enter edits all identity/contact fields · Ctrl-P opens actions                ││  Patient: demographic snapshot included    │
-│                                │└──────────────────────────────────────────────────────────────────────────────┘│  Guards: 1 opaque version(s) · no note     │
-│                                │┌Note Title────────────────────────────────────────────────────────────────────┐│revision guard                              │
-└────────────────────────────────┘│Untitled note                                                                 ││  Reason: Save reviewed chart changes:      │
-┌Patient Notes───────────────────┐└──────────────────────────────────────────────────────────────────────────────┘│demographics                                │
-│Patient Notes                   │┌Note Body─────────────────────────────────────────────────────────────────────┐│  Commit key: stable-discard-key            │
-│  New note                      ││HPI:                                                                          ││                                            │
-│  No patient notes yet. Use     ││Exam:                                                                         ││  ● Esc/Ctrl-W discards and closes; reopen  │
-│:note new.                      ││Assessment:                                                                   ││loads canonical data                        │
-│  Medical, communication, and   ││Plan:                                                                         ││  Human draft stays in the center; canonical│
-│admin notes appear here.        ││                                                                              ││DB changes only after commit success.       │
-│                                ││                                                                              ││                                            │
+│1 active patient; local only    ││Legal/card: legal name missing                                                ││Codex bridge: review                        │
+│New: :patient new; / searches.  ││DOB: missing · admin sex: missing · MRN: missing                              ││[Current]  History  Audit  ←/→              │
+│> Jordan Patient  DOB blank  MRN││Contact: phone missing; email missing; method not set                         ││                                            │
+│blank  active                   ││Address: address missing                                                      ││Pending Chart Changeset                     │
+│                                ││Emergency: name missing; relationship missing; phone missing                  ││  BLOCKED · Canonical chart refreshed, but  │
+│                                ││Coverage: P not entered; S not entered; T not entered                         ││this stale non...                           │
+│                                ││Enter edits all identity/contact fields · Ctrl-P opens actions                ││  Changes: demographics                     │
+│                                │└──────────────────────────────────────────────────────────────────────────────┘│  Patient: demographic snapshot included    │
+│                                │┌Note Title────────────────────────────────────────────────────────────────────┐│  Guards: 1 opaque version(s) · no note     │
+└────────────────────────────────┘│Untitled note                                                                 ││revision guard                              │
+┌Patient Notes───────────────────┐└──────────────────────────────────────────────────────────────────────────────┘│  Reason: Save reviewed chart changes:      │
+│Patient Notes                   │┌Note Body─────────────────────────────────────────────────────────────────────┐│demographics                                │
+│  New note                      ││HPI:                                                                          ││  Commit key: stable-discard-key            │
+│  No patient notes yet. Use     ││Exam:                                                                         ││                                            │
+│:note new.                      ││Assessment:                                                                   ││  ● Esc/Ctrl-W discards and closes; reopen  │
+│  Medical, communication, and   ││Plan:                                                                         ││loads canonical data                        │
+│admin notes appear here.        ││                                                                              ││  Human draft stays in the center; canonical│
+│                                ││                                                                              ││DB changes only after commit success.       │
 │                                ││                                                                              ││                                            │
 └────────────────────────────────┘│                                                                              ││                                            │
 ┌Uploaded Documents──────────────┐│                                                                              ││                                            │

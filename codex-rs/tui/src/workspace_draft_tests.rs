@@ -86,14 +86,14 @@ fn terminal_session(
 }
 
 #[test]
-fn schema_v1_round_trip_has_fixed_kind_and_normalized_context_ids() {
+fn schema_v2_round_trip_has_typed_context_plan_and_normalized_context_ids() {
     let draft = working_draft("Line one\nLine two");
-    let encoded = draft.encode().expect("schema V1 should encode");
+    let encoded = draft.encode().expect("schema V2 should encode");
 
     assert_eq!(
         encoded,
         serde_json::json!({
-            "schemaVersion": 1,
+            "schemaVersion": 2,
             "kind": "medicalWorkspaceWorkingDraft",
             "clientId": "client-1",
             "note": {
@@ -107,12 +107,66 @@ fn schema_v1_round_trip_has_fixed_kind_and_normalized_context_ids() {
             "agentRequestBody": "Suggest a reliable context packet.",
             "selectedFileIds": ["file-a", "file-b"],
             "selectedReviewedTextIds": ["text-1"],
-            "selectedClipIds": ["clip-1"]
+            "selectedClipIds": ["clip-1"],
+            "contextPlan": {
+                "schemaVersion": 1,
+                "objective": "Suggest a reliable context packet.",
+                "expectedOutputKind": "note_proposal",
+                "workflow": "clinicalDocumentation",
+                "noteKind": "other",
+                "authorizedScope": {
+                    "categories": ["visit_history", "progress_notes"],
+                    "maxRecords": 25
+                },
+                "selectedContext": {
+                    "fileIds": ["file-a", "file-b"],
+                    "reviewedTextIds": ["text-1"],
+                    "clipIds": ["clip-1"]
+                },
+                "readinessWarnings": [],
+                "acknowledgements": []
+            }
         })
     );
     assert_eq!(
-        MedicalWorkspaceWorkingDraftV1::decode(encoded).expect("schema V1 should decode"),
+        MedicalWorkspaceWorkingDraftV1::decode(encoded).expect("schema V2 should decode"),
         draft
+    );
+}
+
+#[test]
+fn schema_v1_decode_migrates_to_v2_context_plan_without_losing_work() {
+    let legacy = serde_json::json!({
+        "schemaVersion": 1,
+        "kind": "medicalWorkspaceWorkingDraft",
+        "clientId": "client-1",
+        "note": {
+            "noteId": "note-1",
+            "workingNoteId": "note-1",
+            "encounterId": "encounter-1",
+            "baseRevision": 4,
+            "title": "Daily note",
+            "body": "Legacy body"
+        },
+        "agentRequestBody": "Review the full picture.",
+        "selectedFileIds": ["file-1"],
+        "selectedReviewedTextIds": ["text-1"],
+        "selectedClipIds": ["clip-1"]
+    });
+
+    let migrated = MedicalWorkspaceWorkingDraftV1::decode(legacy)
+        .expect("schema V1 should migrate to the current draft");
+    let encoded = migrated.encode().expect("migrated draft should encode");
+
+    assert_eq!(encoded["schemaVersion"], 2);
+    assert_eq!(encoded["agentRequestBody"], "Review the full picture.");
+    assert_eq!(
+        encoded["contextPlan"]["objective"],
+        "Review the full picture."
+    );
+    assert_eq!(
+        encoded["contextPlan"]["selectedContext"]["clipIds"],
+        serde_json::json!(["clip-1"])
     );
 }
 
@@ -123,10 +177,10 @@ fn decoder_rejects_wrong_schema_kind_and_inconsistent_note_baseline() {
         .expect("valid checkpoint JSON");
 
     let mut wrong_schema = encoded.clone();
-    wrong_schema["schemaVersion"] = 2.into();
+    wrong_schema["schemaVersion"] = 3.into();
     assert!(matches!(
         MedicalWorkspaceWorkingDraftV1::decode(wrong_schema),
-        Err(WorkspaceDraftError::UnsupportedSchemaVersion(2))
+        Err(WorkspaceDraftError::UnsupportedSchemaVersion(3))
     ));
 
     let mut wrong_kind = encoded;

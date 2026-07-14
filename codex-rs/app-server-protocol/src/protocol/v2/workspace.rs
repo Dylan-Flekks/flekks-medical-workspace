@@ -1166,6 +1166,17 @@ pub struct WorkspaceContextPacket {
     pub base_note_revision: Option<i64>,
     pub authorized_scope_json: String,
     pub expected_output_kind: String,
+    #[serde(default = "default_workspace_profile")]
+    pub workspace_profile: String,
+    #[serde(default = "default_context_plan_schema_version")]
+    #[ts(type = "number")]
+    pub plan_schema_version: i64,
+    #[serde(default)]
+    pub source_checkpoint_id: Option<String>,
+    #[serde(default)]
+    pub source_checkpoint_sha256: Option<String>,
+    #[serde(default = "default_context_plan_readiness_json")]
+    pub readiness_json: String,
     pub status: String,
     #[ts(type = "number")]
     pub created_at: i64,
@@ -1223,6 +1234,17 @@ pub struct WorkspaceContextPacketCreateParams {
     pub authorized_scope_json: Option<String>,
     #[ts(optional = nullable)]
     pub expected_output_kind: Option<String>,
+    #[ts(optional = nullable)]
+    pub workspace_profile: Option<String>,
+    #[ts(type = "number | null")]
+    #[ts(optional = nullable)]
+    pub plan_schema_version: Option<i64>,
+    #[ts(optional = nullable)]
+    pub source_checkpoint_id: Option<String>,
+    #[ts(optional = nullable)]
+    pub source_checkpoint_sha256: Option<String>,
+    #[ts(optional = nullable)]
+    pub readiness_json: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
@@ -1258,6 +1280,17 @@ pub struct WorkspaceContextPacketReplay {
     pub base_note_revision: Option<i64>,
     pub authorized_scope_json: String,
     pub expected_output_kind: String,
+    #[serde(default = "default_workspace_profile")]
+    pub workspace_profile: String,
+    #[serde(default = "default_context_plan_schema_version")]
+    #[ts(type = "number")]
+    pub plan_schema_version: i64,
+    #[serde(default)]
+    pub source_checkpoint_id: Option<String>,
+    #[serde(default)]
+    pub source_checkpoint_sha256: Option<String>,
+    #[serde(default = "default_context_plan_readiness_json")]
+    pub readiness_json: String,
     pub read_only_safety_constraints: Vec<String>,
     pub status: String,
     #[ts(type = "number")]
@@ -1437,6 +1470,18 @@ pub struct WorkspaceAgentRunContextReadResponse {
 #[ts(export_to = "v2/")]
 pub struct WorkspaceContextPacketReplayResponse {
     pub replay: Option<WorkspaceContextPacketReplay>,
+}
+
+fn default_workspace_profile() -> String {
+    "medical".to_string()
+}
+
+fn default_context_plan_schema_version() -> i64 {
+    1
+}
+
+fn default_context_plan_readiness_json() -> String {
+    r#"{"version":1,"warnings":[],"acknowledgements":[],"legacy":true}"#.to_string()
 }
 
 /// Agent results are review-pending outputs bound to one context packet. The

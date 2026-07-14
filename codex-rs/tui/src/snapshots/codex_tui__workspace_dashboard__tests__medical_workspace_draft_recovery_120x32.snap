@@ -2,34 +2,34 @@
 source: tui/src/workspace_dashboard.rs
 expression: "render_dashboard_lines_at(&recovery, 120, 32)"
 ---
-Medical Workspace  SYNTHETIC DATA ONLY
+Medical Workspace  /workspace-medical  SYNTHETIC DATA ONLY
 Patient: Jordan Patient  DOB: blank  MRN: blank  Contact: Missing contact  Coverage: Missing coverage  Encounter: No
- EXPLORER                      AGENT WORK
-┌Patient Directory───────────┐┌Agent Work──────────────────────────────────────────────────────────────────────────────┐
+ EXPLORER                      CONTEXT PLAN
+┌Patient Directory───────────┐┌Context Plan────────────────────────────────────────────────────────────────────────────┐
 │Local search: /             ││Patient Chart: Jordan...; Open encounter                                                │
-│0 active patients; local    ││[Pending]  History  Audit  ←/→                                                          │
-│only                        ││                                                                                        │
-│No saved patients yet.      ││  ● recovery: Recovery available: Ctrl-P → Restore local draft or Discard local draft.  │
-│New patient: :patient new   ││                                                                                        │
-│                            ││Local Coach                                                                             │
+│0 active patients; local    ││Codex bridge: building                                                                  │
+│only                        ││[Current]  History  Audit  ←/→                                                          │
+│No saved patients yet.      ││                                                                                        │
+│New patient: :patient new   ││  ● recovery: Recovery available: Ctrl-P → Restore local draft or Discard local draft.  │
+│                            ││                                                                                        │
+│                            ││Workspace Planner                                                                       │
 │                            ││  Choose supporting context                                                             │
-│                            ││  Select only the files, reviewed text, and clips the agent needs for this request.     │
-└────────────────────────────┘│  ● next: Mark agent context                                                            │
-┌Patient Notes───────────────┐│  Guidance only; no model call and no chart mutation.                                   │
-│Patient Notes               ││                                                                                        │
-│  New note                  ││Mode: > Input |   Packet |   Returned                                                   │
-│  No patient notes yet. Use ││  ● draft: No instructions drafted                                                      │
-│:note new.                  ││  ● context: 0 files | 0 text | 0 clips                                                 │
-│  Medical, communication,   ││  ● plan: not sent                                                                      │
-│and admin notes appear here.││  ● returned: none                                                                      │
-└────────────────────────────┘│                                                                                        │
-┌Uploaded Documents──────────┐│  ● review: :agent preview, then Ctrl-G                                                 │
-│Uploaded Documents          ││  No upload/OCR/payer action/auto-apply.                                                │
-│No files yet                ││                                                                                        │
-│Paste/drop JPG/PDF. S...    ││                                                                                        │
-│                            ││                                                                                        │
-│                            ││                                                                                        │
-│                            ││                                                                                        │
+└────────────────────────────┘│  Select only the files, reviewed text, and clips the agent needs for this request.     │
+┌Patient Notes───────────────┐│  ● next: Mark agent context                                                            │
+│Patient Notes               ││  Guidance only; no model call and no chart mutation.                                   │
+│  New note                  ││                                                                                        │
+│  No patient notes yet. Use ││Mode: > Build |   Review |   Returned                                                   │
+│:note new.                  ││  ● draft: No instructions drafted                                                      │
+│  Medical, communication,   ││  ● context: 0 files | 0 text | 0 clips                                                 │
+│and admin notes appear here.││  ● plan: not sent                                                                      │
+└────────────────────────────┘│  ● returned: none                                                                      │
+┌Uploaded Documents──────────┐│  ● readiness: blocked · 2 hard gate(s)                                                 │
+│Uploaded Documents          ││                                                                                        │
+│No files yet                ││  ● resolve the listed hard gates before Ctrl-G                                         │
+│Paste/drop JPG/PDF. S...    ││  No upload/OCR/payer action/auto-apply.                                                │
+│                            ││  ● instructions_empty: Add instructions describing what Codex should analyze.          │
+│                            ││Instructions for Codex · local draft · Enter newline · Ctrl-G review                    │
+│                            ││  Tell Codex what to analyze; nothing is submitted yet.                                 │
 │                            ││                                                                                        │
 │                            ││                                                                                        │
 └────────────────────────────┘└────────────────────────────────────────────────────────────────────────────────────────┘

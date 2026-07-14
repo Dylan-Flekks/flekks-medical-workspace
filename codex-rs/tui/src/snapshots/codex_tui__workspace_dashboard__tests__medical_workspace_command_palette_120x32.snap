@@ -2,7 +2,7 @@
 source: tui/src/workspace_dashboard.rs
 expression: "render_dashboard_lines_at(&dashboard, width, height)"
 ---
-Medical Workspace  SYNTHETIC DATA ONLY
+Medical Workspace  /workspace-medical  SYNTHETIC DATA ONLY
 Patient: Jordan Patient  DOB: blank  MRN: blank  Contact: Missing contact  Coverage: Missing coverage  Encounter: No
  EXPLORER                      PATIENT CHART
 ┌Patient Directory───────────┐┌Patient Demographics────────────────────────────────────────────────────────────────────┐
@@ -20,11 +20,11 @@ Patient: Jordan Patient  DOB: blank  MRN: blank  Contact: Missing contact  Cover
 │  Visit not│New note                                                                     :note new [n]    │───────────┐
 │  Working d│Save chart workspace                                                        :save [Ctrl-S]    │           │
 │saves it to│Agent bridge                                                                                  │           │
-│  Medical, │Review Packet                                                               :agent preview    │           │
-│and admin n│Submit Medical Agent Plan                                                      :agent send    │           │
-└───────────│Open returned work review                                                     :agent inbox    │           │
-┌Uploaded Do│Write agent instructions                                                    :agent request    │           │
-│Uploaded Do│… 104 more                                                                                    │           │
+│  Medical, │Review Context Plan                                                         :agent preview    │           │
+│and admin n│Submit Context Plan                                                            :agent send    │           │
+└───────────│Open full Codex run                                                        :agent open run    │           │
+┌Uploaded Do│Open returned work review                                                     :agent inbox    │           │
+│Uploaded Do│… 105 more                                                                                    │           │
 │No files ye│                                                                                              │───────────┘
 │Paste/drop └──────────────────────────────────────────────────────────────────────────────────────────────┘───────────┐
 │                            ││Patient: Jordan Patient; note: Visit note                                               │

@@ -95,7 +95,9 @@ SELECT
     selected_artifact_ids_json, selected_derivative_ids_json, selected_clip_ids_json,
     artifact_summary, derivative_summary, clip_summary, chart_context_summary,
     context_envelope_json, context_envelope_sha256, clinician_actor,
-    base_note_revision, authorized_scope_json, expected_output_kind, status,
+    base_note_revision, authorized_scope_json, expected_output_kind,
+    workspace_profile, plan_schema_version, source_checkpoint_id,
+    source_checkpoint_sha256, readiness_json, status,
     created_at_ms, sent_at_ms, submitted_at_ms, canceled_at_ms, updated_at_ms
 FROM workspace_context_packets
 WHERE id = ?

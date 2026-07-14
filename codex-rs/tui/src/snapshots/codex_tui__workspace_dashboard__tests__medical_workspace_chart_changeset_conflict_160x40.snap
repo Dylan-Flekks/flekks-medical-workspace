@@ -2,29 +2,29 @@
 source: tui/src/workspace_dashboard.rs
 expression: "render_dashboard_lines_at(&dashboard, 160, 40)"
 ---
-Medical Workspace  SYNTHETIC DATA ONLY
+Medical Workspace  /workspace-medical  SYNTHETIC DATA ONLY
 Patient: Jordan Patient  DOB: blank  MRN: blank  Contact: Missing contact  Coverage: Missing coverage  Encounter: No encounter
- EXPLORER                          PATIENT CHART                                                                   AGENT WORK
-┌Patient Directory───────────────┐┌Patient Demographics──────────────────────────────────────────────────────────┐┌Agent Work──────────────────────────────────┐
+ EXPLORER                          PATIENT CHART                                                                   CONTEXT PLAN
+┌Patient Directory───────────────┐┌Patient Demographics──────────────────────────────────────────────────────────┐┌Agent Review────────────────────────────────┐
 │Local search: /                 ││Identity: Jordan Patient · preferred not set                                  ││Patient Chart: Jordan...; Open encounter    │
-│1 active patient; local only    ││Legal/card: legal name missing                                                ││[Pending]  History  Audit  ←/→              │
-│New: :patient new; / searches.  ││DOB: missing · admin sex: missing · MRN: missing                              ││                                            │
-│> Jordan Patient  DOB blank  MRN││Contact: phone missing; email missing; method not set                         ││Pending Chart Changeset                     │
-│blank  active                   ││Address: address missing                                                      ││  CONFLICT · note note-1 changed from r3 to │
-│                                ││Emergency: name missing; relationship missing; phone missing                  ││r4; refresh be...                           │
-│                                ││Coverage: P not entered; S not entered; T not entered                         ││  Changes: encounter, note                  │
-│                                ││Enter edits all identity/contact fields · Ctrl-P opens actions                ││  Patient: identity only; demographics      │
-│                                │└──────────────────────────────────────────────────────────────────────────────┘│untouched                                   │
-│                                │┌Note Title────────────────────────────────────────────────────────────────────┐│  Guards: 0 opaque version(s) · note r3     │
-└────────────────────────────────┘│Visit note                                                                    ││  Reason: Save reviewed chart changes:      │
-┌Patient Notes───────────────────┐└──────────────────────────────────────────────────────────────────────────────┘│encounter, note                             │
-│Patient Notes                   │┌Note Body─────────────────────────────────────────────────────────────────────┐│  Commit key: stable-conflict-key           │
-│  Medical Notes                 ││Unsaved clinician draft.                                                      ││                                            │
-│> daily  1970-01-01  Visit note ││                                                                              ││  ● Ctrl-S refreshes canonical data and     │
-│[unsaved] [draft]               ││                                                                              ││preserves the draft                         │
+│1 active patient; local only    ││Legal/card: legal name missing                                                ││Codex bridge: review                        │
+│New: :patient new; / searches.  ││DOB: missing · admin sex: missing · MRN: missing                              ││[Current]  History  Audit  ←/→              │
+│> Jordan Patient  DOB blank  MRN││Contact: phone missing; email missing; method not set                         ││                                            │
+│blank  active                   ││Address: address missing                                                      ││Pending Chart Changeset                     │
+│                                ││Emergency: name missing; relationship missing; phone missing                  ││  CONFLICT · note note-1 changed from r3 to │
+│                                ││Coverage: P not entered; S not entered; T not entered                         ││r4; refresh be...                           │
+│                                ││Enter edits all identity/contact fields · Ctrl-P opens actions                ││  Changes: encounter, note                  │
+│                                │└──────────────────────────────────────────────────────────────────────────────┘│  Patient: identity only; demographics      │
+│                                │┌Note Title────────────────────────────────────────────────────────────────────┐│untouched                                   │
+└────────────────────────────────┘│Visit note                                                                    ││  Guards: 0 opaque version(s) · note r3     │
+┌Patient Notes───────────────────┐└──────────────────────────────────────────────────────────────────────────────┘│  Reason: Save reviewed chart changes:      │
+│Patient Notes                   │┌Note Body─────────────────────────────────────────────────────────────────────┐│encounter, note                             │
+│  Medical Notes                 ││Unsaved clinician draft.                                                      ││  Commit key: stable-conflict-key           │
+│> daily  1970-01-01  Visit note ││                                                                              ││                                            │
+│[unsaved] [draft]               ││                                                                              ││  ● Ctrl-S refreshes canonical data and     │
+│                                ││                                                                              ││preserves the draft                         │
 │                                ││                                                                              ││  Human draft stays in the center; canonical│
 │                                ││                                                                              ││DB changes only after commit success.       │
-│                                ││                                                                              ││                                            │
 │                                ││                                                                              ││                                            │
 └────────────────────────────────┘│                                                                              ││                                            │
 ┌Uploaded Documents──────────────┐│                                                                              ││                                            │

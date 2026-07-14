@@ -253,7 +253,7 @@ async fn workspace_drafts_close_and_validation_are_client_scoped() -> Result<()>
         "workspace/draft/checkpoint/create",
         json!({
             "clientId": client_id,
-            "draft": {"schemaVersion": 2},
+            "draft": {"schemaVersion": 3},
             "trigger": "manual",
             "actor": "Clinician Example"
         }),
@@ -263,7 +263,7 @@ async fn workspace_drafts_close_and_validation_are_client_scoped() -> Result<()>
         invalid_schema
             .error
             .message
-            .contains("schemaVersion must be 1")
+            .contains("schemaVersion must be 1 or 2")
     );
     let negative_revision = request_error(
         &mut server,

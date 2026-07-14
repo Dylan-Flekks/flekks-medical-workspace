@@ -10,7 +10,8 @@ use sha2::Sha256;
 use sqlx::Sqlite;
 use uuid::Uuid;
 
-const DRAFT_SCHEMA_VERSION: i64 = 1;
+const LEGACY_DRAFT_SCHEMA_VERSION: i64 = 1;
+const DRAFT_SCHEMA_VERSION: i64 = 2;
 const MAX_NORMALIZED_DRAFT_BYTES: usize = 1024 * 1024;
 
 struct ExpectedCurrentCheckpoint<'a> {
@@ -472,7 +473,10 @@ fn normalize_draft(draft_json: &str) -> Result<(String, i64, String), crate::Wor
         .ok_or_else(|| crate::WorkspaceDraftError::Validation {
             message: "workspace draft checkpoint schemaVersion is required".to_string(),
         })?;
-    if schema_version != DRAFT_SCHEMA_VERSION {
+    if !matches!(
+        schema_version,
+        LEGACY_DRAFT_SCHEMA_VERSION | DRAFT_SCHEMA_VERSION
+    ) {
         return validation(format!(
             "unsupported workspace draft checkpoint schemaVersion {schema_version}"
         ));

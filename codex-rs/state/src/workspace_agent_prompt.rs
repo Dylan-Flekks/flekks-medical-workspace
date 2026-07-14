@@ -52,13 +52,13 @@ pub fn render_workspace_agent_handoff_prompt(
     let note_label = envelope_note_label(envelope.as_ref(), packet);
     let request_label = envelope_string(envelope.as_ref(), "/humanRequest")
         .or_else(|| nonempty(packet.human_request.as_str()))
-        .unwrap_or("General Medical Agent Plan request")
+        .unwrap_or("General Context Plan request")
         .to_string();
     let chart_summary = envelope_string(envelope.as_ref(), "/summaries/chartContextSummary")
         .or_else(|| nonempty(packet.chart_context_summary.as_str()))
         .map(str::to_string);
     let mut prompt = String::new();
-    prompt.push_str("Medical workspace context packet selected.\n\n");
+    prompt.push_str("Medical workspace Context Plan selected.\n\n");
     prompt.push_str("Agent-visible packet handle:\n");
     prompt.push_str("- backend endpoint: workspace/context/packet/replay\n");
     prompt.push_str("- client_id: ");
@@ -112,7 +112,7 @@ pub fn render_workspace_agent_handoff_prompt(
         prompt.push_str(&compact_preview(chart_summary, 140));
         prompt.push('\n');
     }
-    prompt.push_str("- return: reopen /workspacemedical; the matching completed response is saved automatically as review-pending Agent Work\n");
+    prompt.push_str("- return: reopen /workspace-medical; the matching completed response is saved automatically in Agent Review\n");
     prompt.push_str("- do not submit this composer prompt until the packet id/hash and scope match the intended chart\n\n");
     prompt.push_str("Packet access boundary:\n");
     prompt.push_str("- use this packet envelope plus only categories returned by workspace_context_read for this run id\n");
@@ -125,7 +125,7 @@ pub fn render_workspace_agent_handoff_prompt(
         "- do not write to chart, sign notes, submit claims, contact payers, or mutate records\n",
     );
     prompt.push_str(
-        "- captured Agent Work cannot change the chart without explicit human review in /workspacemedical\n",
+        "- captured agent output cannot change the chart without explicit human review in /workspace-medical\n",
     );
     prompt.push_str(
         "- if more context is needed, ask the human to build and send another packet\n\n",
@@ -218,5 +218,7 @@ mod tests {
         assert!(!prompt.contains("workspace/agent/run/context/read"));
         assert!(prompt.contains("Daily note [draft r2]"));
         assert!(prompt.contains("Exact synthetic snapshot"));
+        assert!(prompt.contains("reopen /workspace-medical"));
+        assert!(!prompt.contains("/workspacemedical"));
     }
 }

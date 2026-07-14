@@ -11,14 +11,18 @@ use sha2::Sha256;
 use std::time::Duration;
 use thiserror::Error;
 
-pub(crate) const MEDICAL_WORKSPACE_DRAFT_SCHEMA_VERSION: i64 = 1;
+use super::context_plan::MedicalContextPlanInput;
+use super::context_plan::MedicalContextPlanV2;
+
+const LEGACY_MEDICAL_WORKSPACE_DRAFT_SCHEMA_VERSION: i64 = 1;
+pub(crate) const MEDICAL_WORKSPACE_DRAFT_SCHEMA_VERSION: i64 = 2;
 pub(crate) const MEDICAL_WORKSPACE_DRAFT_KIND: &str = "medicalWorkspaceWorkingDraft";
 pub(crate) const MEDICAL_WORKSPACE_DRAFT_ACTOR: &str = "medical workspace TUI";
 pub(crate) const WORKSPACE_DRAFT_AUTOSAVE_DELAY: Duration = Duration::from_millis(750);
 const MAX_WORKSPACE_DRAFT_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-enum MedicalWorkspaceDraftKindV1 {
+enum MedicalWorkspaceDraftKindV2 {
     #[serde(rename = "medicalWorkspaceWorkingDraft")]
     MedicalWorkspaceWorkingDraft,
 }
@@ -36,15 +40,31 @@ pub(crate) struct MedicalWorkspaceNoteDraftV1 {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) struct MedicalWorkspaceWorkingDraftV1 {
+pub(crate) struct MedicalWorkspaceWorkingDraftV2 {
     schema_version: i64,
-    kind: MedicalWorkspaceDraftKindV1,
+    kind: MedicalWorkspaceDraftKindV2,
     pub(crate) client_id: String,
     pub(crate) note: MedicalWorkspaceNoteDraftV1,
     pub(crate) agent_request_body: String,
     pub(crate) selected_file_ids: Vec<String>,
     pub(crate) selected_reviewed_text_ids: Vec<String>,
     pub(crate) selected_clip_ids: Vec<String>,
+    pub(crate) context_plan: MedicalContextPlanV2,
+}
+
+pub(crate) type MedicalWorkspaceWorkingDraftV1 = MedicalWorkspaceWorkingDraftV2;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct LegacyMedicalWorkspaceWorkingDraftV1 {
+    schema_version: i64,
+    kind: MedicalWorkspaceDraftKindV2,
+    client_id: String,
+    note: MedicalWorkspaceNoteDraftV1,
+    agent_request_body: String,
+    selected_file_ids: Vec<String>,
+    selected_reviewed_text_ids: Vec<String>,
+    selected_clip_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -62,13 +82,25 @@ pub(crate) struct MedicalWorkspaceWorkingDraftInput {
     pub(crate) selected_clip_ids: Vec<String>,
 }
 
-impl MedicalWorkspaceWorkingDraftV1 {
+impl MedicalWorkspaceWorkingDraftV2 {
     pub(crate) fn new(
         input: MedicalWorkspaceWorkingDraftInput,
     ) -> Result<Self, WorkspaceDraftError> {
+        let context_plan =
+            MedicalContextPlanInput::for_note_proposal(input.agent_request_body.clone());
+        Self::new_with_context_plan(input, context_plan)
+    }
+
+    pub(crate) fn new_with_context_plan(
+        input: MedicalWorkspaceWorkingDraftInput,
+        context_plan: MedicalContextPlanInput,
+    ) -> Result<Self, WorkspaceDraftError> {
+        let selected_file_ids = normalized_ids(input.selected_file_ids);
+        let selected_reviewed_text_ids = normalized_ids(input.selected_reviewed_text_ids);
+        let selected_clip_ids = normalized_ids(input.selected_clip_ids);
         let draft = Self {
             schema_version: MEDICAL_WORKSPACE_DRAFT_SCHEMA_VERSION,
-            kind: MedicalWorkspaceDraftKindV1::MedicalWorkspaceWorkingDraft,
+            kind: MedicalWorkspaceDraftKindV2::MedicalWorkspaceWorkingDraft,
             client_id: input.client_id.trim().to_string(),
             note: MedicalWorkspaceNoteDraftV1 {
                 note_id: normalized_optional_id(input.note_id),
@@ -78,10 +110,16 @@ impl MedicalWorkspaceWorkingDraftV1 {
                 title: input.note_title,
                 body: input.note_body,
             },
-            agent_request_body: input.agent_request_body,
-            selected_file_ids: normalized_ids(input.selected_file_ids),
-            selected_reviewed_text_ids: normalized_ids(input.selected_reviewed_text_ids),
-            selected_clip_ids: normalized_ids(input.selected_clip_ids),
+            agent_request_body: context_plan.objective.clone(),
+            context_plan: MedicalContextPlanV2::from_input(
+                context_plan,
+                selected_file_ids.clone(),
+                selected_reviewed_text_ids.clone(),
+                selected_clip_ids.clone(),
+            )?,
+            selected_file_ids,
+            selected_reviewed_text_ids,
+            selected_clip_ids,
         };
         draft.validate()?;
         Ok(draft)
@@ -92,11 +130,6 @@ impl MedicalWorkspaceWorkingDraftV1 {
             .get("schemaVersion")
             .and_then(Value::as_i64)
             .ok_or(WorkspaceDraftError::MissingSchemaVersion)?;
-        if schema_version != MEDICAL_WORKSPACE_DRAFT_SCHEMA_VERSION {
-            return Err(WorkspaceDraftError::UnsupportedSchemaVersion(
-                schema_version,
-            ));
-        }
         let kind = value
             .get("kind")
             .and_then(Value::as_str)
@@ -104,7 +137,27 @@ impl MedicalWorkspaceWorkingDraftV1 {
         if kind != MEDICAL_WORKSPACE_DRAFT_KIND {
             return Err(WorkspaceDraftError::UnsupportedKind(kind.to_string()));
         }
-        let draft: Self = serde_json::from_value(value)?;
+        let draft = match schema_version {
+            MEDICAL_WORKSPACE_DRAFT_SCHEMA_VERSION => serde_json::from_value(value)?,
+            LEGACY_MEDICAL_WORKSPACE_DRAFT_SCHEMA_VERSION => {
+                let legacy: LegacyMedicalWorkspaceWorkingDraftV1 = serde_json::from_value(value)?;
+                let input = MedicalWorkspaceWorkingDraftInput {
+                    client_id: legacy.client_id,
+                    note_id: legacy.note.note_id,
+                    working_note_id: legacy.note.working_note_id,
+                    encounter_id: legacy.note.encounter_id,
+                    base_note_revision: legacy.note.base_revision,
+                    note_title: legacy.note.title,
+                    note_body: legacy.note.body,
+                    agent_request_body: legacy.agent_request_body,
+                    selected_file_ids: legacy.selected_file_ids,
+                    selected_reviewed_text_ids: legacy.selected_reviewed_text_ids,
+                    selected_clip_ids: legacy.selected_clip_ids,
+                };
+                Self::new(input)?
+            }
+            other => return Err(WorkspaceDraftError::UnsupportedSchemaVersion(other)),
+        };
         draft.validate()?;
         Ok(draft)
     }
@@ -163,6 +216,18 @@ impl MedicalWorkspaceWorkingDraftV1 {
                 )));
             }
         }
+        self.context_plan.validate()?;
+        if self.context_plan.objective != self.agent_request_body
+            || self.context_plan.selected_context.file_ids != self.selected_file_ids
+            || self.context_plan.selected_context.reviewed_text_ids
+                != self.selected_reviewed_text_ids
+            || self.context_plan.selected_context.clip_ids != self.selected_clip_ids
+        {
+            return Err(WorkspaceDraftError::InvalidDraft(
+                "context plan objective and selected context must match the working draft"
+                    .to_string(),
+            ));
+        }
         Ok(())
     }
 }
@@ -200,6 +265,7 @@ impl WorkspaceDraftCheckpointTrigger {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WorkspaceDraftCloseDisposition {
+    #[cfg_attr(not(test), allow(dead_code))]
     Closed,
     Discarded,
 }
@@ -238,7 +304,10 @@ impl WorkspaceDraftCheckpointMetadata {
     pub(super) fn from_checkpoint(
         checkpoint: &WorkspaceDraftCheckpoint,
     ) -> Result<(Self, MedicalWorkspaceWorkingDraftV1), WorkspaceDraftError> {
-        if checkpoint.schema_version != MEDICAL_WORKSPACE_DRAFT_SCHEMA_VERSION {
+        if !matches!(
+            checkpoint.schema_version,
+            LEGACY_MEDICAL_WORKSPACE_DRAFT_SCHEMA_VERSION | MEDICAL_WORKSPACE_DRAFT_SCHEMA_VERSION
+        ) {
             return Err(WorkspaceDraftError::UnsupportedSchemaVersion(
                 checkpoint.schema_version,
             ));
@@ -337,7 +406,11 @@ impl WorkspaceDraftCheckpointMetadata {
             || session.current_checkpoint.encounter_id != self.encounter_id
             || session.current_checkpoint.note_id != self.note_id
             || session.current_checkpoint.base_note_revision != self.base_note_revision
-            || session.current_checkpoint.schema_version != MEDICAL_WORKSPACE_DRAFT_SCHEMA_VERSION
+            || !matches!(
+                session.current_checkpoint.schema_version,
+                LEGACY_MEDICAL_WORKSPACE_DRAFT_SCHEMA_VERSION
+                    | MEDICAL_WORKSPACE_DRAFT_SCHEMA_VERSION
+            )
             || session.current_checkpoint.revision != self.revision
             || session.current_checkpoint.content_sha256 != self.content_sha256
         {

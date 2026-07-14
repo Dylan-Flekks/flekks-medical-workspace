@@ -1,5 +1,0 @@
----
-source: tui/src/app/workspace_context_turn_tests.rs
-expression: rendered
----
-■ Medical context handoff was not prepared because the Codex composer already contains unrelated text. Send or clear that draft, then submit the packet again.

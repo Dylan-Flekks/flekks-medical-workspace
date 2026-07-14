@@ -11,7 +11,7 @@ use crate::external_agent_config_migration_flow::ExternalAgentConfigMigrationFlo
 use codex_config::types::WindowsSandboxModeToml;
 
 const SHUTDOWN_FIRST_EXIT_TIMEOUT: Duration = Duration::from_secs(/*secs*/ 2);
-const REMOTE_MEDICAL_WORKSPACE_BLOCK_MESSAGE: &str = "Medical Workspace is local-only and cannot open against a remote app-server store. Reconnect with the local app-server before using /workspacemedical.";
+const REMOTE_MEDICAL_WORKSPACE_BLOCK_MESSAGE: &str = "Medical Workspace is local-only and cannot open against a remote app-server store. Reconnect with the local app-server before using /workspace-medical.";
 
 fn remote_workspace_block_message(
     profile: WorkspaceProfile,
@@ -32,7 +32,7 @@ impl App {
             AppEvent::OpenWorkspaceDashboard { profile } => {
                 if profile != WorkspaceProfile::Medical && self.workspace_draft_recovery_pending() {
                     self.chat_widget.add_error_message(
-                        "A Medical Workspace recovery is pending. Reopen /workspacemedical and explicitly restore or discard it before switching workspace profiles."
+                        "A Medical Workspace recovery is pending. Reopen /workspace-medical and explicitly restore or discard it before switching workspace profiles."
                             .to_string(),
                     );
                     tui.frame_requester().schedule_frame();
@@ -78,7 +78,15 @@ impl App {
                     }
                     self.workspace_dashboard = None;
                 }
-                let _ = tui.enter_workspace_alt_screen();
+                if let Err(err) = tui.enter_workspace_alt_screen() {
+                    self.workspace_dashboard_visible = false;
+                    self.chat_widget.add_error_message(format!(
+                        "Workspace could not open in an isolated full-screen surface: {err}"
+                    ));
+                    tui.terminal.invalidate_viewport();
+                    tui.frame_requester().schedule_frame();
+                    return Ok(AppRunControl::Continue);
+                }
                 // Entering from an already-active alternate screen does not perform a raw clear.
                 // Invalidate the prior chat diff buffer so the first workspace frame still paints
                 // every cell without introducing an intermediate blank screen.

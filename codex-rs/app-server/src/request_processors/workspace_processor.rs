@@ -1045,6 +1045,11 @@ impl WorkspaceRequestProcessor {
                 base_note_revision: params.base_note_revision,
                 authorized_scope_json,
                 expected_output_kind,
+                workspace_profile: params.workspace_profile.unwrap_or_default(),
+                plan_schema_version: params.plan_schema_version,
+                source_checkpoint_id: empty_to_none(params.source_checkpoint_id),
+                source_checkpoint_sha256: empty_to_none(params.source_checkpoint_sha256),
+                readiness_json: params.readiness_json.unwrap_or_default(),
                 status: "prepared".to_string(),
                 actor: clinician_actor,
             })
@@ -2152,6 +2157,11 @@ fn api_workspace_context_packet_from_state(
         base_note_revision: value.base_note_revision,
         authorized_scope_json: value.authorized_scope_json,
         expected_output_kind: value.expected_output_kind,
+        workspace_profile: value.workspace_profile,
+        plan_schema_version: value.plan_schema_version,
+        source_checkpoint_id: value.source_checkpoint_id,
+        source_checkpoint_sha256: value.source_checkpoint_sha256,
+        readiness_json: value.readiness_json,
         status: value.status,
         created_at: value.created_at.timestamp(),
         sent_at: value.sent_at.timestamp(),
@@ -2178,6 +2188,11 @@ fn api_workspace_context_packet_replay_from_state(
         base_note_revision: value.base_note_revision,
         authorized_scope_json: value.authorized_scope_json,
         expected_output_kind: value.expected_output_kind,
+        workspace_profile: value.workspace_profile,
+        plan_schema_version: value.plan_schema_version,
+        source_checkpoint_id: value.source_checkpoint_id,
+        source_checkpoint_sha256: value.source_checkpoint_sha256,
+        readiness_json: value.readiness_json,
         read_only_safety_constraints: AGENT_VISIBLE_PACKET_SAFETY_CONSTRAINTS
             .iter()
             .map(|line| (*line).to_string())

@@ -2,7 +2,7 @@
 source: tui/src/workspace_dashboard.rs
 expression: "render_dashboard_lines_at(&dashboard, width, height)"
 ---
-Medical Workspace  SYNTHETIC DATA ONLY
+Medical Workspace  /workspace-medical  SYNTHETIC DATA ONLY
 Patient: Jordan Patient  DOB: blank  MRN: blank  Contact: Missing contact  Coverage: Missing coverage  Encounter: No
  EXPLORER                      PATIENT CHART
 ┌Patient Directory───────────┐┌Patient Demographics────────────────────────────────────────────────────────────────────┐
@@ -31,6 +31,6 @@ Patient: Jordan Patient  DOB: blank  MRN: blank  Contact: Missing contact  Cover
 │                            ││Review state: READY · proposal base matches saved canonical r3                          │
 │                            ││  Guard: proposal base r3 · saved canonical r3                                          │
 │                            ││  Proposed: Assessment: gait tolerance improved with cueing. Plan: progress w...        │
-│                            ││  ● Tab to Agent Work for full text · :proposal accept | :proposal decline              │
+│                            ││  ● Tab to Agent Review for full text · :proposal accept | :proposal decline            │
 └────────────────────────────┘└────────────────────────────────────────────────────────────────────────────────────────┘
 Focus: Center | Mode: Read-only chart | Keys: ↑/↓ scroll  PgUp/PgDn page  Tab/⇧Tab pane  Ctrl-P commands

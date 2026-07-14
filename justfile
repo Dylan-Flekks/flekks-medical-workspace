@@ -17,7 +17,7 @@ codex *args:
     cargo run --bin codex -- {args}
 
 # Build and open Codex for the synthetic medical-workspace demo.
-# Once the TUI opens, enter `/workspacemedical`.
+# Once the TUI opens, enter `/workspace-medical`.
 [no-cd]
 [unix]
 medical-workspace *args:

@@ -1,23 +1,40 @@
 # Flekks Medical Workspace
 
-Flekks Medical Workspace is an open-source Rust terminal UI for patient-centered chart workflows and human-reviewed AI agent recommendations. It is derived from [OpenAI Codex](https://github.com/openai/codex) and explores a TUI-style model for clinical documentation: clinicians own the canonical chart, agents propose reviewable changes, and every request, source access, recommendation, decision, and accepted revision is auditable.
+Flekks Medical Workspace is an open-source Rust terminal UI for building auditable clinical context plans and reviewing AI agent recommendations. It is derived from [OpenAI Codex](https://github.com/openai/codex) and explores a domain-workspace model for clinical documentation: clinicians maintain the living patient record, freeze an explicitly scoped context plan for a master-agent run, and retain the final decision over every proposed chart change.
 
 > [!WARNING]
 > This project is alpha research software for synthetic data only. It is not an electronic health record, medical device, clinical decision-support system, or HIPAA-ready product. Do not enter protected health information or use it for patient care.
 
 This is an independent community project. It is not an official OpenAI product and is not endorsed or supported by OpenAI.
 
-## Product model
+## Workspace Mode
 
-The medical workspace is organized like an IDE:
+`/workspace-medical` is a persistent domain workspace, not a replacement name for ordinary Codex Plan Mode. Plan Mode makes one software task decision-complete. Workspace Mode maintains changing domain context over time and produces immutable, decision-complete context plans for individual audited runs.
 
 ```text
-Patient / Chart Explorer | Canonical Human Chart | Agent Work
+Living patient workspace -> frozen context plan -> master Codex run
+          ^                                           |
+          +------- human-reviewed recommendations <---+
 ```
 
-- **Explorer:** active and archived synthetic patients, demographics, safety, contacts, coverage, encounters, notes, patient files, tasks, and audit history.
+The medical workspace is organized into three zones:
+
+```text
+Evidence / Chart Explorer | Canonical Human Chart | Context Plan / Agent Review
+```
+
+- **Evidence / Explorer:** active and archived synthetic patients, demographics, safety, contacts, coverage, encounters, notes, patient files, tasks, and audit history.
 - **Canonical Chart:** human-controlled records, saved revisions, and clinician working drafts.
-- **Agent Work:** immutable requests, run status, sources accessed, recommendations, provenance, and accept/reject history.
+- **Context Plan / Agent Review:** the current objective, selected evidence, readiness, frozen requests, run status, sources accessed, recommendations, provenance, and accept/reject history.
+
+The local Workspace Planner provides deterministic readiness guidance: it identifies missing
+context, records checkpoint-bound acknowledgements, and explains when a plan can be submitted. It
+does not perform the higher-capability patient analysis. The full Codex harness is launched from
+the frozen, authorized packet, can retrieve only packet-scoped sources through the audited reader,
+performs that run in the background, and returns evidence-linked work to the same workspace for
+review. The right pane moves from Context Plan to Codex Running to Agent Review; if its bound
+checkpoint no longer matches the living workspace, the prior run is marked Outdated. Prior
+submissions and results remain immutable for audit.
 
 The core safety invariant is:
 
@@ -30,7 +47,7 @@ See [Agent proposal workflow](docs/agent-proposal-workflow.md),
 ## Current capabilities
 
 - Local SQLite patient, note, encounter, task, file-metadata, safety, packet, result, proposal, and audit persistence.
-- `/workspacemedical` refuses to open against a remote app-server store; the current medical-data
+- `/workspace-medical` refuses to open against a remote app-server store; the current medical-data
   path is intentionally local-only.
 - The supported launcher marks and exclusively locks its dedicated synthetic SQLite home. A
   read-only store check verifies the synthetic policy, expected workspace table-name inventory,
@@ -42,9 +59,9 @@ See [Agent proposal workflow](docs/agent-proposal-workflow.md),
   compatibility projection for older primary-coverage clients.
 - Local-only patient search across identifiers, contact, emergency-contact, and coverage fields.
 - Note revision history, local note locking, addenda, and stale-proposal checks.
-- Local working-draft checkpoints for note title and body, Agent requests, and selected context,
-  with explicit restore or discard after an interrupted session. Canonical chart changes still
-  require an explicit human save.
+- Local working-draft checkpoints for note title and body, context-plan instructions, and selected
+  context, with explicit restore or discard after an interrupted session. Canonical chart changes
+  still require an explicit human save.
 - Explicit packet selection for multimodal file metadata and human-reviewed excerpts.
 - Durable prepared packets, idempotent agent runs, immutable packet-source snapshots, review-pending results, revision-bound proposals, and append-only clinician decisions.
 - Patient-rooted atomic chart changesets with optimistic note revisions, opaque entity-version guards, durable idempotency receipts, exact-request retry, explicit note-only reconciliation, and fail-closed discard/reload for broader stale drafts.
@@ -59,9 +76,10 @@ See [Agent proposal workflow](docs/agent-proposal-workflow.md),
   packet path. Returned note bodies are byte-bounded and local-path tokens are redacted before
   immutable snapshot hashing; generic logs and telemetry receive redacted tool arguments/results.
 - Automatic packet-id/hash turn binding and review-pending capture of the final agent answer with thread/turn provenance.
-- A responsive three-zone Explorer / Patient Chart / Agent Work layout with Pending, History, and Audit views.
-- Conventional multiline note and Agent-request editing, plus deterministic local workflow hints
-  that teach the next context-packet step without changing the chart.
+- A responsive three-zone Evidence / Patient Chart / Context Plan and Agent Review layout with
+  pending, history, and audit views.
+- Conventional multiline note and context-plan instruction editing, plus deterministic local
+  workflow hints that teach the next context-packet step without changing the chart.
 - Human-entered coverage-card comparison tied to a selected local source document, with append-only
   provenance and advisory `match`, `mismatch`, `unverified`, `stale`, or `incomplete` readiness.
 - Read-only current-versus-proposed comparison with stale and signed-note guards.
@@ -116,13 +134,14 @@ just medical-workspace
 When the TUI opens, run:
 
 ```text
-/workspacemedical
+/workspace-medical
 ```
 
-On an empty isolated store, `/workspacemedical` performs the local synthetic-policy preflight before
-opening the patient workspace. A plain `cargo run` intentionally lacks that launch authority. Use
-`just medical-workspace` (or `scripts/run_medical_workspace.sh`) for the supported synthetic demo
-flow.
+The previous `/workspacemedical` spelling remains a deprecated compatibility alias but is hidden
+from the command palette. On an empty isolated store, `/workspace-medical` performs the local
+synthetic-policy preflight before opening the patient workspace. A plain `cargo run` intentionally
+lacks that launch authority. Use `just medical-workspace` (or
+`scripts/run_medical_workspace.sh`) for the supported synthetic demo flow.
 
 Use synthetic fixtures only. Never enter PHI, real patient details, or production credentials. See
 [Development](docs/development.md) for focused tests and snapshot review.
@@ -201,7 +220,7 @@ The medical workspace keeps pane navigation separate from the action performed i
 | `Ctrl-P` | Open Commands from any pane, including an active text editor. |
 | `:` | Open Commands from navigation and read-only panes; remains typable in medical text fields. |
 | `Ctrl-S` | Explicitly save the current human chart draft. |
-| `Ctrl-G` | Prepare the selected context for a handoff to the parent Codex agent. |
+| `Ctrl-G` | Review the frozen context plan before handoff to the master Codex agent. |
 | `?` | Show the workspace action reference when the focused pane is not consuming text. |
 
 The command palette leads with actions relevant to the focused pane, followed by common chart actions and the Agent bridge. While a clinician edits an unsigned note, its live title appears in Patient Notes with an `[unsaved]` marker; that marker is working-state feedback and does not imply a canonical chart revision.
@@ -217,20 +236,23 @@ Known blockers include:
 - coverage-card verification is a human transcription and deterministic comparison workflow only:
   there is no remote card upload, OCR, model extraction, payer query, eligibility lookup, claim
   creation, EDI submission, or automatic chart mutation;
-- working-draft recovery currently covers note text, Agent requests, and context selections tied to
-  the exact patient, note, and base revision; demographic and coverage edits remain explicit-save
-  canonical drafts rather than recoverable background checkpoints;
+- working-draft recovery currently covers note text, context-plan instructions, and context
+  selections tied to the exact patient, note, and base revision; demographic and coverage edits
+  remain explicit-save canonical drafts rather than recoverable background checkpoints;
 - working-draft checkpoints are local full snapshots; production-grade compression, retention,
   storage-health reporting, and authenticated ownership are not implemented yet;
-- local workflow hints are deterministic navigation and packet-building guidance, not medical or
-  clinical recommendations, and the parent agent is engaged only through an explicit handoff;
+- local workflow hints are deterministic navigation, readiness, and packet-building guidance, not
+  medical or clinical recommendations; higher-capability analysis is engaged only through an
+  explicit frozen context-plan handoff to the master agent;
 - atomic multi-document batch intake and durable restart recovery for an unresolved local changeset;
 - extension of the packet-authorized reader beyond visit history and progress notes;
 - partial per-change proposal review in both the app-server API and TUI; edited whole-proposal acceptance is state/API-ready;
 - startup reconciliation for a run abandoned by an abrupt process termination;
 - technical enforcement that prevents accidental entry of real patient data.
 
-Matching model turns are captured automatically as review-pending Agent Work with thread/turn provenance. The explicit `:agent result save` path remains available as a clinician-attributed recovery import when a response was produced outside the bound harness turn.
+Matching model turns are captured automatically as review-pending Agent Review with thread/turn
+provenance. The explicit `:agent result save` path remains available as a clinician-attributed
+recovery import when a response was produced outside the bound harness turn.
 
 See the [Patient identity, contact, and coverage design](PATIENT_IDENTITY_AND_COVERAGE.md), the
 [Roadmap](ROADMAP.md), and issues labeled `help wanted`.

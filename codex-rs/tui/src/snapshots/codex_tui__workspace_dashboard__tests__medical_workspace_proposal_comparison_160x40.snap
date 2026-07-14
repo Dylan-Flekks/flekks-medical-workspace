@@ -2,38 +2,38 @@
 source: tui/src/workspace_dashboard.rs
 expression: "render_dashboard_lines_at(&dashboard, width, height)"
 ---
-Medical Workspace  SYNTHETIC DATA ONLY
+Medical Workspace  /workspace-medical  SYNTHETIC DATA ONLY
 Patient: Jordan Patient  DOB: blank  MRN: blank  Contact: Missing contact  Coverage: Missing coverage  Encounter: No encounter
- EXPLORER                          PATIENT CHART                                                                   AGENT WORK
-┌Patient Directory───────────────┐┌Patient Demographics──────────────────────────────────────────────────────────┐┌Agent Work──────────────────────────────────┐
+ EXPLORER                          PATIENT CHART                                                                   CONTEXT PLAN
+┌Patient Directory───────────────┐┌Patient Demographics──────────────────────────────────────────────────────────┐┌Agent Review────────────────────────────────┐
 │Local search: /                 ││Identity: Jordan Patient · preferred not set                                  ││Patient Chart: Jordan...; Accept proposal   │
-│0 active patients; local only   ││Legal/card: legal name missing                                                ││[Pending]  History  Audit  ←/→              │
-│No saved patients yet.          ││DOB: missing · admin sex: missing · MRN: missing                              ││                                            │
-│New patient: :patient new       ││Contact: phone missing; email missing; method not set                         ││Pending Proposal Changeset                  │
-│                                ││Address: address missing                                                      ││Review state: READY · proposal base matches │
-│                                ││Emergency: name missing; relationship missing; phone missing                  ││saved canonical r3                          │
-│                                ││Coverage: P not entered; S not entered; T not entered                         ││  Change: replace note note-1 body          │
-│                                ││Enter edits all identity/contact fields · Ctrl-P opens actions                ││  Guard: proposal base r3 · saved canonical │
-│                                │└──────────────────────────────────────────────────────────────────────────────┘│r3                                          │
-│                                │┌Note Title────────────────────────────────────────────────────────────────────┐│  Patient: identity only; demographics      │
-└────────────────────────────────┘│Visit note                                                                    ││untouched                                   │
-┌Patient Notes───────────────────┐└──────────────────────────────────────────────────────────────────────────────┘│  Provenance: thread thread-1 · turn turn-1 │
-│Patient Notes                   │┌Note Body─────────────────────────────────────────────────────────────────────┐│  Reason: tighten wording                   │
-│  Medical Notes                 ││Assessment: improving gait tolerance.                                         ││                                            │
-│> daily  1970-01-01  Visit note ││Plan: continue current program.                                               ││  Full proposed replacement:                │
-│[draft]                         ││                                                                              ││    + Assessment: gait tolerance improved   │
+│0 active patients; local only   ││Legal/card: legal name missing                                                ││Codex bridge: review                        │
+│No saved patients yet.          ││DOB: missing · admin sex: missing · MRN: missing                              ││[Current]  History  Audit  ←/→              │
+│New patient: :patient new       ││Contact: phone missing; email missing; method not set                         ││                                            │
+│                                ││Address: address missing                                                      ││Pending Proposal Changeset                  │
+│                                ││Emergency: name missing; relationship missing; phone missing                  ││Review state: READY · proposal base matches │
+│                                ││Coverage: P not entered; S not entered; T not entered                         ││saved canonical r3                          │
+│                                ││Enter edits all identity/contact fields · Ctrl-P opens actions                ││  Change: replace note note-1 body          │
+│                                │└──────────────────────────────────────────────────────────────────────────────┘│  Guard: proposal base r3 · saved canonical │
+│                                │┌Note Title────────────────────────────────────────────────────────────────────┐│r3                                          │
+└────────────────────────────────┘│Visit note                                                                    ││  Patient: identity only; demographics      │
+┌Patient Notes───────────────────┐└──────────────────────────────────────────────────────────────────────────────┘│untouched                                   │
+│Patient Notes                   │┌Note Body─────────────────────────────────────────────────────────────────────┐│  Provenance: thread thread-1 · turn turn-1 │
+│  Medical Notes                 ││Assessment: improving gait tolerance.                                         ││  Reason: tighten wording                   │
+│> daily  1970-01-01  Visit note ││Plan: continue current program.                                               ││                                            │
+│[draft]                         ││                                                                              ││  Full proposed replacement:                │
+│                                ││                                                                              ││    + Assessment: gait tolerance improved   │
 │                                ││                                                                              ││with cueing.                                │
 │                                ││                                                                              ││    + Plan: progress walking intervals next │
 │                                ││                                                                              ││visit.                                      │
-│                                ││                                                                              ││                                            │
-└────────────────────────────────┘│                                                                              ││  Saved canonical note (r3):                │
-┌Uploaded Documents──────────────┐│                                                                              ││    - Assessment: improving gait tolerance. │
-│Uploaded Documents              ││                                                                              ││    - Plan: continue current program.       │
-│No files yet                    ││                                                                              ││                                            │
-│Paste/drop JPG/PDF. Space...    ││                                                                              ││  ● :proposal accept | :proposal decline    │
+└────────────────────────────────┘│                                                                              ││                                            │
+┌Uploaded Documents──────────────┐│                                                                              ││  Saved canonical note (r3):                │
+│Uploaded Documents              ││                                                                              ││    - Assessment: improving gait tolerance. │
+│No files yet                    ││                                                                              ││    - Plan: continue current program.       │
+│Paste/drop JPG/PDF. Space...    ││                                                                              ││                                            │
+│                                ││                                                                              ││  ● :proposal accept | :proposal decline    │
 │                                ││                                                                              ││  Acceptance is explicit; no agent output   │
 │                                ││                                                                              ││auto-applies.                               │
-│                                ││                                                                              ││                                            │
 │                                ││                                                                              ││                                            │
 │                                ││                                                                              ││                                            │
 │                                ││                                                                              ││                                            │

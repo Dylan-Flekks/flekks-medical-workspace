@@ -85,7 +85,7 @@ pub(crate) fn assemble_medical_context(
     input: MedicalContextAssemblyInput<'_>,
 ) -> MedicalContextAssembly {
     let human_request = if input.agent_request_body.trim().is_empty() {
-        "General Medical Agent Plan request".to_string()
+        "General Context Plan request".to_string()
     } else {
         input.agent_request_body.trim().to_string()
     };
@@ -179,11 +179,11 @@ fn context_packet_preview_lines(
             input.patient_display_name, input.note_title, input.note_status, input.note_revision
         ),
         format!("instructions: {request}"),
-        "plan: Ctrl-G opens agent; inspect before submitting".to_string(),
-        "Agent sees: this patient/note, request, selected files/text/clips/jobs".to_string(),
-        "Agent cannot: read unselected records, fetch files, mutate/sign/submit/contact"
+        "plan: Ctrl-G acknowledges warnings and submits the frozen Context Plan".to_string(),
+        "Codex sees: this patient/note, request, selected files/text/clips/jobs".to_string(),
+        "Codex cannot: read unselected records, mutate/sign/submit/contact without a reviewed plan"
             .to_string(),
-        "return: /workspacemedical; completed response appears in Agent Work".to_string(),
+        "return: /workspace-medical; completed response appears in Agent Review".to_string(),
         format!(
             "agent context: files {} in/{excluded_files} out ({patient_files} patient/{practice_files} practice); text {} in/{excluded_derivatives} out; clips {} in/{excluded_clips} out; jobs {}; proposals {}",
             input.selected_artifacts.len(),
@@ -192,7 +192,7 @@ fn context_packet_preview_lines(
             input.active_tasks.len(),
             input.pending_proposal_count
         ),
-        "boundary: selected-only, read-only Medical Agent Plan; human review before chart action"
+        "boundary: selected-only, read-only Context Plan; human review before chart action"
             .to_string(),
         "no file copy/upload/parse/OCR/transcribe/analyze".to_string(),
         format!(
@@ -731,7 +731,7 @@ fn context_envelope_json(
     chart_context_summary: &str,
 ) -> String {
     let human_request = if input.agent_request_body.trim().is_empty() {
-        "General Medical Agent Plan request".to_string()
+        "General Context Plan request".to_string()
     } else {
         input.agent_request_body.trim().to_string()
     };
