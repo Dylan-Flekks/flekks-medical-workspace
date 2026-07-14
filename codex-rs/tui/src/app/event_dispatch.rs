@@ -113,6 +113,16 @@ impl App {
                 }
                 tui.frame_requester().schedule_frame();
             }
+            AppEvent::WorkspaceDraftAutosaveTick { token } => {
+                self.handle_workspace_draft_autosave_tick(app_server, token)
+                    .await;
+                tui.frame_requester().schedule_frame();
+            }
+            AppEvent::WorkspaceDraftFocusCheckpoint { token } => {
+                self.handle_workspace_draft_focus_checkpoint(app_server, token)
+                    .await;
+                tui.frame_requester().schedule_frame();
+            }
             AppEvent::NewSession => {
                 self.start_fresh_session_with_summary_hint(
                     tui, app_server, /*session_start_source*/ None,

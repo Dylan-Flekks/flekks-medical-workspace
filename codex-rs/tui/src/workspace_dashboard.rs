@@ -2240,6 +2240,10 @@ impl WorkspaceDashboard {
         self.profile
     }
 
+    pub(crate) fn focus(&self) -> WorkspaceFocus {
+        self.focus
+    }
+
     pub(crate) fn set_local_store_path(&mut self, path: impl AsRef<Path>) {
         self.set_store_description(format!("Local SQLite: {}", path.as_ref().display()));
     }

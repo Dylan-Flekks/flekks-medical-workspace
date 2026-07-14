@@ -84,6 +84,7 @@ use crate::workspace_command::WorkspaceCommandRunner;
 use crate::workspace_context_assembly::packet_scoped_agent_handoff_prompt_for_run;
 use crate::workspace_dashboard::WorkspaceDashboard;
 use crate::workspace_dashboard::WorkspaceDashboardAction;
+use crate::workspace_dashboard::WorkspaceFocus;
 use crate::workspace_dashboard::WorkspaceProfile;
 use crate::workspace_draft::WorkspaceDraftCheckpointTrigger;
 use codex_ansi_escape::ansi_escape_line;
@@ -738,6 +739,10 @@ fn active_turn_interrupt_race(error: &TypedRequestError) -> Option<String> {
     )
 }
 
+fn workspace_dashboard_render_event(event: &TuiEvent) -> bool {
+    matches!(event, TuiEvent::Draw | TuiEvent::Resize)
+}
+
 impl App {
     pub fn chatwidget_init_for_forked_or_resumed_thread(
         &self,
@@ -1371,8 +1376,15 @@ See the Codex keymap documentation for supported actions and examples."
         event: TuiEvent,
     ) -> Result<AppRunControl> {
         let _ = tui.enter_workspace_alt_screen();
+        if workspace_dashboard_render_event(&event) {
+            return self.handle_workspace_dashboard_render_event(tui, event);
+        }
         match event {
             TuiEvent::Key(key_event) => {
+                let previous_focus = self
+                    .workspace_dashboard
+                    .as_ref()
+                    .map(WorkspaceDashboard::focus);
                 let viewport = tui
                     .terminal
                     .size()
@@ -1385,6 +1397,9 @@ See the Codex keymap documentation for supported actions and examples."
                     .unwrap_or(WorkspaceDashboardAction::Consumed);
                 self.handle_workspace_dashboard_action(tui, app_server, action)
                     .await;
+                if let Some(previous_focus) = previous_focus {
+                    self.request_workspace_draft_focus_checkpoint(previous_focus);
+                }
             }
             TuiEvent::Paste(pasted) => {
                 let pasted = pasted.replace("\r", "\n");
@@ -1410,24 +1425,31 @@ See the Codex keymap documentation for supported actions and examples."
                 self.handle_workspace_dashboard_action(tui, app_server, action)
                     .await;
             }
-            TuiEvent::Draw | TuiEvent::Resize => {
-                self.chat_widget.maybe_post_pending_notification(tui);
-                if self
-                    .chat_widget
-                    .handle_paste_burst_tick(tui.frame_requester())
-                {
-                    return Ok(AppRunControl::Continue);
-                }
-                self.chat_widget.pre_draw_tick();
-                self.maybe_autosave_workspace_draft(tui, app_server).await;
-                let resized = matches!(event, TuiEvent::Resize);
-                self.render_workspace_dashboard_frame(tui, resized)?;
-                if self.chat_widget.external_editor_state() == ExternalEditorState::Requested {
-                    self.chat_widget
-                        .set_external_editor_state(ExternalEditorState::Active);
-                    self.app_event_tx.send(AppEvent::LaunchExternalEditor);
-                }
-            }
+            TuiEvent::Draw | TuiEvent::Resize => unreachable!("render events return above"),
+        }
+        Ok(AppRunControl::Continue)
+    }
+
+    fn handle_workspace_dashboard_render_event(
+        &mut self,
+        tui: &mut tui::Tui,
+        event: TuiEvent,
+    ) -> Result<AppRunControl> {
+        debug_assert!(workspace_dashboard_render_event(&event));
+        self.chat_widget.maybe_post_pending_notification(tui);
+        if self
+            .chat_widget
+            .handle_paste_burst_tick(tui.frame_requester())
+        {
+            return Ok(AppRunControl::Continue);
+        }
+        self.chat_widget.pre_draw_tick();
+        let resized = matches!(event, TuiEvent::Resize);
+        self.render_workspace_dashboard_frame(tui, resized)?;
+        if self.chat_widget.external_editor_state() == ExternalEditorState::Requested {
+            self.chat_widget
+                .set_external_editor_state(ExternalEditorState::Active);
+            self.app_event_tx.send(AppEvent::LaunchExternalEditor);
         }
         Ok(AppRunControl::Continue)
     }
@@ -1494,7 +1516,7 @@ See the Codex keymap documentation for supported actions and examples."
                     self.chat_widget.add_error_message(format!(
                         "Failed to checkpoint workspace draft before close: {err}"
                     ));
-                    self.observe_workspace_draft(tui);
+                    self.observe_workspace_draft();
                     tui.frame_requester().schedule_frame();
                     return;
                 }
@@ -1570,7 +1592,7 @@ See the Codex keymap documentation for supported actions and examples."
                     self.chat_widget.add_error_message(format!(
                         "Failed to checkpoint workspace draft before agent handoff: {err}"
                     ));
-                    self.observe_workspace_draft(tui);
+                    self.observe_workspace_draft();
                     tui.frame_requester().schedule_frame();
                     return;
                 }
@@ -1929,7 +1951,7 @@ See the Codex keymap documentation for supported actions and examples."
                 }
             }
         }
-        self.observe_workspace_draft(tui);
+        self.observe_workspace_draft();
         tui.frame_requester().schedule_frame();
     }
 

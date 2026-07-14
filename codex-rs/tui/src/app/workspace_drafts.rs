@@ -9,6 +9,9 @@ use crate::workspace_draft::WorkspaceDraftCloseDisposition;
 use crate::workspace_draft::WorkspaceDraftGenerationToken;
 use crate::workspace_draft::WorkspaceDraftState;
 use codex_app_server_protocol::WorkspaceDraftSessionListParams;
+use std::time::Duration;
+use std::time::Instant;
+use tokio::task::AbortHandle;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct WorkspaceDraftScope {
@@ -25,6 +28,12 @@ impl WorkspaceDraftScope {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WorkspaceDraftTimerRequest {
+    token: WorkspaceDraftGenerationToken,
+    delay: Duration,
+}
+
 #[derive(Debug, Default)]
 pub(super) struct WorkspaceDraftRuntime {
     enabled: bool,
@@ -33,10 +42,12 @@ pub(super) struct WorkspaceDraftRuntime {
     scope: Option<WorkspaceDraftScope>,
     observed: Option<MedicalWorkspaceWorkingDraftV1>,
     scheduled_token: Option<WorkspaceDraftGenerationToken>,
+    autosave_timer_abort: Option<AbortHandle>,
 }
 
 impl WorkspaceDraftRuntime {
     fn attach_baseline(&mut self, draft: Option<MedicalWorkspaceWorkingDraftV1>) {
+        self.cancel_autosave_timer();
         self.scope = draft.as_ref().map(WorkspaceDraftScope::from_draft);
         if let Some(scope) = self.scope.as_ref() {
             self.state.reset_for_client(scope.client_id.clone());
@@ -50,12 +61,30 @@ impl WorkspaceDraftRuntime {
     fn observe(
         &mut self,
         draft: Option<MedicalWorkspaceWorkingDraftV1>,
-    ) -> Option<std::time::Duration> {
+    ) -> Option<WorkspaceDraftTimerRequest> {
+        self.observe_inner(draft, None)
+    }
+
+    #[cfg(test)]
+    fn observe_at(
+        &mut self,
+        draft: Option<MedicalWorkspaceWorkingDraftV1>,
+        now: Instant,
+    ) -> Option<WorkspaceDraftTimerRequest> {
+        self.observe_inner(draft, Some(now))
+    }
+
+    fn observe_inner(
+        &mut self,
+        draft: Option<MedicalWorkspaceWorkingDraftV1>,
+        now: Option<Instant>,
+    ) -> Option<WorkspaceDraftTimerRequest> {
         if !self.enabled {
             return None;
         }
         let next_scope = draft.as_ref().map(WorkspaceDraftScope::from_draft);
         if next_scope != self.scope {
+            self.cancel_autosave_timer();
             self.scope = next_scope.clone();
             if let Some(scope) = next_scope.as_ref() {
                 self.state.reset_for_client(scope.client_id.clone());
@@ -71,9 +100,15 @@ impl WorkspaceDraftRuntime {
         }
         self.observed = draft;
         self.scope.as_ref()?;
-        let schedule = self.state.mark_changed();
+        let schedule = match now {
+            Some(now) => self.state.mark_changed_at(now),
+            None => self.state.mark_changed(),
+        };
         self.scheduled_token = Some(schedule.token);
-        Some(schedule.delay)
+        Some(WorkspaceDraftTimerRequest {
+            token: schedule.token,
+            delay: schedule.delay,
+        })
     }
 
     fn reset_after_terminal_close(&mut self, draft: Option<MedicalWorkspaceWorkingDraftV1>) {
@@ -82,6 +117,50 @@ impl WorkspaceDraftRuntime {
 
     fn adopt_recovered_scope(&mut self, draft: &MedicalWorkspaceWorkingDraftV1) {
         self.scope = Some(WorkspaceDraftScope::from_draft(draft));
+    }
+
+    fn schedule_autosave_timer(
+        &mut self,
+        app_event_tx: AppEventSender,
+        request: WorkspaceDraftTimerRequest,
+    ) {
+        self.cancel_autosave_timer();
+        let task = tokio::spawn(async move {
+            tokio::time::sleep(request.delay).await;
+            app_event_tx.send(AppEvent::WorkspaceDraftAutosaveTick {
+                token: request.token,
+            });
+        });
+        self.autosave_timer_abort = Some(task.abort_handle());
+    }
+
+    fn cancel_autosave_timer(&mut self) {
+        if let Some(abort) = self.autosave_timer_abort.take() {
+            abort.abort();
+        }
+    }
+
+    fn take_fired_autosave_timer(&mut self, token: WorkspaceDraftGenerationToken) -> bool {
+        if self.scheduled_token != Some(token) {
+            return false;
+        }
+        self.autosave_timer_abort = None;
+        true
+    }
+
+    fn request_focus_checkpoint(
+        &self,
+        app_event_tx: &AppEventSender,
+        previous_focus: WorkspaceFocus,
+        current_focus: WorkspaceFocus,
+    ) {
+        if current_focus == previous_focus {
+            return;
+        }
+        let Some(token) = self.scheduled_token else {
+            return;
+        };
+        app_event_tx.send(AppEvent::WorkspaceDraftFocusCheckpoint { token });
     }
 }
 
@@ -196,7 +275,7 @@ impl App {
         }
     }
 
-    pub(super) fn observe_workspace_draft(&mut self, tui: &mut tui::Tui) {
+    pub(super) fn observe_workspace_draft(&mut self) {
         let current = match self.current_medical_working_draft() {
             Ok(current) => current,
             Err(error) => {
@@ -206,36 +285,54 @@ impl App {
                 return;
             }
         };
-        if let Some(delay) = self.workspace_draft_runtime.observe(current) {
+        if let Some(request) = self.workspace_draft_runtime.observe(current) {
             self.set_workspace_draft_recovery_available(false);
             self.set_workspace_draft_message(Some(
                 "Local recovery checkpoint pending; Ctrl-S still saves the canonical chart."
                     .to_string(),
             ));
-            tui.frame_requester().schedule_frame_in(delay);
+            self.workspace_draft_runtime
+                .schedule_autosave_timer(self.app_event_tx.clone(), request);
         }
     }
 
-    pub(super) async fn maybe_autosave_workspace_draft(
+    pub(super) fn request_workspace_draft_focus_checkpoint(&self, previous_focus: WorkspaceFocus) {
+        let Some(current_focus) = self
+            .workspace_dashboard
+            .as_ref()
+            .map(WorkspaceDashboard::focus)
+        else {
+            return;
+        };
+        self.workspace_draft_runtime.request_focus_checkpoint(
+            &self.app_event_tx,
+            previous_focus,
+            current_focus,
+        );
+    }
+
+    pub(super) async fn handle_workspace_draft_autosave_tick(
         &mut self,
-        tui: &mut tui::Tui,
         app_server: &mut AppServerSession,
+        token: WorkspaceDraftGenerationToken,
     ) {
         if !self.workspace_draft_runtime.enabled
             || !self.workspace_draft_runtime.recovery_discovery_complete
+            || !self
+                .workspace_draft_runtime
+                .take_fired_autosave_timer(token)
         {
             return;
         }
-        let Some(token) = self.workspace_draft_runtime.scheduled_token else {
-            return;
-        };
         if !self.workspace_draft_runtime.state.autosave_is_due(token) {
-            // Frame scheduling coalesces an immediate redraw with any later deadline. Re-arm the
-            // current generation after every premature draw so UI refreshes cannot swallow the
-            // debounce wakeup that persists the local recovery checkpoint.
             if let Some(remaining) = self.workspace_draft_runtime.state.autosave_remaining(token) {
-                tui.frame_requester()
-                    .schedule_frame_in(remaining.max(std::time::Duration::from_millis(1)));
+                self.workspace_draft_runtime.schedule_autosave_timer(
+                    self.app_event_tx.clone(),
+                    WorkspaceDraftTimerRequest {
+                        token,
+                        delay: remaining.max(Duration::from_millis(1)),
+                    },
+                );
             }
             return;
         }
@@ -250,8 +347,38 @@ impl App {
             self.set_workspace_draft_message(Some(format!(
                 "Local recovery checkpoint failed; working state remains in memory: {error}"
             )));
-            tui.frame_requester()
-                .schedule_frame_in(WORKSPACE_DRAFT_AUTOSAVE_DELAY);
+            self.workspace_draft_runtime.schedule_autosave_timer(
+                self.app_event_tx.clone(),
+                WorkspaceDraftTimerRequest {
+                    token,
+                    delay: WORKSPACE_DRAFT_AUTOSAVE_DELAY,
+                },
+            );
+        }
+    }
+
+    pub(super) async fn handle_workspace_draft_focus_checkpoint(
+        &mut self,
+        app_server: &mut AppServerSession,
+        token: WorkspaceDraftGenerationToken,
+    ) {
+        if !self.workspace_draft_runtime.enabled
+            || !self.workspace_draft_runtime.recovery_discovery_complete
+            || self.workspace_draft_runtime.scheduled_token != Some(token)
+        {
+            return;
+        }
+        if let Err(error) = self
+            .persist_workspace_draft_checkpoint(
+                app_server,
+                token,
+                WorkspaceDraftCheckpointTrigger::FocusChange,
+            )
+            .await
+        {
+            self.set_workspace_draft_message(Some(format!(
+                "Local recovery checkpoint failed after focus changed; working state remains in memory: {error}"
+            )));
         }
     }
 
@@ -316,6 +443,7 @@ impl App {
         self.workspace_draft_runtime.adopt_recovered_scope(&adopted);
         self.workspace_draft_runtime.observed = Some(adopted);
         self.workspace_draft_runtime.scheduled_token = None;
+        self.workspace_draft_runtime.cancel_autosave_timer();
         self.set_workspace_draft_recovery_available(false);
         Ok(())
     }
@@ -426,6 +554,7 @@ impl App {
         )? {
             WorkspaceDraftCheckpointStart::AlreadyCurrent => {
                 self.workspace_draft_runtime.scheduled_token = None;
+                self.workspace_draft_runtime.cancel_autosave_timer();
                 return Ok(());
             }
             WorkspaceDraftCheckpointStart::Request(request) => request,
@@ -446,6 +575,7 @@ impl App {
             .state
             .complete_checkpoint(token, &response)?;
         self.workspace_draft_runtime.scheduled_token = None;
+        self.workspace_draft_runtime.cancel_autosave_timer();
         self.set_workspace_draft_message(Some(format!(
             "Local recovery checkpoint r{} saved; canonical chart unchanged.",
             metadata.revision
@@ -474,3 +604,7 @@ impl App {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "workspace_drafts_tests.rs"]
+mod tests;

@@ -90,7 +90,7 @@ impl WorkspaceDraftState {
         self.mark_changed_at(Instant::now())
     }
 
-    pub(super) fn mark_changed_at(&mut self, now: Instant) -> WorkspaceDraftAutosaveSchedule {
+    pub(crate) fn mark_changed_at(&mut self, now: Instant) -> WorkspaceDraftAutosaveSchedule {
         self.edit_generation = self.edit_generation.wrapping_add(1);
         self.debounce_deadline = Some(now + WORKSPACE_DRAFT_AUTOSAVE_DELAY);
         self.last_failure = None;
@@ -118,7 +118,7 @@ impl WorkspaceDraftState {
         self.autosave_remaining_at(token, Instant::now())
     }
 
-    pub(super) fn autosave_remaining_at(
+    pub(crate) fn autosave_remaining_at(
         &self,
         token: WorkspaceDraftGenerationToken,
         now: Instant,
@@ -133,7 +133,7 @@ impl WorkspaceDraftState {
             .map(|deadline| deadline.saturating_duration_since(now))
     }
 
-    pub(super) fn autosave_is_due_at(
+    pub(crate) fn autosave_is_due_at(
         &self,
         token: WorkspaceDraftGenerationToken,
         now: Instant,

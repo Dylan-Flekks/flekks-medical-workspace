@@ -163,6 +163,7 @@ impl MedicalWorkspaceWorkingDraftV1 {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WorkspaceDraftCheckpointTrigger {
     IdleTyping,
+    FocusChange,
     ExplicitSave,
     PatientNavigation,
     NoteNavigation,
@@ -175,6 +176,7 @@ impl WorkspaceDraftCheckpointTrigger {
     pub(super) fn as_str(self) -> &'static str {
         match self {
             Self::IdleTyping => "idle_typing",
+            Self::FocusChange => "focus_change",
             Self::ExplicitSave => "explicit_save",
             Self::PatientNavigation => "patient_navigation",
             Self::NoteNavigation => "note_navigation",
