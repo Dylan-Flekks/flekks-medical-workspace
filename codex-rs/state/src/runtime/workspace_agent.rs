@@ -389,7 +389,8 @@ LIMIT ?
             );
         }
         let now_ms = datetime_to_epoch_millis(Utc::now());
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        require_synthetic_workspace(&mut tx).await?;
         let Some(existing) = workspace_agent_run_row_by_id(&mut tx, &input.run_id).await? else {
             tx.rollback().await?;
             return Ok(None);
@@ -760,7 +761,8 @@ ORDER BY accessed_at_ms ASC, id ASC
             .filter(|run_id| !run_id.is_empty())
             .ok_or_else(|| anyhow::anyhow!("workspace agent result run id must not be empty"))?;
         let now_ms = datetime_to_epoch_millis(Utc::now());
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        require_synthetic_workspace(&mut tx).await?;
         let mut run = workspace_agent_run_row_by_id(&mut tx, run_id)
             .await?
             .ok_or_else(|| anyhow::anyhow!("workspace agent run `{run_id}` was not found"))?;

@@ -1577,6 +1577,10 @@ async fn workspace_agent_source_continuations_reject_unclassified_legacy_run_wit
         .list_agent_run_sources(&run.id)
         .await
         .expect("source manifest should list");
+    let audits_before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM workspace_audit_events")
+        .fetch_one(runtime.workspace().pool.as_ref())
+        .await
+        .expect("audit count should load");
 
     let mut connection = runtime
         .workspace()
@@ -1629,6 +1633,47 @@ async fn workspace_agent_source_continuations_reject_unclassified_legacy_run_wit
             .expect("rejected read must preserve sources"),
         sources_before
     );
+    let error = runtime
+        .workspace()
+        .update_agent_run_status(crate::WorkspaceAgentRunStatusUpdate {
+            run_id: run.id.clone(),
+            status: "canceled".to_string(),
+            error_summary: "must not persist".to_string(),
+            actor: "agent".to_string(),
+        })
+        .await
+        .expect_err("unclassified legacy run must not change status")
+        .to_string();
+    assert!(error.contains("explicit synthetic"));
+    let error = runtime
+        .workspace()
+        .complete_agent_run_with_result(result_create(&packet, &run))
+        .await
+        .expect_err("unclassified legacy run must not save a result")
+        .to_string();
+    assert!(error.contains("explicit synthetic"));
+    let stored_run = runtime
+        .workspace()
+        .list_agent_runs(crate::WorkspaceAgentRunFilter {
+            client_id: client.id,
+            packet_id: Some(packet.id),
+            limit: Some(10),
+            ..Default::default()
+        })
+        .await
+        .expect("run should remain readable");
+    assert_eq!(stored_run.len(), 1);
+    assert_eq!(stored_run[0].status, "running");
+    let result_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM workspace_agent_results")
+        .fetch_one(runtime.workspace().pool.as_ref())
+        .await
+        .expect("result count should load");
+    assert_eq!(result_count, 0);
+    let audits_after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM workspace_audit_events")
+        .fetch_one(runtime.workspace().pool.as_ref())
+        .await
+        .expect("audit count should load");
+    assert_eq!(audits_after, audits_before);
 }
 
 #[tokio::test]
