@@ -38,6 +38,7 @@ impl AppServerSession {
         &mut self,
         params: WorkspaceCoverageVerificationCreateParams,
     ) -> Result<WorkspaceCoverageVerificationCreateResponse> {
+        self.ensure_synthetic_workspace().await?;
         let request_id = self.next_request_id();
         self.client
             .request_typed(ClientRequest::WorkspaceCoverageVerificationCreate {

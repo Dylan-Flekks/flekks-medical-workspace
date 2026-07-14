@@ -18,6 +18,7 @@ impl AppServerSession {
         &mut self,
         params: WorkspaceDraftCheckpointCreateParams,
     ) -> Result<WorkspaceDraftCheckpointCreateResponse> {
+        self.ensure_synthetic_workspace().await?;
         let request_id = self.next_request_id();
         self.client
             .request_typed(ClientRequest::WorkspaceDraftCheckpointCreate { request_id, params })
@@ -52,6 +53,7 @@ impl AppServerSession {
         &mut self,
         params: WorkspaceDraftSessionCloseParams,
     ) -> Result<WorkspaceDraftSessionCloseResponse> {
+        self.ensure_synthetic_workspace().await?;
         let request_id = self.next_request_id();
         self.client
             .request_typed(ClientRequest::WorkspaceDraftSessionClose { request_id, params })

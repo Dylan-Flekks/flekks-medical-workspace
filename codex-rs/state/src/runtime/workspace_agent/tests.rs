@@ -269,6 +269,85 @@ async fn workspace_agent_turn_claim_enforces_exact_prompt_and_execution_provenan
 }
 
 #[tokio::test]
+async fn workspace_agent_turn_claim_rejects_a_downgraded_unclassified_store() {
+    let runtime = test_runtime().await;
+    let (client, note) = seed_client_note(&runtime).await;
+    let packet = runtime
+        .workspace()
+        .prepare_context_packet(packet_create(&client, &note))
+        .await
+        .expect("packet should prepare");
+    let run = runtime
+        .workspace()
+        .start_agent_run(run_start(&packet))
+        .await
+        .expect("run should start while the store is synthetic");
+    let prompt = crate::render_workspace_agent_handoff_prompt(
+        &crate::WorkspaceAgentHandoffPromptInput::from(&packet),
+        Some(&run.id),
+    );
+
+    let mut connection = runtime
+        .workspace()
+        .pool
+        .acquire()
+        .await
+        .expect("policy corruption fixture connection");
+    sqlx::query("DROP TRIGGER workspace_data_policy_restrict_update")
+        .execute(&mut *connection)
+        .await
+        .expect("drop update guard fixture");
+    sqlx::query("PRAGMA ignore_check_constraints = ON")
+        .execute(&mut *connection)
+        .await
+        .expect("enable policy corruption fixture mode");
+    sqlx::query(
+        "UPDATE workspace_data_policy SET data_classification = 'unclassified', classified_at_ms = NULL, classified_by = NULL",
+    )
+    .execute(&mut *connection)
+    .await
+    .expect("downgrade fixture should apply after dropping the guard");
+    drop(connection);
+
+    let error = runtime
+        .workspace()
+        .claim_agent_turn(crate::WorkspaceAgentTurnClaim {
+            execution: crate::WorkspaceAgentExecutionBinding {
+                run_id: run.id.clone(),
+                source_thread_id: "thread-synthetic".to_string(),
+                source_turn_id: "turn-synthetic".to_string(),
+                provider: "test-provider".to_string(),
+                model: "test-model".to_string(),
+            },
+            prompt,
+        })
+        .await
+        .expect_err("unclassified stores must not claim a model turn");
+    assert!(error.to_string().contains("explicit synthetic"));
+
+    let stored = runtime
+        .workspace()
+        .list_agent_runs(crate::WorkspaceAgentRunFilter {
+            client_id: client.id,
+            packet_id: Some(packet.id),
+            limit: Some(10),
+            ..Default::default()
+        })
+        .await
+        .expect("run lookup should succeed");
+    assert_eq!(stored.len(), 1);
+    let stored = &stored[0];
+    assert_eq!(stored.status, "running");
+    assert_eq!(stored.source_turn_id, None);
+    let audit = runtime
+        .workspace()
+        .list_audit_events("agent_run", &run.id)
+        .await
+        .expect("audit should list");
+    assert!(audit.iter().all(|event| event.action != "turn_claimed"));
+}
+
+#[tokio::test]
 async fn workspace_agent_run_preserves_packet_revision_and_source_manifest() {
     let runtime = test_runtime().await;
     let (client, note) = seed_client_note(&runtime).await;

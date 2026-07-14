@@ -69,13 +69,34 @@ Requirements:
 
 - Rust toolchain declared in `codex-rs/rust-toolchain.toml`
 - Git
+- Python 3 for repository launch and check helpers
 - `just` for the repository's canonical checks
+- At least 10 GiB of free disk space; 30 GiB or more is recommended for the first build
 
 ```bash
 git clone https://github.com/Dylan-Flekks/flekks-medical-workspace.git
 cd flekks-medical-workspace
 just medical-workspace
 ```
+
+The first launch compiles the Codex Rust workspace and may take several minutes. The launcher uses
+the smaller `dev-small` build profile with incremental compilation disabled, checks available disk
+space before Cargo starts, and never deletes files automatically.
+
+By default, medical SQLite data is isolated at
+`$HOME/.codex/flekks-medical-synthetic`. The launcher creates that directory with private
+permissions, sets the explicit synthetic-data classification, and refuses a relative path or a
+path that resolves to the normal `CODEX_HOME`. To choose another location, reserve an absolute
+directory for synthetic medical-workspace SQLite data only:
+
+```bash
+FLEKKS_MEDICAL_WORKSPACE_SQLITE_HOME=/absolute/private/synthetic/path just medical-workspace
+```
+
+The launcher does not copy records from another Codex or medical-workspace database and cannot
+classify a nonempty, unclassified workspace database as synthetic. Do not point the override at
+another Codex SQLite home. Codex configuration and authentication remain under `CODEX_HOME`; the
+medical workspace's SQLite state remains separate.
 
 To update an existing clone to the latest public version, first make sure `git status --short` is
 empty. Commit or stash any local changes before switching branches or pulling, then run:
@@ -94,10 +115,37 @@ When the TUI opens, run:
 /workspacemedical
 ```
 
-The equivalent manual launch sequence is `cd codex-rs`, `cargo build -p codex-cli`,
-`stty cols 160 rows 45`, and `./target/debug/codex`.
+On an empty isolated store, `/workspacemedical` performs the local synthetic-policy preflight before
+opening the patient workspace. A plain `cargo run` intentionally lacks that launch authority. Use
+`just medical-workspace` (or `scripts/run_medical_workspace.sh`) for the supported synthetic demo
+flow.
 
-Use synthetic fixtures only. See [Development](docs/development.md) for focused tests and snapshot review.
+Use synthetic fixtures only. Never enter PHI, real patient details, or production credentials. See
+[Development](docs/development.md) for focused tests and snapshot review.
+
+### Recover from `No space left on device`
+
+If Cargo reports `No space left on device`, the later Rust and LLVM errors are usually a cascade
+from the full disk rather than separate source-code failures. Stop the build, inspect the current
+checkout and Cargo caches, and identify stale checkout/worktree targets before removing anything:
+
+```bash
+cd flekks-medical-workspace
+df -h . "$HOME/.codex/flekks-medical-synthetic"
+du -sh codex-rs/target "$HOME/.cargo/registry" "$HOME/.cargo/git" 2>/dev/null
+find "$HOME" -type d -path '*/codex-rs/target' -prune -exec du -sh {} \; 2>/dev/null | sort -h
+```
+
+After verifying that the current checkout's build artifacts are safe to rebuild, this command
+cleans only its Cargo target directory; it does not delete the synthetic medical SQLite directory:
+
+```bash
+cargo clean --manifest-path codex-rs/Cargo.toml
+just medical-workspace
+```
+
+If another checkout or worktree owns the large stale target, run `cargo clean` against that
+checkout's `codex-rs/Cargo.toml` instead. Do not delete an unfamiliar database or target directory.
 
 ## Keyboard quick start
 

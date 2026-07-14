@@ -18,11 +18,10 @@ codex *args:
 
 # Build and open Codex for the synthetic medical-workspace demo.
 # Once the TUI opens, enter `/workspacemedical`.
+[no-cd]
 [unix]
-medical-workspace:
-    @echo "Opening Codex. Enter /workspacemedical to open the synthetic medical dashboard."
-    stty cols 160 rows 45
-    cargo run --bin codex
+medical-workspace *args:
+    "{{ justfile_directory() }}/scripts/run_medical_workspace.sh" "$@"
 
 # `codex exec`
 exec *args:

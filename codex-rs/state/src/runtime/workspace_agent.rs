@@ -472,7 +472,8 @@ LIMIT ?
         }
 
         let now_ms = datetime_to_epoch_millis(Utc::now());
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        require_synthetic_workspace(&mut tx).await?;
         let run = workspace_agent_run_row_by_id(&mut tx, &execution.run_id)
             .await?
             .ok_or_else(|| {

@@ -45,6 +45,14 @@ impl App {
                     tui.frame_requester().schedule_frame();
                     return Ok(AppRunControl::Continue);
                 }
+                if profile == WorkspaceProfile::Medical
+                    && let Err(error) = app_server.ensure_synthetic_workspace().await
+                {
+                    self.chat_widget
+                        .add_error_message(workspace_open_error_message(error));
+                    tui.frame_requester().schedule_frame();
+                    return Ok(AppRunControl::Continue);
+                }
                 let switching_profiles = self
                     .workspace_dashboard
                     .as_ref()
@@ -2549,11 +2557,16 @@ impl App {
     }
 }
 
+pub(super) fn workspace_open_error_message(error: impl std::fmt::Display) -> String {
+    format!("Failed to open workspace: {error}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::REMOTE_MEDICAL_WORKSPACE_BLOCK_MESSAGE;
     use super::WorkspaceProfile;
     use super::remote_workspace_block_message;
+    use super::workspace_open_error_message;
 
     #[test]
     fn remote_store_blocks_medical_workspace_but_not_generic_workspace() {
@@ -2569,5 +2582,15 @@ mod tests {
             remote_workspace_block_message(WorkspaceProfile::Medical, false),
             None
         );
+    }
+
+    #[test]
+    fn workspace_policy_failure_keeps_the_recovery_action_visible() {
+        let message = workspace_open_error_message(
+            crate::app_server_session::workspace_data_policy::LOCAL_UNCONFIGURED_MESSAGE,
+        );
+        assert!(message.starts_with("Failed to open workspace:"));
+        assert!(message.contains("restart with `just medical-workspace`"));
+        assert!(message.contains("no chart data was changed"));
     }
 }
