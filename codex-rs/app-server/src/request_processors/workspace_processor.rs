@@ -1,7 +1,6 @@
 use super::*;
 use chrono::DateTime;
 use chrono::Utc;
-use codex_app_server_protocol::WorkspaceAgentContextCategory;
 use codex_app_server_protocol::WorkspaceAgentResultCreateParams;
 use codex_app_server_protocol::WorkspaceAgentResultCreateResponse;
 use codex_app_server_protocol::WorkspaceAgentResultListParams;
@@ -9,7 +8,6 @@ use codex_app_server_protocol::WorkspaceAgentResultListResponse;
 use codex_app_server_protocol::WorkspaceAgentResultStatusUpdateParams;
 use codex_app_server_protocol::WorkspaceAgentResultStatusUpdateResponse;
 use codex_app_server_protocol::WorkspaceAgentRunContextReadParams;
-use codex_app_server_protocol::WorkspaceAgentRunContextReadResponse;
 use codex_app_server_protocol::WorkspaceAgentRunListParams;
 use codex_app_server_protocol::WorkspaceAgentRunListResponse;
 use codex_app_server_protocol::WorkspaceAgentRunSourceListParams;
@@ -1232,32 +1230,8 @@ impl WorkspaceRequestProcessor {
                 "workspace agent run context read runId must not be empty",
             ));
         }
-        let category = params.category;
-        let category_name = match category {
-            WorkspaceAgentContextCategory::VisitHistory => "visit_history",
-            WorkspaceAgentContextCategory::ProgressNotes => "progress_notes",
-        };
-        let read = self
-            .state_db()?
-            .workspace()
-            .read_authorized_agent_context(codex_state::WorkspaceAgentContextReadRequest {
-                run_id: params.run_id,
-                category: category_name.to_string(),
-                max_records: params.limit,
-            })
-            .await
-            .map_err(|err| {
-                invalid_request(format!(
-                    "failed to read authorized workspace agent context: {err}"
-                ))
-            })?;
-        let sources = read
-            .sources
-            .into_iter()
-            .map(api_workspace_agent_run_source_from_state)
-            .collect();
-        Ok(Some(
-            WorkspaceAgentRunContextReadResponse { category, sources }.into(),
+        Err(invalid_request(
+            "workspace agent context is available only to the claimed workspaceContextOnly model turn through the workspace_context_read tool; run-id-only RPC reads are not authorized",
         ))
     }
 
