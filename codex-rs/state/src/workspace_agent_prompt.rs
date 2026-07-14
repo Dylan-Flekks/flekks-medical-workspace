@@ -74,8 +74,7 @@ pub fn render_workspace_agent_handoff_prompt(
         prompt.push_str("- run_id: ");
         prompt.push_str(run_id);
         prompt.push('\n');
-        prompt.push_str("- authorized context endpoint: workspace/agent/run/context/read\n");
-        prompt.push_str("- model tool: workspace_context_read (pass this run_id plus visit_history or progress_notes)\n");
+        prompt.push_str("- bound model tool: workspace_context_read (pass this run_id plus visit_history or progress_notes)\n");
     }
     if let Some(encounter_id) = packet.encounter_id.as_deref() {
         prompt.push_str("- encounter_id: ");
@@ -215,6 +214,8 @@ mod tests {
         assert!(prompt.contains("- packet_id: packet-1"));
         assert!(prompt.contains("- context_envelope_sha256: envelope-hash"));
         assert!(prompt.contains("- run_id: run-1"));
+        assert!(prompt.contains("- bound model tool: workspace_context_read"));
+        assert!(!prompt.contains("workspace/agent/run/context/read"));
         assert!(prompt.contains("Daily note [draft r2]"));
         assert!(prompt.contains("Exact synthetic snapshot"));
     }

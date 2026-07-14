@@ -140,6 +140,275 @@ fn result_create(
     }
 }
 
+async fn claim_run(
+    runtime: &StateRuntime,
+    packet: &crate::WorkspaceContextPacket,
+    run: &crate::WorkspaceAgentRun,
+) -> crate::WorkspaceAgentExecutionBinding {
+    let execution = crate::WorkspaceAgentExecutionBinding {
+        run_id: run.id.clone(),
+        source_thread_id: run
+            .source_thread_id
+            .clone()
+            .expect("agent run should have a source thread"),
+        source_turn_id: "turn-synthetic".to_string(),
+        provider: run.provider.clone(),
+        model: run.model.clone(),
+    };
+    runtime
+        .workspace()
+        .claim_agent_turn(crate::WorkspaceAgentTurnClaim {
+            execution: execution.clone(),
+            prompt: crate::render_workspace_agent_handoff_prompt(
+                &crate::WorkspaceAgentHandoffPromptInput::from(packet),
+                Some(&run.id),
+            ),
+        })
+        .await
+        .expect("agent run should claim its model turn");
+    execution
+}
+
+#[tokio::test]
+async fn workspace_agent_run_start_rejects_asserted_source_turn() {
+    let runtime = test_runtime().await;
+    let (client, note) = seed_client_note(&runtime).await;
+    let packet = runtime
+        .workspace()
+        .prepare_context_packet(packet_create(&client, &note))
+        .await
+        .expect("packet should prepare");
+    let mut start = run_start(&packet);
+    start.source_turn_id = Some("caller-asserted-turn".to_string());
+
+    let error = runtime
+        .workspace()
+        .start_agent_run(start)
+        .await
+        .expect_err("ordinary agent starts must not assert a source turn")
+        .to_string();
+    assert!(error.contains("server-owned"));
+    let runs = runtime
+        .workspace()
+        .list_agent_runs(crate::WorkspaceAgentRunFilter {
+            client_id: client.id,
+            packet_id: Some(packet.id.clone()),
+            limit: Some(10),
+            ..Default::default()
+        })
+        .await
+        .expect("agent run list should remain readable");
+    assert_eq!(runs, Vec::new());
+}
+
+#[tokio::test]
+async fn workspace_agent_run_start_rejects_unsupported_run_kind() {
+    let runtime = test_runtime().await;
+    let (client, note) = seed_client_note(&runtime).await;
+    let packet = runtime
+        .workspace()
+        .prepare_context_packet(packet_create(&client, &note))
+        .await
+        .expect("packet should prepare");
+    let mut start = run_start(&packet);
+    start.run_kind = "caller_defined".to_string();
+
+    let error = runtime
+        .workspace()
+        .start_agent_run(start)
+        .await
+        .expect_err("unknown run kinds must not bypass claim provenance")
+        .to_string();
+    assert!(error.contains("unsupported workspace agent run kind"));
+}
+
+#[tokio::test]
+async fn workspace_agent_result_rejects_unclaimed_completion() {
+    let runtime = test_runtime().await;
+    let (client, note) = seed_client_note(&runtime).await;
+    let packet = runtime
+        .workspace()
+        .prepare_context_packet(packet_create(&client, &note))
+        .await
+        .expect("packet should prepare");
+    let run = runtime
+        .workspace()
+        .start_agent_run(run_start(&packet))
+        .await
+        .expect("run should start");
+
+    let error = runtime
+        .workspace()
+        .complete_agent_run_with_result(result_create(&packet, &run))
+        .await
+        .expect_err("an unclaimed agent run must not complete")
+        .to_string();
+    assert!(error.contains("must claim a model turn"));
+    let stored = runtime
+        .workspace()
+        .list_agent_runs(crate::WorkspaceAgentRunFilter {
+            client_id: client.id,
+            packet_id: Some(packet.id.clone()),
+            limit: Some(10),
+            ..Default::default()
+        })
+        .await
+        .expect("agent run list should succeed");
+    assert_eq!(stored.len(), 1);
+    assert_eq!(stored[0].status, "running");
+    assert_eq!(stored[0].source_turn_id, None);
+
+    sqlx::query("UPDATE workspace_agent_runs SET source_turn_id = ? WHERE id = ?")
+        .bind("turn-synthetic")
+        .bind(&run.id)
+        .execute(runtime.workspace().pool.as_ref())
+        .await
+        .expect("legacy asserted turn fixture should update");
+    let error = runtime
+        .workspace()
+        .complete_agent_run_with_result(result_create(&packet, &run))
+        .await
+        .expect_err("a turn id without its durable claim source must not complete")
+        .to_string();
+    assert!(error.contains("does not have a durable claimed handoff prompt"));
+}
+
+#[tokio::test]
+async fn workspace_agent_result_rejects_a_mismatched_claimed_turn() {
+    let runtime = test_runtime().await;
+    let (client, note) = seed_client_note(&runtime).await;
+    let packet = runtime
+        .workspace()
+        .prepare_context_packet(packet_create(&client, &note))
+        .await
+        .expect("packet should prepare");
+    let run = runtime
+        .workspace()
+        .start_agent_run(run_start(&packet))
+        .await
+        .expect("run should start");
+    claim_run(&runtime, &packet, &run).await;
+    let mut result = result_create(&packet, &run);
+    result.source_turn_id = Some("different-turn".to_string());
+
+    let error = runtime
+        .workspace()
+        .complete_agent_run_with_result(result)
+        .await
+        .expect_err("a result from another turn must not complete the run")
+        .to_string();
+    assert!(error.contains("does not match run source turn"));
+    let stored = runtime
+        .workspace()
+        .list_agent_runs(crate::WorkspaceAgentRunFilter {
+            client_id: client.id,
+            packet_id: Some(packet.id),
+            limit: Some(10),
+            ..Default::default()
+        })
+        .await
+        .expect("agent run list should succeed");
+    assert_eq!(stored.len(), 1);
+    assert_eq!(stored[0].status, "running");
+    assert_eq!(stored[0].source_turn_id.as_deref(), Some("turn-synthetic"));
+}
+
+#[tokio::test]
+async fn workspace_agent_result_uses_stored_claim_provenance() {
+    let runtime = test_runtime().await;
+    let (client, note) = seed_client_note(&runtime).await;
+    let packet = runtime
+        .workspace()
+        .prepare_context_packet(packet_create(&client, &note))
+        .await
+        .expect("packet should prepare");
+    let run = runtime
+        .workspace()
+        .start_agent_run(run_start(&packet))
+        .await
+        .expect("run should start");
+    claim_run(&runtime, &packet, &run).await;
+    let mut create = result_create(&packet, &run);
+    create.source_thread_id = None;
+    create.source_turn_id = None;
+    create.actor = "caller-asserted-actor".to_string();
+
+    let result = runtime
+        .workspace()
+        .complete_agent_run_with_result(create)
+        .await
+        .expect("claimed agent run should complete from stored provenance");
+    let audit = runtime
+        .workspace()
+        .list_audit_events("agent_result", &result.id)
+        .await
+        .expect("result audit should list");
+    assert!(audit.iter().any(|event| {
+        event.action == "saved"
+            && event.actor == "agent"
+            && event.actor_kind == "agent"
+            && event.source == "agent_harness"
+            && event.source_thread_id.as_deref() == Some("thread-synthetic")
+            && event.source_turn_id.as_deref() == Some("turn-synthetic")
+    }));
+}
+
+#[tokio::test]
+async fn workspace_agent_turn_claim_persists_exact_handoff_prompt_source() {
+    let runtime = test_runtime().await;
+    let (client, note) = seed_client_note(&runtime).await;
+    let packet = runtime
+        .workspace()
+        .prepare_context_packet(packet_create(&client, &note))
+        .await
+        .expect("packet should prepare");
+    let run = runtime
+        .workspace()
+        .start_agent_run(run_start(&packet))
+        .await
+        .expect("run should start");
+    let expected_prompt = crate::render_workspace_agent_handoff_prompt(
+        &crate::WorkspaceAgentHandoffPromptInput::from(&packet),
+        Some(&run.id),
+    );
+    claim_run(&runtime, &packet, &run).await;
+
+    let sources = runtime
+        .workspace()
+        .list_agent_run_sources(&run.id)
+        .await
+        .expect("claimed run sources should list");
+    let prompt_source = sources
+        .iter()
+        .find(|source| source.source_entity_type == "handoff_prompt")
+        .expect("claim should persist its exact handoff prompt");
+    assert_eq!(prompt_source.source_entity_id, "turn-synthetic");
+    assert_eq!(prompt_source.source_revision, Some(1));
+    let snapshot: serde_json::Value =
+        serde_json::from_str(&prompt_source.snapshot_json).expect("prompt snapshot should be JSON");
+    assert_eq!(snapshot["schema"], "workspace-agent-handoff-prompt-v1");
+    assert_eq!(
+        snapshot["renderer"],
+        "render_workspace_agent_handoff_prompt"
+    );
+    assert_eq!(snapshot["rendererVersion"], 1);
+    assert_eq!(snapshot["runId"], run.id);
+    assert_eq!(snapshot["sourceThreadId"], "thread-synthetic");
+    assert_eq!(snapshot["sourceTurnId"], "turn-synthetic");
+    assert_eq!(snapshot["prompt"], expected_prompt);
+    assert_eq!(
+        snapshot["promptSha256"],
+        format!("{:x}", Sha256::digest(expected_prompt.as_bytes()))
+    );
+    assert_eq!(
+        prompt_source.content_sha256,
+        format!(
+            "{:x}",
+            Sha256::digest(prompt_source.snapshot_json.as_bytes())
+        )
+    );
+}
+
 #[tokio::test]
 async fn workspace_agent_turn_claim_enforces_exact_prompt_and_execution_provenance() {
     let runtime = test_runtime().await;
@@ -429,6 +698,22 @@ async fn workspace_agent_run_preserves_packet_revision_and_source_manifest() {
         )
     );
 
+    let reserved_source_error = runtime
+        .workspace()
+        .record_agent_run_source(crate::WorkspaceAgentRunSourceCreate {
+            run_id: run.id.clone(),
+            source_entity_type: "handoff_prompt".to_string(),
+            source_entity_id: "caller-forged-turn".to_string(),
+            source_revision: Some(1),
+            display_label: "Caller prompt".to_string(),
+            snapshot_json: r#"{"prompt":"forged"}"#.to_string(),
+            access_purpose: "bypass claim".to_string(),
+        })
+        .await
+        .expect_err("handoff prompt sources must be reserved to the claim transaction")
+        .to_string();
+    assert!(reserved_source_error.contains("server-owned"));
+
     let note_snapshot = serde_json::json!({
         "clientId": client.id,
         "noteId": note.id,
@@ -464,6 +749,7 @@ async fn workspace_agent_run_preserves_packet_revision_and_source_manifest() {
         .to_string();
     assert!(mismatch_error.contains("does not match packet expected output kind"));
 
+    claim_run(&runtime, &packet, &run).await;
     let result = runtime
         .workspace()
         .complete_agent_run_with_result(result_create(&packet, &run))
@@ -555,6 +841,9 @@ async fn workspace_manual_result_import_is_audited_as_clinician_work() {
     assert_eq!(runs.len(), 1);
     assert_eq!(runs[0].id, run_id);
     assert_eq!(runs[0].run_kind, "manual_import");
+    assert_eq!(runs[0].source_thread_id, None);
+    assert_eq!(runs[0].source_turn_id, None);
+    assert_eq!(runs[0].status, "completed");
     let audit = runtime
         .workspace()
         .list_audit_events("agent_result", &result.id)
@@ -623,6 +912,7 @@ async fn workspace_stale_agent_result_proposal_keeps_original_base_and_decisions
         .start_agent_run(run_start(&packet))
         .await
         .expect("run should start");
+    claim_run(&runtime, &packet, &run).await;
     let result = runtime
         .workspace()
         .complete_agent_run_with_result(result_create(&packet, &run))

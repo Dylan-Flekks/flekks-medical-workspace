@@ -16,6 +16,10 @@ use super::workspace::WorkspaceStore;
 use super::workspace::insert_audit_event;
 use super::workspace_policy::require_synthetic_workspace;
 
+const HANDOFF_PROMPT_SOURCE_TYPE: &str = "handoff_prompt";
+const HANDOFF_PROMPT_RENDERER: &str = "render_workspace_agent_handoff_prompt";
+const HANDOFF_PROMPT_RENDERER_VERSION: i64 = 1;
+
 impl WorkspaceStore {
     pub async fn prepare_context_packet(
         &self,
@@ -135,6 +139,18 @@ impl WorkspaceStore {
         if input.idempotency_key.trim().is_empty() {
             anyhow::bail!("workspace agent run idempotency key must not be empty");
         }
+        let run_kind = nonempty_or(&input.run_kind, "agent");
+        match run_kind.as_str() {
+            "agent" => {
+                if input.source_turn_id.is_some() {
+                    anyhow::bail!(
+                        "workspace agent run source turn is server-owned and must be claimed after run start"
+                    );
+                }
+            }
+            "manual_import" => {}
+            other => anyhow::bail!("unsupported workspace agent run kind `{other}`"),
+        }
         let now_ms = datetime_to_epoch_millis(Utc::now());
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let policy = require_synthetic_workspace(&mut tx).await?;
@@ -206,7 +222,6 @@ impl WorkspaceStore {
         }
 
         let id = Uuid::new_v4().to_string();
-        let run_kind = nonempty_or(&input.run_kind, "agent");
         sqlx::query(
             r#"
 INSERT INTO workspace_agent_runs (
@@ -436,6 +451,11 @@ LIMIT ?
         &self,
         input: crate::WorkspaceAgentRunSourceCreate,
     ) -> anyhow::Result<crate::WorkspaceAgentRunSource> {
+        if input.source_entity_type.trim() == HANDOFF_PROMPT_SOURCE_TYPE {
+            anyhow::bail!(
+                "workspace handoff prompt sources are server-owned and may only be recorded by the turn claim"
+            );
+        }
         let now_ms = datetime_to_epoch_millis(Utc::now());
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         require_synthetic_workspace(&mut tx).await?;
@@ -484,6 +504,13 @@ LIMIT ?
                 "workspace agent run `{}` is `{}` and cannot claim a model turn",
                 run.id,
                 run.status
+            );
+        }
+        if run.run_kind != "agent" {
+            anyhow::bail!(
+                "workspace agent run `{}` is `{}` and cannot claim a model turn",
+                run.id,
+                run.run_kind
             );
         }
         validate_unclaimed_execution_identity(&run, &execution)?;
@@ -540,6 +567,40 @@ LIMIT ?
         }
 
         let prompt_sha256 = format!("{:x}", Sha256::digest(input.prompt.as_bytes()));
+        let prompt_source_id = Uuid::new_v4().to_string();
+        let prompt_snapshot_json = serde_json::json!({
+            "schema": "workspace-agent-handoff-prompt-v1",
+            "renderer": HANDOFF_PROMPT_RENDERER,
+            "rendererVersion": HANDOFF_PROMPT_RENDERER_VERSION,
+            "runId": &run.id,
+            "packetId": &run.packet_id,
+            "clientId": &run.client_id,
+            "sourceThreadId": &execution.source_thread_id,
+            "sourceTurnId": &execution.source_turn_id,
+            "prompt": &input.prompt,
+            "promptSha256": &prompt_sha256,
+        })
+        .to_string();
+        let prompt_snapshot_sha256 =
+            format!("{:x}", Sha256::digest(prompt_snapshot_json.as_bytes()));
+        sqlx::query(
+            r#"
+INSERT INTO workspace_agent_run_sources (
+    id, run_id, source_entity_type, source_entity_id, source_revision,
+    display_label, snapshot_json, content_sha256, access_purpose, accessed_at_ms
+) VALUES (?, ?, ?, ?, ?, 'Canonical agent handoff prompt', ?, ?, 'authorize one restricted model turn', ?)
+            "#,
+        )
+        .bind(&prompt_source_id)
+        .bind(&run.id)
+        .bind(HANDOFF_PROMPT_SOURCE_TYPE)
+        .bind(&execution.source_turn_id)
+        .bind(HANDOFF_PROMPT_RENDERER_VERSION)
+        .bind(&prompt_snapshot_json)
+        .bind(&prompt_snapshot_sha256)
+        .bind(now_ms)
+        .execute(&mut *tx)
+        .await?;
         insert_audit_event(
             &mut tx,
             crate::WorkspaceAuditEventCreate {
@@ -560,6 +621,10 @@ LIMIT ?
                         "provider": &execution.provider,
                         "model": &execution.model,
                         "prompt_sha256": prompt_sha256,
+                        "prompt_source_id": prompt_source_id,
+                        "prompt_snapshot_sha256": prompt_snapshot_sha256,
+                        "renderer": HANDOFF_PROMPT_RENDERER,
+                        "renderer_version": HANDOFF_PROMPT_RENDERER_VERSION,
                     })
                     .to_string(),
                 ),
@@ -756,28 +821,65 @@ ORDER BY accessed_at_ms ASC, id ASC
         {
             anyhow::bail!("workspace agent result source turn requires a source thread");
         }
-        let bound_source_thread_id = run
-            .source_thread_id
-            .clone()
-            .or_else(|| source_thread_id.map(ToString::to_string));
-        let bound_source_turn_id = run
-            .source_turn_id
-            .clone()
-            .or_else(|| source_turn_id.map(ToString::to_string));
-        if bound_source_thread_id != run.source_thread_id
-            || bound_source_turn_id != run.source_turn_id
-        {
-            sqlx::query(
-                "UPDATE workspace_agent_runs SET source_thread_id = ?, source_turn_id = ?, updated_at_ms = ? WHERE id = ? AND status = 'running'",
+        if run.run_kind != "manual_import" {
+            if run
+                .source_thread_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .is_none()
+            {
+                anyhow::bail!(
+                    "workspace agent run `{run_id}` is missing its claimed source thread"
+                );
+            }
+            let claimed_source_turn_id = run
+                .source_turn_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "workspace agent run `{run_id}` must claim a model turn before result completion"
+                    )
+                })?;
+            let prompt_source_exists: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM workspace_agent_run_sources WHERE run_id = ? AND source_entity_type = ? AND source_entity_id = ?)",
             )
-            .bind(&bound_source_thread_id)
-            .bind(&bound_source_turn_id)
-            .bind(now_ms)
             .bind(&run.id)
-            .execute(&mut *tx)
+            .bind(HANDOFF_PROMPT_SOURCE_TYPE)
+            .bind(claimed_source_turn_id)
+            .fetch_one(&mut *tx)
             .await?;
-            run.source_thread_id = bound_source_thread_id;
-            run.source_turn_id = bound_source_turn_id;
+            if !prompt_source_exists {
+                anyhow::bail!(
+                    "workspace agent run `{run_id}` does not have a durable claimed handoff prompt"
+                );
+            }
+        } else {
+            let bound_source_thread_id = run
+                .source_thread_id
+                .clone()
+                .or_else(|| source_thread_id.map(ToString::to_string));
+            let bound_source_turn_id = run
+                .source_turn_id
+                .clone()
+                .or_else(|| source_turn_id.map(ToString::to_string));
+            if bound_source_thread_id != run.source_thread_id
+                || bound_source_turn_id != run.source_turn_id
+            {
+                sqlx::query(
+                    "UPDATE workspace_agent_runs SET source_thread_id = ?, source_turn_id = ?, updated_at_ms = ? WHERE id = ? AND status = 'running'",
+                )
+                .bind(&bound_source_thread_id)
+                .bind(&bound_source_turn_id)
+                .bind(now_ms)
+                .bind(&run.id)
+                .execute(&mut *tx)
+                .await?;
+                run.source_thread_id = bound_source_thread_id;
+                run.source_turn_id = bound_source_turn_id;
+            }
         }
 
         if let Some(existing) = workspace_agent_result_row_by_run(&mut tx, run_id).await? {
@@ -842,10 +944,14 @@ INSERT INTO workspace_agent_results (
         if updated.rows_affected() != 1 {
             anyhow::bail!("workspace agent run `{run_id}` completion raced");
         }
-        let (result_actor_kind, result_source) = if run.run_kind == "manual_import" {
-            ("clinician", "manual_import")
+        let (result_actor, result_actor_kind, result_source) = if run.run_kind == "manual_import" {
+            (
+                nonempty_or(&input.actor, "clinician"),
+                "clinician",
+                "manual_import",
+            )
         } else {
-            ("agent", "agent_harness")
+            ("agent".to_string(), "agent", "agent_harness")
         };
         insert_audit_event(
             &mut tx,
@@ -853,7 +959,7 @@ INSERT INTO workspace_agent_results (
                 entity_type: "agent_result".to_string(),
                 entity_id: id.clone(),
                 action: "saved".to_string(),
-                actor: nonempty_or(&input.actor, "agent"),
+                actor: result_actor.clone(),
                 actor_kind: result_actor_kind.to_string(),
                 source: result_source.to_string(),
                 client_id: Some(run.client_id.clone()),
@@ -883,7 +989,7 @@ INSERT INTO workspace_agent_results (
                 entity_type: "agent_run".to_string(),
                 entity_id: run.id.clone(),
                 action: "completed".to_string(),
-                actor: nonempty_or(&input.actor, "agent"),
+                actor: result_actor,
                 actor_kind: result_actor_kind.to_string(),
                 source: result_source.to_string(),
                 client_id: Some(run.client_id),
