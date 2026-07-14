@@ -1833,7 +1833,8 @@ See the Codex keymap documentation for supported actions and examples."
                 if let Some(dashboard) = self.workspace_dashboard.as_mut() {
                     dashboard.start_new_client();
                 }
-                self.initialize_workspace_draft_recovery(app_server).await;
+                self.initialize_workspace_draft_recovery_after_navigation(app_server)
+                    .await;
             }
             WorkspaceDashboardAction::StartNewNote => {
                 if let Err(err) = self
@@ -1854,7 +1855,8 @@ See the Codex keymap documentation for supported actions and examples."
                 if let Some(dashboard) = self.workspace_dashboard.as_mut() {
                     dashboard.start_new_note();
                 }
-                self.initialize_workspace_draft_recovery(app_server).await;
+                self.initialize_workspace_draft_recovery_after_navigation(app_server)
+                    .await;
             }
             WorkspaceDashboardAction::SelectClient(index) => {
                 if let Err(err) = self
@@ -1881,7 +1883,8 @@ See the Codex keymap documentation for supported actions and examples."
                     self.chat_widget
                         .add_error_message(format!("Failed to load workspace client: {err}"));
                 } else {
-                    self.initialize_workspace_draft_recovery(app_server).await;
+                    self.initialize_workspace_draft_recovery_after_navigation(app_server)
+                        .await;
                 }
             }
             WorkspaceDashboardAction::SelectNote(index) => {
@@ -1909,7 +1912,8 @@ See the Codex keymap documentation for supported actions and examples."
                     self.chat_widget
                         .add_error_message(format!("Failed to load workspace note: {err}"));
                 } else {
-                    self.initialize_workspace_draft_recovery(app_server).await;
+                    self.initialize_workspace_draft_recovery_after_navigation(app_server)
+                        .await;
                 }
             }
             WorkspaceDashboardAction::SignNote => {
@@ -2030,9 +2034,11 @@ See the Codex keymap documentation for supported actions and examples."
             return Ok(());
         };
         let prompt = if dashboard.profile() == WorkspaceProfile::Medical {
-            let target_thread_id = medical_target_thread_id
-                .as_ref()
-                .expect("medical handoff target was validated above");
+            let Some(target_thread_id) = medical_target_thread_id.as_ref() else {
+                return Err(color_eyre::eyre::eyre!(
+                    "medical handoff target was missing after active-thread validation"
+                ));
+            };
             let params = match dashboard.context_packet_create_params() {
                 Ok(params) => params,
                 Err(status) => {

@@ -118,8 +118,6 @@ use codex_app_server_protocol::WorkspaceAgentResultListParams;
 use codex_app_server_protocol::WorkspaceAgentResultListResponse;
 use codex_app_server_protocol::WorkspaceAgentResultStatusUpdateParams;
 use codex_app_server_protocol::WorkspaceAgentResultStatusUpdateResponse;
-use codex_app_server_protocol::WorkspaceAgentRunContextReadParams;
-use codex_app_server_protocol::WorkspaceAgentRunContextReadResponse;
 use codex_app_server_protocol::WorkspaceAgentRunListParams;
 use codex_app_server_protocol::WorkspaceAgentRunListResponse;
 use codex_app_server_protocol::WorkspaceAgentRunSourceListParams;
@@ -1288,18 +1286,6 @@ impl AppServerSession {
             .request_typed(ClientRequest::WorkspaceAgentRunSourceList { request_id, params })
             .await
             .wrap_err("workspace/agent/run/source/list failed in TUI")
-    }
-
-    #[allow(dead_code)]
-    pub(crate) async fn workspace_agent_run_context_read(
-        &mut self,
-        params: WorkspaceAgentRunContextReadParams,
-    ) -> Result<WorkspaceAgentRunContextReadResponse> {
-        let request_id = self.next_request_id();
-        self.client
-            .request_typed(ClientRequest::WorkspaceAgentRunContextRead { request_id, params })
-            .await
-            .wrap_err("workspace/agent/run/context/read failed in TUI")
     }
 
     pub(crate) async fn workspace_agent_result_list(

@@ -1,5 +1,8 @@
 use super::*;
 use crate::workspace_draft::MedicalWorkspaceWorkingDraftInput;
+use crate::workspace_draft::RecoverableMedicalWorkspaceDraft;
+use crate::workspace_draft::WORKSPACE_DRAFT_AUTOSAVE_DELAY;
+use crate::workspace_draft::WorkspaceDraftCheckpointMetadata;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use pretty_assertions::assert_eq;
@@ -21,6 +24,131 @@ fn working_draft(body: &str) -> MedicalWorkspaceWorkingDraftV1 {
         selected_clip_ids: Vec::new(),
     })
     .expect("valid working draft")
+}
+
+fn unsaved_working_draft(
+    working_note_id: &str,
+    encounter_id: &str,
+) -> MedicalWorkspaceWorkingDraftV1 {
+    MedicalWorkspaceWorkingDraftV1::new(MedicalWorkspaceWorkingDraftInput {
+        client_id: "client-1".to_string(),
+        note_id: None,
+        working_note_id: working_note_id.to_string(),
+        encounter_id: Some(encounter_id.to_string()),
+        base_note_revision: None,
+        note_title: "New daily note".to_string(),
+        note_body: format!("Body for {working_note_id}"),
+        agent_request_body: String::new(),
+        selected_file_ids: Vec::new(),
+        selected_reviewed_text_ids: Vec::new(),
+        selected_clip_ids: Vec::new(),
+    })
+    .expect("valid unsaved working draft")
+}
+
+fn recoverable_draft(
+    draft: MedicalWorkspaceWorkingDraftV1,
+    session_id: &str,
+) -> RecoverableMedicalWorkspaceDraft {
+    let content_sha256 = draft.content_sha256().expect("draft hash");
+    RecoverableMedicalWorkspaceDraft {
+        checkpoint: WorkspaceDraftCheckpointMetadata {
+            checkpoint_id: format!("checkpoint-{session_id}"),
+            session_id: session_id.to_string(),
+            client_id: draft.client_id.clone(),
+            encounter_id: draft.note.encounter_id.clone(),
+            note_id: draft.note.note_id.clone(),
+            base_note_revision: draft.note.base_revision,
+            revision: 1,
+            content_sha256,
+            trigger: "idle_typing".to_string(),
+            created_at: 10,
+        },
+        draft,
+        session_updated_at: 20,
+    }
+}
+
+#[test]
+fn navigation_recovery_selects_the_exact_working_note_identity() {
+    let current = unsaved_working_draft("working-current", "encounter-1");
+    let prior = recoverable_draft(
+        unsaved_working_draft("working-prior", "encounter-1"),
+        "prior",
+    );
+    let exact = recoverable_draft(current.clone(), "exact");
+
+    let selected = select_workspace_draft_recovery(
+        &current,
+        vec![prior, exact],
+        WorkspaceDraftRecoveryMode::Navigation,
+    )
+    .expect("exact recovery selection should be safe")
+    .expect("exact working note recovery should be selected");
+
+    assert_eq!(selected.checkpoint.session_id, "exact");
+    assert_eq!(selected.draft.note.working_note_id, "working-current");
+}
+
+#[test]
+fn cold_start_recovery_fails_closed_when_same_scope_fallback_is_ambiguous() {
+    let current = unsaved_working_draft("working-current", "encounter-1");
+    let first = recoverable_draft(
+        unsaved_working_draft("working-prior-a", "encounter-1"),
+        "prior-a",
+    );
+    let second = recoverable_draft(
+        unsaved_working_draft("working-prior-b", "encounter-1"),
+        "prior-b",
+    );
+
+    let error = select_workspace_draft_recovery(
+        &current,
+        vec![first, second],
+        WorkspaceDraftRecoveryMode::ColdStart,
+    )
+    .expect_err("ambiguous fallback must fail closed");
+
+    assert!(error.to_string().contains("2 active local drafts"));
+    assert!(error.to_string().contains("none was selected"));
+}
+
+#[test]
+fn cold_start_recovery_allows_one_unique_same_scope_fallback() {
+    let current = unsaved_working_draft("working-fresh-start", "encounter-1");
+    let prior = recoverable_draft(
+        unsaved_working_draft("working-recoverable", "encounter-1"),
+        "recoverable",
+    );
+
+    let selected = select_workspace_draft_recovery(
+        &current,
+        vec![prior],
+        WorkspaceDraftRecoveryMode::ColdStart,
+    )
+    .expect("one same-scope fallback should be safe")
+    .expect("unique same-scope fallback should be selected");
+
+    assert_eq!(selected.checkpoint.session_id, "recoverable");
+    assert_eq!(selected.draft.note.working_note_id, "working-recoverable");
+}
+
+#[test]
+fn navigation_does_not_restore_a_prior_unsaved_new_note_from_the_same_encounter() {
+    let current = unsaved_working_draft("working-new-note", "encounter-1");
+    let prior = recoverable_draft(
+        unsaved_working_draft("working-prior-note", "encounter-1"),
+        "prior",
+    );
+
+    let selected = select_workspace_draft_recovery(
+        &current,
+        vec![prior],
+        WorkspaceDraftRecoveryMode::Navigation,
+    )
+    .expect("non-matching navigation recovery should be ignored");
+
+    assert_eq!(selected, None);
 }
 
 #[test]

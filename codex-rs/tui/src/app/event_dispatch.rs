@@ -108,15 +108,20 @@ impl App {
                     dashboard.set_profile(profile);
                 }
                 self.workspace_dashboard_visible = true;
-                if opened_new_dashboard || self.workspace_draft_recovery_needs_retry() {
+                if opened_new_dashboard {
                     self.initialize_workspace_draft_recovery(app_server).await;
+                } else if self.workspace_draft_recovery_needs_retry() {
+                    self.retry_workspace_draft_recovery(app_server).await;
                 }
                 tui.frame_requester().schedule_frame();
             }
             AppEvent::WorkspaceDraftAutosaveTick { token } => {
-                self.handle_workspace_draft_autosave_tick(app_server, token)
-                    .await;
-                tui.frame_requester().schedule_frame();
+                if self
+                    .handle_workspace_draft_autosave_tick(app_server, token)
+                    .await
+                {
+                    tui.frame_requester().schedule_frame();
+                }
             }
             AppEvent::WorkspaceDraftFocusCheckpoint { token } => {
                 self.handle_workspace_draft_focus_checkpoint(app_server, token)

@@ -36,6 +36,7 @@ fn checkpoint(
     checkpoint_id: &str,
     revision: i64,
 ) -> WorkspaceDraftCheckpoint {
+    let content_sha256 = draft.content_sha256().expect("valid checkpoint hash");
     WorkspaceDraftCheckpoint {
         id: checkpoint_id.to_string(),
         session_id: "session-1".to_string(),
@@ -46,7 +47,7 @@ fn checkpoint(
         schema_version: MEDICAL_WORKSPACE_DRAFT_SCHEMA_VERSION,
         revision,
         draft: draft.encode().expect("valid checkpoint JSON"),
-        content_sha256: "a".repeat(64),
+        content_sha256,
         trigger: "idle_typing".to_string(),
         actor: MEDICAL_WORKSPACE_DRAFT_ACTOR.to_string(),
         created_at: 10,
@@ -157,6 +158,22 @@ fn decoder_rejects_wrong_schema_kind_and_inconsistent_note_baseline() {
 }
 
 #[test]
+fn checkpoint_metadata_rejects_tampered_draft_content_hash() {
+    let draft = working_draft("Original body");
+    let mut persisted = checkpoint(&draft, "checkpoint-tampered", 1);
+    persisted.draft["note"]["body"] = "Tampered body".into();
+
+    let error = WorkspaceDraftCheckpointMetadata::from_checkpoint(&persisted)
+        .expect_err("tampered draft content must not verify");
+
+    assert!(matches!(
+        error,
+        WorkspaceDraftError::InvalidCheckpoint(ref message)
+            if message.contains("content hash does not match")
+    ));
+}
+
+#[test]
 fn autosave_uses_750ms_generation_tokens_and_invalidates_stale_events() {
     let start = Instant::now();
     let mut state = WorkspaceDraftState::default();
@@ -187,6 +204,62 @@ fn autosave_uses_750ms_generation_tokens_and_invalidates_stale_events() {
         state.current_token().scope_generation()
     );
     assert!(!state.autosave_is_due_at(second.token, start + Duration::from_secs(2)));
+}
+
+#[test]
+fn failed_idle_checkpoint_pauses_automatic_retry_until_new_activity() {
+    let start = Instant::now();
+    let draft = working_draft("Body that still needs a checkpoint");
+    let mut state = WorkspaceDraftState::default();
+    state.reset_for_client("client-1");
+    let schedule = state.mark_changed_at(start);
+    assert!(matches!(
+        state
+            .begin_checkpoint(
+                schedule.token,
+                &draft,
+                WorkspaceDraftCheckpointTrigger::IdleTyping,
+                MEDICAL_WORKSPACE_DRAFT_ACTOR,
+            )
+            .expect("idle checkpoint should start"),
+        WorkspaceDraftCheckpointStart::Request(_)
+    ));
+    let failed_at = start + WORKSPACE_DRAFT_AUTOSAVE_DELAY;
+    state
+        .fail_checkpoint_at(
+            schedule.token,
+            "database unavailable".to_string(),
+            failed_at,
+        )
+        .expect("failed request should return the generation to a retryable state");
+
+    assert!(matches!(
+        state.persistence_status(),
+        WorkspaceDraftPersistenceStatus::Failed { token, .. } if token == schedule.token
+    ));
+    assert_eq!(
+        state.autosave_remaining_at(schedule.token, failed_at + Duration::from_secs(60)),
+        None
+    );
+    assert!(!state.autosave_is_due_at(schedule.token, failed_at + Duration::from_secs(60)));
+
+    let mut explicit_retry = state.clone();
+    assert!(matches!(
+        explicit_retry
+            .begin_checkpoint(
+                schedule.token,
+                &draft,
+                WorkspaceDraftCheckpointTrigger::FocusChange,
+                MEDICAL_WORKSPACE_DRAFT_ACTOR,
+            )
+            .expect("focus change should still permit an explicit retry"),
+        WorkspaceDraftCheckpointStart::Request(_)
+    ));
+
+    let next_edit_at = failed_at + Duration::from_secs(1);
+    let next = state.mark_changed_at(next_edit_at);
+    assert_ne!(next.token, schedule.token);
+    assert!(state.autosave_is_due_at(next.token, next_edit_at + WORKSPACE_DRAFT_AUTOSAVE_DELAY));
 }
 
 #[test]
@@ -224,6 +297,7 @@ fn clean_state_only_forces_a_first_checkpoint_at_packet_boundaries() {
 fn checkpoint_completion_only_acknowledges_its_generation_and_reuses_session() {
     let start = Instant::now();
     let first_draft = working_draft("First body");
+    let first_draft_hash = first_draft.content_sha256().expect("first draft hash");
     let second_draft = working_draft("Second body");
     let mut state = WorkspaceDraftState::default();
     state.reset_for_client("client-1");
@@ -291,7 +365,7 @@ fn checkpoint_completion_only_acknowledges_its_generation_and_reuses_session() {
         (
             Some("checkpoint-1"),
             Some(1),
-            Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            Some(first_draft_hash.as_str()),
         )
     );
     assert_eq!(second_request.draft["note"]["body"], "Second body");
@@ -300,6 +374,7 @@ fn checkpoint_completion_only_acknowledges_its_generation_and_reuses_session() {
 #[test]
 fn exact_close_echoes_checkpoint_cas_and_verifies_terminal_response() {
     let draft = working_draft("Saved body");
+    let draft_hash = draft.content_sha256().expect("saved draft hash");
     let mut state = WorkspaceDraftState::default();
     state.reset_for_client("client-1");
     let schedule = state.mark_changed();
@@ -376,7 +451,7 @@ fn exact_close_echoes_checkpoint_cas_and_verifies_terminal_response() {
             status: WorkspaceDraftSessionCloseStatus::Closed,
             expected_current_checkpoint_id: Some("checkpoint-7".to_string()),
             expected_current_checkpoint_revision: Some(7),
-            expected_current_checkpoint_sha256: Some("a".repeat(64)),
+            expected_current_checkpoint_sha256: Some(draft_hash),
             actor: MEDICAL_WORKSPACE_DRAFT_ACTOR.to_string(),
             reason: "agent handoff completed".to_string(),
         }
@@ -457,6 +532,7 @@ fn invalid_checkpoint_response_stays_failed_and_retryable() {
 #[test]
 fn recovery_is_typed_note_scoped_and_discard_is_exact_cas() {
     let draft = working_draft("Recovered body");
+    let draft_hash = draft.content_sha256().expect("recovered draft hash");
     let persisted = checkpoint(&draft, "checkpoint-recovery", 3);
     let recovery = RecoverableMedicalWorkspaceDraft::try_from(active_session(persisted.clone()))
         .expect("active consistent session should decode");
@@ -464,6 +540,12 @@ fn recovery_is_typed_note_scoped_and_discard_is_exact_cas() {
     assert!(recovery.matches_note_scope(Some("note-1"), Some("encounter-1")));
     assert!(!recovery.matches_note_scope(Some("note-other"), Some("encounter-1")));
     assert!(!recovery.matches_note_scope(Some("note-1"), Some("encounter-other")));
+    assert!(recovery.matches_working_note_scope(Some("note-1"), Some("encounter-1"), "note-1"));
+    assert!(!recovery.matches_working_note_scope(
+        Some("note-1"),
+        Some("encounter-1"),
+        "working-note-other"
+    ));
     let discard = recovery
         .discard_params(
             MEDICAL_WORKSPACE_DRAFT_ACTOR,
@@ -481,7 +563,7 @@ fn recovery_is_typed_note_scoped_and_discard_is_exact_cas() {
             WorkspaceDraftSessionCloseStatus::Discarded,
             Some("checkpoint-recovery"),
             Some(3),
-            Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            Some(draft_hash.as_str()),
         )
     );
 
@@ -545,7 +627,7 @@ fn recovery_is_typed_note_scoped_and_discard_is_exact_cas() {
             Some("session-1"),
             Some("checkpoint-recovery"),
             Some(3),
-            Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            Some(draft_hash.as_str()),
         )
     );
 }

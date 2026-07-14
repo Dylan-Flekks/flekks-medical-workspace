@@ -6,6 +6,8 @@ use codex_app_server_protocol::WorkspaceDraftSessionStatus;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
+use sha2::Digest;
+use sha2::Sha256;
 use std::time::Duration;
 use thiserror::Error;
 
@@ -117,6 +119,11 @@ impl MedicalWorkspaceWorkingDraftV1 {
             });
         }
         Ok(serde_json::from_slice(&encoded)?)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn content_sha256(&self) -> Result<String, WorkspaceDraftError> {
+        normalized_draft_sha256(&self.encode()?)
     }
 
     fn validate(&self) -> Result<(), WorkspaceDraftError> {
@@ -263,6 +270,12 @@ impl WorkspaceDraftCheckpointMetadata {
             ));
         }
         let draft = MedicalWorkspaceWorkingDraftV1::decode(checkpoint.draft.clone())?;
+        let expected_content_sha256 = normalized_draft_sha256(&checkpoint.draft)?;
+        if checkpoint.content_sha256 != expected_content_sha256 {
+            return Err(WorkspaceDraftError::InvalidCheckpoint(
+                "content hash does not match the normalized typed working draft".to_string(),
+            ));
+        }
         if draft.client_id != checkpoint.client_id
             || draft.note.encounter_id != checkpoint.encounter_id
             || draft.note.note_id != checkpoint.note_id
@@ -380,6 +393,16 @@ impl RecoverableMedicalWorkspaceDraft {
             && self.checkpoint.encounter_id.as_deref() == encounter_id
     }
 
+    pub(crate) fn matches_working_note_scope(
+        &self,
+        note_id: Option<&str>,
+        encounter_id: Option<&str>,
+        working_note_id: &str,
+    ) -> bool {
+        self.matches_note_scope(note_id, encounter_id)
+            && self.draft.note.working_note_id == working_note_id
+    }
+
     pub(crate) fn discard_params(
         &self,
         actor: &str,
@@ -442,6 +465,11 @@ fn normalized_ids(ids: Vec<String>) -> Vec<String> {
     ids.sort();
     ids.dedup();
     ids
+}
+
+fn normalized_draft_sha256(value: &Value) -> Result<String, WorkspaceDraftError> {
+    let normalized = serde_json::to_vec(value)?;
+    Ok(format!("{:x}", Sha256::digest(normalized)))
 }
 
 pub(super) fn required_text(label: &str, value: &str) -> Result<String, WorkspaceDraftError> {

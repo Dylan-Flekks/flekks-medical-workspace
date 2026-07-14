@@ -11,6 +11,7 @@ pub(crate) use model::MEDICAL_WORKSPACE_DRAFT_ACTOR;
 pub(crate) use model::MedicalWorkspaceWorkingDraftInput;
 pub(crate) use model::MedicalWorkspaceWorkingDraftV1;
 pub(crate) use model::RecoverableMedicalWorkspaceDraft;
+#[cfg(test)]
 pub(crate) use model::WORKSPACE_DRAFT_AUTOSAVE_DELAY;
 pub(crate) use model::WorkspaceDraftCheckpointTrigger;
 pub(crate) use model::WorkspaceDraftCloseDisposition;

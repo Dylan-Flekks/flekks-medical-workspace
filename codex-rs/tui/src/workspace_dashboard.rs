@@ -52,6 +52,7 @@ use crate::workspace_draft::MedicalWorkspaceWorkingDraftInput;
 use crate::workspace_draft::MedicalWorkspaceWorkingDraftV1;
 use crate::workspace_draft::WorkspaceDraftError;
 use crate::workspace_editor::WorkspaceEditor;
+use crate::wrapping::word_wrap_lines;
 use chart_changeset::ChartChangesetPurpose;
 use chart_changeset::ChartChangesetReviewState;
 use chart_changeset::PendingChartChangeset;
@@ -1881,6 +1882,10 @@ impl NoteDraft {
     }
 }
 
+fn workspace_note_is_locked(note: &WorkspaceNote) -> bool {
+    matches!(note.status.trim(), "signed" | "addended" | "locked")
+}
+
 #[derive(Debug, Clone, Default)]
 struct AddendumDraft {
     active: bool,
@@ -3357,7 +3362,7 @@ impl WorkspaceDashboard {
             WorkspaceFocus::Demographics => self.handle_demographics_key_event(key_event),
             WorkspaceFocus::NoteTitle => self.handle_note_title_key_event(key_event),
             WorkspaceFocus::NoteBody => self.handle_note_body_key_event(key_event),
-            WorkspaceFocus::Workflow => self.handle_workflow_key_event(key_event),
+            WorkspaceFocus::Workflow => self.handle_workflow_key_event(key_event, viewport),
             WorkspaceFocus::Agent => self.handle_agent_key_event(key_event),
             WorkspaceFocus::PatientFiles => self.handle_patient_files_key_event(key_event),
         }
@@ -3386,7 +3391,11 @@ impl WorkspaceDashboard {
                 WorkspaceDashboardAction::Consumed
             }
             WorkspaceFocus::Workflow => {
-                self.scroll_center_work_area(delta, 2);
+                if self.workflow_section == MedicalWorkflowSection::Proposals {
+                    self.scroll_proposal_comparison(delta, 2, viewport);
+                } else {
+                    self.scroll_center_work_area(delta, 2);
+                }
                 WorkspaceDashboardAction::Consumed
             }
             WorkspaceFocus::Agent => {
@@ -3503,6 +3512,15 @@ impl WorkspaceDashboard {
         } else {
             self.workflow_scroll = self.workflow_scroll.saturating_add(amount);
             self.status = "Scrolled center work area down.".to_string();
+        }
+    }
+
+    fn scroll_proposal_comparison(&mut self, delta: isize, amount: u16, viewport: Option<Rect>) {
+        self.scroll_center_work_area(delta, amount);
+        if let Some(max_scroll) =
+            viewport.and_then(|area| self.proposal_comparison_max_scroll_for_viewport(area))
+        {
+            self.workflow_scroll = self.workflow_scroll.min(max_scroll);
         }
     }
 
@@ -7645,30 +7663,54 @@ impl WorkspaceDashboard {
         let Some(proposal) = self.selected_pending_proposal() else {
             return;
         };
-        let rows = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(if area.height >= 10 { 3 } else { 2 }),
-                Constraint::Min(3),
-                Constraint::Length(1),
-            ])
-            .split(area);
-        Paragraph::new(vec![
+        let canonical_note = self.saved_canonical_note_for_proposal(proposal);
+        let canonical_body = canonical_note.map(|note| note.body.as_str()).unwrap_or("");
+        let comparison = proposal_comparison_lines(canonical_body, &proposal.proposed_body);
+        let draft_differs = self.proposal_note_draft_differs_from_saved(proposal);
+        let mut header_lines = vec![
             Line::from(format!(
-                "Current vs Proposed · Note Proposals · {} pending proposals",
+                "Saved Canonical vs Proposed · Note Proposals · {} pending proposals",
                 self.pending_proposal_count()
             )),
             self.proposal_review_state_line(proposal),
             Line::from(format!(
-                "Summary: {}",
-                compact_preview(&proposal.summary, area.width.saturating_sub(9) as usize)
+                "Summary: {} · +{} proposed / -{} canonical lines",
+                compact_preview(&proposal.summary, area.width.saturating_sub(40) as usize),
+                comparison.additions,
+                comparison.deletions,
             )),
-        ])
-        .wrap(Wrap { trim: true })
-        .render(rows[0], buf);
+        ];
+        if draft_differs {
+            header_lines.push(Line::from(vec![
+                Span::styled(
+                    "Unsaved human draft (not canonical): ",
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(compact_preview(
+                    &self.draft_note.body,
+                    area.width.saturating_sub(37) as usize,
+                )),
+            ]));
+        }
+        let comparison_layout = ProposalComparisonLayout::new(area, header_lines.len());
+        Paragraph::new(header_lines)
+            .wrap(Wrap { trim: true })
+            .render(comparison_layout.header, buf);
 
-        let current_title = format!("Current chart · r{}", self.draft_note.current_revision);
+        let current_title = canonical_note
+            .map(|note| format!("Saved canonical · r{}", note.current_revision))
+            .unwrap_or_else(|| "Saved canonical unavailable".to_string());
         let proposed_title = format!("Proposed edit · from r{}", proposal.base_revision);
+        let wrapped_comparison = wrap_proposal_comparison_lines(
+            &comparison,
+            comparison_layout.current_inner().width,
+            comparison_layout.proposed_inner().width,
+        );
+        let scroll = self
+            .workflow_scroll
+            .min(comparison_layout.max_scroll(wrapped_comparison.current.len()));
         let render_comparison_pane =
             |pane: Rect, title: String, lines: Vec<Line<'static>>, pane_buf: &mut Buffer| {
                 let block = Block::default()
@@ -7678,86 +7720,181 @@ impl WorkspaceDashboard {
                 let inner = block.inner(pane);
                 block.render(pane, pane_buf);
                 Paragraph::new(lines)
-                    .wrap(Wrap { trim: false })
-                    .scroll((self.workflow_scroll, 0))
+                    .scroll((scroll, 0))
                     .render(inner, pane_buf);
             };
-        let current_lines = proposal_comparison_body_lines(&self.draft_note.body, '-');
-        let proposed_lines = proposal_comparison_body_lines(&proposal.proposed_body, '+');
-        if rows[1].width >= 72 {
-            let columns = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-                .split(rows[1]);
-            render_comparison_pane(columns[0], current_title, current_lines, buf);
-            render_comparison_pane(columns[1], proposed_title, proposed_lines, buf);
-        } else {
-            let panes = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-                .split(rows[1]);
-            render_comparison_pane(panes[0], current_title, current_lines, buf);
-            render_comparison_pane(panes[1], proposed_title, proposed_lines, buf);
-        }
+        render_comparison_pane(
+            comparison_layout.current,
+            current_title,
+            wrapped_comparison.current,
+            buf,
+        );
+        render_comparison_pane(
+            comparison_layout.proposed,
+            proposed_title,
+            wrapped_comparison.proposed,
+            buf,
+        );
         Paragraph::new(Line::from(
             ":proposal accept | :proposal decline | :proposal next  · read-only comparison",
         ))
-        .render(rows[2], buf);
+        .render(comparison_layout.footer, buf);
+    }
+
+    fn proposal_comparison_max_scroll_for_viewport(&self, viewport: Rect) -> Option<u16> {
+        if self.profile != WorkspaceProfile::Medical
+            || self.focus != WorkspaceFocus::Workflow
+            || self.workflow_section != MedicalWorkflowSection::Proposals
+        {
+            return None;
+        }
+        let comparison_area = match WorkspaceLayoutMode::for_area(viewport) {
+            WorkspaceLayoutMode::Compact => inner_rect(MedicalCompactAreas::new(viewport).body),
+            WorkspaceLayoutMode::Large
+            | WorkspaceLayoutMode::Medium
+            | WorkspaceLayoutMode::Tiny => return None,
+        };
+        let proposal = self.selected_pending_proposal()?;
+        let canonical_body = self
+            .saved_canonical_note_for_proposal(proposal)
+            .map(|note| note.body.as_str())
+            .unwrap_or("");
+        let comparison = proposal_comparison_lines(canonical_body, &proposal.proposed_body);
+        let header_line_count =
+            3 + usize::from(self.proposal_note_draft_differs_from_saved(proposal));
+        let comparison_layout = ProposalComparisonLayout::new(comparison_area, header_line_count);
+        let wrapped_comparison = wrap_proposal_comparison_lines(
+            &comparison,
+            comparison_layout.current_inner().width,
+            comparison_layout.proposed_inner().width,
+        );
+        Some(comparison_layout.max_scroll(wrapped_comparison.current.len()))
     }
 
     fn proposal_review_state_line(&self, proposal: &WorkspaceNoteProposal) -> Line<'static> {
-        let stale = proposal.base_revision != self.draft_note.current_revision;
         let mut spans = vec![Span::styled(
             "Review state: ",
             Style::default().fg(Color::DarkGray),
         )];
-        if self.draft_note.is_locked() {
-            let label = if stale {
-                "SIGNED · STALE · READ ONLY"
-            } else {
-                "SIGNED · READ ONLY"
-            };
+        let Some(canonical_note) = self.saved_canonical_note_for_proposal(proposal) else {
             spans.push(Span::styled(
-                label,
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ));
-        } else if stale {
-            spans.push(Span::styled(
-                "STALE",
+                "CANONICAL UNAVAILABLE · ACCEPT BLOCKED",
                 Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
             ));
-        } else if self.dirty {
             spans.push(Span::styled(
-                "UNSAVED · ACCEPT BLOCKED",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
+                " · reload the saved note before reviewing",
+                Style::default().fg(Color::DarkGray),
             ));
+            return Line::from(spans);
+        };
+
+        let stale = proposal.base_revision != canonical_note.current_revision;
+        let unsaved = self.proposal_has_unsaved_work(proposal);
+        let locked = workspace_note_is_locked(canonical_note);
+        let label = if locked {
+            match (stale, unsaved) {
+                (true, true) => "SIGNED · STALE · UNSAVED · READ ONLY",
+                (true, false) => "SIGNED · STALE · READ ONLY",
+                (false, true) => "SIGNED · UNSAVED · READ ONLY",
+                (false, false) => "SIGNED · READ ONLY",
+            }
+        } else if stale && unsaved {
+            "STALE · UNSAVED · ACCEPT BLOCKED"
+        } else if stale {
+            "STALE · ACCEPT BLOCKED"
+        } else if unsaved {
+            "UNSAVED · ACCEPT BLOCKED"
         } else {
-            spans.push(Span::styled(
-                "READY",
-                Style::default()
-                    .fg(Color::Green)
-                    .add_modifier(Modifier::BOLD),
-            ));
-        }
-        let detail = if stale {
+            "READY"
+        };
+        let state_color = if locked {
+            Color::Cyan
+        } else if stale {
+            Color::Red
+        } else if unsaved {
+            Color::Cyan
+        } else {
+            Color::Green
+        };
+        spans.push(Span::styled(
+            label,
+            Style::default()
+                .fg(state_color)
+                .add_modifier(Modifier::BOLD),
+        ));
+
+        let detail = if locked {
             format!(
-                " · current pane is live r{}; proposal was prepared from r{}",
-                self.draft_note.current_revision, proposal.base_revision
+                " · saved canonical r{} is signed; use an addendum",
+                canonical_note.current_revision
             )
-        } else if self.draft_note.is_locked() {
-            " · use an addendum; replacement accept is blocked".to_string()
+        } else if stale && unsaved {
+            format!(
+                " · saved canonical is r{}; proposal is from r{}; unsaved human draft is separate",
+                canonical_note.current_revision, proposal.base_revision
+            )
+        } else if stale {
+            format!(
+                " · saved canonical is r{}; proposal was prepared from r{}",
+                canonical_note.current_revision, proposal.base_revision
+            )
+        } else if unsaved {
+            format!(
+                " · saved canonical r{} is compared; save or discard the human draft",
+                canonical_note.current_revision
+            )
         } else {
             format!(
-                " · proposal base matches current r{}",
-                proposal.base_revision
+                " · proposal base matches saved canonical r{}",
+                canonical_note.current_revision
             )
         };
         spans.push(Span::styled(detail, Style::default().fg(Color::DarkGray)));
         Line::from(spans)
+    }
+
+    fn saved_canonical_note_for_proposal(
+        &self,
+        proposal: &WorkspaceNoteProposal,
+    ) -> Option<&WorkspaceNote> {
+        let active_note_id = self.draft_note.id.as_deref()?;
+        if active_note_id != proposal.note_id {
+            return None;
+        }
+        self.notes.iter().find(|note| note.id == active_note_id)
+    }
+
+    fn proposal_note_draft_differs_from_saved(&self, proposal: &WorkspaceNoteProposal) -> bool {
+        let Some(canonical_note) = self.saved_canonical_note_for_proposal(proposal) else {
+            return self.draft_note.should_save();
+        };
+        canonical_note.title != self.effective_note_title()
+            || canonical_note.body != self.draft_note.body
+            || canonical_note.status != self.draft_note.status_label()
+            || canonical_note.encounter_id != self.draft_note.encounter_id
+    }
+
+    fn proposal_has_unsaved_work(&self, proposal: &WorkspaceNoteProposal) -> bool {
+        self.dirty || self.proposal_note_draft_differs_from_saved(proposal)
+    }
+
+    fn proposal_accept_disabled_reason(
+        &self,
+        proposal: &WorkspaceNoteProposal,
+    ) -> Option<&'static str> {
+        let Some(canonical_note) = self.saved_canonical_note_for_proposal(proposal) else {
+            return Some("Saved canonical note is unavailable; reload before accepting.");
+        };
+        if workspace_note_is_locked(canonical_note) {
+            return Some("Signed notes require addenda; replacement proposals cannot be accepted.");
+        }
+        if self.proposal_has_unsaved_work(proposal) {
+            return Some("Save or discard draft changes before accepting a proposal.");
+        }
+        if proposal.base_revision != canonical_note.current_revision {
+            return Some("Proposal is stale; ask the agent for a fresh proposal.");
+        }
+        None
     }
 
     fn workflow_section_uses_agent_workpane(&self) -> bool {
@@ -8684,25 +8821,13 @@ impl WorkspaceDashboard {
             self.status = "No pending proposal selected.".to_string();
             return WorkspaceDashboardAction::Consumed;
         };
-        if accept {
-            if self.draft_note.is_locked() {
-                self.status =
-                    "Signed notes require addenda; replacement proposals cannot be accepted."
-                        .to_string();
-                return WorkspaceDashboardAction::Consumed;
-            }
-            if self.dirty {
-                self.status =
-                    "Save or discard draft changes before accepting a proposal.".to_string();
-                return WorkspaceDashboardAction::Consumed;
-            }
-            if proposal.base_revision != self.draft_note.current_revision {
-                self.status = "Proposal is stale; ask the agent for a fresh proposal.".to_string();
-                return WorkspaceDashboardAction::Consumed;
-            }
+        let proposal_id = proposal.id.clone();
+        if accept && let Some(reason) = self.proposal_accept_disabled_reason(proposal) {
+            self.status = reason.to_string();
+            return WorkspaceDashboardAction::Consumed;
         }
         WorkspaceDashboardAction::ResolveProposal {
-            proposal_id: proposal.id.clone(),
+            proposal_id,
             accept,
         }
     }
@@ -9123,17 +9248,7 @@ impl WorkspaceDashboard {
             }
             WorkspaceActionId::ProposalAccept => {
                 if let Some(proposal) = self.selected_pending_proposal() {
-                    if self.draft_note.is_locked() {
-                        Some(
-                            "Signed notes require addenda; replacement proposals cannot be accepted.",
-                        )
-                    } else if self.dirty {
-                        Some("Save or discard draft changes before accepting a proposal.")
-                    } else if proposal.base_revision != self.draft_note.current_revision {
-                        Some("Proposal is stale; ask the agent for a fresh proposal.")
-                    } else {
-                        None
-                    }
+                    self.proposal_accept_disabled_reason(proposal)
                 } else {
                     Some("No pending proposals for the active note.")
                 }
@@ -9513,7 +9628,11 @@ impl WorkspaceDashboard {
         WorkspaceDashboardAction::Consumed
     }
 
-    fn handle_workflow_key_event(&mut self, key_event: KeyEvent) -> WorkspaceDashboardAction {
+    fn handle_workflow_key_event(
+        &mut self,
+        key_event: KeyEvent,
+        viewport: Option<Rect>,
+    ) -> WorkspaceDashboardAction {
         if self.profile != WorkspaceProfile::Medical {
             return WorkspaceDashboardAction::Consumed;
         }
@@ -9668,13 +9787,17 @@ impl WorkspaceDashboard {
             && !self.draft_document.is_active()
         {
             match key_event.code {
-                KeyCode::Up => self.scroll_center_work_area(/*delta*/ -1, /*amount*/ 1),
-                KeyCode::Down => self.scroll_center_work_area(/*delta*/ 1, /*amount*/ 1),
+                KeyCode::Up => {
+                    self.scroll_proposal_comparison(/*delta*/ -1, /*amount*/ 1, viewport)
+                }
+                KeyCode::Down => {
+                    self.scroll_proposal_comparison(/*delta*/ 1, /*amount*/ 1, viewport)
+                }
                 KeyCode::PageUp => {
-                    self.scroll_center_work_area(/*delta*/ -1, /*amount*/ 8)
+                    self.scroll_proposal_comparison(/*delta*/ -1, /*amount*/ 8, viewport)
                 }
                 KeyCode::PageDown => {
-                    self.scroll_center_work_area(/*delta*/ 1, /*amount*/ 8)
+                    self.scroll_proposal_comparison(/*delta*/ 1, /*amount*/ 8, viewport)
                 }
                 KeyCode::Home => {
                     self.workflow_scroll = 0;
@@ -11445,13 +11568,16 @@ impl WorkspaceDashboard {
                 Line::from("  Human draft remains in the chart center until commit success."),
             ]
         } else if let Some(proposal) = self.selected_pending_proposal() {
-            vec![
+            let canonical_revision = self
+                .saved_canonical_note_for_proposal(proposal)
+                .map(|note| format!("r{}", note.current_revision))
+                .unwrap_or_else(|| "unavailable".to_string());
+            let mut lines = vec![
                 workflow_header_line("Pending Proposal Changeset", WorkflowTone::Review),
                 self.proposal_review_state_line(proposal),
                 Line::from(format!(
-                    "  Guard: note r{} · Reason: {}",
-                    proposal.base_revision,
-                    compact_preview(&proposal.summary, 46)
+                    "  Guard: proposal base r{} · saved canonical {}",
+                    proposal.base_revision, canonical_revision,
                 )),
                 Line::from(format!(
                     "  Proposed: {}",
@@ -11460,7 +11586,17 @@ impl WorkspaceDashboard {
                 workflow_action_hint_line(
                     "Tab to Agent Work for full text · :proposal accept | :proposal decline",
                 ),
-            ]
+            ];
+            if self.proposal_note_draft_differs_from_saved(proposal) && inner.height >= 6 {
+                lines.insert(
+                    3,
+                    Line::from(format!(
+                        "  Draft (not canonical): {}",
+                        compact_preview(&self.draft_note.body, 54)
+                    )),
+                );
+            }
+            lines
         } else if self.workflow_section == MedicalWorkflowSection::Proposals {
             vec![
                 workflow_header_line("Note Proposals", WorkflowTone::Review),
@@ -11669,8 +11805,11 @@ impl WorkspaceDashboard {
                 compact_preview(&proposal.note_id, 14)
             )),
             Line::from(format!(
-                "  Guard: expected canonical note r{}",
-                proposal.base_revision
+                "  Guard: proposal base r{} · saved canonical {}",
+                proposal.base_revision,
+                self.saved_canonical_note_for_proposal(proposal)
+                    .map(|note| format!("r{}", note.current_revision))
+                    .unwrap_or_else(|| "unavailable".to_string())
             )),
             Line::from("  Patient: identity only; demographics untouched"),
             Line::from(format!("  Provenance: {provenance}")),
@@ -11696,22 +11835,48 @@ impl WorkspaceDashboard {
         }
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
-            "  Current canonical note:",
+            self.saved_canonical_note_for_proposal(proposal)
+                .map(|note| format!("  Saved canonical note (r{}):", note.current_revision))
+                .unwrap_or_else(|| "  Saved canonical note unavailable:".to_string()),
             Style::default().add_modifier(Modifier::BOLD),
         )));
-        if self.draft_note.body.is_empty() {
-            lines.push(Line::from("    (empty)"));
-        } else {
-            lines.extend(
-                self.draft_note
-                    .body
+        match self.saved_canonical_note_for_proposal(proposal) {
+            Some(note) if note.body.is_empty() => lines.push(Line::from("    (empty)")),
+            Some(note) => lines.extend(
+                note.body
                     .lines()
                     .map(|line| Line::from(format!("    - {line}"))),
-            );
+            ),
+            None => lines.push(Line::from("    (reload required before acceptance)")),
         }
+        if self.proposal_note_draft_differs_from_saved(proposal) {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "  Unsaved human draft (not canonical; accept blocked):",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            )));
+            if self.draft_note.body.is_empty() {
+                lines.push(Line::from("    ! (empty)"));
+            } else {
+                lines.extend(
+                    self.draft_note
+                        .body
+                        .lines()
+                        .map(|line| Line::from(format!("    ! {line}"))),
+                );
+            }
+        }
+        let action_hint = if self.proposal_has_unsaved_work(proposal) {
+            "Save/discard human draft before :proposal accept · :proposal decline is available"
+        } else {
+            self.proposal_accept_disabled_reason(proposal)
+                .unwrap_or(":proposal accept | :proposal decline")
+        };
         lines.extend([
             Line::from(""),
-            workflow_action_hint_line(":proposal accept | :proposal decline"),
+            workflow_action_hint_line(action_hint),
             Line::from("  Acceptance is explicit; no agent output auto-applies."),
         ]);
         lines
@@ -15567,30 +15732,253 @@ fn selected_line(text: &str, selected: bool) -> Line<'static> {
     ])
 }
 
-fn proposal_comparison_body_lines(body: &str, marker: char) -> Vec<Line<'static>> {
-    let marker_style = if marker == '+' {
-        Style::default().fg(Color::Green)
-    } else {
-        Style::default().fg(Color::Red)
-    };
-    let body_lines = if body.is_empty() {
-        vec![""]
-    } else {
-        body.lines().collect::<Vec<_>>()
-    };
-    body_lines
-        .into_iter()
-        .enumerate()
-        .map(|(index, text)| {
-            Line::from(vec![
-                Span::styled(
-                    format!("{marker}{:>3} ", index + 1),
-                    marker_style.add_modifier(Modifier::BOLD),
-                ),
-                Span::raw(text.to_string()),
+struct ProposalComparisonLines {
+    current: Vec<Line<'static>>,
+    proposed: Vec<Line<'static>>,
+    additions: usize,
+    deletions: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ProposalComparisonLayout {
+    header: Rect,
+    current: Rect,
+    proposed: Rect,
+    footer: Rect,
+}
+
+impl ProposalComparisonLayout {
+    fn new(area: Rect, header_line_count: usize) -> Self {
+        let full_header_height = header_line_count.min(u16::MAX as usize) as u16;
+        let header_height = if area.height >= 10 {
+            full_header_height
+        } else {
+            full_header_height.min(2)
+        };
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(header_height),
+                Constraint::Min(3),
+                Constraint::Length(1),
             ])
-        })
-        .collect()
+            .split(area);
+        let panes = if rows[1].width >= 72 {
+            Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+                .split(rows[1])
+        } else {
+            Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+                .split(rows[1])
+        };
+        Self {
+            header: rows[0],
+            current: panes[0],
+            proposed: panes[1],
+            footer: rows[2],
+        }
+    }
+
+    fn current_inner(self) -> Rect {
+        inner_rect(self.current)
+    }
+
+    fn proposed_inner(self) -> Rect {
+        inner_rect(self.proposed)
+    }
+
+    fn max_scroll(self, visual_line_count: usize) -> u16 {
+        let visible_height = self
+            .current_inner()
+            .height
+            .min(self.proposed_inner().height) as usize;
+        if visible_height == 0 {
+            return 0;
+        }
+        visual_line_count
+            .saturating_sub(visible_height)
+            .min(u16::MAX as usize) as u16
+    }
+}
+
+fn wrap_proposal_comparison_lines(
+    comparison: &ProposalComparisonLines,
+    current_width: u16,
+    proposed_width: u16,
+) -> ProposalComparisonLines {
+    let row_count = comparison.current.len().max(comparison.proposed.len());
+    let mut current = Vec::new();
+    let mut proposed = Vec::new();
+    for row in 0..row_count {
+        let current_row = comparison
+            .current
+            .get(row)
+            .cloned()
+            .unwrap_or_else(|| Line::from(""));
+        let proposed_row = comparison
+            .proposed
+            .get(row)
+            .cloned()
+            .unwrap_or_else(|| Line::from(""));
+        let mut wrapped_current = word_wrap_lines(
+            std::iter::once(current_row),
+            current_width.max(/*other*/ 1) as usize,
+        );
+        let mut wrapped_proposed = word_wrap_lines(
+            std::iter::once(proposed_row),
+            proposed_width.max(/*other*/ 1) as usize,
+        );
+        let shared_height = wrapped_current.len().max(wrapped_proposed.len()).max(1);
+        wrapped_current.resize_with(shared_height, || Line::from(""));
+        wrapped_proposed.resize_with(shared_height, || Line::from(""));
+        current.extend(wrapped_current);
+        proposed.extend(wrapped_proposed);
+    }
+    ProposalComparisonLines {
+        current,
+        proposed,
+        additions: comparison.additions,
+        deletions: comparison.deletions,
+    }
+}
+
+fn proposal_comparison_lines(current_body: &str, proposed_body: &str) -> ProposalComparisonLines {
+    let patch = diffy::create_patch(current_body, proposed_body);
+    let mut current = Vec::new();
+    let mut proposed = Vec::new();
+    let mut additions = 0;
+    let mut deletions = 0;
+
+    for hunk in patch.hunks() {
+        let old_range = hunk.old_range();
+        let new_range = hunk.new_range();
+        let hunk_label = format!(
+            "@@ -{},{} +{},{} @@",
+            old_range.start(),
+            old_range.len(),
+            new_range.start(),
+            new_range.len()
+        );
+        let separator = Line::from(Span::styled(
+            hunk_label,
+            Style::default().fg(Color::DarkGray),
+        ));
+        current.push(separator.clone());
+        proposed.push(separator);
+
+        let mut old_line = old_range.start();
+        let mut new_line = new_range.start();
+        let mut pending_deletions = Vec::new();
+        let mut pending_insertions = Vec::new();
+        for line in hunk.lines() {
+            match line {
+                diffy::Line::Context(text) => {
+                    append_proposal_change_rows(
+                        &mut current,
+                        &mut proposed,
+                        &mut pending_deletions,
+                        &mut pending_insertions,
+                    );
+                    current.push(proposal_comparison_line(' ', old_line, text, None));
+                    proposed.push(proposal_comparison_line(' ', new_line, text, None));
+                    old_line += 1;
+                    new_line += 1;
+                }
+                diffy::Line::Delete(text) => {
+                    pending_deletions.push((old_line, text.to_string()));
+                    old_line += 1;
+                    deletions += 1;
+                }
+                diffy::Line::Insert(text) => {
+                    pending_insertions.push((new_line, text.to_string()));
+                    new_line += 1;
+                    additions += 1;
+                }
+            }
+        }
+        append_proposal_change_rows(
+            &mut current,
+            &mut proposed,
+            &mut pending_deletions,
+            &mut pending_insertions,
+        );
+    }
+
+    if current.is_empty() {
+        let body_lines = if current_body.is_empty() {
+            vec![""]
+        } else {
+            current_body.lines().collect::<Vec<_>>()
+        };
+        for (index, text) in body_lines.into_iter().enumerate() {
+            current.push(proposal_comparison_line(' ', index + 1, text, None));
+            proposed.push(proposal_comparison_line(' ', index + 1, text, None));
+        }
+    }
+
+    ProposalComparisonLines {
+        current,
+        proposed,
+        additions,
+        deletions,
+    }
+}
+
+fn append_proposal_change_rows(
+    current: &mut Vec<Line<'static>>,
+    proposed: &mut Vec<Line<'static>>,
+    deletions: &mut Vec<(usize, String)>,
+    insertions: &mut Vec<(usize, String)>,
+) {
+    let row_count = deletions.len().max(insertions.len());
+    for row in 0..row_count {
+        current.push(
+            deletions
+                .get(row)
+                .map(|(line_number, text)| {
+                    proposal_comparison_line('-', *line_number, text, Some(Color::Red))
+                })
+                .unwrap_or_else(proposal_comparison_placeholder),
+        );
+        proposed.push(
+            insertions
+                .get(row)
+                .map(|(line_number, text)| {
+                    proposal_comparison_line('+', *line_number, text, Some(Color::Green))
+                })
+                .unwrap_or_else(proposal_comparison_placeholder),
+        );
+    }
+    deletions.clear();
+    insertions.clear();
+}
+
+fn proposal_comparison_line(
+    marker: char,
+    line_number: usize,
+    text: &str,
+    color: Option<Color>,
+) -> Line<'static> {
+    let marker_style = color
+        .map(|color| Style::default().fg(color).add_modifier(Modifier::BOLD))
+        .unwrap_or_else(|| Style::default().fg(Color::DarkGray));
+    let body_style = color
+        .map(|color| Style::default().fg(color))
+        .unwrap_or_default();
+    Line::from(vec![
+        Span::styled(format!("{marker}{line_number:>3} "), marker_style),
+        Span::styled(
+            text.trim_end_matches(&['\r', '\n'][..]).to_string(),
+            body_style,
+        ),
+    ])
+}
+
+fn proposal_comparison_placeholder() -> Line<'static> {
+    Line::from(Span::styled("     ", Style::default().fg(Color::DarkGray)))
 }
 
 fn text_field_display_lines(text: &str) -> Vec<&str> {
@@ -18924,6 +19312,84 @@ mod tests {
         ));
         assert_eq!(dashboard.draft_note.title, "Current unsaved note");
         assert_eq!(dashboard.draft_note.body, "Current unsaved body");
+    }
+
+    #[test]
+    fn local_draft_recovery_rejects_a_different_working_note_in_the_same_encounter() {
+        let mut dashboard = medical_recursive_base_dashboard();
+        dashboard.draft_note.id = None;
+        dashboard.draft_note.current_revision = 0;
+        dashboard.draft_note.working_note_id = "working-note-current".to_string();
+        dashboard.draft_note.encounter_id = Some("encounter-current".to_string());
+        dashboard.draft_note.title = "Current unsaved note".to_string();
+        dashboard.draft_note.body = "Current unsaved body".to_string();
+        let recovered = MedicalWorkspaceWorkingDraftV1::new(MedicalWorkspaceWorkingDraftInput {
+            client_id: "client-1".to_string(),
+            note_id: None,
+            working_note_id: "working-note-prior".to_string(),
+            encounter_id: Some("encounter-current".to_string()),
+            base_note_revision: None,
+            note_title: "Prior unsaved title".to_string(),
+            note_body: "Prior unsaved body".to_string(),
+            agent_request_body: String::new(),
+            selected_file_ids: Vec::new(),
+            selected_reviewed_text_ids: Vec::new(),
+            selected_clip_ids: Vec::new(),
+        })
+        .expect("valid unsaved recovery fixture");
+
+        let error = dashboard
+            .apply_recovered_medical_working_draft(recovered)
+            .expect_err("different working note must reject recovery");
+        assert!(matches!(
+            error,
+            WorkspaceDraftError::InvalidRecovery(ref message)
+                if message.contains("different working note")
+        ));
+        assert_eq!(dashboard.draft_note.working_note_id, "working-note-current");
+        assert_eq!(dashboard.draft_note.title, "Current unsaved note");
+        assert_eq!(dashboard.draft_note.body, "Current unsaved body");
+    }
+
+    #[test]
+    fn cold_start_recovery_binding_changes_only_the_internal_working_note_identity() {
+        let mut dashboard = medical_recursive_base_dashboard();
+        dashboard.draft_note.id = None;
+        dashboard.draft_note.current_revision = 0;
+        dashboard.draft_note.working_note_id = "working-note-fresh-start".to_string();
+        dashboard.draft_note.encounter_id = Some("encounter-current".to_string());
+        dashboard.draft_note.title = "Current unsaved note".to_string();
+        dashboard.draft_note.body = "Current unsaved body".to_string();
+        let recovered = MedicalWorkspaceWorkingDraftV1::new(MedicalWorkspaceWorkingDraftInput {
+            client_id: "client-1".to_string(),
+            note_id: None,
+            working_note_id: "working-note-recoverable".to_string(),
+            encounter_id: Some("encounter-current".to_string()),
+            base_note_revision: None,
+            note_title: "Recovered title".to_string(),
+            note_body: "Recovered body".to_string(),
+            agent_request_body: String::new(),
+            selected_file_ids: Vec::new(),
+            selected_reviewed_text_ids: Vec::new(),
+            selected_clip_ids: Vec::new(),
+        })
+        .expect("valid cold-start recovery fixture");
+
+        dashboard
+            .bind_cold_start_recovery_identity(&recovered)
+            .expect("unique same-scope fallback should bind its internal identity");
+        assert_eq!(
+            dashboard.draft_note.working_note_id,
+            "working-note-recoverable"
+        );
+        assert_eq!(dashboard.draft_note.title, "Current unsaved note");
+        assert_eq!(dashboard.draft_note.body, "Current unsaved body");
+
+        dashboard
+            .apply_recovered_medical_working_draft(recovered)
+            .expect("explicit restore should now validate the rebound identity");
+        assert_eq!(dashboard.draft_note.title, "Recovered title");
+        assert_eq!(dashboard.draft_note.body, "Recovered body");
     }
 
     #[test]
@@ -24514,6 +24980,13 @@ mod tests {
         let dashboard = WorkspaceDashboard {
             focus: WorkspaceFocus::Workflow,
             workflow_section: MedicalWorkflowSection::Proposals,
+            notes: vec![test_saved_note(
+                "note-1",
+                "Visit note",
+                "Assessment: improving gait tolerance.\nPlan: continue current program.",
+                "draft",
+                3,
+            )],
             draft_note: NoteDraft {
                 id: Some("note-1".to_string()),
                 title: "Visit note".to_string(),
@@ -24546,8 +25019,16 @@ mod tests {
         let proposed_body = format!("{}\n{sentinel}", "Proposed detail. ".repeat(12));
         let dashboard = WorkspaceDashboard {
             workflow_section: MedicalWorkflowSection::Proposals,
+            notes: vec![test_saved_note(
+                "note-1",
+                "Visit note",
+                "Canonical note body.",
+                "draft",
+                3,
+            )],
             draft_note: NoteDraft {
                 id: Some("note-1".to_string()),
+                title: "Visit note".to_string(),
                 body: "Canonical note body.".to_string(),
                 current_revision: 3,
                 ..NoteDraft::default()
@@ -24565,7 +25046,7 @@ mod tests {
 
         assert!(rendered.contains(sentinel));
         assert!(rendered.contains("Full proposed replacement:"));
-        assert!(rendered.contains("Current canonical note:"));
+        assert!(rendered.contains("Saved canonical note (r3):"));
     }
 
     #[test]
@@ -25324,6 +25805,13 @@ mod tests {
     #[test]
     fn pending_proposals_render_and_route_accept_decline() {
         let mut dashboard = WorkspaceDashboard {
+            notes: vec![test_saved_note(
+                "note-1",
+                "Draft note",
+                "Human body",
+                "draft",
+                3,
+            )],
             draft_note: NoteDraft {
                 id: Some("note-1".to_string()),
                 title: "Draft note".to_string(),
@@ -25338,11 +25826,17 @@ mod tests {
 
         let rendered = render_dashboard_lines_at(&dashboard, 160, 45);
         assert!(rendered.contains("Pending Proposal Changeset"));
-        assert!(rendered.contains("Guard: expected canonical note r3"));
         assert!(rendered.contains("READY"));
         assert!(rendered.contains("tighten wording"));
         assert!(rendered.contains("Proposed body"));
         assert!(rendered.contains("Human body"));
+        let workpane = dashboard
+            .agent_workpane_proposal_changeset_lines()
+            .iter()
+            .map(line_plain_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(workpane.contains("Guard: proposal base r3 · saved canonical r3"));
 
         assert_eq!(
             dashboard.execute_workspace_command(":proposal accept"),
@@ -25358,6 +25852,183 @@ mod tests {
                 accept: false,
             }
         );
+    }
+
+    #[test]
+    fn proposal_comparison_marks_only_changed_lines_and_keeps_panes_aligned() {
+        let comparison = proposal_comparison_lines(
+            "Subjective: walking farther.\nAssessment: needs cueing.\nTolerance: 5 minutes.\nPlan: continue.\n",
+            "Subjective: walking farther.\nAssessment: improved with cueing.\nTolerance: 8 minutes.\nPlan: continue.\n",
+        );
+
+        assert_eq!(comparison.additions, 2);
+        assert_eq!(comparison.deletions, 2);
+        assert_eq!(comparison.current.len(), comparison.proposed.len());
+        let current = comparison
+            .current
+            .iter()
+            .map(line_plain_text)
+            .collect::<Vec<_>>();
+        let proposed = comparison
+            .proposed
+            .iter()
+            .map(line_plain_text)
+            .collect::<Vec<_>>();
+        let assessment_row = current
+            .iter()
+            .position(|line| line == "-  2 Assessment: needs cueing.")
+            .expect("deleted assessment row");
+        let tolerance_row = current
+            .iter()
+            .position(|line| line == "-  3 Tolerance: 5 minutes.")
+            .expect("deleted tolerance row");
+        assert_eq!(
+            proposed[assessment_row],
+            "+  2 Assessment: improved with cueing."
+        );
+        assert_eq!(proposed[tolerance_row], "+  3 Tolerance: 8 minutes.");
+        assert!(current.contains(&"   1 Subjective: walking farther.".to_string()));
+        assert!(proposed.contains(&"   4 Plan: continue.".to_string()));
+        let context_row = current
+            .iter()
+            .position(|line| line == "   1 Subjective: walking farther.")
+            .expect("neutral context row");
+        for span in &comparison.current[context_row].spans {
+            assert!(!matches!(span.style.fg, Some(Color::Red | Color::Green)));
+        }
+
+        let unchanged = proposal_comparison_lines("No change", "No change");
+        assert_eq!(unchanged.additions, 0);
+        assert_eq!(unchanged.deletions, 0);
+        assert_eq!(line_plain_text(&unchanged.current[0]), "   1 No change");
+        assert_eq!(line_plain_text(&unchanged.proposed[0]), "   1 No change");
+    }
+
+    #[test]
+    fn narrow_proposal_comparison_aligns_wrapped_pairs_and_clamps_page_down() {
+        let viewport = Rect::new(0, 0, 80, 20);
+        let sentinel = "TRAILING-CONTEXT-SENTINEL";
+        let canonical_body = format!("Assessment: {}\n{sentinel}", "canonical detail ".repeat(5));
+        let proposed_body = format!(
+            "Assessment: {}\n{sentinel}",
+            "substantially longer proposed detail ".repeat(18)
+        );
+        let comparison = proposal_comparison_lines(&canonical_body, &proposed_body);
+        let comparison_area = inner_rect(MedicalCompactAreas::new(viewport).body);
+        let comparison_layout = ProposalComparisonLayout::new(comparison_area, 3);
+        let wrapped = wrap_proposal_comparison_lines(
+            &comparison,
+            comparison_layout.current_inner().width,
+            comparison_layout.proposed_inner().width,
+        );
+        let current_sentinel_row = wrapped
+            .current
+            .iter()
+            .position(|line| line_plain_text(line).contains(sentinel))
+            .expect("current trailing context sentinel");
+        let proposed_sentinel_row = wrapped
+            .proposed
+            .iter()
+            .position(|line| line_plain_text(line).contains(sentinel))
+            .expect("proposed trailing context sentinel");
+        assert_eq!(current_sentinel_row, proposed_sentinel_row);
+        assert_eq!(wrapped.current.len(), wrapped.proposed.len());
+
+        let mut dashboard = WorkspaceDashboard {
+            focus: WorkspaceFocus::Workflow,
+            workflow_section: MedicalWorkflowSection::Proposals,
+            notes: vec![test_saved_note(
+                "note-1",
+                "Visit note",
+                &canonical_body,
+                "draft",
+                3,
+            )],
+            draft_note: NoteDraft {
+                id: Some("note-1".to_string()),
+                title: "Visit note".to_string(),
+                body: canonical_body,
+                current_revision: 3,
+                ..NoteDraft::default()
+            },
+            proposals: vec![test_proposal("proposal-1", "note-1", 3, &proposed_body)],
+            ..medical_recursive_base_dashboard()
+        };
+        for _ in 0..32 {
+            assert_eq!(
+                dashboard.handle_key_event_for_viewport(
+                    KeyEvent::from(KeyCode::PageDown),
+                    Some(viewport),
+                ),
+                WorkspaceDashboardAction::Consumed
+            );
+        }
+        let max_scroll = dashboard
+            .proposal_comparison_max_scroll_for_viewport(viewport)
+            .expect("proposal comparison max scroll");
+        assert!(max_scroll > 0);
+        assert_eq!(dashboard.workflow_scroll, max_scroll);
+
+        let rendered = render_dashboard_lines_at(&dashboard, viewport.width, viewport.height);
+        assert_eq!(rendered.matches(sentinel).count(), 2, "{rendered}");
+    }
+
+    #[test]
+    fn dirty_proposal_review_uses_saved_canonical_and_blocks_accept() {
+        let canonical_body = "Saved canonical body.";
+        let draft_body = "Unsaved human draft.";
+        let mut dashboard = WorkspaceDashboard {
+            focus: WorkspaceFocus::Workflow,
+            workflow_section: MedicalWorkflowSection::Proposals,
+            notes: vec![test_saved_note(
+                "note-1",
+                "Visit note",
+                canonical_body,
+                "draft",
+                3,
+            )],
+            draft_note: NoteDraft {
+                id: Some("note-1".to_string()),
+                title: "Visit note".to_string(),
+                body: draft_body.to_string(),
+                current_revision: 99,
+                ..NoteDraft::default()
+            },
+            dirty: true,
+            proposals: vec![test_proposal(
+                "proposal-1",
+                "note-1",
+                3,
+                "Proposed replacement.",
+            )],
+            ..WorkspaceDashboard::new(WorkspaceProfile::Medical)
+        };
+
+        let comparison_area = Rect::new(0, 0, 120, 24);
+        let mut comparison_buffer = Buffer::empty(comparison_area);
+        dashboard.render_medical_proposal_comparison(comparison_area, &mut comparison_buffer);
+        let rendered = buffer_text(&comparison_buffer, comparison_area);
+        assert!(rendered.contains("UNSAVED · ACCEPT BLOCKED"));
+        assert!(rendered.contains("Saved canonical · r3"));
+        assert!(rendered.contains("Saved canonical body."));
+        assert!(rendered.contains("Unsaved human draft (not canonical):"));
+
+        let workpane = dashboard
+            .agent_workpane_proposal_changeset_lines()
+            .iter()
+            .map(line_plain_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(workpane.contains("Saved canonical note (r3):"));
+        assert!(workpane.contains("    - Saved canonical body."));
+        assert!(workpane.contains("Unsaved human draft (not canonical; accept blocked):"));
+        assert!(workpane.contains("    ! Unsaved human draft."));
+
+        assert_eq!(
+            dashboard.execute_workspace_command(":proposal accept"),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert!(dashboard.status.contains("Save or discard draft changes"));
     }
 
     #[test]
@@ -25493,6 +26164,13 @@ mod tests {
         let ready = WorkspaceDashboard {
             focus: WorkspaceFocus::Workflow,
             workflow_section: MedicalWorkflowSection::Proposals,
+            notes: vec![test_saved_note(
+                "note-1",
+                "Draft note",
+                "Current clinician text",
+                "draft",
+                3,
+            )],
             draft_note: NoteDraft {
                 id: Some("note-1".to_string()),
                 title: "Draft note".to_string(),
@@ -25511,23 +26189,30 @@ mod tests {
         let ready_render = render_dashboard_lines_at(&ready, 160, 40);
         assert!(ready_render.contains("READY"));
         assert!(ready_render.contains("Pending Proposal Changeset"));
-        assert!(ready_render.contains("Guard: expected canonical note r3"));
         assert!(ready_render.contains("Proposed agent text"));
         assert!(ready_render.contains("Current clinician text"));
+        let ready_workpane = ready
+            .agent_workpane_proposal_changeset_lines()
+            .iter()
+            .map(line_plain_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(ready_workpane.contains("Guard: proposal base r3 · saved canonical r3"));
 
         let mut stale = ready.clone();
         stale.proposals[0].base_revision = 2;
         let stale_render = render_dashboard_lines_at(&stale, 160, 40);
         assert!(stale_render.contains("STALE"));
-        assert!(stale_render.contains("current pane is live"));
-        assert!(stale_render.contains("r3; proposal was"));
-        assert!(stale_render.contains("prepared from r2"));
+        let stale_state = line_plain_text(&stale.proposal_review_state_line(&stale.proposals[0]));
+        assert!(stale_state.contains("saved canonical is r3; proposal was prepared from r2"));
         assert!(!stale_render.contains("Current historical base"));
 
         let mut signed = ready.clone();
         signed.draft_note.status = "signed".to_string();
-        let signed_render = render_dashboard_lines_at(&signed, 160, 40);
-        assert!(signed_render.contains("SIGNED · READ ONLY"));
+        signed.notes[0].status = "signed".to_string();
+        let signed_state =
+            line_plain_text(&signed.proposal_review_state_line(&signed.proposals[0]));
+        assert!(signed_state.contains("SIGNED · READ ONLY"));
 
         let mut read_only = ready;
         press_consumed(&mut read_only, KeyCode::Char('d'));
@@ -25539,8 +26224,17 @@ mod tests {
     #[test]
     fn stale_and_signed_proposals_are_not_accepted_from_dashboard() {
         let mut stale = WorkspaceDashboard {
+            notes: vec![test_saved_note(
+                "note-1",
+                "Visit note",
+                "Saved body",
+                "draft",
+                3,
+            )],
             draft_note: NoteDraft {
                 id: Some("note-1".to_string()),
+                title: "Visit note".to_string(),
+                body: "Saved body".to_string(),
                 current_revision: 3,
                 ..NoteDraft::default()
             },
@@ -25554,8 +26248,17 @@ mod tests {
         assert!(stale.status.contains("stale"));
 
         let mut signed = WorkspaceDashboard {
+            notes: vec![test_saved_note(
+                "note-1",
+                "Visit note",
+                "Signed saved body",
+                "signed",
+                3,
+            )],
             draft_note: NoteDraft {
                 id: Some("note-1".to_string()),
+                title: "Visit note".to_string(),
+                body: "Signed saved body".to_string(),
                 status: "signed".to_string(),
                 current_revision: 3,
                 ..NoteDraft::default()
@@ -26944,6 +27647,20 @@ mod tests {
         }
     }
 
+    fn test_saved_note(
+        id: &str,
+        title: &str,
+        body: &str,
+        status: &str,
+        current_revision: i64,
+    ) -> WorkspaceNote {
+        let mut note = test_note(id, title, "daily", status, 1);
+        note.encounter_id = None;
+        note.body = body.to_string();
+        note.current_revision = current_revision;
+        note
+    }
+
     fn test_task(id: &str, title: &str, status: WorkspaceTaskStatus) -> WorkspaceTask {
         WorkspaceTask {
             id: id.to_string(),
@@ -27734,6 +28451,13 @@ mod tests {
             0,
             "Fake proposed replacement note body.",
         ));
+        proposal_draft.notes = vec![test_saved_note(
+            "note-1",
+            "Visit note",
+            "Fake human-entered visit note body.",
+            "draft",
+            0,
+        )];
         proposal_draft.execute_workspace_command(":workflow proposals");
 
         let mut addendum_draft = medical_recursive_result_dashboard(true);
@@ -27944,6 +28668,13 @@ mod tests {
             "note-1",
             0,
             "Fake proposed replacement note body.",
+        )];
+        dashboard.notes = vec![test_saved_note(
+            "note-1",
+            "Visit note",
+            "Fake human-entered visit note body.",
+            "draft",
+            0,
         )];
         dashboard.patient_safety_items = vec![WorkspacePatientSafetyItem {
             id: "safety-1".to_string(),

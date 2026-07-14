@@ -271,7 +271,7 @@ impl WorkspaceDraftState {
         &mut self,
         token: WorkspaceDraftGenerationToken,
         message: String,
-        now: Instant,
+        _now: Instant,
     ) -> Result<(), WorkspaceDraftError> {
         if token.scope_generation != self.scope_generation {
             return Err(WorkspaceDraftError::StaleGeneration);
@@ -285,9 +285,10 @@ impl WorkspaceDraftState {
             return Err(WorkspaceDraftError::StaleGeneration);
         }
         self.last_failure = Some((token, message));
-        if self.has_uncheckpointed_changes() {
-            self.debounce_deadline = Some(now + WORKSPACE_DRAFT_AUTOSAVE_DELAY);
-        }
+        // A durable-store failure must not create an unbounded autosave/RPC loop.
+        // Keep the generation retryable for an explicit focus/save boundary, but
+        // pause idle retries until another edit establishes a fresh deadline.
+        self.debounce_deadline = None;
         Ok(())
     }
 
@@ -417,9 +418,7 @@ impl WorkspaceDraftState {
         error: &WorkspaceDraftError,
     ) {
         self.last_failure = Some((token, error.to_string()));
-        if self.has_uncheckpointed_changes() {
-            self.debounce_deadline = Some(Instant::now() + WORKSPACE_DRAFT_AUTOSAVE_DELAY);
-        }
+        self.debounce_deadline = None;
     }
 
     fn reset_scope(&mut self, client_id: Option<String>) {

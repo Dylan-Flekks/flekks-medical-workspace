@@ -17,19 +17,19 @@ Patient: Jordan Patient  DOB: blank  MRN: blank  Contact: Missing contact  Cover
 └────────────────────────────┘┌Note Title──────────────────────────────────────────────────────────────────────────────┐
 ┌Patient Notes───────────────┐│Visit note                                                                              │
 │Patient Notes               │└────────────────────────────────────────────────────────────────────────────────────────┘
-│  New note                  │┌Note Body───────────────────────────────────────────────────────────────────────────────┐
-│  No patient notes yet. Use ││Assessment: improving gait tolerance.                                                   │
-│:note new.                  ││Plan: continue current program.                                                         │
-│  Medical, communication,   ││                                                                                        │
-│and admin notes appear here.││                                                                                        │
+│  Medical Notes             │┌Note Body───────────────────────────────────────────────────────────────────────────────┐
+│> daily  1970-01-01  Visit  ││Assessment: improving gait tolerance.                                                   │
+│note [draft]                ││Plan: continue current program.                                                         │
+│                            ││                                                                                        │
+│                            ││                                                                                        │
 └────────────────────────────┘│                                                                                        │
 ┌Uploaded Documents──────────┐│                                                                                        │
 │Uploaded Documents          ││                                                                                        │
 │No files yet                │└────────────────────────────────────────────────────────────────────────────────────────┘
 │Paste/drop JPG/PDF. S...    │┌Agent Recommendation────────────────────────────────────────────────────────────────────┐
 │                            ││Pending Proposal Changeset                                                              │
-│                            ││Review state: READY · proposal base matches current r3                                  │
-│                            ││  Guard: note r3 · Reason: tighten wording                                              │
+│                            ││Review state: READY · proposal base matches saved canonical r3                          │
+│                            ││  Guard: proposal base r3 · saved canonical r3                                          │
 │                            ││  Proposed: Assessment: gait tolerance improved with cueing. Plan: progress w...        │
 │                            ││  ● Tab to Agent Work for full text · :proposal accept | :proposal decline              │
 └────────────────────────────┘└────────────────────────────────────────────────────────────────────────────────────────┘

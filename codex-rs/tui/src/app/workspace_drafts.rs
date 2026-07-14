@@ -2,10 +2,10 @@ use super::*;
 use crate::workspace_draft::MEDICAL_WORKSPACE_DRAFT_ACTOR;
 use crate::workspace_draft::MedicalWorkspaceWorkingDraftV1;
 use crate::workspace_draft::RecoverableMedicalWorkspaceDraft;
-use crate::workspace_draft::WORKSPACE_DRAFT_AUTOSAVE_DELAY;
 use crate::workspace_draft::WorkspaceDraftCheckpointStart;
 use crate::workspace_draft::WorkspaceDraftCheckpointTrigger;
 use crate::workspace_draft::WorkspaceDraftCloseDisposition;
+use crate::workspace_draft::WorkspaceDraftError;
 use crate::workspace_draft::WorkspaceDraftGenerationToken;
 use crate::workspace_draft::WorkspaceDraftState;
 use codex_app_server_protocol::WorkspaceDraftSessionListParams;
@@ -34,10 +34,70 @@ struct WorkspaceDraftTimerRequest {
     delay: Duration,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum WorkspaceDraftRecoveryMode {
+    #[default]
+    ColdStart,
+    Navigation,
+}
+
+fn select_workspace_draft_recovery(
+    current: &MedicalWorkspaceWorkingDraftV1,
+    recoveries: Vec<RecoverableMedicalWorkspaceDraft>,
+    mode: WorkspaceDraftRecoveryMode,
+) -> std::result::Result<Option<RecoverableMedicalWorkspaceDraft>, WorkspaceDraftError> {
+    let same_scope = recoveries
+        .into_iter()
+        .filter(|recovery| {
+            recovery.matches_note_scope(
+                current.note.note_id.as_deref(),
+                current.note.encounter_id.as_deref(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let exact = same_scope
+        .iter()
+        .filter(|recovery| {
+            recovery.matches_working_note_scope(
+                current.note.note_id.as_deref(),
+                current.note.encounter_id.as_deref(),
+                &current.note.working_note_id,
+            )
+        })
+        .collect::<Vec<_>>();
+
+    match exact.as_slice() {
+        [] => {}
+        [recovery] => return Ok(Some((*recovery).clone())),
+        _ => {
+            return Err(WorkspaceDraftError::InvalidRecovery(format!(
+                "{} active local drafts match working note ID {}; none was selected",
+                exact.len(),
+                current.note.working_note_id
+            )));
+        }
+    }
+
+    if mode == WorkspaceDraftRecoveryMode::Navigation {
+        return Ok(None);
+    }
+
+    match same_scope.as_slice() {
+        [] => Ok(None),
+        [recovery] => Ok(Some(recovery.clone())),
+        _ => Err(WorkspaceDraftError::InvalidRecovery(format!(
+            "{} active local drafts match this note and encounter but not working note ID {}; none was selected",
+            same_scope.len(),
+            current.note.working_note_id
+        ))),
+    }
+}
+
 #[derive(Debug, Default)]
 pub(super) struct WorkspaceDraftRuntime {
     enabled: bool,
     recovery_discovery_complete: bool,
+    recovery_mode: WorkspaceDraftRecoveryMode,
     state: WorkspaceDraftState,
     scope: Option<WorkspaceDraftScope>,
     observed: Option<MedicalWorkspaceWorkingDraftV1>,
@@ -181,6 +241,39 @@ impl App {
         &mut self,
         app_server: &mut AppServerSession,
     ) {
+        self.initialize_workspace_draft_recovery_with_mode(
+            app_server,
+            WorkspaceDraftRecoveryMode::ColdStart,
+        )
+        .await;
+    }
+
+    pub(super) async fn initialize_workspace_draft_recovery_after_navigation(
+        &mut self,
+        app_server: &mut AppServerSession,
+    ) {
+        self.initialize_workspace_draft_recovery_with_mode(
+            app_server,
+            WorkspaceDraftRecoveryMode::Navigation,
+        )
+        .await;
+    }
+
+    pub(super) async fn retry_workspace_draft_recovery(
+        &mut self,
+        app_server: &mut AppServerSession,
+    ) {
+        let mode = self.workspace_draft_runtime.recovery_mode;
+        self.initialize_workspace_draft_recovery_with_mode(app_server, mode)
+            .await;
+    }
+
+    async fn initialize_workspace_draft_recovery_with_mode(
+        &mut self,
+        app_server: &mut AppServerSession,
+        mode: WorkspaceDraftRecoveryMode,
+    ) {
+        self.workspace_draft_runtime.recovery_mode = mode;
         self.workspace_draft_runtime.enabled = !app_server.uses_remote_workspace();
         self.workspace_draft_runtime.recovery_discovery_complete = false;
         let current = match self.current_medical_working_draft() {
@@ -211,7 +304,8 @@ impl App {
         }
 
         let mut cursor = None;
-        let recovery = loop {
+        let mut recoveries = Vec::new();
+        loop {
             let response = match app_server
                 .workspace_draft_session_list(WorkspaceDraftSessionListParams {
                     client_id: current.client_id.clone(),
@@ -229,7 +323,6 @@ impl App {
                     return;
                 }
             };
-            let mut recoveries = Vec::with_capacity(response.data.len());
             for session in response.data {
                 let recovery = match RecoverableMedicalWorkspaceDraft::try_from(session) {
                     Ok(recovery) => recovery,
@@ -242,16 +335,24 @@ impl App {
                 };
                 recoveries.push(recovery);
             }
-            let matching = recoveries.into_iter().find(|recovery| {
-                recovery.matches_note_scope(
-                    current.note.note_id.as_deref(),
-                    current.note.encounter_id.as_deref(),
-                )
-            });
-            if matching.is_some() || response.next_cursor.is_none() {
-                break matching;
+            let Some(next_cursor) = response.next_cursor else {
+                break;
+            };
+            cursor = Some(next_cursor);
+        }
+        let recovery = match select_workspace_draft_recovery(&current, recoveries, mode) {
+            Ok(recovery) => recovery,
+            Err(error) => {
+                self.set_workspace_draft_message(Some(format!(
+                    "Local recovery is ambiguous; no draft was selected and new checkpoints are paused: {error}"
+                )));
+                if let Some(dashboard) = self.workspace_dashboard.as_mut() {
+                    dashboard.set_status(
+                        "Recovery paused: multiple active local drafts match this note; none was applied.",
+                    );
+                }
+                return;
             }
-            cursor = response.next_cursor;
         };
         let Some(recovery) = recovery else {
             self.workspace_draft_runtime.recovery_discovery_complete = true;
@@ -260,6 +361,36 @@ impl App {
             ));
             return;
         };
+        if mode == WorkspaceDraftRecoveryMode::ColdStart
+            && recovery.draft.note.working_note_id != current.note.working_note_id
+        {
+            let Some(dashboard) = self.workspace_dashboard.as_mut() else {
+                self.set_workspace_draft_message(Some(
+                    "Local recovery could not bind its unique working-note identity because the workspace dashboard is closed."
+                        .to_string(),
+                ));
+                return;
+            };
+            if let Err(error) = dashboard.bind_cold_start_recovery_identity(&recovery.draft) {
+                dashboard.set_draft_persistence_message(Some(format!(
+                    "Local recovery could not bind its unique working-note identity safely; no draft was selected and new checkpoints are paused: {error}"
+                )));
+                dashboard.set_status(
+                    "Recovery paused: the unique local draft identity could not be verified; nothing was applied.",
+                );
+                return;
+            }
+            let rebound = match self.current_medical_working_draft() {
+                Ok(rebound) => rebound,
+                Err(error) => {
+                    self.set_workspace_draft_message(Some(format!(
+                        "Local recovery could not confirm its rebound working-note identity; no draft was selected and new checkpoints are paused: {error}"
+                    )));
+                    return;
+                }
+            };
+            self.workspace_draft_runtime.attach_baseline(rebound);
+        }
         if let Err(error) = self.workspace_draft_runtime.state.offer_recovery(recovery) {
             self.set_workspace_draft_message(Some(format!(
                 "Local recovery could not be offered safely: {error}"
@@ -315,14 +446,14 @@ impl App {
         &mut self,
         app_server: &mut AppServerSession,
         token: WorkspaceDraftGenerationToken,
-    ) {
+    ) -> bool {
         if !self.workspace_draft_runtime.enabled
             || !self.workspace_draft_runtime.recovery_discovery_complete
             || !self
                 .workspace_draft_runtime
                 .take_fired_autosave_timer(token)
         {
-            return;
+            return false;
         }
         if !self.workspace_draft_runtime.state.autosave_is_due(token) {
             if let Some(remaining) = self.workspace_draft_runtime.state.autosave_remaining(token) {
@@ -334,7 +465,7 @@ impl App {
                     },
                 );
             }
-            return;
+            return false;
         }
         if let Err(error) = self
             .persist_workspace_draft_checkpoint(
@@ -345,16 +476,10 @@ impl App {
             .await
         {
             self.set_workspace_draft_message(Some(format!(
-                "Local recovery checkpoint failed; working state remains in memory: {error}"
+                "Local recovery checkpoint failed; working state remains in memory. Automatic retry is paused until the next edit, focus change, or explicit save: {error}"
             )));
-            self.workspace_draft_runtime.schedule_autosave_timer(
-                self.app_event_tx.clone(),
-                WorkspaceDraftTimerRequest {
-                    token,
-                    delay: WORKSPACE_DRAFT_AUTOSAVE_DELAY,
-                },
-            );
         }
+        true
     }
 
     pub(super) async fn handle_workspace_draft_focus_checkpoint(

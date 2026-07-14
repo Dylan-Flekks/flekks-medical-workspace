@@ -82,8 +82,6 @@ use codex_app_server_protocol::TurnStatus;
 use codex_app_server_protocol::UserInput;
 use codex_app_server_protocol::UserInput as AppServerUserInput;
 use codex_app_server_protocol::WarningNotification;
-use codex_app_server_protocol::WorkspaceAgentContextCategory;
-use codex_app_server_protocol::WorkspaceAgentRunContextReadParams;
 use codex_app_server_protocol::WorkspaceAgentRunListParams;
 use codex_app_server_protocol::WorkspaceAgentRunSourceListParams;
 use codex_app_server_protocol::WorkspaceAgentRunStartParams;
@@ -6634,12 +6632,6 @@ fn medical_workspace_first_eval_round_trip_stays_packet_scoped_and_review_pendin
         app.workspace_dashboard_visible = true;
         let expected_run_provider = app.chat_widget.config_ref().model_provider_id.clone();
         let expected_run_model = app.chat_widget.current_model().to_string();
-        let expected_run_source_thread_id = app
-            .active_thread_id
-            .as_ref()
-            .map(ToString::to_string)
-            .or_else(|| app.chat_widget.thread_id().map(|id| id.to_string()));
-
         app.send_workspace_context_to_agent(&mut app_server).await?;
 
         assert!(!app.workspace_dashboard_active());
@@ -6676,13 +6668,47 @@ fn medical_workspace_first_eval_round_trip_stays_packet_scoped_and_review_pendin
             .into_iter()
             .next()
             .expect("handoff run");
-        let progress_sources = app_server
-            .workspace_agent_run_context_read(WorkspaceAgentRunContextReadParams {
-                run_id: handoff_run.id.clone(),
-                category: WorkspaceAgentContextCategory::ProgressNotes,
-                limit: Some(10),
+        let capture_thread_id = handoff_run
+            .source_thread_id
+            .clone()
+            .expect("handoff run should be bound to the active thread");
+        let capture_turn_id = "synthetic-medical-turn";
+        let execution = codex_state::WorkspaceAgentExecutionBinding {
+            run_id: handoff_run.id.clone(),
+            source_thread_id: capture_thread_id.clone(),
+            source_turn_id: capture_turn_id.to_string(),
+            provider: expected_run_provider.clone(),
+            model: expected_run_model.clone(),
+        };
+        // The app-server integration suite exercises the real WCO turn and tool. This TUI
+        // round-trip fixture binds the same durable execution identity before it feeds the
+        // resulting notifications through the capture UI.
+        let state_db = codex_state::StateRuntime::init(
+            app.config.sqlite_home.clone(),
+            app.config.model_provider_id.clone(),
+        )
+        .await
+        .expect("workspace state should open for a bound-turn fixture");
+        state_db
+            .workspace()
+            .claim_agent_turn(codex_state::WorkspaceAgentTurnClaim {
+                execution: execution.clone(),
+                prompt: composer.clone(),
             })
-            .await?
+            .await
+            .expect("the generated handoff should claim its exact synthetic turn");
+        let progress_sources = state_db
+            .workspace()
+            .read_authorized_agent_context_for_execution(
+                codex_state::WorkspaceAgentContextReadRequest {
+                    run_id: handoff_run.id.clone(),
+                    category: "progress_notes".to_string(),
+                    max_records: Some(10),
+                },
+                execution.clone(),
+            )
+            .await
+            .expect("the claimed turn should read authorized progress notes")
             .sources;
         assert!(progress_sources.iter().any(|source| {
             source.source_entity_id == prior_progress_note.id
@@ -6690,23 +6716,24 @@ fn medical_workspace_first_eval_round_trip_stays_packet_scoped_and_review_pendin
                     .snapshot_json
                     .contains("AUTHORIZED_PRIOR_PROGRESS_NOTE_SENTINEL")
         }));
-        let visit_sources = app_server
-            .workspace_agent_run_context_read(WorkspaceAgentRunContextReadParams {
-                run_id: handoff_run.id,
-                category: WorkspaceAgentContextCategory::VisitHistory,
-                limit: Some(10),
-            })
-            .await?
+        let visit_sources = state_db
+            .workspace()
+            .read_authorized_agent_context_for_execution(
+                codex_state::WorkspaceAgentContextReadRequest {
+                    run_id: handoff_run.id,
+                    category: "visit_history".to_string(),
+                    max_records: Some(10),
+                },
+                execution,
+            )
+            .await
+            .expect("the claimed turn should read authorized visit history")
             .sources;
         assert!(
             visit_sources
                 .iter()
                 .any(|source| source.source_entity_id == prior_encounter.id)
         );
-        let capture_thread_id = expected_run_source_thread_id
-            .clone()
-            .unwrap_or_else(|| "synthetic-medical-thread".to_string());
-        let capture_turn_id = "synthetic-medical-turn";
         let user_item = ThreadItem::UserMessage {
             id: "synthetic-medical-user-message".to_string(),
             client_id: None,
@@ -8035,9 +8062,9 @@ fn workspace_context_packet_replay_stays_historical_after_daily_chart_changes() 
                 idempotency_key: "historical-replay-test-v1".to_string(),
                 client_id: Some(patient.id.clone()),
                 context_envelope_sha256: Some(packet.context_envelope_sha256.clone()),
-                provider: None,
-                model: None,
-                source_thread_id: None,
+                provider: Some("test-provider".to_string()),
+                model: Some("test-model".to_string()),
+                source_thread_id: Some("thread-historical-replay".to_string()),
                 source_turn_id: None,
             })
             .await?;
@@ -8501,9 +8528,9 @@ fn workspace_context_packet_replay_is_packet_scoped_and_hash_guarded() -> Result
                 idempotency_key: "packet-scoped-replay-test-v1".to_string(),
                 client_id: Some(client_a.id.clone()),
                 context_envelope_sha256: Some(packet_a.context_envelope_sha256.clone()),
-                provider: None,
-                model: None,
-                source_thread_id: None,
+                provider: Some("test-provider".to_string()),
+                model: Some("test-model".to_string()),
+                source_thread_id: Some("thread-packet-scoped-replay".to_string()),
                 source_turn_id: None,
             })
             .await?;
