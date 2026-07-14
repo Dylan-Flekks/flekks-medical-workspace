@@ -28,7 +28,10 @@ The project is intentionally public before it is finished so contributors can he
 
 - Enforce synthetic workspace mode ([#10](https://github.com/Dylan-Flekks/flekks-medical-workspace/issues/10)).
 - Remove absolute paths from agent-visible packets.
-- Add purge, retention, permissions, and bounded file processing.
+- Dedicated synthetic workspace-database health reporting and dry-run-first whole-store purge are
+  implemented; extend health checks to every allowed Codex SQLite database, then extend lifecycle
+  coverage to Codex rollouts/logs, managed files, derivatives, backups, retention schedules, and a
+  complete erasure receipt.
 - Design authenticated identity, encryption, access control, and telemetry isolation before any real-data discussion ([#12](https://github.com/Dylan-Flekks/flekks-medical-workspace/issues/12)).
 - Reconcile runs abandoned by abrupt process termination without mislabeling concurrent work.
 

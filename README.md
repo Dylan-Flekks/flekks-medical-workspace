@@ -32,6 +32,10 @@ See [Agent proposal workflow](docs/agent-proposal-workflow.md),
 - Local SQLite patient, note, encounter, task, file-metadata, safety, packet, result, proposal, and audit persistence.
 - `/workspacemedical` refuses to open against a remote app-server store; the current medical-data
   path is intentionally local-only.
+- The supported launcher marks and exclusively locks its dedicated synthetic SQLite home. A
+  read-only store check verifies the synthetic policy, expected workspace table-name inventory,
+  `workspace_1.sqlite` quick-check and foreign keys, and filesystem permissions. It also reports
+  free space and active/stale lock state.
 - Structured patient display and legal identity, contact methods, mailing address, emergency contact,
   preferred language, interpreter need, and local contact notes.
 - Ordered primary, secondary, and tertiary coverage records with optimistic version guards and a
@@ -146,6 +150,45 @@ just medical-workspace
 
 If another checkout or worktree owns the large stale target, run `cargo clean` against that
 checkout's `codex-rs/Cargo.toml` instead. Do not delete an unfamiliar database or target directory.
+
+### Inspect or reset the synthetic SQLite store
+
+Run the read-only health report while the workspace is closed:
+
+```bash
+just medical-workspace-store-status
+```
+
+The checker refuses ordinary `CODEX_HOME`, missing or altered store markers, unclassified stores,
+workspace table-name inventory drift, unsafe symlinks, `workspace_1.sqlite` quick-check failures,
+and workspace foreign-key failures. It inventories every file in the dedicated store, but its
+database health claims are intentionally limited to `workspace_1.sqlite`; other allowed Codex
+SQLite files are included in the purge inventory, not reported as integrity-checked. It reports
+free space, overly broad permissions, unexpected files, and stale launcher locks instead of
+repairing or deleting them.
+
+The purge command is a dry run unless both an exact canonical path and an absolute start-receipt
+path outside the store are supplied:
+
+```bash
+just medical-workspace-store-purge
+
+# Only after reviewing the printed path and inventory:
+just medical-workspace-store-purge \
+  --confirm "$HOME/.codex/flekks-medical-synthetic" \
+  --receipt "$HOME/flekks-medical-purge-receipt.json"
+```
+
+Actual purge is refused while any launcher lock exists, when unexpected top-level content or a
+cross-device descendant is present, or when either external receipt target already exists. The
+receipt parent must already be a non-symlink directory. Purge creates the requested durable
+start receipt without overwriting anything, removes the store, then creates a separate
+`<receipt>.complete` file with the completion record. It never rewrites either receipt. Purge
+acquires the same exclusive store lock as the launcher, revalidates the store while holding it,
+removes the entire dedicated SQLite home, and verifies that it is gone; the next supported launch
+creates a new empty store. It never deletes ordinary `CODEX_HOME`. Codex rollouts or logs retained
+there are outside this reset boundary and must be reviewed separately—do not assume this command
+is a complete regulated-data erasure workflow.
 
 ## Keyboard quick start
 

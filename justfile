@@ -23,6 +23,18 @@ codex *args:
 medical-workspace *args:
     "{{ justfile_directory() }}/scripts/run_medical_workspace.sh" "$@"
 
+# Inspect the dedicated synthetic medical-workspace SQLite store without changing it.
+[no-cd]
+[unix]
+medical-workspace-store-status:
+    "{{ python }}" "{{ justfile_directory() }}/scripts/medical_workspace_store.py" status
+
+# Dry-run by default. Actual deletion requires exact --confirm and an external --receipt path.
+[no-cd]
+[unix]
+medical-workspace-store-purge *args:
+    "{{ python }}" "{{ justfile_directory() }}/scripts/medical_workspace_store.py" purge "$@"
+
 # `codex exec`
 exec *args:
     cargo run --bin codex -- exec {args}
