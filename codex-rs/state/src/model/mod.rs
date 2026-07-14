@@ -134,6 +134,7 @@ pub use workspace_guides::WorkspaceGuideRunStart;
 pub use workspace_guides::WorkspaceGuideRunStatus;
 pub use workspace_policy::WorkspaceDataClassification;
 pub use workspace_policy::WorkspaceDataPolicyStatus;
+pub use workspace_policy::WorkspaceSyntheticProvisionError;
 pub use workspace_policy::WorkspaceSyntheticProvisionOutcome;
 
 pub(crate) use agent_job::AgentJobItemRow;

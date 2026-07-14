@@ -22912,6 +22912,49 @@
         ],
         "type": "string"
       },
+      "WorkspaceDataClassification": {
+        "enum": [
+          "unclassified",
+          "synthetic"
+        ],
+        "type": "string"
+      },
+      "WorkspaceDataPolicyProvisionOutcome": {
+        "enum": [
+          "provisioned",
+          "alreadySynthetic"
+        ],
+        "type": "string"
+      },
+      "WorkspaceDataPolicyStatus": {
+        "properties": {
+          "classifiedAt": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "classifiedBy": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "dataClassification": {
+            "$ref": "#/definitions/v2/WorkspaceDataClassification"
+          },
+          "schemaVersion": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "dataClassification",
+          "schemaVersion"
+        ],
+        "type": "object"
+      },
       "WorkspaceDocument": {
         "properties": {
           "archivedAt": {

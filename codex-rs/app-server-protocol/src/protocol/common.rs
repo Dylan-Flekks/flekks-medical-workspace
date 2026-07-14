@@ -720,6 +720,18 @@ client_request_definitions! {
         serialization: global_shared_read("workspace"),
         response: v2::WorkspaceContextGetResponse,
     },
+    #[experimental("workspace/dataPolicy/read")]
+    WorkspaceDataPolicyRead => "workspace/dataPolicy/read" {
+        params: v2::WorkspaceDataPolicyReadParams,
+        serialization: global_shared_read("workspace"),
+        response: v2::WorkspaceDataPolicyReadResponse,
+    },
+    #[experimental("workspace/dataPolicy/provision")]
+    WorkspaceDataPolicyProvision => "workspace/dataPolicy/provision" {
+        params: v2::WorkspaceDataPolicyProvisionParams,
+        serialization: global("workspace"),
+        response: v2::WorkspaceDataPolicyProvisionResponse,
+    },
     #[experimental("workspace/draft/checkpoint/create")]
     WorkspaceDraftCheckpointCreate => "workspace/draft/checkpoint/create" {
         params: v2::WorkspaceDraftCheckpointCreateParams,

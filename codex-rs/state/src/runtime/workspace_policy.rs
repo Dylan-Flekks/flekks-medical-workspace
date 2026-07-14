@@ -51,15 +51,21 @@ impl WorkspaceStore {
     pub async fn provision_synthetic_workspace(
         &self,
         classified_by: &str,
-    ) -> anyhow::Result<crate::WorkspaceSyntheticProvisionOutcome> {
+    ) -> Result<crate::WorkspaceSyntheticProvisionOutcome, crate::WorkspaceSyntheticProvisionError>
+    {
         let classified_by = classified_by.trim();
         if classified_by.is_empty() {
-            anyhow::bail!("workspace synthetic data classification requires an attestation source");
+            return Err(crate::WorkspaceSyntheticProvisionError::Validation {
+                message: "workspace synthetic data classification requires an attestation source"
+                    .to_string(),
+            });
         }
         if classified_by.len() > MAX_CLASSIFIED_BY_BYTES {
-            anyhow::bail!(
-                "workspace synthetic data attestation source exceeds the {MAX_CLASSIFIED_BY_BYTES} byte limit"
-            );
+            return Err(crate::WorkspaceSyntheticProvisionError::Validation {
+                message: format!(
+                    "workspace synthetic data attestation source exceeds the {MAX_CLASSIFIED_BY_BYTES} byte limit"
+                ),
+            });
         }
 
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
@@ -74,9 +80,11 @@ impl WorkspaceStore {
             crate::WorkspaceDataClassification::Unclassified => {}
         }
         if workspace_has_domain_data(&mut tx).await? {
-            anyhow::bail!(
-                "workspace data classification cannot change after workspace records exist"
-            );
+            return Err(crate::WorkspaceSyntheticProvisionError::Validation {
+                message:
+                    "workspace data classification cannot change after workspace records exist"
+                        .to_string(),
+            });
         }
 
         let updated = sqlx::query(
@@ -87,7 +95,10 @@ impl WorkspaceStore {
         .execute(&mut *tx)
         .await?;
         if updated.rows_affected() != 1 {
-            anyhow::bail!("workspace data policy changed concurrently or is not canonical");
+            return Err(crate::WorkspaceSyntheticProvisionError::Conflict {
+                message: "workspace data policy changed concurrently or is not canonical"
+                    .to_string(),
+            });
         }
         let status = read_policy(&mut tx).await?;
         tx.commit().await?;

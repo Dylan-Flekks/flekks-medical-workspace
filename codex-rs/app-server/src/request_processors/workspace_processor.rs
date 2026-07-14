@@ -111,6 +111,8 @@ mod chart_commit;
 mod client_patch;
 #[path = "workspace_coverage_processor.rs"]
 mod coverage;
+#[path = "workspace_data_policy_processor.rs"]
+mod data_policy;
 #[path = "workspace_draft_processor.rs"]
 mod drafts;
 
@@ -125,11 +127,19 @@ const AGENT_VISIBLE_PACKET_SAFETY_CONSTRAINTS: &[&str] = &[
 #[derive(Clone)]
 pub(crate) struct WorkspaceRequestProcessor {
     state_db: Option<StateDbHandle>,
+    synthetic_provisioning_authority: data_policy::WorkspaceSyntheticProvisioningAuthority,
 }
 
 impl WorkspaceRequestProcessor {
-    pub(crate) fn new(state_db: Option<StateDbHandle>) -> Self {
-        Self { state_db }
+    pub(crate) fn new(
+        state_db: Option<StateDbHandle>,
+        config: &codex_core::config::Config,
+    ) -> Self {
+        Self {
+            state_db,
+            synthetic_provisioning_authority:
+                data_policy::WorkspaceSyntheticProvisioningAuthority::from_config(config),
+        }
     }
 
     pub(crate) async fn client_list(

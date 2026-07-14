@@ -526,6 +526,9 @@ export type { WorkspaceCoverageMatchResult } from "./WorkspaceCoverageMatchResul
 export type { WorkspaceCoverageUpsertParams } from "./WorkspaceCoverageUpsertParams";
 export type { WorkspaceCoverageVerification } from "./WorkspaceCoverageVerification";
 export type { WorkspaceCoverageVerificationSubject } from "./WorkspaceCoverageVerificationSubject";
+export type { WorkspaceDataClassification } from "./WorkspaceDataClassification";
+export type { WorkspaceDataPolicyProvisionOutcome } from "./WorkspaceDataPolicyProvisionOutcome";
+export type { WorkspaceDataPolicyStatus } from "./WorkspaceDataPolicyStatus";
 export type { WorkspaceDocument } from "./WorkspaceDocument";
 export type { WorkspaceDraftCheckpoint } from "./WorkspaceDraftCheckpoint";
 export type { WorkspaceDraftSession } from "./WorkspaceDraftSession";

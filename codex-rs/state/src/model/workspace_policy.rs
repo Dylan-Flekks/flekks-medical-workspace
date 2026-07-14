@@ -37,3 +37,38 @@ pub enum WorkspaceSyntheticProvisionOutcome {
     Provisioned(WorkspaceDataPolicyStatus),
     AlreadySynthetic(WorkspaceDataPolicyStatus),
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorkspaceSyntheticProvisionError {
+    Validation { message: String },
+    Conflict { message: String },
+    Storage { message: String },
+}
+
+impl std::fmt::Display for WorkspaceSyntheticProvisionError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Validation { message }
+            | Self::Conflict { message }
+            | Self::Storage { message } => formatter.write_str(message),
+        }
+    }
+}
+
+impl std::error::Error for WorkspaceSyntheticProvisionError {}
+
+impl From<anyhow::Error> for WorkspaceSyntheticProvisionError {
+    fn from(error: anyhow::Error) -> Self {
+        Self::Storage {
+            message: error.to_string(),
+        }
+    }
+}
+
+impl From<sqlx::Error> for WorkspaceSyntheticProvisionError {
+    fn from(error: sqlx::Error) -> Self {
+        Self::Storage {
+            message: error.to_string(),
+        }
+    }
+}
