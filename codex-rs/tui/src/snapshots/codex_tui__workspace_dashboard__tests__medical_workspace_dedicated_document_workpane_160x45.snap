@@ -1,0 +1,49 @@
+---
+source: tui/src/workspace_dashboard.rs
+expression: "render_dashboard_lines_at(&dashboard, 160, 45)"
+---
+Medical Workspace  Unsaved  SYNTHETIC DATA ONLY
+Patient: Jordan Patient  DOB: blank  MRN: blank  Contact: Missing contact  Coverage: Missing coverage  Encounter: No encounter
+┌Patient Directory─────────────┐┌Patient File Detail───────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│Local search: /               ││Uploaded Documents                                                                                                            │
+│0 active patients; local only ││  Chart Safe [Files] Agent Rev Lib PI Aud                                                                                     │
+│No saved patients yet.        ││  pt: Jordan Patient; DOB: DOB blank; preferred: preferred blank; Patient ID / MRN: Patient ID / MRN ...                      │
+│New patient: :patient new     ││  ● admin: Missing contact; emergency missing; Missing coverage                                                               │
+│                              ││  ● allergies: not recorded                                                                                                   │
+│                              ││  ● note: Visit note [draft r0]; unsaved; editable; unsigned; 0 addenda                                                       │
+│                              ││  ● next: Save file reference                                                                                                 │
+│                              ││  ● agent: pt ctx; 0F/0T/0C                                                                                                   │
+│                              ││Title: Outside referral PDF                                                                                                   │
+│                              ││Scope: patient                                                                                                                │
+│                              ││Kind: patient pdf                                                                                                             │
+│                              ││Drop or paste local file path: /tmp/fake-outside-referral.pdf                                                                 │
+│                              ││Tags:                                                                                                                         │
+│                              ││Source:                                                                                                                       │
+│                              ││Notes: Fake local file reference only; no parsing or upload.                                                                  │
+│                              ││  :file drop opens native JPG/PDF drop on macOS; path paste still works                                                       │
+│                              ││  no file copy/upload/OCR/transcription/parsing                                                                               │
+│                              ││                                                                                                                              │
+│                              ││  No file references yet. Focus Uploaded Documents, then drop/paste JPG/PDF.                                                  │
+│                              ││  :file drop/add/open/preview; Space includes for packet                                                                      │
+│                              ││  metadata only; no copy/upload/OCR/transcribe/parse                                                                          │
+│                              ││                                                                                                                              │
+│                              ││Ask Agent  :agent request                                                                                                     │
+└──────────────────────────────┘│  No instructions drafted. Write one before plan review.                                                                      │
+┌Patient Notes─────────────────┐│                                                                                                                              │
+│Patient Notes                 ││Medical Agent Plan  :agent send                                                                                               │
+│  New note                    ││  patient: Jordan Patient; note: Visit note [draft r0]                                                                        │
+│  No patient notes yet. Use   ││  instructions: No agent instructions yet                                                                                     │
+│:note new.                    ││  plan: Ctrl-G opens agent; inspect before submitting                                                                         │
+│  Medical, communication, and ││  Agent sees: this patient/note, request, selected files/text/clips/jobs                                                      │
+│admin notes appear here.      ││                                                                                                                              │
+│                              ││Agent Review  :agent inbox/result                                                                                             │
+│                              ││Returned Work                                                                                                                 │
+│                              ││  ● state: no Medical Agent Plan history recorded for this note                                                               │
+│                              ││Safe Actions                                                                                                                  │
+│                              ││  ● blocked: Submit Medical Agent Plan first                                                                                  │
+│                              ││                                                                                                                              │
+│                              ││Note Proposals                                                                                                                │
+│                              ││  no pending proposals  :proposal accept/decline/next                                                                         │
+│                              ││Addenda  :addendum start/save                                                                                                 │
+└──────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+Focus: Center | Mode: Chart editor | Keys: ↑/↓ field  Enter next  Ctrl-S save  Tab/⇧Tab pane  Ctrl-P commands | Next: Save file ref...

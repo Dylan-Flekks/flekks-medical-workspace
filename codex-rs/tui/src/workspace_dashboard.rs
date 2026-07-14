@@ -5,6 +5,7 @@ mod coverage;
 mod coverage_actions;
 mod coverage_render;
 mod footer;
+mod layout;
 mod patient_admin_fields;
 mod patient_admin_input;
 mod patient_admin_metadata;
@@ -140,6 +141,7 @@ use footer::compose_medical_footer;
 use footer::compose_mode_footer;
 use image::GenericImageView;
 use image::imageops::FilterType;
+use layout::MedicalDedicatedWorkpaneAreas;
 use patient_admin_fields::DemographicsField;
 use patient_admin_fields::PatientAdminEditMode;
 use patient_admin_fields::PatientAdminField;
@@ -3407,6 +3409,20 @@ impl WorkspaceDashboard {
             return self.focus;
         };
         let point = (scroll_event.column, scroll_event.row);
+        if self.uses_medical_dedicated_workpane_layout()
+            && let Some(areas) = MedicalDedicatedWorkpaneAreas::new(area)
+        {
+            if rect_contains(areas.clients, point) {
+                return WorkspaceFocus::Clients;
+            }
+            if rect_contains(areas.notes, point) {
+                return WorkspaceFocus::Notes;
+            }
+            if rect_contains(areas.workpane, point) {
+                return WorkspaceFocus::Workflow;
+            }
+            return self.focus;
+        }
         match WorkspaceLayoutMode::for_area(area) {
             WorkspaceLayoutMode::Large => {
                 let areas = MedicalLargeAreas::new(area);
@@ -7277,6 +7293,15 @@ impl WorkspaceDashboard {
             }
             return;
         }
+        if self.render_medical_dedicated_workpane(area, buf) {
+            if self.action_overlay_visible {
+                self.render_action_overlay(area, buf);
+            }
+            if self.command_input.is_some() {
+                self.render_command_palette(area, buf);
+            }
+            return;
+        }
         if self.render_medical_large_chart_workspace(area, buf) {
             if self.action_overlay_visible {
                 self.render_action_overlay(area, buf);
@@ -7296,15 +7321,6 @@ impl WorkspaceDashboard {
             return;
         }
         if self.render_medical_focus_first_workspace(area, buf) {
-            if self.action_overlay_visible {
-                self.render_action_overlay(area, buf);
-            }
-            if self.command_input.is_some() {
-                self.render_command_palette(area, buf);
-            }
-            return;
-        }
-        if self.render_medical_dedicated_workpane(area, buf) {
             if self.action_overlay_visible {
                 self.render_action_overlay(area, buf);
             }
@@ -7753,49 +7769,30 @@ impl WorkspaceDashboard {
         if !self.uses_medical_dedicated_workpane_layout() {
             return false;
         }
-        let mode = WorkspaceLayoutMode::for_area(area);
-        if mode == WorkspaceLayoutMode::Tiny {
+        let Some(areas) = MedicalDedicatedWorkpaneAreas::new(area) else {
             return false;
-        }
-        let vertical = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(if mode == WorkspaceLayoutMode::Compact {
-                    1
-                } else {
-                    2
-                }),
-                Constraint::Min(3),
-                Constraint::Length(1),
-            ])
-            .split(area);
+        };
         Paragraph::new(self.header_lines())
             .wrap(Wrap { trim: true })
-            .render(vertical[0], buf);
+            .render(areas.header, buf);
 
-        if mode == WorkspaceLayoutMode::Compact {
-            self.render_workflow(vertical[1], buf);
-        } else {
-            let columns = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([Constraint::Length(32), Constraint::Min(40)])
-                .split(vertical[1]);
-            let left = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
-                .split(columns[0]);
-            self.render_clients(left[0], buf);
-            self.render_notes(left[1], buf);
-            self.render_workflow(columns[1], buf);
+        if areas.clients.width > 0 && areas.clients.height > 0 {
+            self.render_clients(areas.clients, buf);
+            self.render_notes(areas.notes, buf);
         }
+        self.render_workflow(areas.workpane, buf);
 
-        Paragraph::new(self.status_line(vertical[2].width)).render(vertical[2], buf);
+        Paragraph::new(self.status_line(areas.status.width)).render(areas.status, buf);
         true
     }
 
     fn uses_medical_dedicated_workpane_layout(&self) -> bool {
         self.profile == WorkspaceProfile::Medical
             && matches!(self.workflow_section, MedicalWorkflowSection::Documents)
+            && !matches!(
+                self.focus,
+                WorkspaceFocus::Agent | WorkspaceFocus::PatientFiles
+            )
             && (self.workflow_section_has_active_editor()
                 || self.inspected_artifact_id.is_some()
                 || self.inspected_derivative_id.is_some()
@@ -7871,6 +7868,9 @@ impl WorkspaceDashboard {
             ));
         }
         if self.profile == WorkspaceProfile::Medical {
+            if self.uses_medical_dedicated_workpane_layout() {
+                return self.cursor_pos_medical_dedicated(area);
+            }
             match WorkspaceLayoutMode::for_area(area) {
                 WorkspaceLayoutMode::Large => return self.cursor_pos_medical_large(area),
                 WorkspaceLayoutMode::Medium => return self.cursor_pos_medical_medium(area),
@@ -7930,6 +7930,17 @@ impl WorkspaceDashboard {
             }
             WorkspaceFocus::Clients | WorkspaceFocus::Notes | WorkspaceFocus::PatientFiles => None,
         }
+    }
+
+    fn cursor_pos_medical_dedicated(&self, area: Rect) -> Option<(u16, u16)> {
+        if self.focus != WorkspaceFocus::Workflow {
+            return None;
+        }
+        let inner = inner_rect(MedicalDedicatedWorkpaneAreas::new(area)?.workpane);
+        if inner.width == 0 || inner.height == 0 {
+            return None;
+        }
+        self.cursor_pos_in_workflow_inner(inner)
     }
 
     fn cursor_pos_medical_large(&self, area: Rect) -> Option<(u16, u16)> {
@@ -9866,7 +9877,7 @@ impl WorkspaceDashboard {
     }
 
     fn header_lines(&self) -> Vec<Line<'static>> {
-        let mut lines = vec![Line::from(vec![
+        let mut title_spans = vec![
             Span::styled(
                 self.profile.header_title(),
                 Style::default()
@@ -9874,7 +9885,16 @@ impl WorkspaceDashboard {
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw(status_suffix(self.dirty)),
-        ])];
+        ];
+        if self.profile == WorkspaceProfile::Medical {
+            title_spans.push(Span::styled(
+                "  SYNTHETIC DATA ONLY",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
+        let mut lines = vec![Line::from(title_spans)];
         if self.profile == WorkspaceProfile::Medical {
             let admin = patient_admin_metadata_for_draft(&self.draft_client);
             let patient = self.draft_client.display_name.trim();
@@ -9911,9 +9931,14 @@ impl WorkspaceDashboard {
     }
 
     fn render_tiny(&self, area: Rect, buf: &mut Buffer) {
+        let title = if self.profile == WorkspaceProfile::Medical {
+            format!("{}  SYNTHETIC DATA ONLY", self.profile.header_title())
+        } else {
+            self.profile.header_title().to_string()
+        };
         Paragraph::new(vec![
             Line::from(Span::styled(
-                self.profile.header_title(),
+                title,
                 Style::default()
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),
@@ -19891,6 +19916,83 @@ mod tests {
     }
 
     #[test]
+    fn medical_dedicated_document_workpane_shares_render_cursor_and_mouse_geometry() {
+        let mut dashboard = medical_recursive_base_dashboard();
+        dashboard.set_document_draft_for_tests(
+            "patient pdf",
+            &"x".repeat(140),
+            "/tmp/fake-referral.pdf",
+            "Fake local file reference only.",
+        );
+        dashboard.set_workflow_section(MedicalWorkflowSection::Documents);
+        dashboard.document_field = DocumentField::Title;
+
+        for viewport in [
+            Rect::new(0, 0, 80, 20),
+            Rect::new(0, 0, 120, 32),
+            Rect::new(0, 0, 160, 45),
+        ] {
+            let areas = MedicalDedicatedWorkpaneAreas::new(viewport).expect("dedicated geometry");
+            let mut buf = Buffer::empty(viewport);
+            dashboard.render(viewport, &mut buf);
+            assert!(buffer_text(&buf, areas.workpane).contains("Patient File Detail"));
+            if areas.clients.width > 0 {
+                assert!(buffer_text(&buf, areas.clients).contains("Patient Directory"));
+                assert!(buffer_text(&buf, areas.notes).contains("Patient Notes"));
+                assert_eq!(
+                    dashboard.mouse_scroll_target(
+                        MouseScrollEvent {
+                            direction: MouseScrollDirection::Down,
+                            column: areas.clients.x + 1,
+                            row: areas.clients.y + 1,
+                        },
+                        Some(viewport),
+                    ),
+                    WorkspaceFocus::Clients
+                );
+                assert_eq!(
+                    dashboard.mouse_scroll_target(
+                        MouseScrollEvent {
+                            direction: MouseScrollDirection::Down,
+                            column: areas.notes.x + 1,
+                            row: areas.notes.y + 1,
+                        },
+                        Some(viewport),
+                    ),
+                    WorkspaceFocus::Notes
+                );
+            }
+
+            let cursor = dashboard
+                .cursor_pos(viewport)
+                .expect("active document field should expose a cursor");
+            assert!(rect_contains(inner_rect(areas.workpane), cursor));
+            assert_eq!(
+                dashboard.mouse_scroll_target(
+                    MouseScrollEvent {
+                        direction: MouseScrollDirection::Down,
+                        column: areas.workpane.x + 1,
+                        row: areas.workpane.y + 2,
+                    },
+                    Some(viewport),
+                ),
+                WorkspaceFocus::Workflow,
+                "pointer inside the visible workpane must not hit standard pane geometry"
+            );
+        }
+
+        let large_viewport = Rect::new(0, 0, 160, 45);
+        let standard_areas = MedicalLargeAreas::new(large_viewport);
+        let cursor = dashboard
+            .cursor_pos(large_viewport)
+            .expect("large document editor cursor");
+        assert!(
+            !rect_contains(inner_rect(standard_areas.active_work), cursor),
+            "long document title should use the visible dedicated workpane width: {cursor:?}"
+        );
+    }
+
+    #[test]
     fn medical_trackpad_scroll_burst_across_every_pane_stays_single_workspace() {
         let viewport = Rect::new(0, 0, 160, 45);
         let areas = MedicalLargeAreas::new(viewport);
@@ -24372,6 +24474,23 @@ mod tests {
         insta::assert_snapshot!(
             "medical_workspace_agent_composer_160x45",
             render_dashboard_lines_at(&composer, 160, 45)
+        );
+    }
+
+    #[test]
+    fn medical_dedicated_document_workpane_render_snapshot() {
+        let mut dashboard = medical_recursive_base_dashboard();
+        dashboard.set_document_draft_for_tests(
+            "patient pdf",
+            "Outside referral PDF",
+            "/tmp/fake-outside-referral.pdf",
+            "Fake local file reference only; no parsing or upload.",
+        );
+        dashboard.set_workflow_section(MedicalWorkflowSection::Documents);
+
+        insta::assert_snapshot!(
+            "medical_workspace_dedicated_document_workpane_160x45",
+            render_dashboard_lines_at(&dashboard, 160, 45)
         );
     }
 

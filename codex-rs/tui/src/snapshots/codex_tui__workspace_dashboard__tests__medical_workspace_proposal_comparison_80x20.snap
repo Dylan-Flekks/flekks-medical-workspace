@@ -2,7 +2,7 @@
 source: tui/src/workspace_dashboard.rs
 expression: "render_dashboard_lines_at(&dashboard, width, height)"
 ---
-Medical Workspace
+Medical Workspace  SYNTHETIC DATA ONLY
 Zones: Explorer > [Patient Chart] > Agent Work  Focus: Center
 ┌Patient Chart─────────────────────────────────────────────────────────────────┐
 │Current vs Proposed · Note Proposals · 1 pending proposals                    │
