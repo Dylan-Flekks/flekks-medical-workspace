@@ -9,32 +9,53 @@ This is an independent community project. It is not an official OpenAI product a
 
 ## Workspace Mode
 
-`/workspace-medical` is a persistent domain workspace, not a replacement name for ordinary Codex Plan Mode. Plan Mode makes one software task decision-complete. Workspace Mode maintains changing domain context over time and produces immutable, decision-complete context plans for individual audited runs.
+`/workspace-medical` is a persistent domain workspace built one level above ordinary Codex Plan
+Mode. Plan Mode makes one task decision-complete. Workspace Mode maintains changing patient context
+over time, gives each synthetic patient a dedicated database-backed Plan conversation, and produces
+immutable, decision-complete context plans for individual audited runs.
 
 ```text
-Living patient workspace -> frozen context plan -> master Codex run
-          ^                                           |
-          +------- human-reviewed recommendations <---+
+Living patient workspace -> checkpointed patient Plan -> reviewed plan revision
+          ^                       |                              |
+          |                 guided questions                    v
+          +---- human-reviewed recommendations <- optional master Codex handoff
 ```
 
 The medical workspace is organized into three zones:
 
 ```text
-Evidence / Chart Explorer | Canonical Human Chart | Context Plan / Agent Review
+Evidence / Chart Explorer | Canonical Human Chart | Plan with Codex
 ```
 
 - **Evidence / Explorer:** active and archived synthetic patients, demographics, safety, contacts, coverage, encounters, notes, patient files, tasks, and audit history.
 - **Canonical Chart:** human-controlled records, saved revisions, and clinician working drafts.
-- **Context Plan / Agent Review:** the current objective, selected evidence, readiness, frozen requests, run status, sources accessed, recommendations, provenance, and accept/reject history.
+- **Plan with Codex:** a focused `Chat / Context / Audit` rail containing the patient-scoped Plan
+  conversation, selected evidence, current/outdated plan revision, accessed-source provenance, and
+  human review history. It deliberately does not render parent-harness MCP, usage, or token chrome.
 
-The local Workspace Planner provides deterministic readiness guidance: it identifies missing
-context, records checkpoint-bound acknowledgements, and explains when a plan can be submitted. It
-does not perform the higher-capability patient analysis. The full Codex harness is launched from
-the frozen, authorized packet, can retrieve only packet-scoped sources through the audited reader,
-performs that run in the background, and returns evidence-linked work to the same workspace for
-review. The right pane moves from Context Plan to Codex Running to Agent Review; if its bound
-checkpoint no longer matches the living workspace, the prior run is marked Outdated. Prior
-submissions and results remain immutable for audit.
+The right rail runs a small, persistent version of the harness's real Plan workflow. It uses the
+same resolved Plan model and reasoning-effort settings as the parent harness, but a stricter tool
+surface: it can ask a focused question and read only patient/checkpoint-bound context through the
+audited `workspace_context_read` tool. It cannot execute commands, mutate or sign chart data,
+submit claims, or silently accept its own recommendations. Human and assistant messages, exact
+context reads, and published plan revisions are stored in local SQLite. If Codex asks a question,
+it appears as a normal saved response; answer in the composer to start a fresh persisted turn.
+
+When the living workspace advances to a different checkpoint, the previous current plan is marked
+outdated instead of being silently regenerated. The clinician decides when to ask Codex to refresh
+and when a reviewed plan is ready for an explicit, separate parent-harness run using the model
+currently selected there. Prior conversations, revisions, submissions, and results remain
+immutable for audit.
+
+### Plan-to-handoff workflow
+
+1. Save the synthetic patient and note so the workspace can create an exact local checkpoint.
+2. In `Plan with Codex`, send conversational questions or requests with `Enter`.
+3. If Codex asks a focused question, answer it with another composer send.
+4. When the context is complete, explicitly ask Codex to publish or update the reviewed Plan.
+5. Inspect the Plan, selected evidence, and provenance in `Chat`, `Context`, and `Audit`.
+6. Press `Ctrl-G` to submit that current reviewed Plan revision to the separate parent-harness run;
+   returned work remains review-only until a clinician accepts a proposal.
 
 The core safety invariant is:
 
@@ -63,7 +84,18 @@ See [Agent proposal workflow](docs/agent-proposal-workflow.md),
   context, with explicit restore or discard after an interrupted session. Canonical chart changes
   still require an explicit human save.
 - Explicit packet selection for multimodal file metadata and human-reviewed excerpts.
-- Durable prepared packets, idempotent agent runs, immutable packet-source snapshots, review-pending results, revision-bound proposals, and append-only clinician decisions.
+- Persistent patient Plan sessions, ordered human and assistant messages (including focused
+  questions and clinician answers), immutable
+  checkpoint-bound context reads, evidence-linked plan revisions, locked proposal records, and
+  append-only review decisions.
+- Dedicated medical Plan threads with memory generation disabled and a fail-closed
+  `workspacePlanningOnly` tool mode. The allowed planning reads are bounded `patient_chart`,
+  `visit_history`, `progress_notes`, and `selected_context`; selected context includes the exact
+  checkpoint draft plus selected file metadata/reviewed text/clip transcripts, never raw bytes.
+- Durable prepared packets, idempotent master-agent runs, immutable packet-source snapshots,
+  review-pending results, revision-bound proposals, and append-only clinician decisions.
+- First-class packet and master-run bindings to the exact reviewed Plan revision, Plan content
+  hash, and evidence-manifest hash; revision submission is accepted only for that bound run.
 - Patient-rooted atomic chart changesets with optimistic note revisions, opaque entity-version guards, durable idempotency receipts, exact-request retry, explicit note-only reconciliation, and fail-closed discard/reload for broader stale drafts.
 - A one-turn medical handoff boundary that exposes only `workspace_context_read`, binds that reader
   to the submitted run and its explicitly authorized visit-history or progress-note categories,
@@ -76,10 +108,11 @@ See [Agent proposal workflow](docs/agent-proposal-workflow.md),
   packet path. Returned note bodies are byte-bounded and local-path tokens are redacted before
   immutable snapshot hashing; generic logs and telemetry receive redacted tool arguments/results.
 - Automatic packet-id/hash turn binding and review-pending capture of the final agent answer with thread/turn provenance.
-- A responsive three-zone Evidence / Patient Chart / Context Plan and Agent Review layout with
-  pending, history, and audit views.
-- Conventional multiline note and context-plan instruction editing, plus deterministic local
-  workflow hints that teach the next context-packet step without changing the chart.
+- A responsive three-zone Evidence / Patient Chart / Plan with Codex layout with dedicated
+  `Chat`, `Context`, and `Audit` views.
+- Conventional multiline note editing and a bottom-pinned Plan composer. Note-body `Enter` inserts
+  a newline; in the Plan composer `Enter` sends and `Shift-Enter` inserts a newline. Failed sends
+  retain the exact draft for retry.
 - Human-entered coverage-card comparison tied to a selected local source document, with append-only
   provenance and advisory `match`, `mismatch`, `unverified`, `stale`, or `incomplete` readiness.
 - Read-only current-versus-proposed comparison with stale and signed-note guards.
@@ -220,8 +253,10 @@ The medical workspace keeps pane navigation separate from the action performed i
 | `Ctrl-P` | Open Commands from any pane, including an active text editor. |
 | `:` | Open Commands from navigation and read-only panes; remains typable in medical text fields. |
 | `Ctrl-S` | Explicitly save the current human chart draft. |
-| `Ctrl-G` | Review the frozen context plan before handoff to the master Codex agent. |
+| `Ctrl-G` | Submit the current reviewed Plan revision to the parent Codex harness. |
 | `?` | Show the workspace action reference when the focused pane is not consuming text. |
+| `Enter` | In the Plan composer, send the exact draft; in the note body, insert a newline. |
+| `Shift-Enter` | Insert a newline in the Plan composer without sending. |
 
 The command palette leads with actions relevant to the focused pane, followed by common chart actions and the Agent bridge. While a clinician edits an unsigned note, its live title appears in Patient Notes with an `[unsaved]` marker; that marker is working-state feedback and does not imply a canonical chart revision.
 
@@ -241,18 +276,23 @@ Known blockers include:
   remain explicit-save canonical drafts rather than recoverable background checkpoints;
 - working-draft checkpoints are local full snapshots; production-grade compression, retention,
   storage-health reporting, and authenticated ownership are not implemented yet;
-- local workflow hints are deterministic navigation, readiness, and packet-building guidance, not
-  medical or clinical recommendations; higher-capability analysis is engaged only through an
-  explicit frozen context-plan handoff to the master agent;
+- patient Plan conversations are model-generated recommendations for synthetic research data only;
+  they do not replace clinician judgment, diagnosis, or review, and the separate parent-harness
+  handoff remains explicit;
 - atomic multi-document batch intake and durable restart recovery for an unresolved local changeset;
-- extension of the packet-authorized reader beyond visit history and progress notes;
 - partial per-change proposal review in both the app-server API and TUI; edited whole-proposal acceptance is state/API-ready;
-- startup reconciliation for a run abandoned by an abrupt process termination;
+- broader lifecycle recovery beyond the implemented unclaimed planning-turn and orphaned claimed
+  master-turn reconciliation;
 - technical enforcement that prevents accidental entry of real patient data.
 
-Matching model turns are captured automatically as review-pending Agent Review with thread/turn
-provenance. The explicit `:agent result save` path remains available as a clinician-attributed
-recovery import when a response was produced outside the bound harness turn.
+The final Assistant message from a matching model turn is withheld from the UI and rollout history
+until the exact response, body hash, thread/turn/model receipt, packet, submitted Plan revision, and
+completed run commit together as review-pending Agent Review. Restricted prompts, reasoning, and
+tool lifecycle events may still exist in the dedicated private rollout, but they are redacted from
+generic diagnostics and excluded from later model context unless an exact durable completion
+authorizes the turn. The explicit `:agent result save` path remains available only as a
+clinician-attributed import for output produced outside the bound harness turn; it cannot claim that
+the bound agent produced caller-supplied text.
 
 See the [Patient identity, contact, and coverage design](PATIENT_IDENTITY_AND_COVERAGE.md), the
 [Roadmap](ROADMAP.md), and issues labeled `help wanted`.

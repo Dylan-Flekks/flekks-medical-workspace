@@ -4,8 +4,9 @@ The design follows an IDE agent-edit model rather than direct database mutation.
 
 ```text
 Clinician draft
-  -> living Context Plan
-  -> reviewed, frozen context packet
+  -> checkpointed patient Plan conversation
+  -> evidence-linked Plan revision
+  -> reviewed, frozen master context packet
   -> packet-scoped agent run
   -> recorded source reads
   -> recommendation
@@ -16,15 +17,22 @@ Clinician draft
 
 ## Audit objects
 
-1. **Plan checkpoint:** the living objective, expected output, selected evidence, readiness, and
-   acknowledged context gaps at review time.
-2. **Packet:** who requested what, when, against which patient/note/revision, and which categories were authorized.
-3. **Run:** provider/model, thread/turn, lifecycle, and errors.
-4. **Sources:** the records and exact revisions/snapshots actually returned to the run.
-5. **Result:** generated recommendation and concise review rationale.
-6. **Proposal:** a change against the packet's base note revision.
-7. **Decision:** clinician acceptance, edit, rejection, or selected-copy action.
-8. **Revision:** canonical human-controlled chart state after an accepted decision.
+1. **Workspace checkpoint:** the exact patient/note working state used by a Plan turn.
+2. **Plan session/messages:** ordered Human and Assistant messages in the patient-bound
+   conversation. A focused question is an ordinary saved Assistant response; its answer starts a
+   fresh persisted Human turn.
+3. **Plan run and source reads:** provider/model, thread/turn, checkpoint capability, and exact
+   hashed context returned to the model.
+4. **Plan revision:** a published, evidence-linked decision-complete plan; ordinary help replies do
+   not replace it.
+5. **Packet:** who submitted which reviewed plan, against which patient/note/revision, and which
+   categories were authorized for the master run. Its first-class binding stores the Plan revision
+   ID, Plan-content hash, and evidence-manifest hash.
+6. **Master run/result:** a separate full parent-harness run using its currently selected model and
+   its immutable recommendation. A run inherits the packet's exact Plan binding, and the Plan can
+   be marked submitted only through that bound packet/run pair.
+7. **Proposal:** a locked change against the packet's base note revision.
+8. **Decision/revision:** append-only clinician review and resulting canonical chart state.
 
 Each submitted packet also records the workspace profile, plan-schema version, source-checkpoint
 identifier and hash, and structured readiness acknowledgements. That metadata binds the reviewed
@@ -32,15 +40,14 @@ plan to the exact living-workspace checkpoint used for the run.
 
 ## Current vertical-slice boundary
 
-The TUI maintains a living context plan, freezes it for review, submits the immutable packet, and
-starts the durable master-agent run. The model-visible `workspace_context_read` tool accepts only
-that running ID plus an authorized visit-history or progress-note category; patient ownership comes
-from the run, not model input. Each bounded, path-redacted returned row is frozen and hashed in the
-source manifest, alongside a separately hashed packet authorization/output contract. A matching
-user turn is bound by packet id/hash, and its final agent answer is saved automatically as
+The TUI first maintains a patient-scoped Plan conversation. Every Plan turn is bound to a local
+checkpoint and can read only `patient_chart`, `visit_history`, `progress_notes`, or
+`selected_context`; every returned snapshot is immutable and hashed. A published Plan revision
+records its evidence manifest and never changes canonical chart data. The clinician then explicitly
+freezes a master packet and starts the durable master-agent run. That separate one-turn boundary
+uses only its packet-authorized reader and automatically saves the matching final answer as
 review-pending Agent Review with thread/turn attribution. `:agent result save` remains a
-clinician-attributed recovery import for externally produced output. Additional clinical source
-categories and abrupt-restart reconciliation remain roadmap work.
+clinician-attributed recovery import for externally produced output.
 
 ## Concurrency rule
 
