@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::app_server_session::AppServerSession;
+use crate::app_server_session::WORKSPACE_MEDICAL_PLAN_THREAD_SOURCE;
 use crate::clipboard_paste::normalize_pasted_search_query;
 use crate::color::blend;
 use crate::color::is_light;
@@ -38,6 +39,7 @@ use codex_app_server_protocol::ThreadItem;
 use codex_app_server_protocol::ThreadListCwdFilter;
 use codex_app_server_protocol::ThreadListParams;
 use codex_app_server_protocol::ThreadSortKey;
+use codex_app_server_protocol::ThreadSource;
 use codex_config::types::SessionPickerViewMode;
 use codex_protocol::ThreadId;
 use codex_utils_path as path_utils;
@@ -1778,6 +1780,16 @@ impl PickerState {
 }
 
 fn row_from_app_server_thread(thread: Thread) -> Option<Row> {
+    let is_workspace_plan_thread = matches!(
+        thread.thread_source.as_ref(),
+        Some(ThreadSource::Feature(feature))
+            if feature == WORKSPACE_MEDICAL_PLAN_THREAD_SOURCE
+    ) || thread.name.as_deref().is_some_and(|name| {
+        name == "Medical workspace planning" || name.starts_with("Medical Plan ·")
+    });
+    if is_workspace_plan_thread {
+        return None;
+    }
     let thread_id = match ThreadId::from_string(&thread.id) {
         Ok(thread_id) => thread_id,
         Err(err) => {
@@ -5751,6 +5763,44 @@ session_picker_view = "dense"
         assert_eq!(row.path, None);
         assert_eq!(row.thread_id, Some(thread_id));
         assert_eq!(row.thread_name, Some(String::from("Named thread")));
+    }
+
+    #[test]
+    fn app_server_row_hides_dedicated_medical_planning_threads() {
+        let thread_id = ThreadId::new();
+        let mut thread = Thread {
+            id: thread_id.to_string(),
+            extra: None,
+            session_id: thread_id.to_string(),
+            forked_from_id: None,
+            parent_thread_id: None,
+            preview: String::from("internal patient planning context"),
+            ephemeral: false,
+            history_mode: Default::default(),
+            model_provider: String::from("openai"),
+            created_at: 1,
+            updated_at: 2,
+            recency_at: Some(2),
+            status: codex_app_server_protocol::ThreadStatus::Idle,
+            path: None,
+            cwd: test_path_buf("/tmp").abs(),
+            cli_version: String::from("0.0.0"),
+            source: codex_app_server_protocol::SessionSource::Cli,
+            thread_source: Some(ThreadSource::Feature(
+                WORKSPACE_MEDICAL_PLAN_THREAD_SOURCE.to_string(),
+            )),
+            agent_nickname: None,
+            agent_role: None,
+            git_info: None,
+            name: Some(String::from("Medical workspace planning")),
+            turns: Vec::new(),
+        };
+
+        assert!(row_from_app_server_thread(thread.clone()).is_none());
+
+        thread.thread_source = Some(ThreadSource::User);
+        thread.name = Some(String::from("Medical Plan · legacy synthetic patient"));
+        assert!(row_from_app_server_thread(thread).is_none());
     }
 
     #[test]

@@ -31,6 +31,7 @@ mod workspace_chart_commit;
 mod workspace_coverage;
 mod workspace_data_policy;
 mod workspace_drafts;
+mod workspace_plans;
 
 pub use account::*;
 pub use apps::*;
@@ -64,6 +65,7 @@ pub use workspace_chart_commit::*;
 pub use workspace_coverage::*;
 pub use workspace_data_policy::*;
 pub use workspace_drafts::*;
+pub use workspace_plans::*;
 
 #[cfg(test)]
 mod tests;

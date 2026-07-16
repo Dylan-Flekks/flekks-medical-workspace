@@ -111,6 +111,7 @@ const DEFAULT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 const TEST_ORIGINATOR: &str = "codex_vscode";
 const MULTI_AGENT_V2_NAMESPACE: &str = "collaboration";
 const INVALID_REQUEST_ERROR_CODE: i64 = -32600;
+const SYNTHETIC_CLASSIFICATION_ENV: &str = "FLEKKS_MEDICAL_WORKSPACE_DATA_CLASSIFICATION";
 const TINY_PNG_BYTES: &[u8] = &[
     137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0,
     0, 0, 31, 21, 196, 137, 0, 0, 0, 11, 73, 68, 65, 84, 120, 156, 99, 96, 0, 2, 0, 0, 5, 0, 1,
@@ -237,6 +238,48 @@ async fn create_canonical_workspace_context_prompt(
         },
         Some(&run_response.run.id),
     ))
+}
+
+async fn start_synthetic_workspace_test_server(
+    model_server_uri: &str,
+) -> Result<(TempDir, TestAppServer)> {
+    let root = TempDir::new()?;
+    let codex_home = root.path().join("codex-home");
+    let sqlite_home = root.path().join("medical-sqlite-home");
+    std::fs::create_dir_all(&codex_home)?;
+    std::fs::create_dir_all(&sqlite_home)?;
+    create_config_toml(&codex_home, model_server_uri, "never", &BTreeMap::default())?;
+    let configured_sqlite_home = sqlite_home.to_string_lossy().into_owned();
+    let sqlite_override = format!(
+        "sqlite_home={}",
+        serde_json::to_string(&configured_sqlite_home)?
+    );
+    let mut server = TestAppServer::builder()
+        .with_codex_home(&codex_home)
+        .with_env_overrides(&[
+            (SYNTHETIC_CLASSIFICATION_ENV, Some("synthetic")),
+            (
+                codex_state::SQLITE_HOME_ENV,
+                Some(configured_sqlite_home.as_str()),
+            ),
+        ])
+        .with_args(&["-c", sqlite_override.as_str()])
+        .build()
+        .await?;
+    timeout(DEFAULT_READ_TIMEOUT, server.initialize()).await??;
+
+    let provision_request = server
+        .send_raw_request("workspace/dataPolicy/provision", Some(json!({})))
+        .await?;
+    let _: Value = to_response(
+        timeout(
+            DEFAULT_READ_TIMEOUT,
+            server.read_stream_until_response_message(RequestId::Integer(provision_request)),
+        )
+        .await??,
+    )?;
+
+    Ok((root, server))
 }
 
 async fn run_local_image_turn(detail: Option<ImageDetail>) -> Result<Vec<Value>> {
@@ -4760,18 +4803,7 @@ async fn workspace_context_only_turn_restores_the_prior_persistent_mode() -> Res
     skip_if_no_network!(Ok(()));
 
     let server = create_mock_responses_server_repeating_assistant("Done").await;
-    let codex_home = TempDir::new()?;
-    create_config_toml(
-        codex_home.path(),
-        &server.uri(),
-        "never",
-        &BTreeMap::default(),
-    )?;
-    let mut mcp = TestAppServer::builder()
-        .with_codex_home(codex_home.path())
-        .build()
-        .await?;
-    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+    let (_root, mut mcp) = start_synthetic_workspace_test_server(&server.uri()).await?;
 
     let start_request = mcp
         .send_thread_start_request_with_auto_env(ThreadStartParams {
@@ -4920,18 +4952,7 @@ async fn workspace_context_only_turn_rejects_modified_canonical_prompt_before_mo
     skip_if_no_network!(Ok(()));
 
     let server = create_mock_responses_server_repeating_assistant("must not sample").await;
-    let codex_home = TempDir::new()?;
-    create_config_toml(
-        codex_home.path(),
-        &server.uri(),
-        "never",
-        &BTreeMap::default(),
-    )?;
-    let mut mcp = TestAppServer::builder()
-        .with_codex_home(codex_home.path())
-        .build()
-        .await?;
-    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+    let (_root, mut mcp) = start_synthetic_workspace_test_server(&server.uri()).await?;
 
     let start_request = mcp
         .send_thread_start_request_with_auto_env(ThreadStartParams {

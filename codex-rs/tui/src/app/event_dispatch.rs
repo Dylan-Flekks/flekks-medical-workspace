@@ -94,6 +94,7 @@ impl App {
                 let opened_new_dashboard = self.workspace_dashboard.is_none();
                 if opened_new_dashboard {
                     let mut dashboard = WorkspaceDashboard::new(profile);
+                    dashboard.set_keymap_bindings(&self.keymap);
                     if app_server.uses_remote_workspace() {
                         dashboard.set_store_description("Remote app-server workspace store");
                     } else {
@@ -114,12 +115,23 @@ impl App {
                     }
                 } else if let Some(dashboard) = self.workspace_dashboard.as_mut() {
                     dashboard.set_profile(profile);
+                    dashboard.set_keymap_bindings(&self.keymap);
                 }
                 self.workspace_dashboard_visible = true;
                 if opened_new_dashboard {
                     self.initialize_workspace_draft_recovery(app_server).await;
                 } else if self.workspace_draft_recovery_needs_retry() {
                     self.retry_workspace_draft_recovery(app_server).await;
+                }
+                if profile == WorkspaceProfile::Medical
+                    && let Err(error) = self.refresh_workspace_plan_snapshot(app_server).await
+                {
+                    tracing::warn!(%error, "failed to load persistent workspace plan snapshot");
+                    if let Some(dashboard) = self.workspace_dashboard.as_mut() {
+                        dashboard.set_status(format!(
+                            "Workspace opened, but the persistent Codex plan could not load: {error}"
+                        ));
+                    }
                 }
                 tui.frame_requester().schedule_frame();
             }

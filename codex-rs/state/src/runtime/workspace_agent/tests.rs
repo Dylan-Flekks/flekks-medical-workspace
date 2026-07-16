@@ -116,6 +116,11 @@ fn run_start(packet: &crate::WorkspaceContextPacket) -> crate::WorkspaceAgentRun
         packet_id: packet.id.clone(),
         expected_client_id: packet.client_id.clone(),
         expected_context_envelope_sha256: packet.context_envelope_sha256.clone(),
+        expected_workspace_plan_revision_id: packet.workspace_plan_revision_id.clone(),
+        expected_workspace_plan_content_sha256: packet.workspace_plan_content_sha256.clone(),
+        expected_workspace_plan_evidence_manifest_sha256: packet
+            .workspace_plan_evidence_manifest_sha256
+            .clone(),
         run_kind: "agent".to_string(),
         idempotency_key: "turn:synthetic-1".to_string(),
         provider: "test-provider".to_string(),
@@ -148,11 +153,53 @@ fn result_create(
     }
 }
 
+fn turn_completion(
+    execution: crate::WorkspaceAgentExecutionBinding,
+) -> crate::WorkspaceAgentTurnComplete {
+    crate::WorkspaceAgentTurnComplete {
+        assistant_message_id: format!("assistant-{}", execution.source_turn_id),
+        body: "Subjective\n\nObjective\n\nAssessment\n\nPlan".to_string(),
+        idempotency_key: format!("agent-completion:{}", execution.run_id),
+        execution,
+    }
+}
+
+async fn submit_packet(runtime: &StateRuntime, packet: &crate::WorkspaceContextPacket) {
+    runtime
+        .workspace()
+        .submit_context_packet(crate::WorkspaceContextPacketLifecycleUpdate {
+            packet_id: packet.id.clone(),
+            client_id: packet.client_id.clone(),
+            expected_context_envelope_sha256: packet.context_envelope_sha256.clone(),
+            actor: "Clinician Example".to_string(),
+        })
+        .await
+        .expect("packet submission should succeed")
+        .expect("submitted packet should exist");
+}
+
+async fn assert_no_turn_completion(runtime: &StateRuntime, run_id: &str) {
+    let counts: (i64, i64) = sqlx::query_as(
+        r#"
+SELECT
+    (SELECT COUNT(*) FROM workspace_agent_results WHERE run_id = ?),
+    (SELECT COUNT(*) FROM workspace_agent_turn_completions WHERE run_id = ?)
+        "#,
+    )
+    .bind(run_id)
+    .bind(run_id)
+    .fetch_one(runtime.workspace().pool.as_ref())
+    .await
+    .expect("rejected completion row counts should load");
+    assert_eq!(counts, (0, 0));
+}
+
 async fn claim_run(
     runtime: &StateRuntime,
     packet: &crate::WorkspaceContextPacket,
     run: &crate::WorkspaceAgentRun,
 ) -> crate::WorkspaceAgentExecutionBinding {
+    submit_packet(runtime, packet).await;
     let execution = crate::WorkspaceAgentExecutionBinding {
         run_id: run.id.clone(),
         source_thread_id: run
@@ -387,14 +434,25 @@ async fn workspace_agent_result_rejects_unclaimed_completion() {
         .start_agent_run(run_start(&packet))
         .await
         .expect("run should start");
+    submit_packet(&runtime, &packet).await;
+    let execution = crate::WorkspaceAgentExecutionBinding {
+        run_id: run.id.clone(),
+        source_thread_id: run
+            .source_thread_id
+            .clone()
+            .expect("agent run should have a source thread"),
+        source_turn_id: "turn-synthetic".to_string(),
+        provider: run.provider.clone(),
+        model: run.model.clone(),
+    };
 
     let error = runtime
         .workspace()
-        .complete_agent_run_with_result(result_create(&packet, &run))
+        .complete_agent_turn(turn_completion(execution.clone()))
         .await
         .expect_err("an unclaimed agent run must not complete")
         .to_string();
-    assert!(error.contains("must claim a model turn"));
+    assert!(error.contains("does not match the durably claimed run identity"));
     let stored = runtime
         .workspace()
         .list_agent_runs(crate::WorkspaceAgentRunFilter {
@@ -417,11 +475,12 @@ async fn workspace_agent_result_rejects_unclaimed_completion() {
         .expect("legacy asserted turn fixture should update");
     let error = runtime
         .workspace()
-        .complete_agent_run_with_result(result_create(&packet, &run))
+        .complete_agent_turn(turn_completion(execution))
         .await
         .expect_err("a turn id without its durable claim source must not complete")
         .to_string();
     assert!(error.contains("does not have a durable claimed handoff prompt"));
+    assert_no_turn_completion(&runtime, &run.id).await;
 }
 
 #[tokio::test]
@@ -438,17 +497,18 @@ async fn workspace_agent_result_rejects_a_mismatched_claimed_turn() {
         .start_agent_run(run_start(&packet))
         .await
         .expect("run should start");
-    claim_run(&runtime, &packet, &run).await;
-    let mut result = result_create(&packet, &run);
-    result.source_turn_id = Some("different-turn".to_string());
+    let execution = claim_run(&runtime, &packet, &run).await;
+    let mut mismatched_execution = execution;
+    mismatched_execution.source_turn_id = "different-turn".to_string();
 
     let error = runtime
         .workspace()
-        .complete_agent_run_with_result(result)
+        .complete_agent_turn(turn_completion(mismatched_execution))
         .await
         .expect_err("a result from another turn must not complete the run")
         .to_string();
-    assert!(error.contains("does not match run source turn"));
+    assert!(error.contains("does not match the durably claimed run identity"));
+    assert_no_turn_completion(&runtime, &run.id).await;
     let stored = runtime
         .workspace()
         .list_agent_runs(crate::WorkspaceAgentRunFilter {
@@ -478,20 +538,16 @@ async fn workspace_agent_result_uses_stored_claim_provenance() {
         .start_agent_run(run_start(&packet))
         .await
         .expect("run should start");
-    claim_run(&runtime, &packet, &run).await;
-    let mut create = result_create(&packet, &run);
-    create.source_thread_id = None;
-    create.source_turn_id = None;
-    create.actor = "caller-asserted-actor".to_string();
+    let execution = claim_run(&runtime, &packet, &run).await;
 
-    let result = runtime
+    let completion = runtime
         .workspace()
-        .complete_agent_run_with_result(create)
+        .complete_agent_turn(turn_completion(execution))
         .await
         .expect("claimed agent run should complete from stored provenance");
     let audit = runtime
         .workspace()
-        .list_audit_events("agent_result", &result.id)
+        .list_audit_events("agent_result", &completion.result.id)
         .await
         .expect("result audit should list");
     assert!(audit.iter().any(|event| {
@@ -502,6 +558,171 @@ async fn workspace_agent_result_uses_stored_claim_provenance() {
             && event.source_thread_id.as_deref() == Some("thread-synthetic")
             && event.source_turn_id.as_deref() == Some("turn-synthetic")
     }));
+}
+
+#[tokio::test]
+async fn workspace_agent_turn_completion_is_atomic_idempotent_and_integrity_checked() {
+    let runtime = test_runtime().await;
+    let (client, note) = seed_client_note(&runtime).await;
+    let packet = runtime
+        .workspace()
+        .prepare_context_packet(packet_create(&client, &note))
+        .await
+        .expect("packet should prepare");
+    let run = runtime
+        .workspace()
+        .start_agent_run(run_start(&packet))
+        .await
+        .expect("run should start");
+    let execution = claim_run(&runtime, &packet, &run).await;
+    let input = turn_completion(execution.clone());
+
+    let completion = runtime
+        .workspace()
+        .complete_agent_turn(input.clone())
+        .await
+        .expect("claimed model output should complete atomically");
+    assert!(!completion.replayed);
+    assert_eq!(completion.result.body, input.body);
+    assert_eq!(
+        completion.body_sha256,
+        format!("{:x}", Sha256::digest(input.body.as_bytes()))
+    );
+    assert_eq!(completion.source_thread_id, execution.source_thread_id);
+    assert_eq!(completion.source_turn_id, execution.source_turn_id);
+    assert_eq!(completion.provider, execution.provider);
+    assert_eq!(completion.model, execution.model);
+    assert_eq!(completion.assistant_message_id, input.assistant_message_id);
+    assert_eq!(completion.idempotency_key, input.idempotency_key);
+
+    let mut expected_replay = completion.clone();
+    expected_replay.replayed = true;
+    let replay = runtime
+        .workspace()
+        .complete_agent_turn(input.clone())
+        .await
+        .expect("the exact terminal write should replay idempotently");
+    assert_eq!(replay, expected_replay);
+
+    let run_status: String =
+        sqlx::query_scalar("SELECT status FROM workspace_agent_runs WHERE id = ?")
+            .bind(&run.id)
+            .fetch_one(runtime.workspace().pool.as_ref())
+            .await
+            .expect("completed run status should load");
+    let result_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM workspace_agent_results WHERE run_id = ?")
+            .bind(&run.id)
+            .fetch_one(runtime.workspace().pool.as_ref())
+            .await
+            .expect("atomic result count should load");
+    let completion_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM workspace_agent_turn_completions WHERE run_id = ?",
+    )
+    .bind(&run.id)
+    .fetch_one(runtime.workspace().pool.as_ref())
+    .await
+    .expect("atomic completion receipt count should load");
+    assert_eq!(
+        (run_status, result_count, completion_count),
+        ("completed".to_string(), 1, 1)
+    );
+
+    let mut changed_body = input.clone();
+    changed_body.body.push_str("\nChanged after completion");
+    let error = runtime
+        .workspace()
+        .complete_agent_turn(changed_body)
+        .await
+        .expect_err("the same run must reject a changed response body")
+        .to_string();
+    assert!(error.contains("already has a different terminal completion"));
+
+    sqlx::query("UPDATE workspace_agent_results SET body = ? WHERE id = ?")
+        .bind("tampered body")
+        .bind(&completion.result.id)
+        .execute(runtime.workspace().pool.as_ref())
+        .await
+        .expect("integrity corruption fixture should update the stored body");
+    let error = runtime
+        .workspace()
+        .complete_agent_turn(input)
+        .await
+        .expect_err("an exact replay must verify the persisted result body")
+        .to_string();
+    assert!(error.contains("persisted integrity checks"));
+}
+
+#[tokio::test]
+async fn workspace_startup_recovery_cancels_unreceipted_unclaimed_and_claimed_agent_runs() {
+    let runtime = test_runtime().await;
+    let (client, note) = seed_client_note(&runtime).await;
+
+    let unclaimed_packet = runtime
+        .workspace()
+        .prepare_context_packet(packet_create(&client, &note))
+        .await
+        .expect("unclaimed packet should prepare");
+    let mut unclaimed_start = run_start(&unclaimed_packet);
+    unclaimed_start.idempotency_key = "turn:unclaimed-orphan".to_string();
+    let unclaimed_run = runtime
+        .workspace()
+        .start_agent_run(unclaimed_start)
+        .await
+        .expect("unclaimed run should start");
+
+    let claimed_packet = runtime
+        .workspace()
+        .prepare_context_packet(packet_create(&client, &note))
+        .await
+        .expect("claimed packet should prepare");
+    let mut claimed_start = run_start(&claimed_packet);
+    claimed_start.idempotency_key = "turn:claimed-orphan".to_string();
+    let claimed_run = runtime
+        .workspace()
+        .start_agent_run(claimed_start)
+        .await
+        .expect("claimed run should start");
+    claim_run(&runtime, &claimed_packet, &claimed_run).await;
+
+    assert_eq!(
+        runtime
+            .workspace()
+            .reconcile_orphaned_agent_turns()
+            .await
+            .expect("startup orphan recovery"),
+        2
+    );
+    let runs = runtime
+        .workspace()
+        .list_agent_runs(crate::WorkspaceAgentRunFilter {
+            client_id: client.id,
+            note_id: Some(note.id),
+            limit: Some(10),
+            ..Default::default()
+        })
+        .await
+        .expect("reconciled runs should list");
+    let unclaimed = runs
+        .iter()
+        .find(|candidate| candidate.id == unclaimed_run.id)
+        .expect("unclaimed run should remain auditable");
+    assert_eq!(unclaimed.status, "canceled");
+    assert_eq!(unclaimed.source_turn_id, None);
+    assert_eq!(
+        unclaimed.error_summary,
+        "recovered an unclaimed master-agent run without a Plan submission receipt"
+    );
+    let claimed = runs
+        .iter()
+        .find(|candidate| candidate.id == claimed_run.id)
+        .expect("claimed run should remain auditable");
+    assert_eq!(claimed.status, "canceled");
+    assert_eq!(claimed.source_turn_id.as_deref(), Some("turn-synthetic"));
+    assert_eq!(
+        claimed.error_summary,
+        "recovered after an interrupted master-agent turn"
+    );
 }
 
 #[tokio::test]
@@ -574,6 +795,7 @@ async fn workspace_agent_turn_claim_enforces_exact_prompt_and_execution_provenan
         .start_agent_run(run_start(&packet))
         .await
         .expect("run should start");
+    submit_packet(&runtime, &packet).await;
     let prompt = crate::render_workspace_agent_handoff_prompt(
         &crate::WorkspaceAgentHandoffPromptInput::from(&packet),
         Some(&run.id),
@@ -890,25 +1112,17 @@ async fn workspace_agent_run_preserves_packet_revision_and_source_manifest() {
         format!("{:x}", Sha256::digest(note_snapshot.as_bytes()))
     );
 
-    let mut mismatched_result = result_create(&packet, &run);
-    mismatched_result.result_kind = "unrelated_recommendation".to_string();
-    let mismatch_error = runtime
+    let execution = claim_run(&runtime, &packet, &run).await;
+    let completion = runtime
         .workspace()
-        .complete_agent_run_with_result(mismatched_result)
-        .await
-        .expect_err("result kind must match the packet contract")
-        .to_string();
-    assert!(mismatch_error.contains("does not match packet expected output kind"));
-
-    claim_run(&runtime, &packet, &run).await;
-    let result = runtime
-        .workspace()
-        .complete_agent_run_with_result(result_create(&packet, &run))
+        .complete_agent_turn(turn_completion(execution))
         .await
         .expect("run result should save");
+    let result = completion.result;
     assert_eq!(result.run_id.as_deref(), Some(run.id.as_str()));
     assert_eq!(result.base_note_revision, packet.base_note_revision);
     assert_eq!(result.packet_context_sha256, packet.context_envelope_sha256);
+    assert_eq!(result.result_kind, packet.expected_output_kind);
     let completed_runs = runtime
         .workspace()
         .list_agent_runs(crate::WorkspaceAgentRunFilter {
@@ -1063,12 +1277,13 @@ async fn workspace_stale_agent_result_proposal_keeps_original_base_and_decisions
         .start_agent_run(run_start(&packet))
         .await
         .expect("run should start");
-    claim_run(&runtime, &packet, &run).await;
+    let execution = claim_run(&runtime, &packet, &run).await;
     let result = runtime
         .workspace()
-        .complete_agent_run_with_result(result_create(&packet, &run))
+        .complete_agent_turn(turn_completion(execution))
         .await
-        .expect("result should save");
+        .expect("result should save")
+        .result;
     let updated_note = runtime
         .workspace()
         .upsert_note(crate::WorkspaceNoteUpsert {

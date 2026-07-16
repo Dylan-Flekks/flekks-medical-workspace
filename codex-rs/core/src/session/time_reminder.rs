@@ -1,7 +1,6 @@
 use chrono::DateTime;
 use chrono::Utc;
 use codex_features::CurrentTimeReminderDeliveryMode;
-use codex_protocol::config_types::ModelToolMode;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result as CodexResult;
 use codex_protocol::models::ResponseItem;
@@ -74,7 +73,7 @@ pub(super) async fn maybe_record_current_time_reminder(
     turn_context: &TurnContext,
     window_id: &str,
 ) -> CodexResult<()> {
-    if turn_context.model_tool_mode == ModelToolMode::WorkspaceContextOnly {
+    if turn_context.model_tool_mode.is_workspace_restricted() {
         return Ok(());
     }
     let Some(config) = turn_context.config.current_time_reminder else {

@@ -1,0 +1,49 @@
+---
+source: tui/src/workspace_dashboard.rs
+expression: rendered
+---
+Medical Workspace  /workspace-medical  SYNTHETIC DATA ONLY
+Patient: Jordan Patient  DOB: blank  MRN: blank  Contact: Missing contact  Coverage: Missing coverage  Encounter: No encounter
+ EXPLORER                          PATIENT CHART                                                                   PLAN WITH CODEX
+┌Patient Directory───────────────┐┌Patient Demographics──────────────────────────────────────────────────────────┐┌Plan with Codex─────────────────────────────┐
+│Local search: /                 ││Identity: Jordan Patient · preferred not set                                  ││[Chat]  Context  Audit  ←/→ tabs            │
+│0 active patients; local only   ││Legal/card: legal name missing                                                ││                                            │
+│No saved patients yet.          ││DOB: missing · admin sex: missing · MRN: missing                              ││Plan with Codex · Jordan Patient            │
+│New patient: :patient new       ││Contact: phone missing; email missing; method not set                         ││  Context  0 files · 0 text · 0 clips       │
+│                                ││Address: address missing                                                      ││  ● plan: checking prior goals              │
+│                                ││Emergency: name missing; relationship missing; phone missing                  ││                                            │
+│                                ││Coverage: P not entered; S not entered; T not entered                         ││Conversation                                │
+│                                ││Enter edits all identity/contact fields · Ctrl-P opens actions                ││You                                         │
+│                                │└──────────────────────────────────────────────────────────────────────────────┘│  How does today's gait note fit the        │
+│                                │┌Note Title────────────────────────────────────────────────────────────────────┐│referral goals?                             │
+│                                ││Visit note                                                                    ││                                            │
+│                                │└──────────────────────────────────────────────────────────────────────────────┘│Codex                                       │
+└────────────────────────────────┘┌Note Body─────────────────────────────────────────────────────────────────────┐│  The referral emphasizes safe community    │
+┌Patient Notes───────────────────┐│Fake human-entered visit note body.                                           ││mobility across the episode of care.        │
+│Patient Notes                   ││                                                                              ││                                            │
+│  New note                      ││                                                                              ││Codex · question                            │
+│  No patient notes yet. Use     ││                                                                              ││  Was the gait video recorded with the usual│
+│:note new.                      ││                                                                              ││assistive device?                           │
+│  Medical, communication, and   ││                                                                              ││                                            │
+│admin notes appear here.        ││                                                                              ││You · answer                                │
+│                                ││                                                                              ││  Yes, the patient used the rolling walker. │
+│                                ││                                                                              ││                                            │
+│                                ││                                                                              ││Plan status                                 │
+└────────────────────────────────┘│                                                                              ││  Context refreshed from checkpoint r4.     │
+┌Uploaded Documents──────────────┐│                                                                              ││                                            │
+│Uploaded Documents              ││                                                                              ││Codex · checking prior goals                │
+│No files yet                    ││                                                                              ││  I am comparing the most recent gait       │
+│Paste/drop JPG/PDF. Space...    ││                                                                              ││observations with the referral.             │
+│                                ││                                                                              ││  Master handoff: Ctrl-G submits reviewed   │
+│                                ││                                                                              ││plan r2 with its evidence receipt.          │
+│                                ││                                                                              ││  Recommendations remain review-only until a│
+│                                ││                                                                              ││clinician approves a change.                │
+│                                ││                                                                              ││                                            │
+│                                ││                                                                              ││                                            │
+│                                ││                                                                              ││Message Codex                               │
+│                                ││                                                                              ││Enter send · Shift-Enter line · Esc leave   │
+│                                ││                                                                              ││  Ask about the patient picture, this note, │
+│                                ││                                                                              ││  or context readiness.                     │
+│                                ││                                                                              ││                                            │
+└────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────┘└────────────────────────────────────────────┘
+Focus: Agent | Mode: Navigate | Keys: Type message  ←/→ Chat/Context/Audit  ↑/↓ scroll  Tab/⇧Tab pane  Ctrl-P commands | Next: Ask Codex about this patient

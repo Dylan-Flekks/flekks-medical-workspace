@@ -1036,6 +1036,11 @@ impl TurnRequestProcessor {
                         None,
                         None,
                     ),
+                    SteerInputError::WorkspacePlanningOnlyTurn => (
+                        "cannot steer a workspacePlanningOnly turn".to_string(),
+                        None,
+                        None,
+                    ),
                     SteerInputError::EmptyInput => (
                         "input must not be empty".to_string(),
                         None,

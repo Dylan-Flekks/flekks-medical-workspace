@@ -1,36 +1,36 @@
 ---
 source: tui/src/workspace_dashboard.rs
-expression: "render_dashboard_lines_at(&recovery, 120, 32)"
+expression: rendered
 ---
 Medical Workspace  /workspace-medical  SYNTHETIC DATA ONLY
 Patient: Jordan Patient  DOB: blank  MRN: blank  Contact: Missing contact  Coverage: Missing coverage  Encounter: No
- EXPLORER                      CONTEXT PLAN
-┌Patient Directory───────────┐┌Context Plan────────────────────────────────────────────────────────────────────────────┐
-│Local search: /             ││Patient Chart: Jordan...; Open encounter                                                │
-│0 active patients; local    ││Codex bridge: building                                                                  │
-│only                        ││[Current]  History  Audit  ←/→                                                          │
-│No saved patients yet.      ││                                                                                        │
-│New patient: :patient new   ││  ● recovery: Recovery available: Ctrl-P → Restore local draft or Discard local draft.  │
+ EXPLORER                      PLAN WITH CODEX
+┌Patient Directory───────────┐┌Plan with Codex─────────────────────────────────────────────────────────────────────────┐
+│Local search: /             ││[Chat]  Context  Audit  ←/→ tabs                                                        │
+│0 active patients; local    ││                                                                                        │
+│only                        ││Plan with Codex · Jordan Patient                                                        │
+│No saved patients yet.      ││  Context  0 files · 0 text · 0 clips                                                   │
+│New patient: :patient new   ││  ● plan: blocked · recover local draft                                                 │
 │                            ││                                                                                        │
-│                            ││Workspace Planner                                                                       │
-│                            ││  Choose supporting context                                                             │
-└────────────────────────────┘│  Select only the files, reviewed text, and clips the agent needs for this request.     │
-┌Patient Notes───────────────┐│  ● next: Mark agent context                                                            │
-│Patient Notes               ││  Guidance only; no model call and no chart mutation.                                   │
-│  New note                  ││                                                                                        │
-│  No patient notes yet. Use ││Mode: > Build |   Review |   Returned                                                   │
-│:note new.                  ││  ● draft: No instructions drafted                                                      │
-│  Medical, communication,   ││  ● context: 0 files | 0 text | 0 clips                                                 │
-│and admin notes appear here.││  ● plan: not sent                                                                      │
-└────────────────────────────┘│  ● returned: none                                                                      │
-┌Uploaded Documents──────────┐│  ● readiness: blocked · 2 hard gate(s)                                                 │
+│                            ││Recovery Required                                                                       │
+│                            ││  A recoverable local draft must be resolved before planning continues.                 │
+└────────────────────────────┘│  ● Ctrl-P → Restore local draft or Discard local draft                                 │
+┌Patient Notes───────────────┐│  Messaging, chart edits, and master handoff remain locked.                             │
+│Patient Notes               ││  Resolve draft recovery before messaging Codex or using Ctrl-G.                        │
+│  New note                  ││  Recommendations remain review-only until a clinician approves a change.               │
+│  No patient notes yet. Use ││                                                                                        │
+│:note new.                  ││                                                                                        │
+│  Medical, communication,   ││                                                                                        │
+│and admin notes appear here.││                                                                                        │
+└────────────────────────────┘│                                                                                        │
+┌Uploaded Documents──────────┐│                                                                                        │
 │Uploaded Documents          ││                                                                                        │
-│No files yet                ││  ● resolve the listed hard gates before Ctrl-G                                         │
-│Paste/drop JPG/PDF. S...    ││  No upload/OCR/payer action/auto-apply.                                                │
-│                            ││  ● instructions_empty: Add instructions describing what Codex should analyze.          │
-│                            ││Instructions for Codex · local draft · Enter newline · Ctrl-G review                    │
-│                            ││  Tell Codex what to analyze; nothing is submitted yet.                                 │
+│No files yet                ││                                                                                        │
+│Paste/drop JPG/PDF. S...    ││                                                                                        │
+│                            ││                                                                                        │
+│                            ││Draft Recovery Required · Ctrl-P restore/discard · messaging locked                     │
+│                            ││  Restore or discard the recoverable local draft before continuing.                     │
 │                            ││                                                                                        │
 │                            ││                                                                                        │
 └────────────────────────────┘└────────────────────────────────────────────────────────────────────────────────────────┘
-Focus: Agent | Mode: Navigate | Keys: Type starts request  ←/→ Agent tab  ↑/↓ scroll  Tab/⇧Tab pane  Ctrl-P commands
+Focus: Agent | Mode: Draft recovery | Keys: Ctrl-P restore/discard  Esc close | Next: Restore or discard local draft

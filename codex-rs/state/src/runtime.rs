@@ -74,6 +74,7 @@ mod test_support;
 mod threads;
 mod workspace;
 mod workspace_agent;
+mod workspace_agent_completion;
 mod workspace_agent_proposals;
 mod workspace_agent_queries;
 mod workspace_chart_commit;
@@ -90,6 +91,8 @@ mod workspace_coverage_identity;
 mod workspace_draft_close;
 mod workspace_drafts;
 mod workspace_guides;
+mod workspace_plan_binding;
+mod workspace_plans;
 mod workspace_policy;
 
 pub use external_agent_config_imports::ExternalAgentConfigImportDetailsRecord;
@@ -366,6 +369,26 @@ impl StateRuntime {
         let thread_updated_at_millis = thread_updated_at_millis.unwrap_or(0);
         let thread_recency_at_millis = thread_recency_at_millis.unwrap_or(0);
         let workspace = WorkspaceStore::new(Arc::clone(&workspace_pool));
+        let started = Instant::now();
+        let agent_turn_recovery_result = workspace.reconcile_orphaned_agent_turns().await;
+        crate::telemetry::record_init_result(
+            telemetry_override,
+            DbKind::Workspace,
+            "reconcile_orphaned_agent_turns",
+            started.elapsed(),
+            &agent_turn_recovery_result,
+        );
+        if let Err(err) = agent_turn_recovery_result {
+            close_sqlite_pools(&[
+                pool.as_ref(),
+                logs_pool.as_ref(),
+                goals_pool.as_ref(),
+                memories_pool.as_ref(),
+                workspace_pool.as_ref(),
+            ])
+            .await;
+            return Err(err);
+        }
         let started = Instant::now();
         let client_admin_backfill_result = workspace.backfill_legacy_client_admin_metadata().await;
         crate::telemetry::record_init_result(
@@ -853,6 +876,7 @@ mod tests {
             "ensure_backfill_state",
             "post_init_query",
             "backfill_client_admin_metadata",
+            "reconcile_orphaned_agent_turns",
         ]
         .into_iter()
         .map(str::to_string)

@@ -10,6 +10,7 @@ use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::ThreadStartResponse;
 use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::UserInput as V2UserInput;
+use codex_app_server_protocol::WorkspaceAgentResultListResponse;
 use codex_app_server_protocol::WorkspaceAgentRunSourceListResponse;
 use codex_app_server_protocol::WorkspaceAgentRunStartResponse;
 use codex_app_server_protocol::WorkspaceClientUpsertResponse;
@@ -36,6 +37,8 @@ struct WorkspaceAgentFixture {
 
 struct StartedAgentRun {
     id: String,
+    packet_id: String,
+    client_id: String,
     prompt: String,
 }
 
@@ -97,6 +100,11 @@ async fn claimed_wco_tool_read_succeeds_but_run_id_only_rpc_stays_denied() -> Re
     )
     .await?;
 
+    let mut commentary = responses::ev_assistant_message(
+        "message-commentary-bound",
+        "Reviewing the authorized context.",
+    );
+    commentary["item"]["phase"] = json!("commentary");
     let response_mock = responses::mount_sse_sequence(
         &model_server,
         vec![
@@ -116,6 +124,7 @@ async fn claimed_wco_tool_read_succeeds_but_run_id_only_rpc_stays_denied() -> Re
             ]),
             responses::sse(vec![
                 responses::ev_response_created("response-final-bound"),
+                commentary,
                 responses::ev_assistant_message("message-final-bound", "Bound context reviewed."),
                 responses::ev_completed("response-final-bound"),
             ]),
@@ -149,6 +158,41 @@ async fn claimed_wco_tool_read_succeeds_but_run_id_only_rpc_stays_denied() -> Re
             .read_stream_until_notification_message("turn/completed"),
     )
     .await??;
+
+    let results: WorkspaceAgentResultListResponse = request(
+        &mut fixture.server,
+        "workspace/agent/result/list",
+        json!({
+            "clientId": &run.client_id,
+            "packetId": &run.packet_id,
+            "limit": 10,
+        }),
+    )
+    .await?;
+    let result = results
+        .results
+        .iter()
+        .find(|result| result.run_id.as_deref() == Some(run.id.as_str()))
+        .context("bound model turn should atomically persist its result")?;
+    assert_eq!(result.body, "Bound context reviewed.");
+    assert_eq!(result.status, "review_pending");
+
+    let forged_result = request_error(
+        &mut fixture.server,
+        "workspace/agent/result/create",
+        json!({
+            "packetId": &run.packet_id,
+            "runId": &run.id,
+            "body": "Caller-forged agent output",
+        }),
+    )
+    .await?;
+    assert!(
+        forged_result
+            .error
+            .message
+            .contains("linked workspace agent results are committed by the bound model turn")
+    );
 
     let requests = response_mock.requests();
     assert_eq!(requests.len(), 2);
@@ -314,6 +358,9 @@ async fn start_agent_run(
     assert_eq!(packet.packet.plan_schema_version, 1);
     assert_eq!(packet.packet.source_checkpoint_id, None);
     assert_eq!(packet.packet.source_checkpoint_sha256, None);
+    assert_eq!(packet.packet.workspace_plan_revision_id, None);
+    assert_eq!(packet.packet.workspace_plan_content_sha256, None);
+    assert_eq!(packet.packet.workspace_plan_evidence_manifest_sha256, None);
     let readiness: Value = serde_json::from_str(&packet.packet.readiness_json)?;
     assert_eq!(readiness["legacy"], true);
     let stored_envelope: Value = serde_json::from_str(&packet.packet.context_envelope_json)?;
@@ -334,6 +381,11 @@ async fn start_agent_run(
         }),
     )
     .await?;
+    assert_eq!(run.run.workspace_plan_revision_id, None);
+    assert_eq!(run.run.workspace_plan_content_sha256, None);
+    assert_eq!(run.run.workspace_plan_evidence_manifest_sha256, None);
+    let packet_id = packet.packet.id.clone();
+    let client_id = packet.packet.client_id.clone();
     let prompt = codex_state::render_workspace_agent_handoff_prompt(
         &codex_state::WorkspaceAgentHandoffPromptInput {
             packet_id: packet.packet.id,
@@ -350,6 +402,8 @@ async fn start_agent_run(
     );
     Ok(StartedAgentRun {
         id: run.run.id,
+        packet_id,
+        client_id,
         prompt,
     })
 }

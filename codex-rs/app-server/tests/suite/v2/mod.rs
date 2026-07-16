@@ -93,3 +93,4 @@ mod workspace_chart_commit_adversarial;
 mod workspace_coverage;
 mod workspace_data_policy;
 mod workspace_drafts;
+mod workspace_plan;

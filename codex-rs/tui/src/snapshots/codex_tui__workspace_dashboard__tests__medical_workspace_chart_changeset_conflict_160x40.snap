@@ -1,30 +1,30 @@
 ---
 source: tui/src/workspace_dashboard.rs
-expression: "render_dashboard_lines_at(&dashboard, 160, 40)"
+expression: rendered
 ---
 Medical Workspace  /workspace-medical  SYNTHETIC DATA ONLY
 Patient: Jordan Patient  DOB: blank  MRN: blank  Contact: Missing contact  Coverage: Missing coverage  Encounter: No encounter
- EXPLORER                          PATIENT CHART                                                                   CONTEXT PLAN
-┌Patient Directory───────────────┐┌Patient Demographics──────────────────────────────────────────────────────────┐┌Agent Review────────────────────────────────┐
-│Local search: /                 ││Identity: Jordan Patient · preferred not set                                  ││Patient Chart: Jordan...; Open encounter    │
-│1 active patient; local only    ││Legal/card: legal name missing                                                ││Codex bridge: review                        │
-│New: :patient new; / searches.  ││DOB: missing · admin sex: missing · MRN: missing                              ││[Current]  History  Audit  ←/→              │
-│> Jordan Patient  DOB blank  MRN││Contact: phone missing; email missing; method not set                         ││                                            │
-│blank  active                   ││Address: address missing                                                      ││Pending Chart Changeset                     │
-│                                ││Emergency: name missing; relationship missing; phone missing                  ││  CONFLICT · note note-1 changed from r3 to │
-│                                ││Coverage: P not entered; S not entered; T not entered                         ││r4; refresh be...                           │
-│                                ││Enter edits all identity/contact fields · Ctrl-P opens actions                ││  Changes: encounter, note                  │
-│                                │└──────────────────────────────────────────────────────────────────────────────┘│  Patient: identity only; demographics      │
-│                                │┌Note Title────────────────────────────────────────────────────────────────────┐│untouched                                   │
-└────────────────────────────────┘│Visit note                                                                    ││  Guards: 0 opaque version(s) · note r3     │
-┌Patient Notes───────────────────┐└──────────────────────────────────────────────────────────────────────────────┘│  Reason: Save reviewed chart changes:      │
-│Patient Notes                   │┌Note Body─────────────────────────────────────────────────────────────────────┐│encounter, note                             │
-│  Medical Notes                 ││Unsaved clinician draft.                                                      ││  Commit key: stable-conflict-key           │
-│> daily  1970-01-01  Visit note ││                                                                              ││                                            │
-│[unsaved] [draft]               ││                                                                              ││  ● Ctrl-S refreshes canonical data and     │
-│                                ││                                                                              ││preserves the draft                         │
-│                                ││                                                                              ││  Human draft stays in the center; canonical│
+ EXPLORER                          PATIENT CHART                                                                   PLAN WITH CODEX
+┌Patient Directory───────────────┐┌Patient Demographics──────────────────────────────────────────────────────────┐┌Plan with Codex─────────────────────────────┐
+│Local search: /                 ││Identity: Jordan Patient · preferred not set                                  ││[Chat]  Context  Audit  ←/→ tabs            │
+│1 active patient; local only    ││Legal/card: legal name missing                                                ││                                            │
+│New: :patient new; / searches.  ││DOB: missing · admin sex: missing · MRN: missing                              ││Pending Chart Changeset                     │
+│> Jordan Patient  DOB blank  MRN││Contact: phone missing; email missing; method not set                         ││  CONFLICT · note note-1 changed from r3 to │
+│blank  active                   ││Address: address missing                                                      ││r4; refresh be...                           │
+│                                ││Emergency: name missing; relationship missing; phone missing                  ││  Changes: encounter, note                  │
+│                                ││Coverage: P not entered; S not entered; T not entered                         ││  Patient: identity only; demographics      │
+│                                ││Enter edits all identity/contact fields · Ctrl-P opens actions                ││untouched                                   │
+│                                │└──────────────────────────────────────────────────────────────────────────────┘│  Guards: 0 opaque version(s) · note r3     │
+│                                │┌Note Title────────────────────────────────────────────────────────────────────┐│  Reason: Save reviewed chart changes:      │
+└────────────────────────────────┘│Visit note                                                                    ││encounter, note                             │
+┌Patient Notes───────────────────┐└──────────────────────────────────────────────────────────────────────────────┘│  Commit key: stable-conflict-key           │
+│Patient Notes                   │┌Note Body─────────────────────────────────────────────────────────────────────┐│                                            │
+│  Medical Notes                 ││Unsaved clinician draft.                                                      ││  ● Ctrl-S refreshes canonical data and     │
+│> daily  1970-01-01  Visit note ││                                                                              ││preserves the draft                         │
+│[unsaved] [draft]               ││                                                                              ││  Human draft stays in the center; canonical│
 │                                ││                                                                              ││DB changes only after commit success.       │
+│                                ││                                                                              ││                                            │
+│                                ││                                                                              ││                                            │
 │                                ││                                                                              ││                                            │
 └────────────────────────────────┘│                                                                              ││                                            │
 ┌Uploaded Documents──────────────┐│                                                                              ││                                            │
@@ -35,10 +35,10 @@ Patient: Jordan Patient  DOB: blank  MRN: blank  Contact: Missing contact  Cover
 │                                ││                                                                              ││                                            │
 │                                ││                                                                              ││                                            │
 │                                ││                                                                              ││                                            │
-│                                ││                                                                              ││                                            │
-│                                ││                                                                              ││                                            │
-│                                ││                                                                              ││                                            │
-│                                ││                                                                              ││                                            │
+│                                ││                                                                              ││Resolve Chart Conflict                      │
+│                                ││                                                                              ││Ctrl-S refresh · Esc/Ctrl-W close           │
+│                                ││                                                                              ││  Refresh canonical chart data before       │
+│                                ││                                                                              ││  messaging Codex.                          │
 │                                ││                                                                              ││                                            │
 └────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────┘└────────────────────────────────────────────┘
 Focus: Agent | Mode: Conflict recovery | Keys: Ctrl-S refresh  Esc/Ctrl-W close | Next: Refresh canonical chart

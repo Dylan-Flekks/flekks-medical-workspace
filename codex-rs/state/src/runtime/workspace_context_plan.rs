@@ -48,6 +48,7 @@ struct ContextPlanAcknowledgement {
 pub(super) async fn normalize_context_plan_metadata(
     tx: &mut sqlx::Transaction<'_, Sqlite>,
     input: &crate::WorkspaceContextPacketCreate,
+    allow_stale_source_checkpoint: bool,
 ) -> anyhow::Result<NormalizedContextPlanMetadata> {
     let source_checkpoint_id = normalized_optional(&input.source_checkpoint_id);
     let source_checkpoint_sha256 = normalized_optional(&input.source_checkpoint_sha256);
@@ -93,7 +94,14 @@ pub(super) async fn normalize_context_plan_metadata(
         source_checkpoint_id.as_deref(),
         source_checkpoint_sha256.as_deref(),
     ) {
-        validate_source_checkpoint(tx, input, checkpoint_id, checkpoint_sha256).await?;
+        validate_source_checkpoint(
+            tx,
+            input,
+            checkpoint_id,
+            checkpoint_sha256,
+            !allow_stale_source_checkpoint,
+        )
+        .await?;
     }
 
     let readiness = if input.readiness_json.trim().is_empty() {
@@ -191,7 +199,17 @@ pub(super) async fn validate_context_plan_for_submission(
         base_note_revision: packet.base_note_revision,
         ..Default::default()
     };
-    validate_source_checkpoint(tx, &input, checkpoint_id, checkpoint_sha256).await?;
+    let has_complete_plan_binding = packet.workspace_plan_revision_id.is_some()
+        && packet.workspace_plan_content_sha256.is_some()
+        && packet.workspace_plan_evidence_manifest_sha256.is_some();
+    validate_source_checkpoint(
+        tx,
+        &input,
+        checkpoint_id,
+        checkpoint_sha256,
+        !has_complete_plan_binding,
+    )
+    .await?;
     let acknowledged = readiness
         .acknowledgements
         .iter()
@@ -218,6 +236,7 @@ async fn validate_source_checkpoint(
     input: &crate::WorkspaceContextPacketCreate,
     checkpoint_id: &str,
     checkpoint_sha256: &str,
+    require_current: bool,
 ) -> anyhow::Result<()> {
     let row = sqlx::query(
         r#"
@@ -271,7 +290,7 @@ LIMIT 1
             "workspace context plan source checkpoint `{checkpoint_id}` SHA-256 does not match"
         );
     }
-    if current_revision != revision {
+    if require_current && current_revision != revision {
         anyhow::bail!(
             "workspace context plan source checkpoint `{checkpoint_id}` is stale; the draft session has a newer checkpoint"
         );

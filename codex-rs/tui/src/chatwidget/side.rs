@@ -21,19 +21,34 @@ impl ChatWidget {
     /// Running that prompt through mention, skill, connector, or IDE-context discovery would make
     /// the submitted turn differ from the persisted audit record. Keep this path text-only while
     /// leaving normal user and side-conversation submission behavior unchanged.
+    pub(crate) fn can_accept_audited_text_as_plain_user_turn(&self, text: &str) -> bool {
+        self.is_session_configured()
+            && !text.is_empty()
+            && !self
+                .effective_collaboration_mode()
+                .model()
+                .trim()
+                .is_empty()
+    }
+
     pub(crate) fn accept_audited_text_as_plain_user_turn(&mut self, text: String) -> bool {
-        if !self.is_session_configured() || text.is_empty() {
+        if !self.can_accept_audited_text_as_plain_user_turn(&text) {
+            if self.is_session_configured()
+                && !text.is_empty()
+                && self
+                    .effective_collaboration_mode()
+                    .model()
+                    .trim()
+                    .is_empty()
+            {
+                self.add_error_message(
+                    "Thread model is unavailable. Wait for the thread to finish syncing or choose a model before sending input.".to_string(),
+                );
+            }
             return false;
         }
 
         let effective_mode = self.effective_collaboration_mode();
-        if effective_mode.model().trim().is_empty() {
-            self.add_error_message(
-                "Thread model is unavailable. Wait for the thread to finish syncing or choose a model before sending input.".to_string(),
-            );
-            return false;
-        }
-
         let render_in_history = !self.turn_lifecycle.agent_turn_running;
         let items = vec![UserInput::Text {
             text: text.clone(),

@@ -9,6 +9,8 @@ mod workspace_coverage;
 pub(crate) mod workspace_data_policy;
 mod workspace_drafts;
 
+pub(crate) const WORKSPACE_MEDICAL_PLAN_THREAD_SOURCE: &str = "workspace_medical_plan";
+
 use crate::bottom_pane::FeedbackAudience;
 use crate::legacy_core::config::Config;
 use crate::permission_compat::legacy_compatible_permission_profile;
@@ -188,6 +190,24 @@ use codex_app_server_protocol::WorkspaceNoteUpsertParams;
 use codex_app_server_protocol::WorkspaceNoteUpsertResponse;
 use codex_app_server_protocol::WorkspacePatientSafetyItemListParams;
 use codex_app_server_protocol::WorkspacePatientSafetyItemListResponse;
+use codex_app_server_protocol::WorkspacePlanGuideRunFinishParams;
+use codex_app_server_protocol::WorkspacePlanGuideRunFinishResponse;
+use codex_app_server_protocol::WorkspacePlanGuideRunStartParams;
+use codex_app_server_protocol::WorkspacePlanGuideRunStartResponse;
+use codex_app_server_protocol::WorkspacePlanMessageAppendParams;
+use codex_app_server_protocol::WorkspacePlanMessageAppendResponse;
+use codex_app_server_protocol::WorkspacePlanRecoveryGetParams;
+use codex_app_server_protocol::WorkspacePlanRecoveryGetResponse;
+use codex_app_server_protocol::WorkspacePlanRevisionOutdateParams;
+use codex_app_server_protocol::WorkspacePlanRevisionOutdateResponse;
+use codex_app_server_protocol::WorkspacePlanRevisionSubmitParams;
+use codex_app_server_protocol::WorkspacePlanRevisionSubmitResponse;
+use codex_app_server_protocol::WorkspacePlanSessionBindThreadParams;
+use codex_app_server_protocol::WorkspacePlanSessionBindThreadResponse;
+use codex_app_server_protocol::WorkspacePlanSessionOpenParams;
+use codex_app_server_protocol::WorkspacePlanSessionOpenResponse;
+use codex_app_server_protocol::WorkspacePlanSnapshotGetParams;
+use codex_app_server_protocol::WorkspacePlanSnapshotGetResponse;
 use codex_app_server_protocol::WorkspacePracticeLibraryListParams;
 use codex_app_server_protocol::WorkspacePracticeLibraryListResponse;
 use codex_app_server_protocol::WorkspaceTaskListParams;
@@ -554,19 +574,40 @@ impl AppServerSession {
         config: &Config,
         session_start_source: Option<ThreadStartSource>,
     ) -> Result<AppServerStartedThread> {
+        self.start_thread_with_sources(config, session_start_source, ThreadSource::User)
+            .await
+    }
+
+    pub(crate) async fn start_workspace_medical_plan_thread(
+        &mut self,
+        config: &Config,
+    ) -> Result<AppServerStartedThread> {
+        self.start_thread_with_sources(
+            config,
+            /*session_start_source*/ None,
+            ThreadSource::Feature(WORKSPACE_MEDICAL_PLAN_THREAD_SOURCE.to_string()),
+        )
+        .await
+    }
+
+    async fn start_thread_with_sources(
+        &mut self,
+        config: &Config,
+        session_start_source: Option<ThreadStartSource>,
+        thread_source: ThreadSource,
+    ) -> Result<AppServerStartedThread> {
         let request_id = self.next_request_id();
         let session_config = self.session_config_with_effective_service_tier(config);
+        let mut params = thread_start_params_from_config(
+            &session_config,
+            self.thread_params_mode(),
+            self.remote_cwd_override.as_deref(),
+            session_start_source,
+        );
+        params.thread_source = Some(thread_source);
         let response: ThreadStartResponse = self
             .client
-            .request_typed(ClientRequest::ThreadStart {
-                request_id,
-                params: thread_start_params_from_config(
-                    &session_config,
-                    self.thread_params_mode(),
-                    self.remote_cwd_override.as_deref(),
-                    session_start_source,
-                ),
-            })
+            .request_typed(ClientRequest::ThreadStart { request_id, params })
             .await
             .map_err(|err| {
                 bootstrap_request_error("thread/start failed during TUI bootstrap", err)
@@ -1321,6 +1362,112 @@ impl AppServerSession {
             .request_typed(ClientRequest::WorkspaceAgentResultStatusUpdate { request_id, params })
             .await
             .wrap_err("workspace/agent/result/status/update failed in TUI")
+    }
+
+    pub(crate) async fn workspace_plan_session_open(
+        &mut self,
+        params: WorkspacePlanSessionOpenParams,
+    ) -> Result<WorkspacePlanSessionOpenResponse> {
+        self.ensure_synthetic_workspace().await?;
+        let request_id = self.next_request_id();
+        self.client
+            .request_typed(ClientRequest::WorkspacePlanSessionOpen { request_id, params })
+            .await
+            .wrap_err("workspace/plan/session/open failed in TUI")
+    }
+
+    pub(crate) async fn workspace_plan_session_bind_thread(
+        &mut self,
+        params: WorkspacePlanSessionBindThreadParams,
+    ) -> Result<WorkspacePlanSessionBindThreadResponse> {
+        self.ensure_synthetic_workspace().await?;
+        let request_id = self.next_request_id();
+        self.client
+            .request_typed(ClientRequest::WorkspacePlanSessionBindThread { request_id, params })
+            .await
+            .wrap_err("workspace/plan/session/bindThread failed in TUI")
+    }
+
+    pub(crate) async fn workspace_plan_snapshot_get(
+        &mut self,
+        params: WorkspacePlanSnapshotGetParams,
+    ) -> Result<WorkspacePlanSnapshotGetResponse> {
+        let request_id = self.next_request_id();
+        self.client
+            .request_typed(ClientRequest::WorkspacePlanSnapshotGet { request_id, params })
+            .await
+            .wrap_err("workspace/plan/snapshot/get failed in TUI")
+    }
+
+    pub(crate) async fn workspace_plan_recovery_get(
+        &mut self,
+        params: WorkspacePlanRecoveryGetParams,
+    ) -> Result<WorkspacePlanRecoveryGetResponse> {
+        let request_id = self.next_request_id();
+        self.client
+            .request_typed(ClientRequest::WorkspacePlanRecoveryGet { request_id, params })
+            .await
+            .wrap_err("workspace/plan/recovery/get failed in TUI")
+    }
+
+    pub(crate) async fn workspace_plan_guide_run_start(
+        &mut self,
+        params: WorkspacePlanGuideRunStartParams,
+    ) -> Result<WorkspacePlanGuideRunStartResponse> {
+        self.ensure_synthetic_workspace().await?;
+        let request_id = self.next_request_id();
+        self.client
+            .request_typed(ClientRequest::WorkspacePlanGuideRunStart { request_id, params })
+            .await
+            .wrap_err("workspace/plan/guideRun/start failed in TUI")
+    }
+
+    pub(crate) async fn workspace_plan_guide_run_finish(
+        &mut self,
+        params: WorkspacePlanGuideRunFinishParams,
+    ) -> Result<WorkspacePlanGuideRunFinishResponse> {
+        self.ensure_synthetic_workspace().await?;
+        let request_id = self.next_request_id();
+        self.client
+            .request_typed(ClientRequest::WorkspacePlanGuideRunFinish { request_id, params })
+            .await
+            .wrap_err("workspace/plan/guideRun/finish failed in TUI")
+    }
+
+    pub(crate) async fn workspace_plan_message_append(
+        &mut self,
+        params: WorkspacePlanMessageAppendParams,
+    ) -> Result<WorkspacePlanMessageAppendResponse> {
+        self.ensure_synthetic_workspace().await?;
+        let request_id = self.next_request_id();
+        self.client
+            .request_typed(ClientRequest::WorkspacePlanMessageAppend { request_id, params })
+            .await
+            .wrap_err("workspace/plan/message/append failed in TUI")
+    }
+
+    pub(crate) async fn workspace_plan_revision_outdate(
+        &mut self,
+        params: WorkspacePlanRevisionOutdateParams,
+    ) -> Result<WorkspacePlanRevisionOutdateResponse> {
+        self.ensure_synthetic_workspace().await?;
+        let request_id = self.next_request_id();
+        self.client
+            .request_typed(ClientRequest::WorkspacePlanRevisionOutdate { request_id, params })
+            .await
+            .wrap_err("workspace/plan/revision/outdate failed in TUI")
+    }
+
+    pub(crate) async fn workspace_plan_revision_submit(
+        &mut self,
+        params: WorkspacePlanRevisionSubmitParams,
+    ) -> Result<WorkspacePlanRevisionSubmitResponse> {
+        self.ensure_synthetic_workspace().await?;
+        let request_id = self.next_request_id();
+        self.client
+            .request_typed(ClientRequest::WorkspacePlanRevisionSubmit { request_id, params })
+            .await
+            .wrap_err("workspace/plan/revision/submit failed in TUI")
     }
 
     #[cfg(test)]

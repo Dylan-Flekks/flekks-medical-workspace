@@ -98,3 +98,7 @@ WHERE version = ?
 #[cfg(test)]
 #[path = "migrations_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "workspace_plan_migration_tests.rs"]
+mod workspace_plan_migration_tests;

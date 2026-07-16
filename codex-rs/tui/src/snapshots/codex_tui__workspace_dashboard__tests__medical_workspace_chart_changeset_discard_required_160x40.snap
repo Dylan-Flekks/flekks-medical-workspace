@@ -1,30 +1,30 @@
 ---
 source: tui/src/workspace_dashboard.rs
-expression: "render_dashboard_lines_at(&dashboard, 160, 40)"
+expression: rendered
 ---
 Medical Workspace  /workspace-medical  SYNTHETIC DATA ONLY
 Patient: Jordan Patient  DOB: blank  MRN: blank  Contact: Missing contact  Coverage: Missing coverage  Encounter: No encounter
- EXPLORER                          PATIENT CHART                                                                   CONTEXT PLAN
-┌Patient Directory───────────────┐┌Patient Demographics──────────────────────────────────────────────────────────┐┌Agent Review────────────────────────────────┐
-│Local search: /                 ││Identity: Jordan Patient · preferred not set                                  ││Patient Chart: Jordan...; Save first eval   │
-│1 active patient; local only    ││Legal/card: legal name missing                                                ││Codex bridge: review                        │
-│New: :patient new; / searches.  ││DOB: missing · admin sex: missing · MRN: missing                              ││[Current]  History  Audit  ←/→              │
-│> Jordan Patient  DOB blank  MRN││Contact: phone missing; email missing; method not set                         ││                                            │
-│blank  active                   ││Address: address missing                                                      ││Pending Chart Changeset                     │
-│                                ││Emergency: name missing; relationship missing; phone missing                  ││  BLOCKED · Canonical chart refreshed, but  │
-│                                ││Coverage: P not entered; S not entered; T not entered                         ││this stale non...                           │
-│                                ││Enter edits all identity/contact fields · Ctrl-P opens actions                ││  Changes: demographics                     │
-│                                │└──────────────────────────────────────────────────────────────────────────────┘│  Patient: demographic snapshot included    │
-│                                │┌Note Title────────────────────────────────────────────────────────────────────┐│  Guards: 1 opaque version(s) · no note     │
-└────────────────────────────────┘│Untitled note                                                                 ││revision guard                              │
-┌Patient Notes───────────────────┐└──────────────────────────────────────────────────────────────────────────────┘│  Reason: Save reviewed chart changes:      │
-│Patient Notes                   │┌Note Body─────────────────────────────────────────────────────────────────────┐│demographics                                │
-│  New note                      ││HPI:                                                                          ││  Commit key: stable-discard-key            │
-│  No patient notes yet. Use     ││Exam:                                                                         ││                                            │
-│:note new.                      ││Assessment:                                                                   ││  ● Esc/Ctrl-W discards and closes; reopen  │
-│  Medical, communication, and   ││Plan:                                                                         ││loads canonical data                        │
-│admin notes appear here.        ││                                                                              ││  Human draft stays in the center; canonical│
-│                                ││                                                                              ││DB changes only after commit success.       │
+ EXPLORER                          PATIENT CHART                                                                   PLAN WITH CODEX
+┌Patient Directory───────────────┐┌Patient Demographics──────────────────────────────────────────────────────────┐┌Plan with Codex─────────────────────────────┐
+│Local search: /                 ││Identity: Jordan Patient · preferred not set                                  ││[Chat]  Context  Audit  ←/→ tabs            │
+│1 active patient; local only    ││Legal/card: legal name missing                                                ││                                            │
+│New: :patient new; / searches.  ││DOB: missing · admin sex: missing · MRN: missing                              ││Pending Chart Changeset                     │
+│> Jordan Patient  DOB blank  MRN││Contact: phone missing; email missing; method not set                         ││  BLOCKED · Canonical chart refreshed, but  │
+│blank  active                   ││Address: address missing                                                      ││this stale non...                           │
+│                                ││Emergency: name missing; relationship missing; phone missing                  ││  Changes: demographics                     │
+│                                ││Coverage: P not entered; S not entered; T not entered                         ││  Patient: demographic snapshot included    │
+│                                ││Enter edits all identity/contact fields · Ctrl-P opens actions                ││  Guards: 1 opaque version(s) · no note     │
+│                                │└──────────────────────────────────────────────────────────────────────────────┘│revision guard                              │
+│                                │┌Note Title────────────────────────────────────────────────────────────────────┐│  Reason: Save reviewed chart changes:      │
+└────────────────────────────────┘│Untitled note                                                                 ││demographics                                │
+┌Patient Notes───────────────────┐└──────────────────────────────────────────────────────────────────────────────┘│  Commit key: stable-discard-key            │
+│Patient Notes                   │┌Note Body─────────────────────────────────────────────────────────────────────┐│                                            │
+│  New note                      ││HPI:                                                                          ││  ● Esc/Ctrl-W discards and closes; reopen  │
+│  No patient notes yet. Use     ││Exam:                                                                         ││loads canonical data                        │
+│:note new.                      ││Assessment:                                                                   ││  Human draft stays in the center; canonical│
+│  Medical, communication, and   ││Plan:                                                                         ││DB changes only after commit success.       │
+│admin notes appear here.        ││                                                                              ││                                            │
+│                                ││                                                                              ││                                            │
 │                                ││                                                                              ││                                            │
 └────────────────────────────────┘│                                                                              ││                                            │
 ┌Uploaded Documents──────────────┐│                                                                              ││                                            │
@@ -35,10 +35,10 @@ Patient: Jordan Patient  DOB: blank  MRN: blank  Contact: Missing contact  Cover
 │                                ││                                                                              ││                                            │
 │                                ││                                                                              ││                                            │
 │                                ││                                                                              ││                                            │
-│                                ││                                                                              ││                                            │
-│                                ││                                                                              ││                                            │
-│                                ││                                                                              ││                                            │
-│                                ││                                                                              ││                                            │
+│                                ││                                                                              ││Discard Stale Draft                         │
+│                                ││                                                                              ││Esc/Ctrl-W discard and reload               │
+│                                ││                                                                              ││  Discard this stale draft and reopen       │
+│                                ││                                                                              ││  canonical chart data.                     │
 │                                ││                                                                              ││                                            │
 └────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────┘└────────────────────────────────────────────┘
 Focus: Agent | Mode: Discard required | Keys: Esc/Ctrl-W discard and reload | Next: Discard and reopen

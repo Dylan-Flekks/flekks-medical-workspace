@@ -9,7 +9,6 @@ use crate::tools::context::ToolCallSource;
 use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolOutput;
 use crate::tools::context::ToolPayload;
-use codex_protocol::config_types::ModelToolMode;
 use codex_rollout_trace::ExecutionStatus;
 use codex_rollout_trace::ToolDispatchInvocation;
 use codex_rollout_trace::ToolDispatchPayload;
@@ -24,7 +23,7 @@ pub(crate) struct ToolDispatchTrace {
 
 impl ToolDispatchTrace {
     pub(crate) fn start(invocation: &ToolInvocation) -> Self {
-        if invocation.turn.model_tool_mode == ModelToolMode::WorkspaceContextOnly {
+        if invocation.turn.model_tool_mode.is_workspace_restricted() {
             return Self { context: None };
         }
         let context = invocation

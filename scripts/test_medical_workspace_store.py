@@ -16,6 +16,9 @@ from unittest import mock
 
 SCRIPT = Path(__file__).with_name("medical_workspace_store.py")
 LAUNCHER = Path(__file__).with_name("run_medical_workspace.sh")
+WORKSPACE_MIGRATIONS = (
+    SCRIPT.resolve().parents[1] / "codex-rs" / "state" / "workspace_migrations"
+)
 SPEC = importlib.util.spec_from_file_location("medical_workspace_store", SCRIPT)
 assert SPEC is not None and SPEC.loader is not None
 store_tool = importlib.util.module_from_spec(SPEC)
@@ -50,6 +53,26 @@ class MedicalWorkspaceStoreTests(unittest.TestCase):
             connection.close()
         os.chmod(db_path, 0o600)
         return store
+
+    def test_expected_workspace_tables_match_real_migration_inventory(self) -> None:
+        migration_paths = sorted(WORKSPACE_MIGRATIONS.glob("*.sql"))
+        self.assertTrue(migration_paths, msg="workspace migrations are unavailable")
+        connection = sqlite3.connect(":memory:")
+        try:
+            connection.execute("PRAGMA foreign_keys = ON")
+            for migration_path in migration_paths:
+                connection.executescript(migration_path.read_text(encoding="utf-8"))
+            migrated_tables = {
+                row[0]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_schema "
+                    "WHERE type = 'table' AND name LIKE 'workspace_%'"
+                )
+            }
+        finally:
+            connection.close()
+
+        self.assertEqual(migrated_tables, store_tool.EXPECTED_WORKSPACE_TABLES)
 
     def test_status_accepts_a_private_canonical_synthetic_store(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

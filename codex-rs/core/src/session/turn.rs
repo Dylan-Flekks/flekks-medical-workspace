@@ -229,7 +229,7 @@ pub(crate) async fn run_turn(
         // Note that pending_input would be something like a message the user
         // submitted through the UI while the model was running. Though the UI
         // may support this, the model might not.
-        let pending_input = if turn_context.model_tool_mode == ModelToolMode::WorkspaceContextOnly {
+        let pending_input = if turn_context.model_tool_mode.is_workspace_restricted() {
             Vec::new()
         } else if can_drain_pending_input {
             sess.input_queue.get_pending_input(&sess.active_turn).await
@@ -242,7 +242,7 @@ pub(crate) async fn run_turn(
         }
 
         let window_id = sess.current_window_id().await;
-        if turn_context.model_tool_mode != ModelToolMode::WorkspaceContextOnly {
+        if !turn_context.model_tool_mode.is_workspace_restricted() {
             super::rollout_budget::maybe_record_reminder(
                 sess.as_ref(),
                 turn_context.as_ref(),
@@ -257,7 +257,7 @@ pub(crate) async fn run_turn(
             None => sess.capture_step_context(Arc::clone(&turn_context)).await,
         };
         let sampling_request_result: CodexResult<_> = async {
-            if turn_context.model_tool_mode != ModelToolMode::WorkspaceContextOnly {
+            if !turn_context.model_tool_mode.is_workspace_restricted() {
                 super::time_reminder::maybe_record_current_time_reminder(
                     sess.as_ref(),
                     turn_context.as_ref(),
@@ -312,7 +312,7 @@ pub(crate) async fn run_turn(
                 can_drain_pending_input = true;
                 let (has_pending_input, token_status, estimated_token_count) = async {
                     let has_pending_input =
-                        if turn_context.model_tool_mode == ModelToolMode::WorkspaceContextOnly {
+                        if turn_context.model_tool_mode.is_workspace_restricted() {
                             false
                         } else {
                             sess.input_queue.has_pending_input(&sess.active_turn).await
@@ -348,7 +348,7 @@ pub(crate) async fn run_turn(
                     "post sampling token usage"
                 );
 
-                if turn_context.model_tool_mode != ModelToolMode::WorkspaceContextOnly {
+                if !turn_context.model_tool_mode.is_workspace_restricted() {
                     super::token_budget::maybe_record(
                         sess.as_ref(),
                         turn_context.as_ref(),
@@ -358,7 +358,7 @@ pub(crate) async fn run_turn(
                 }
 
                 // as long as compaction works well in getting us way below the token limit, we shouldn't worry about being in an infinite loop.
-                if turn_context.model_tool_mode != ModelToolMode::WorkspaceContextOnly
+                if !turn_context.model_tool_mode.is_workspace_restricted()
                     && needs_follow_up
                     && (sess.take_new_context_window_request().await || token_limit_reached)
                 {
@@ -531,7 +531,7 @@ async fn build_skills_and_plugins(
     cancellation_token: &CancellationToken,
 ) -> Option<(Vec<ResponseItem>, HashSet<String>)> {
     let turn_context = step_context.turn.as_ref();
-    if turn_context.model_tool_mode == ModelToolMode::WorkspaceContextOnly {
+    if turn_context.model_tool_mode.is_workspace_restricted() {
         return Some((Vec::new(), HashSet::new()));
     }
     // Guardian input embeds the parent transcript as untrusted evidence. Do not interpret skill or
@@ -819,7 +819,7 @@ async fn run_pre_sampling_compact(
     turn_context: &Arc<TurnContext>,
     client_session: &mut ModelClientSession,
 ) -> CodexResult<()> {
-    if turn_context.model_tool_mode == ModelToolMode::WorkspaceContextOnly {
+    if turn_context.model_tool_mode.is_workspace_restricted() {
         return Ok(());
     }
     maybe_run_previous_model_inline_compact(sess, turn_context, client_session).await?;
@@ -983,7 +983,7 @@ async fn run_auto_compact(
     phase: CompactionPhase,
 ) -> CodexResult<()> {
     let turn_context = &step_context.turn;
-    if turn_context.model_tool_mode == ModelToolMode::WorkspaceContextOnly {
+    if turn_context.model_tool_mode.is_workspace_restricted() {
         return Err(CodexErr::InvalidRequest(
             "compaction is unavailable during a workspaceContextOnly turn".to_string(),
         ));
@@ -1157,7 +1157,7 @@ async fn run_sampling_request(
         Arc::clone(&step_context),
         Arc::clone(&turn_diff_tracker),
     );
-    let _code_mode_worker = if turn_context.model_tool_mode == ModelToolMode::WorkspaceContextOnly {
+    let _code_mode_worker = if turn_context.model_tool_mode.is_workspace_restricted() {
         None
     } else {
         sess.services.code_mode_service.start_turn_worker(
@@ -1168,6 +1168,38 @@ async fn run_sampling_request(
         )
     };
     let max_retries = turn_context.provider.info().stream_max_retries();
+    let verified_planning_turn_ids =
+        if turn_context.model_tool_mode == ModelToolMode::WorkspacePlanningOnly {
+            let state_db = sess.state_db().ok_or_else(|| {
+                CodexErr::InvalidRequest(
+                    "workspace planning history verification requires SQLite state".to_string(),
+                )
+            })?;
+            let binding = workspace_context_only::planning_binding(turn_context.as_ref())?;
+            let execution = &binding.execution;
+            let mut turn_ids = state_db
+                .workspace()
+                .list_completed_plan_turn_ids(
+                    &execution.plan_session_id,
+                    &execution.client_id,
+                    &execution.source_thread_id,
+                )
+                .await
+                .map_err(|_| {
+                    CodexErr::InvalidRequest(
+                    "workspace planning history could not be verified against durable completions"
+                        .to_string(),
+                )
+                })?
+                .into_iter()
+                .collect::<HashSet<_>>();
+            // The currently claimed turn must see its own prompt and tool follow-ups, but it becomes
+            // historical only if complete_plan_turn later commits its exact completion receipt.
+            turn_ids.insert(execution.source_turn_id.clone());
+            turn_ids
+        } else {
+            HashSet::new()
+        };
     let mut retries = 0;
     let mut initial_input = Some(input);
     let mut original_input = None;
@@ -1182,6 +1214,7 @@ async fn run_sampling_request(
         let prompt_input = workspace_context_only::filter_prompt_input(
             turn_context.model_tool_mode,
             &turn_context.sub_id,
+            &verified_planning_turn_ids,
             prompt_input,
         );
         let prompt = build_prompt(
@@ -1265,6 +1298,9 @@ pub(crate) async fn built_tools(
             )));
         }
         ModelToolMode::WorkspaceContextOnly => {
+            return workspace_context_only::build_router(turn_context);
+        }
+        ModelToolMode::WorkspacePlanningOnly => {
             return workspace_context_only::build_router(turn_context);
         }
     }
@@ -1901,7 +1937,7 @@ async fn handle_assistant_item_done_in_plan_mode(
         let mut finalized_facts = None;
         if let Some(finalized_turn_item) = finalize_non_tool_response_item(
             sess,
-            if turn_context.model_tool_mode == ModelToolMode::WorkspaceContextOnly {
+            if turn_context.model_tool_mode.is_workspace_restricted() {
                 TurnItemContributorPolicy::Skip
             } else {
                 TurnItemContributorPolicy::Run(turn_store)
@@ -2014,17 +2050,17 @@ async fn try_run_sampling_request(
         .features
         .enabled(Feature::ConcurrentReasoningSummaries)
         && turn_context.provider.info().is_openai();
-    let mut stream = client_session
-        .stream(
-            prompt,
-            &turn_context.model_info,
-            &turn_context.session_telemetry,
-            turn_context.reasoning_effort.clone(),
-            turn_context.reasoning_summary,
-            turn_context.config.service_tier.clone(),
-            responses_metadata,
-            &inference_trace,
-        )
+    let stream_future = Box::pin(client_session.stream(
+        prompt,
+        &turn_context.model_info,
+        &turn_context.session_telemetry,
+        turn_context.reasoning_effort.clone(),
+        turn_context.reasoning_summary,
+        turn_context.config.service_tier.clone(),
+        responses_metadata,
+        &inference_trace,
+    ));
+    let mut stream = stream_future
         .instrument(trace_span!("stream_request"))
         .or_cancel(&cancellation_token)
         .await??;
@@ -2041,11 +2077,15 @@ async fn try_run_sampling_request(
     let mut should_emit_token_count = false;
     let reasoning_effort = turn_context.effective_reasoning_effort_for_tracing();
     let plan_mode = turn_context.collaboration_mode.mode == ModeKind::Plan;
+    let workspace_restricted = turn_context.model_tool_mode.is_workspace_restricted();
+    let workspace_planning_only =
+        turn_context.model_tool_mode == ModelToolMode::WorkspacePlanningOnly;
     let mut assistant_message_stream_parsers = AssistantMessageStreamParsers::new(plan_mode);
     let mut plan_mode_state = plan_mode.then(|| PlanModeStreamState::new(&turn_context.sub_id));
-    let defer_streamed_turn_items_for_contributors = turn_context.model_tool_mode
-        != ModelToolMode::WorkspaceContextOnly
-        && !sess.services.extensions.turn_item_contributors().is_empty();
+    let mut buffered_workspace_assistant: Option<ResponseItem> = None;
+    let defer_streamed_turn_items_for_contributors =
+        !turn_context.model_tool_mode.is_workspace_restricted()
+            && !sess.services.extensions.turn_item_contributors().is_empty();
     let mut active_item_is_streaming_to_client = false;
     let receiving_span = trace_span!("receiving_stream");
     let outcome: CodexResult<SamplingRequestResult> = loop {
@@ -2092,7 +2132,7 @@ async fn try_run_sampling_request(
         match event {
             ResponseEvent::Created => {}
             ResponseEvent::OutputItemDone(mut item) => {
-                if turn_context.item_ids_enabled() {
+                if turn_context.item_ids_enabled() || workspace_restricted {
                     assign_missing_streamed_response_item_id(&mut item, active_item.as_ref());
                 }
                 workspace_context_only::validate_model_output(turn_context.model_tool_mode, &item)?;
@@ -2120,6 +2160,32 @@ async fn try_run_sampling_request(
                         &item_id,
                     )
                     .await;
+                }
+                if workspace_restricted
+                    && matches!(
+                        &item,
+                        ResponseItem::Message { role, .. } if role == "assistant"
+                    )
+                {
+                    if matches!(
+                        &item,
+                        ResponseItem::Message {
+                            phase: Some(MessagePhase::Commentary),
+                            ..
+                        }
+                    ) {
+                        // Commentary may precede the terminal answer, but it is neither an Agent
+                        // Review result nor a Plan completion and is not safe to expose before the
+                        // corresponding restricted result commits.
+                        continue;
+                    }
+                    if buffered_workspace_assistant.replace(item).is_some() {
+                        break Err(CodexErr::InvalidRequest(format!(
+                            "{} requires exactly one final assistant message",
+                            turn_context.model_tool_mode
+                        )));
+                    }
+                    continue;
                 }
                 if let Some(state) = plan_mode_state.as_mut()
                     && handle_assistant_item_done_in_plan_mode(
@@ -2182,7 +2248,7 @@ async fn try_run_sampling_request(
                 }
                 needs_follow_up |= output_result.needs_follow_up;
                 // todo: remove before stabilizing multi-agent v2
-                if turn_context.model_tool_mode != ModelToolMode::WorkspaceContextOnly
+                if !turn_context.model_tool_mode.is_workspace_restricted()
                     && preempt_for_mailbox_mail
                     && sess.input_queue.has_pending_mailbox_items().await
                 {
@@ -2193,7 +2259,7 @@ async fn try_run_sampling_request(
                 }
             }
             ResponseEvent::OutputItemAdded(mut item) => {
-                if turn_context.item_ids_enabled() {
+                if turn_context.item_ids_enabled() || workspace_restricted {
                     assign_missing_streamed_response_item_id(&mut item, /*active_item*/ None);
                 }
                 workspace_context_only::validate_model_output(turn_context.model_tool_mode, &item)?;
@@ -2220,7 +2286,8 @@ async fn try_run_sampling_request(
                 .await
                 {
                     let mut turn_item = turn_item;
-                    let stream_item_to_client = !defer_streamed_turn_items_for_contributors;
+                    let stream_item_to_client = !(defer_streamed_turn_items_for_contributors
+                        || workspace_restricted && matches!(&turn_item, TurnItem::AgentMessage(_)));
                     let mut seeded_parsed: Option<ParsedAssistantTextDelta> = None;
                     let mut seeded_item_id: Option<String> = None;
                     if stream_item_to_client
@@ -2535,6 +2602,92 @@ async fn try_run_sampling_request(
         return Err(CodexErr::TurnAborted);
     }
 
+    let mut outcome = outcome?;
+    if workspace_restricted && !outcome.needs_follow_up {
+        let item = buffered_workspace_assistant.take().ok_or_else(|| {
+            CodexErr::InvalidRequest(format!(
+                "{} requires exactly one final assistant message",
+                turn_context.model_tool_mode
+            ))
+        })?;
+        let state_db = sess.state_db().ok_or_else(|| {
+            CodexErr::InvalidRequest("workspace medical store is unavailable".to_string())
+        })?;
+        let item = match turn_context.model_tool_mode {
+            ModelToolMode::WorkspacePlanningOnly => {
+                workspace_context_only::complete_planning_assistant_message(
+                    state_db,
+                    turn_context.as_ref(),
+                    item,
+                )
+                .await?
+            }
+            ModelToolMode::WorkspaceContextOnly => {
+                workspace_context_only::complete_agent_assistant_message(
+                    state_db,
+                    turn_context.as_ref(),
+                    item,
+                )
+                .await?
+            }
+            ModelToolMode::Default | ModelToolMode::Disabled => unreachable!(),
+        };
+        if workspace_planning_only {
+            let state = plan_mode_state.as_mut().ok_or_else(|| {
+                CodexErr::InvalidRequest(
+                    "workspacePlanningOnly requires Plan collaboration mode".to_string(),
+                )
+            })?;
+            if !handle_assistant_item_done_in_plan_mode(
+                &sess,
+                &turn_context,
+                turn_store.as_ref(),
+                &item,
+                state,
+                None,
+                &mut outcome.last_agent_message,
+            )
+            .await
+            {
+                return Err(CodexErr::InvalidRequest(
+                    "workspace planning completion did not produce an assistant message"
+                        .to_string(),
+                ));
+            }
+        } else if let Some(state) = plan_mode_state.as_mut()
+            && handle_assistant_item_done_in_plan_mode(
+                &sess,
+                &turn_context,
+                turn_store.as_ref(),
+                &item,
+                state,
+                None,
+                &mut outcome.last_agent_message,
+            )
+            .await
+        {
+            // The exact response is already durable; Plan-mode presentation may now emit it.
+        } else {
+            let mut ctx = HandleOutputCtx {
+                sess: sess.clone(),
+                turn_context: turn_context.clone(),
+                turn_store: Arc::clone(&turn_store),
+                tool_runtime,
+                cancellation_token: cancellation_token.child_token(),
+            };
+            let output = handle_output_item_done(&mut ctx, item, None).await?;
+            if output.needs_follow_up || output.tool_future.is_some() {
+                return Err(CodexErr::InvalidRequest(
+                    "workspace agent completion did not produce a terminal assistant message"
+                        .to_string(),
+                ));
+            }
+            if let Some(agent_message) = output.last_agent_message {
+                outcome.last_agent_message = Some(agent_message);
+            }
+        }
+    }
+
     if should_emit_turn_diff {
         let unified_diff = {
             let tracker = turn_diff_tracker.lock().await;
@@ -2546,14 +2699,14 @@ async fn try_run_sampling_request(
         }
     }
 
-    outcome
+    Ok(outcome)
 }
 
 fn inference_trace_context_for_turn(
     sess: &Session,
     turn_context: &TurnContext,
 ) -> codex_rollout_trace::InferenceTraceContext {
-    if turn_context.model_tool_mode == ModelToolMode::WorkspaceContextOnly {
+    if turn_context.model_tool_mode.is_workspace_restricted() {
         codex_rollout_trace::InferenceTraceContext::disabled()
     } else {
         sess.services.rollout_thread_trace.inference_trace_context(

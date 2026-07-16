@@ -33,6 +33,7 @@ DB_BASE_NAMES = {
 EXPECTED_WORKSPACE_TABLES = {
     "workspace_agent_results",
     "workspace_agent_run_sources",
+    "workspace_agent_turn_completions",
     "workspace_agent_runs",
     "workspace_artifact_derivatives",
     "workspace_audit_events",
@@ -57,6 +58,15 @@ EXPECTED_WORKSPACE_TABLES = {
     "workspace_note_signatures",
     "workspace_notes",
     "workspace_patient_safety_items",
+    "workspace_plan_messages",
+    "workspace_plan_proposals",
+    "workspace_plan_revisions",
+    "workspace_plan_sessions",
+    "workspace_plan_submission_receipts",
+    "workspace_plan_turn_completions",
+    "workspace_plan_turn_evidence",
+    "workspace_planning_context_reads",
+    "workspace_planning_turn_claims",
     "workspace_tasks",
 }
 ALLOWED_TOP_LEVEL_NAMES = DB_BASE_NAMES | {

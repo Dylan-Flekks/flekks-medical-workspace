@@ -4,41 +4,41 @@ expression: "render_dashboard_lines_at(&dashboard, width, height)"
 ---
 Medical Workspace  /workspace-medical  SYNTHETIC DATA ONLY
 Patient: Jordan Patient  DOB: blank  MRN: blank  Contact: Missing contact  Coverage: Missing coverage  Encounter: No encounter
- EXPLORER                          PATIENT CHART                                                                   CONTEXT PLAN
-┌Patient Directory───────────────┐┌Patient Demographics──────────────────────────────────────────────────────────┐┌Context Plan────────────────────────────────┐
-│Local search: /                 ││Identity: Jordan Patient · preferred not set                                  ││Patient Chart: Jordan...; Save first eval   │
-│0 active patients; local only   ││Legal/card: legal name missing                                                ││Codex bridge: building                      │
-│No saved patients yet.          ││DOB: missing · admin sex: missing · MRN: missing                              ││[Current]  History  Audit  ←/→              │
-│New patient: :patient new       ││Contact: phone missing; email missing; method not set                         ││                                            │
-│               ┌Commands──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐               │
+ EXPLORER                          PATIENT CHART                                                                   PLAN WITH CODEX
+┌Patient Directory───────────────┐┌Patient Demographics──────────────────────────────────────────────────────────┐┌Plan with Codex─────────────────────────────┐
+│Local search: /                 ││Identity: Jordan Patient · preferred not set                                  ││[Chat]  Context  Audit  ←/→ tabs            │
+│0 active patients; local only   ││Legal/card: legal name missing                                                ││                                            │
+│No saved patients yet.          ││DOB: missing · admin sex: missing · MRN: missing                              ││Plan with Codex · Jordan Patient            │
+│New patient: :patient new       ││Contact: phone missing; email missing; method not set                         ││  Context  0 files · 0 text · 0 clips       │
+│               ┌Commands──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐ent first      │
 │               │Search commands  :                                                                                                            │               │
-│               │Ctrl-P Commands anywhere  Enter run  Esc close  ↑/↓                                                                           │ save the new  │
-│               │                                                                                                                              │ context.      │
+│               │Ctrl-P Commands anywhere  Enter run  Esc close  ↑/↓                                                                           │               │
+│               │                                                                                                                              │needs a saved  │
 │               │Recommended now                                                                                                               │               │
-│               │> Search patients                                                                                        :patient search [/]  │l and no chart │
+│               │> Search patients                                                                                        :patient search [/]  │ and note      │
 └───────────────│Open patient list                                                                                                :patients    │               │
-┌Patient Notes──│Open patient demographics                                                                                    :demographics    │               │
-│Patient Notes  │Common actions                                                                                                                │Returned       │
-│  Visit note [u│New note                                                                                                     :note new [n]    │afted          │
-│  Working draft│Save chart workspace                                                                                        :save [Ctrl-S]    │ | 0 clips     │
+┌Patient Notes──│Open patient demographics                                                                                    :demographics    │message Codex. │
+│Patient Notes  │Common actions                                                                                                                │saging Codex or│
+│  Visit note [u│New note                                                                                                     :note new [n]    │               │
+│  Working draft│Save chart workspace                                                                                        :save [Ctrl-S]    │ew-only until a│
 │to the chart.  │Agent bridge                                                                                                                  │               │
 │  Medical, comm│Review Context Plan                                                                                         :agent preview    │               │
-│admin notes app│Submit Context Plan                                                                                            :agent send    │rd gate(s)     │
+│admin notes app│Submit Context Plan                                                                                            :agent send    │               │
 │               │Open full Codex run                                                                                        :agent open run    │               │
-│               │Open returned work review                                                                                     :agent inbox    │ates before    │
+│               │Open returned work review                                                                                     :agent inbox    │               │
 └───────────────│Write agent instructions                                                                                    :agent request    │               │
-┌Uploaded Docume│Open last scope                                                                                            :scope last off    │auto-apply.    │
-│Uploaded Docume│Navigation                                                                                                                    │ patient before│
+┌Uploaded Docume│Open last scope                                                                                            :scope last off    │               │
+│Uploaded Docume│Navigation                                                                                                                    │               │
 │No files yet   │Show workspace actions                                                                                        :actions [?]    │               │
-│Paste/drop JPG/│Focus note title                                                                                         :focus note title    │nstructions    │
-│               │… 100 more                                                                                                                    │analyze.       │
-│               │                                                                                                                              │ntext · No     │
-│               └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘ or clips are  │
-│                                ││                                                                              ││selected; Codex will receive chart context  │
-│                                ││                                                                              ││only.                                       │
-│                                ││                                                                              ││Instructions for Codex · local draft · Enter│
-│                                ││                                                                              ││  Tell Codex what to analyze; nothing is    │
-│                                ││                                                                              ││  submitted yet.                            │
+│Paste/drop JPG/│Focus note title                                                                                         :focus note title    │               │
+│               │… 100 more                                                                                                                    │               │
+│               │                                                                                                                              │               │
+│               └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘               │
+│                                ││                                                                              ││                                            │
+│                                ││                                                                              ││Save Patient First                          │
+│                                ││                                                                              ││Ctrl-S save patient · then message Codex    │
+│                                ││                                                                              ││  Save this patient before starting a       │
+│                                ││                                                                              ││  persistent Codex plan.                    │
 │                                ││                                                                              ││                                            │
 └────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────┘└────────────────────────────────────────────┘
 Mode: Commands | Keys: ↑/↓ command  Enter run  Esc close | :

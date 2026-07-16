@@ -697,6 +697,12 @@ impl App {
             "Local recovery checkpoint r{} saved; canonical chart unchanged.",
             metadata.revision
         )));
+        if let Err(error) = self
+            .outdate_workspace_plan_for_checkpoint(app_server, &metadata)
+            .await
+        {
+            tracing::warn!(%error, "failed to mark prior workspace plan revision outdated");
+        }
         Ok(())
     }
 

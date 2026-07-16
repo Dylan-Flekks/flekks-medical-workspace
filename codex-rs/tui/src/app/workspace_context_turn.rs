@@ -10,6 +10,7 @@ use codex_protocol::config_types::ModelToolMode;
 pub(super) const WORKSPACE_CONTEXT_ACTIVE_TURN_MESSAGE: &str = "Medical context handoff was held because another turn is active. Retry it after the current turn finishes.";
 pub(super) const WORKSPACE_CONTEXT_UNAUDITED_INPUT_MESSAGE: &str = "Medical context handoff was held: remove inline attachments, skills, and mentions, then select audited files in the context packet.";
 pub(super) const WORKSPACE_CONTEXT_BINDING_MISMATCH_MESSAGE: &str = "Medical context handoff was held because its generated prompt changed. Return to the medical workspace and prepare the handoff again.";
+pub(super) const WORKSPACE_CONTEXT_NOT_AUTHORIZED_MESSAGE: &str = "Medical context handoff was held because its Plan revision was not durably submitted. Return to the medical workspace and retry the reviewed handoff.";
 pub(super) const WORKSPACE_CONTEXT_NO_ACTIVE_THREAD_MESSAGE: &str = "Medical context handoff needs an active Codex thread. Open or resume a thread, then submit the packet again.";
 pub(super) const WORKSPACE_CONTEXT_STRUCTURED_OUTPUT_MESSAGE: &str = "Medical context handoff was held because structured output is enabled. Clear the output schema, then submit the packet again.";
 
@@ -50,6 +51,13 @@ impl App {
                 | AppCommand::Compact
         ) {
             return Some(op);
+        }
+        if !pending_capture.handoff_is_authorized() {
+            self.preserve_workspace_context_rejected_op(&op);
+            self.pending_workspace_agent_capture = None;
+            self.chat_widget
+                .add_error_message(WORKSPACE_CONTEXT_NOT_AUTHORIZED_MESSAGE.to_string());
+            return None;
         }
         if !pending_capture.thread_is_allowed(&thread_id.to_string()) {
             self.preserve_workspace_context_rejected_op(&op);

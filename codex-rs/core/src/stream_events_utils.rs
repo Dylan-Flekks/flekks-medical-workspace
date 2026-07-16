@@ -4,7 +4,6 @@ use std::sync::Arc;
 use codex_extension_api::ExtensionData;
 use codex_protocol::ResponseItemId;
 use codex_protocol::config_types::ModeKind;
-use codex_protocol::config_types::ModelToolMode;
 use codex_protocol::items::TurnItem;
 use codex_utils_stream_parser::strip_citations;
 use tokio_util::sync::CancellationToken;
@@ -363,7 +362,7 @@ pub(crate) async fn handle_output_item_done(
         Ok(None) => {
             let finalized_turn_item = finalize_non_tool_response_item(
                 ctx.sess.as_ref(),
-                if ctx.turn_context.model_tool_mode == ModelToolMode::WorkspaceContextOnly {
+                if ctx.turn_context.model_tool_mode.is_workspace_restricted() {
                     TurnItemContributorPolicy::Skip
                 } else {
                     TurnItemContributorPolicy::Run(ctx.turn_store.as_ref())

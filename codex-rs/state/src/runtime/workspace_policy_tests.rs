@@ -294,6 +294,17 @@ async fn policy_reads_fail_closed_on_missing_corrupt_multiple_or_drifted_schema(
 }
 
 async fn insert_placeholder(connection: &mut sqlx::SqliteConnection, table: &str) {
+    if table == "workspace_agent_runs" {
+        sqlx::query("DROP TRIGGER workspace_agent_runs_plan_binding_matches_packet_insert")
+            .execute(&mut *connection)
+            .await
+            .expect("disable unrelated agent run binding trigger for policy fixture");
+    } else if table == "workspace_plan_submission_receipts" {
+        sqlx::query("DROP TRIGGER workspace_plan_submission_receipts_exact_binding_insert")
+            .execute(&mut *connection)
+            .await
+            .expect("disable unrelated plan submission binding trigger for policy fixture");
+    }
     let mut table_info = QueryBuilder::<Sqlite>::new("PRAGMA table_info(");
     table_info.push(table).push(")");
     let columns = table_info
@@ -323,8 +334,10 @@ async fn insert_placeholder(connection: &mut sqlx::SqliteConnection, table: &str
     query.push(") VALUES (");
     {
         let mut separated = query.separated(", ");
-        for (_, integer) in columns {
-            if integer {
+        for (name, integer) in columns {
+            if name == "evidence_read_count" {
+                separated.push_bind(0_i64);
+            } else if integer {
                 separated.push_bind(1_i64);
             } else {
                 separated.push_bind("x");

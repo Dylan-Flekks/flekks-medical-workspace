@@ -21,7 +21,6 @@ use codex_hooks::UserPromptSubmitOutcome;
 use codex_hooks::UserPromptSubmitRequest;
 use codex_otel::HOOK_RUN_DURATION_METRIC;
 use codex_otel::HOOK_RUN_METRIC;
-use codex_protocol::config_types::ModelToolMode;
 use codex_protocol::items::TurnItem;
 use codex_protocol::items::UserMessageItem;
 use codex_protocol::models::ResponseItem;
@@ -575,7 +574,7 @@ pub(crate) async fn inspect_pending_input(
 }
 
 fn hooks_suppressed(turn_context: &TurnContext) -> bool {
-    turn_context.model_tool_mode == ModelToolMode::WorkspaceContextOnly
+    turn_context.model_tool_mode.is_workspace_restricted()
 }
 
 pub(crate) async fn record_pending_input(

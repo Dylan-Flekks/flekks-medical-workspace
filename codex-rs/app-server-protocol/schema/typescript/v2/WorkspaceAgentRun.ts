@@ -7,4 +7,4 @@
  * new run; repeated starts with the same packet/idempotency key return the
  * existing run.
  */
-export type WorkspaceAgentRun = { id: string, packetId: string, clientId: string, noteId: string | null, baseNoteRevision: number | null, contextEnvelopeSha256: string, runKind: string, idempotencyKey: string, provider: string | null, model: string | null, sourceThreadId: string | null, sourceTurnId: string | null, status: string, errorSummary: string | null, startedAt: number, completedAt: number | null, createdAt: number, updatedAt: number, };
+export type WorkspaceAgentRun = { id: string, packetId: string, clientId: string, noteId: string | null, baseNoteRevision: number | null, contextEnvelopeSha256: string, workspacePlanRevisionId: string | null, workspacePlanContentSha256: string | null, workspacePlanEvidenceManifestSha256: string | null, runKind: string, idempotencyKey: string, provider: string | null, model: string | null, sourceThreadId: string | null, sourceTurnId: string | null, status: string, errorSummary: string | null, startedAt: number, completedAt: number | null, createdAt: number, updatedAt: number, };

@@ -1,4 +1,3 @@
-use codex_protocol::config_types::ModelToolMode;
 use codex_protocol::protocol::CodexErrorInfo;
 use codex_protocol::protocol::TokenUsage;
 use codex_protocol::protocol::TurnAbortReason;
@@ -12,7 +11,7 @@ impl Session {
         turn_context: &TurnContext,
         token_usage_at_turn_start: &TokenUsage,
     ) {
-        if turn_context.model_tool_mode == ModelToolMode::WorkspaceContextOnly {
+        if turn_context.model_tool_mode.is_workspace_restricted() {
             return;
         }
         for contributor in self.services.extensions.turn_lifecycle_contributors() {
@@ -30,7 +29,7 @@ impl Session {
     }
 
     pub(super) async fn emit_turn_stop_lifecycle(&self, turn_context: &TurnContext) {
-        if turn_context.model_tool_mode == ModelToolMode::WorkspaceContextOnly {
+        if turn_context.model_tool_mode.is_workspace_restricted() {
             return;
         }
         for contributor in self.services.extensions.turn_lifecycle_contributors() {
@@ -66,7 +65,7 @@ impl Session {
         reason: TurnAbortReason,
         turn_context: &TurnContext,
     ) {
-        if turn_context.model_tool_mode == ModelToolMode::WorkspaceContextOnly {
+        if turn_context.model_tool_mode.is_workspace_restricted() {
             return;
         }
         for contributor in self.services.extensions.turn_lifecycle_contributors() {
@@ -87,7 +86,7 @@ impl Session {
         turn_context: &TurnContext,
         error: CodexErrorInfo,
     ) {
-        if turn_context.model_tool_mode == ModelToolMode::WorkspaceContextOnly {
+        if turn_context.model_tool_mode.is_workspace_restricted() {
             return;
         }
         for contributor in self.services.extensions.turn_lifecycle_contributors() {

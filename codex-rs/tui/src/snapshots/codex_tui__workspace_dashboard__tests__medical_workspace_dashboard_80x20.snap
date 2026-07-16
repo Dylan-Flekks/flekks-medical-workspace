@@ -3,7 +3,7 @@ source: tui/src/workspace_dashboard.rs
 expression: "render_dashboard_lines_at(&dashboard, width, height)"
 ---
 Medical Workspace  Unsaved  /workspace-medical  SYNTHETIC DATA ONLY
-Zones: Explorer > [Patient Chart] > Context Plan  Focus: Center
+Zones: Explorer > [Patient Chart] > Plan with Codex  Focus: Center
 ┌Today's Visit─────────────────────────────────────────────────────────────────┐
 │Patient: Jordan Patient; note: Visit note                                     │
 │Next                                                                          │

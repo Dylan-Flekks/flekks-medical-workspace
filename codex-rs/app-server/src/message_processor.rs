@@ -1259,6 +1259,41 @@ impl MessageProcessor {
                     .agent_result_status_update(params)
                     .await
             }
+            ClientRequest::WorkspacePlanSessionOpen { params, .. } => {
+                self.workspace_processor.plan_session_open(params).await
+            }
+            ClientRequest::WorkspacePlanSessionGet { params, .. } => {
+                self.workspace_processor.plan_session_get(params).await
+            }
+            ClientRequest::WorkspacePlanSessionBindThread { params, .. } => {
+                self.workspace_processor
+                    .plan_session_bind_thread(params)
+                    .await
+            }
+            ClientRequest::WorkspacePlanSnapshotGet { params, .. } => {
+                self.workspace_processor.plan_snapshot_get(params).await
+            }
+            ClientRequest::WorkspacePlanRecoveryGet { params, .. } => {
+                self.workspace_processor.plan_recovery_get(params).await
+            }
+            ClientRequest::WorkspacePlanGuideRunStart { params, .. } => {
+                self.workspace_processor.plan_guide_run_start(params).await
+            }
+            ClientRequest::WorkspacePlanGuideRunFinish { params, .. } => {
+                self.workspace_processor.plan_guide_run_finish(params).await
+            }
+            ClientRequest::WorkspacePlanMessageAppend { params, .. } => {
+                self.workspace_processor.plan_message_append(params).await
+            }
+            ClientRequest::WorkspacePlanRevisionOutdate { params, .. } => {
+                self.workspace_processor.plan_revision_outdate(params).await
+            }
+            ClientRequest::WorkspacePlanRevisionSubmit { params, .. } => {
+                self.workspace_processor.plan_revision_submit(params).await
+            }
+            ClientRequest::WorkspacePlanProposalResolve { params, .. } => {
+                self.workspace_processor.plan_proposal_resolve(params).await
+            }
             ClientRequest::WorkspaceNoteList { params, .. } => {
                 self.workspace_processor.note_list(params).await
             }

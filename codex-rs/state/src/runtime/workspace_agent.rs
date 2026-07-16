@@ -5,6 +5,10 @@ use super::workspace_agent_queries::workspace_agent_run_row_by_id;
 use super::workspace_agent_queries::workspace_agent_run_row_by_key;
 use super::workspace_agent_queries::workspace_context_packet_row_by_id;
 use super::workspace_context_plan::validate_context_plan_for_submission;
+use super::workspace_plan_binding::WorkspacePlanBindingContext;
+use super::workspace_plan_binding::normalize_plan_revision_binding;
+use super::workspace_plan_binding::require_submitted_plan_revision_receipt;
+use super::workspace_plan_binding::validate_plan_revision_binding;
 use super::*;
 use crate::model::WorkspaceAgentRunRow;
 use crate::model::WorkspaceAgentRunSourceRow;
@@ -77,6 +81,25 @@ impl WorkspaceStore {
         }
         if target_status == "submitted" {
             validate_context_plan_for_submission(&mut tx, &packet).await?;
+            if let Some(binding) = normalize_plan_revision_binding(
+                packet.workspace_plan_revision_id.as_deref(),
+                packet.workspace_plan_content_sha256.as_deref(),
+                packet.workspace_plan_evidence_manifest_sha256.as_deref(),
+            )? {
+                validate_plan_revision_binding(
+                    &mut tx,
+                    &binding,
+                    WorkspacePlanBindingContext {
+                        client_id: &packet.client_id,
+                        encounter_id: packet.encounter_id.as_deref(),
+                        note_id: packet.note_id.as_deref(),
+                        source_checkpoint_id: packet.source_checkpoint_id.as_deref(),
+                        source_checkpoint_sha256: packet.source_checkpoint_sha256.as_deref(),
+                        context_envelope_json: &packet.context_envelope_json,
+                    },
+                )
+                .await?;
+            }
         }
 
         let actor = nonempty_or(&input.actor, &packet.clinician_actor);
@@ -200,6 +223,41 @@ impl WorkspaceStore {
             &input.expected_client_id,
             &input.expected_context_envelope_sha256,
         )?;
+        let packet_plan_binding = normalize_plan_revision_binding(
+            packet.workspace_plan_revision_id.as_deref(),
+            packet.workspace_plan_content_sha256.as_deref(),
+            packet.workspace_plan_evidence_manifest_sha256.as_deref(),
+        )?;
+        if let Some(binding) = packet_plan_binding.as_ref() {
+            validate_plan_revision_binding(
+                &mut tx,
+                binding,
+                WorkspacePlanBindingContext {
+                    client_id: &packet.client_id,
+                    encounter_id: packet.encounter_id.as_deref(),
+                    note_id: packet.note_id.as_deref(),
+                    source_checkpoint_id: packet.source_checkpoint_id.as_deref(),
+                    source_checkpoint_sha256: packet.source_checkpoint_sha256.as_deref(),
+                    context_envelope_json: &packet.context_envelope_json,
+                },
+            )
+            .await?;
+        }
+        let expected_plan_binding = normalize_plan_revision_binding(
+            input.expected_workspace_plan_revision_id.as_deref(),
+            input.expected_workspace_plan_content_sha256.as_deref(),
+            input
+                .expected_workspace_plan_evidence_manifest_sha256
+                .as_deref(),
+        )?;
+        if expected_plan_binding
+            .as_ref()
+            .is_some_and(|expected| Some(expected) != packet_plan_binding.as_ref())
+        {
+            anyhow::bail!(
+                "workspace agent run expected plan binding does not match its authoritative context packet"
+            );
+        }
         if packet.status == "canceled" {
             anyhow::bail!(
                 "workspace context packet `{}` was canceled and cannot start a run",
@@ -211,6 +269,7 @@ impl WorkspaceStore {
             workspace_agent_run_row_by_key(&mut tx, &packet.id, input.idempotency_key.trim())
                 .await?
         {
+            validate_run_packet_binding(&existing, &packet)?;
             tx.rollback().await?;
             return existing.try_into();
         }
@@ -260,10 +319,12 @@ impl WorkspaceStore {
             r#"
 INSERT INTO workspace_agent_runs (
     id, packet_id, client_id, note_id, base_note_revision,
-    context_envelope_sha256, run_kind, idempotency_key, provider, model,
+    context_envelope_sha256, workspace_plan_revision_id,
+    workspace_plan_content_sha256, workspace_plan_evidence_manifest_sha256,
+    run_kind, idempotency_key, provider, model,
     source_thread_id, source_turn_id, status, error_summary,
     started_at_ms, completed_at_ms, created_at_ms, updated_at_ms
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', '', ?, NULL, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', '', ?, NULL, ?, ?)
             "#,
         )
         .bind(&id)
@@ -272,6 +333,9 @@ INSERT INTO workspace_agent_runs (
         .bind(&packet.note_id)
         .bind(packet.base_note_revision)
         .bind(&packet.context_envelope_sha256)
+        .bind(&packet.workspace_plan_revision_id)
+        .bind(&packet.workspace_plan_content_sha256)
+        .bind(&packet.workspace_plan_evidence_manifest_sha256)
         .bind(&run_kind)
         .bind(input.idempotency_key.trim())
         .bind(&provider)
@@ -291,6 +355,10 @@ INSERT INTO workspace_agent_runs (
             "noteId": &packet.note_id,
             "baseNoteRevision": packet.base_note_revision,
             "contextEnvelopeSha256": &packet.context_envelope_sha256,
+            "workspacePlanRevisionId": &packet.workspace_plan_revision_id,
+            "workspacePlanContentSha256": &packet.workspace_plan_content_sha256,
+            "workspacePlanEvidenceManifestSha256":
+                &packet.workspace_plan_evidence_manifest_sha256,
             "contextEnvelope": serde_json::from_str::<serde_json::Value>(
                 &packet.context_envelope_json,
             )?,
@@ -363,6 +431,10 @@ INSERT INTO workspace_agent_run_sources (
                         "packet_id": &packet.id,
                         "base_note_revision": packet.base_note_revision,
                         "context_envelope_sha256": &packet.context_envelope_sha256,
+                        "workspace_plan_revision_id": &packet.workspace_plan_revision_id,
+                        "workspace_plan_content_sha256": &packet.workspace_plan_content_sha256,
+                        "workspace_plan_evidence_manifest_sha256":
+                            &packet.workspace_plan_evidence_manifest_sha256,
                         "packet_contract_sha256": packet_contract_sha256,
                     })
                     .to_string(),
@@ -388,7 +460,9 @@ INSERT INTO workspace_agent_run_sources (
             r#"
 SELECT
     id, packet_id, client_id, note_id, base_note_revision,
-    context_envelope_sha256, run_kind, idempotency_key, provider, model,
+    context_envelope_sha256, workspace_plan_revision_id,
+    workspace_plan_content_sha256, workspace_plan_evidence_manifest_sha256,
+    run_kind, idempotency_key, provider, model,
     source_thread_id, source_turn_id, status, error_summary,
     started_at_ms, completed_at_ms, created_at_ms, updated_at_ms
 FROM workspace_agent_runs
@@ -429,6 +503,26 @@ LIMIT ?
             tx.rollback().await?;
             return Ok(None);
         };
+        let receipt_bound_unclaimed = existing.source_turn_id.is_none()
+            && sqlx::query_scalar::<_, i64>(
+                r#"
+SELECT EXISTS(
+    SELECT 1
+    FROM workspace_plan_submission_receipts
+    WHERE agent_run_id = ?
+)
+                "#,
+            )
+            .bind(&existing.id)
+            .fetch_one(&mut *tx)
+            .await?
+                == 1;
+        if receipt_bound_unclaimed {
+            anyhow::bail!(
+                "workspace agent run `{}` is bound by an immutable Plan submission receipt and must remain resumable until its master-agent turn is claimed",
+                existing.id
+            );
+        }
         if existing.status == status {
             tx.rollback().await?;
             return existing.try_into().map(Some);
@@ -515,8 +609,9 @@ LIMIT ?
     ///
     /// The claim is the security boundary below the TUI: direct app-server clients must present
     /// the canonical packet prompt and must execute on the thread, provider, and model recorded
-    /// when the clinician created the run. Setting `source_turn_id` consumes the run capability so
-    /// it cannot be sampled a second time.
+    /// when the clinician created the run. Plan-bound runs also require the exact immutable
+    /// revision, packet, and run submission receipt. Setting `source_turn_id` consumes the run
+    /// capability so it cannot be sampled a second time.
     pub async fn claim_agent_turn(
         &self,
         input: crate::WorkspaceAgentTurnClaim,
@@ -565,6 +660,20 @@ LIMIT ?
                 packet.id,
                 packet.status
             );
+        }
+        if let Some(binding) = normalize_plan_revision_binding(
+            packet.workspace_plan_revision_id.as_deref(),
+            packet.workspace_plan_content_sha256.as_deref(),
+            packet.workspace_plan_evidence_manifest_sha256.as_deref(),
+        )? {
+            require_submitted_plan_revision_receipt(
+                &mut tx,
+                &binding,
+                &packet.id,
+                &run.id,
+                &packet.client_id,
+            )
+            .await?;
         }
         let expected_prompt = crate::render_workspace_agent_handoff_prompt(
             &crate::WorkspaceAgentHandoffPromptInput {
@@ -791,6 +900,11 @@ ORDER BY accessed_at_ms ASC, id ASC
         let mut run = workspace_agent_run_row_by_id(&mut tx, run_id)
             .await?
             .ok_or_else(|| anyhow::anyhow!("workspace agent run `{run_id}` was not found"))?;
+        if run.run_kind != "manual_import" {
+            anyhow::bail!(
+                "workspace agent run `{run_id}` is bound to model execution and must be completed by its exact model turn"
+            );
+        }
         if run.packet_id != input.packet_id {
             anyhow::bail!(
                 "workspace agent run `{run_id}` belongs to packet `{}` not `{}`",
@@ -1053,6 +1167,10 @@ fn validate_run_packet_binding(
     if packet.client_id != run.client_id
         || packet.note_id != run.note_id
         || packet.context_envelope_sha256 != run.context_envelope_sha256
+        || packet.workspace_plan_revision_id != run.workspace_plan_revision_id
+        || packet.workspace_plan_content_sha256 != run.workspace_plan_content_sha256
+        || packet.workspace_plan_evidence_manifest_sha256
+            != run.workspace_plan_evidence_manifest_sha256
     {
         anyhow::bail!(
             "workspace agent run `{}` no longer matches its authoritative context packet `{}`",
@@ -1183,11 +1301,11 @@ fn authorized_context_read_limit(
     Ok(requested_max_records.min(scope_max_records))
 }
 
-const MAX_AGENT_NOTE_BODY_BYTES: usize = 32 * 1024;
-const MAX_AGENT_CONTEXT_SNAPSHOT_BYTES: usize = 512 * 1024;
-const MAX_AGENT_DISPLAY_LABEL_BYTES: usize = 512;
+pub(super) const MAX_AGENT_NOTE_BODY_BYTES: usize = 32 * 1024;
+pub(super) const MAX_AGENT_CONTEXT_SNAPSHOT_BYTES: usize = 512 * 1024;
+pub(super) const MAX_AGENT_DISPLAY_LABEL_BYTES: usize = 512;
 
-fn truncate_utf8(value: &str, max_bytes: usize) -> (&str, bool) {
+pub(super) fn truncate_utf8(value: &str, max_bytes: usize) -> (&str, bool) {
     if value.len() <= max_bytes {
         return (value, false);
     }
@@ -1220,7 +1338,7 @@ fn token_looks_like_local_path(token: &str) -> bool {
         || (token.starts_with('/') && !matches!(token, "/workspace-medical" | "/workspacemedical"))
 }
 
-fn redact_local_path_tokens(value: &str) -> (String, bool) {
+pub(super) fn redact_local_path_tokens(value: &str) -> (String, bool) {
     let mut redacted = String::with_capacity(value.len());
     let mut changed = false;
     for segment in value.split_inclusive(char::is_whitespace) {

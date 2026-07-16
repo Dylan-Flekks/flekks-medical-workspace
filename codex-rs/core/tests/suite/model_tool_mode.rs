@@ -83,7 +83,7 @@ impl ContextContributor for MarkerWorldStateContributor {
     }
 }
 
-fn user_turn(text: &str, model_tool_mode: Option<ModelToolMode>) -> Op {
+pub(super) fn user_turn(text: &str, model_tool_mode: Option<ModelToolMode>) -> Op {
     Op::UserInput {
         items: vec![UserInput::Text {
             text: text.to_string(),
@@ -99,7 +99,7 @@ fn user_turn(text: &str, model_tool_mode: Option<ModelToolMode>) -> Op {
     }
 }
 
-async fn canonical_workspace_context_prompt(test: &TestCodex) -> anyhow::Result<String> {
+pub(super) async fn canonical_workspace_context_prompt(test: &TestCodex) -> anyhow::Result<String> {
     let state_db = test
         .codex
         .state_db()
@@ -180,7 +180,7 @@ async fn canonical_workspace_context_prompt(test: &TestCodex) -> anyhow::Result<
     ))
 }
 
-fn advertised_tool_names(body: &Value) -> Vec<String> {
+pub(super) fn advertised_tool_names(body: &Value) -> Vec<String> {
     body["tools"]
         .as_array()
         .into_iter()

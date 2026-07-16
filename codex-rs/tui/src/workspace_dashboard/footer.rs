@@ -59,13 +59,13 @@ impl MedicalKeyContext {
             Self::CenterSections => "↑/↓ section  PgUp/PgDn scroll  Tab/⇧Tab pane  Ctrl-P commands",
             Self::ProposalReview => "↑/↓ scroll  PgUp/PgDn page  Tab/⇧Tab pane  Ctrl-P commands",
             Self::AgentTabs => {
-                "Type starts request  ←/→ Agent tab  ↑/↓ scroll  Tab/⇧Tab pane  Ctrl-P commands"
+                "Type message  ←/→ Chat/Context/Audit  ↑/↓ scroll  Tab/⇧Tab pane  Ctrl-P commands"
             }
             Self::AgentInput => {
-                "↑/↓ line  ←/→ cursor  PgUp/PgDn guidance  Ctrl-G send  Tab/⇧Tab pane  Ctrl-P commands"
+                "Enter send  Shift-Enter newline  Esc leave  Ctrl-G master handoff  Tab/⇧Tab pane  Ctrl-P commands"
             }
             Self::PacketReview => {
-                "Review packet  Ctrl-G send  r edit  Tab/⇧Tab pane  Ctrl-P commands"
+                "Review packet  Ctrl-G master handoff  r edit  Tab/⇧Tab pane  Ctrl-P commands"
             }
             Self::ReturnedWorkReview => {
                 "↑/↓ scroll  Type starts request  Tab/⇧Tab pane  Ctrl-P actions"
@@ -94,9 +94,9 @@ impl MedicalKeyContext {
             Self::LockedNote => "Read-only  Tab/⇧Tab pane  Ctrl-P commands",
             Self::CenterSections => "↑/↓ section  Tab/⇧Tab pane  Ctrl-P commands",
             Self::ProposalReview => "↑/↓ scroll  Tab/⇧Tab pane  Ctrl-P commands",
-            Self::AgentTabs => "Type request  ←→ tab  ↑↓  Ctrl-P commands  Tab pane",
-            Self::AgentInput => "↑/↓ line  ←/→ cursor  Tab/⇧Tab pane  Ctrl-P commands",
-            Self::PacketReview => "Ctrl-G send  Tab/⇧Tab pane  Ctrl-P commands",
+            Self::AgentTabs => "Type message  ←→ tab  ↑↓  Ctrl-P commands  Tab pane",
+            Self::AgentInput => "Enter send  Shift-Enter newline  Esc leave  Tab pane",
+            Self::PacketReview => "Ctrl-G master handoff  Tab/⇧Tab pane  Ctrl-P commands",
             Self::ReturnedWorkReview => "↑/↓ scroll  Tab/⇧Tab pane  Ctrl-P commands",
             Self::ReturnedWorkDraft => "Ctrl-S save  Tab/⇧Tab pane  Ctrl-P commands",
             Self::ChartConflict => "Ctrl-S refresh  Esc/Ctrl-W close",

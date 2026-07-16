@@ -3505,7 +3505,7 @@ async fn primary_thread_ignores_child_mcp_startup_notifications() {
             sentry_config,
         )]))
         .expect("test MCP servers should accept any configuration");
-    let app_server = crate::start_embedded_app_server_for_picker(app.chat_widget.config_ref())
+    let mut app_server = crate::start_embedded_app_server_for_picker(app.chat_widget.config_ref())
         .await
         .expect("embedded app server");
     let parent_thread_id = ThreadId::new();
@@ -3514,7 +3514,7 @@ async fn primary_thread_ignores_child_mcp_startup_notifications() {
     app.active_thread_id = Some(parent_thread_id);
 
     app.handle_app_server_event(
-        &app_server,
+        &mut app_server,
         codex_app_server_client::AppServerEvent::ServerNotification(
             ServerNotification::McpServerStatusUpdated(McpServerStatusUpdatedNotification {
                 thread_id: Some(child_thread_id.to_string()),
@@ -3578,7 +3578,7 @@ async fn primary_thread_ignores_child_mcp_startup_notifications() {
 async fn app_scoped_mcp_startup_notifications_do_not_render_in_active_thread() {
     let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
     while app_event_rx.try_recv().is_ok() {}
-    let app_server = crate::start_embedded_app_server_for_picker(app.chat_widget.config_ref())
+    let mut app_server = crate::start_embedded_app_server_for_picker(app.chat_widget.config_ref())
         .await
         .expect("embedded app server");
     let thread_id = ThreadId::new();
@@ -3586,7 +3586,7 @@ async fn app_scoped_mcp_startup_notifications_do_not_render_in_active_thread() {
     app.active_thread_id = Some(thread_id);
 
     app.handle_app_server_event(
-        &app_server,
+        &mut app_server,
         codex_app_server_client::AppServerEvent::ServerNotification(
             ServerNotification::McpServerStatusUpdated(McpServerStatusUpdatedNotification {
                 thread_id: None,
@@ -3621,7 +3621,7 @@ async fn active_side_thread_renders_live_mcp_startup_notifications() {
             sentry_config,
         )]))
         .expect("test MCP servers should accept any configuration");
-    let app_server = crate::start_embedded_app_server_for_picker(app.chat_widget.config_ref())
+    let mut app_server = crate::start_embedded_app_server_for_picker(app.chat_widget.config_ref())
         .await
         .expect("embedded app server");
     let parent_thread_id = ThreadId::new();
@@ -3650,7 +3650,7 @@ async fn active_side_thread_renders_live_mcp_startup_notifications() {
         McpServerStartupState::Failed,
     ] {
         app.handle_app_server_event(
-            &app_server,
+            &mut app_server,
             codex_app_server_client::AppServerEvent::ServerNotification(
                 ServerNotification::McpServerStatusUpdated(McpServerStatusUpdatedNotification {
                     thread_id: Some(side_thread_id.to_string()),
@@ -4084,6 +4084,7 @@ async fn make_test_app() -> App {
         workspace_dashboard: None,
         workspace_dashboard_visible: false,
         workspace_draft_runtime: workspace_drafts::WorkspaceDraftRuntime::default(),
+        workspace_plan_runtime: WorkspacePlanRuntime::default(),
         pending_workspace_agent_capture: None,
         config,
         state_db: None,
@@ -4153,6 +4154,7 @@ async fn make_test_app_with_channels() -> (
             workspace_dashboard: None,
             workspace_dashboard_visible: false,
             workspace_draft_runtime: workspace_drafts::WorkspaceDraftRuntime::default(),
+            workspace_plan_runtime: WorkspacePlanRuntime::default(),
             pending_workspace_agent_capture: None,
             config,
             state_db: None,
@@ -5931,7 +5933,7 @@ async fn override_turn_context_sends_thread_settings_update() {
         );
 
         app.handle_app_server_event(
-            &app_server,
+            &mut app_server,
             codex_app_server_client::AppServerEvent::ServerNotification(
                 ServerNotification::ThreadSettingsUpdated(notification),
             ),
@@ -6347,6 +6349,124 @@ fn configure_medical_workspace_test_thread(app: &mut App) {
         .handle_thread_session_quiet(test_thread_session(thread_id, app.config.cwd.to_path_buf()));
 }
 
+fn publish_current_test_workspace_plan<'a>(
+    app: &'a mut App,
+    app_server: &'a mut AppServerSession,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + 'a>> {
+    Box::pin(async move {
+        app.ensure_workspace_draft_runtime_initialized(app_server)
+            .await;
+        app.flush_workspace_draft(app_server, WorkspaceDraftCheckpointTrigger::AgentHandoff)
+            .await?;
+        let checkpoint = app.confirmed_workspace_draft_checkpoint().ok_or_else(|| {
+            color_eyre::eyre::eyre!("test workspace checkpoint was not confirmed")
+        })?;
+        let state = codex_state::StateRuntime::init(
+            app.config.sqlite_home.clone(),
+            app.config.model_provider_id.clone(),
+        )
+        .await
+        .map_err(|error| color_eyre::eyre::eyre!(error.to_string()))?;
+        let session = state
+            .workspace()
+            .open_plan_session(codex_state::WorkspacePlanSessionOpen {
+                client_id: checkpoint.client_id.clone(),
+                created_by: "synthetic test clinician".to_string(),
+            })
+            .await?;
+        let planning_thread_id = session
+            .source_thread_id
+            .clone()
+            .unwrap_or_else(|| ThreadId::new().to_string());
+        let session = if session.source_thread_id.is_some() {
+            session
+        } else {
+            state
+                .workspace()
+                .bind_plan_session_thread(codex_state::WorkspacePlanSessionThreadBind {
+                    session_id: session.id,
+                    client_id: checkpoint.client_id.clone(),
+                    expected_thread_id: None,
+                    source_thread_id: planning_thread_id.clone(),
+                    actor: "synthetic test clinician".to_string(),
+                })
+                .await?
+        };
+        let key = uuid::Uuid::new_v4().to_string();
+        let run = state
+            .workspace()
+            .start_guide_run(codex_state::WorkspaceGuideRunStart {
+                client_id: checkpoint.client_id.clone(),
+                session_id: checkpoint.session_id.clone(),
+                source_checkpoint_id: checkpoint.checkpoint_id.clone(),
+                source_checkpoint_revision: checkpoint.revision,
+                source_checkpoint_sha256: checkpoint.content_sha256.clone(),
+                request_json: r#"{"schemaVersion":1,"intent":"synthetic test plan"}"#.to_string(),
+                idempotency_key: format!("test-guide-{key}"),
+                trigger: "clinician_message".to_string(),
+                actor: "synthetic test clinician".to_string(),
+                provider: "test-provider".to_string(),
+                model: "test-model".to_string(),
+                model_tool_mode: codex_state::WorkspaceGuideModelToolMode::WorkspacePlanningOnly,
+            })
+            .await?;
+        let execution = state
+            .workspace()
+            .claim_planning_guide_turn(codex_state::WorkspacePlanningGuideTurnClaimRequest {
+                guide_run_id: run.id,
+                plan_session_id: session.id,
+                client_id: checkpoint.client_id.clone(),
+                source_checkpoint_id: checkpoint.checkpoint_id.clone(),
+                source_checkpoint_revision: checkpoint.revision,
+                source_checkpoint_sha256: checkpoint.content_sha256.clone(),
+                source_thread_id: planning_thread_id,
+                source_turn_id: format!("test-turn-{key}"),
+                provider: "test-provider".to_string(),
+                model: "test-model".to_string(),
+                prompt: "Publish the decision-complete synthetic test plan.".to_string(),
+            })
+            .await?;
+        let chart = state
+            .workspace()
+            .read_authorized_planning_context(codex_state::WorkspacePlanningContextReadRequest {
+                execution: execution.clone(),
+                category: "patient_chart".to_string(),
+                max_records: Some(10),
+                idempotency_key: format!("test-chart-{key}"),
+            })
+            .await?;
+        let selected = state
+            .workspace()
+            .read_authorized_planning_context(codex_state::WorkspacePlanningContextReadRequest {
+                execution: execution.clone(),
+                category: "selected_context".to_string(),
+                max_records: Some(10),
+                idempotency_key: format!("test-selected-{key}"),
+            })
+            .await?;
+        state
+            .workspace()
+            .complete_plan_turn(codex_state::WorkspacePlanTurnComplete {
+                execution,
+                assistant_message_role: codex_state::WorkspacePlanMessageRole::Assistant,
+                assistant_message: "Synthetic evidence-linked Plan published for handoff tests."
+                    .to_string(),
+                plan: Some(codex_state::WorkspacePlanArtifact {
+                    plan_markdown: "# Synthetic reviewed Plan\n- Keep all output review-only."
+                        .to_string(),
+                    decisions_json: r#"["keep output review-only"]"#.to_string(),
+                    open_questions_json: "[]".to_string(),
+                }),
+                evidence_read_ids: vec![chart.id, selected.id],
+                idempotency_key: format!("test-complete-{key}"),
+                actor: "synthetic test planner".to_string(),
+            })
+            .await?;
+        app.refresh_workspace_plan_snapshot(app_server).await?;
+        Ok(())
+    })
+}
+
 #[tokio::test]
 async fn audited_workspace_prompt_submits_as_exactly_one_text_item() {
     let (mut app, _app_event_rx, mut op_rx) = make_test_app_with_channels().await;
@@ -6396,1714 +6516,1846 @@ async fn medical_workspace_close_preserves_unsaved_dashboard_draft() {
 
 #[test]
 fn medical_workspace_open_run_leaves_only_for_the_recorded_source_thread() -> Result<()> {
-    run_workspace_dashboard_runtime_test(Box::pin(async {
-        let mut app = make_test_app().await;
-        configure_medical_workspace_test_thread(&mut app);
-        let source_thread_id = app.active_thread_id.expect("configured source thread");
-        let codex_home = tempdir()?;
-        app.config.codex_home = codex_home.path().to_path_buf().abs();
-        app.config.sqlite_home = codex_home.path().to_path_buf();
-        app.workspace_dashboard = Some(WorkspaceDashboard::new(WorkspaceProfile::Medical));
-        app.workspace_dashboard_visible = true;
+    run_workspace_dashboard_runtime_test(|| {
+        Box::pin(async {
+            let mut app = make_test_app().await;
+            configure_medical_workspace_test_thread(&mut app);
+            let source_thread_id = app.active_thread_id.expect("configured source thread");
+            let codex_home = tempdir()?;
+            app.config.codex_home = codex_home.path().to_path_buf().abs();
+            app.config.sqlite_home = codex_home.path().to_path_buf();
+            app.workspace_dashboard = Some(WorkspaceDashboard::new(WorkspaceProfile::Medical));
+            app.workspace_dashboard_visible = true;
 
-        let mut tui = crate::tui::test_support::make_test_tui()?;
-        let mut app_server =
-            Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
+            let mut tui = crate::tui::test_support::make_test_tui()?;
+            let mut app_server =
+                Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
 
-        app.handle_workspace_dashboard_action(
-            &mut tui,
-            &mut app_server,
-            WorkspaceDashboardAction::OpenAgentRun {
-                thread_id: "not-a-thread-id".to_string(),
-                run_id: "run-synthetic".to_string(),
-            },
-        )
-        .await;
-        assert!(
-            app.workspace_dashboard_active(),
-            "invalid recorded provenance must keep the clinician in the workspace"
-        );
+            app.handle_workspace_dashboard_action(
+                &mut tui,
+                &mut app_server,
+                WorkspaceDashboardAction::OpenAgentRun {
+                    thread_id: "not-a-thread-id".to_string(),
+                    run_id: "run-synthetic".to_string(),
+                },
+            )
+            .await;
+            assert!(
+                app.workspace_dashboard_active(),
+                "invalid recorded provenance must keep the clinician in the workspace"
+            );
 
-        app.handle_workspace_dashboard_action(
-            &mut tui,
-            &mut app_server,
-            WorkspaceDashboardAction::OpenAgentRun {
-                thread_id: source_thread_id.to_string(),
-                run_id: "run-synthetic".to_string(),
-            },
-        )
-        .await;
-        assert!(
-            !app.workspace_dashboard_active(),
-            "the workspace may close after the recorded source thread is active"
-        );
+            app.handle_workspace_dashboard_action(
+                &mut tui,
+                &mut app_server,
+                WorkspaceDashboardAction::OpenAgentRun {
+                    thread_id: source_thread_id.to_string(),
+                    run_id: "run-synthetic".to_string(),
+                },
+            )
+            .await;
+            assert!(
+                !app.workspace_dashboard_active(),
+                "the workspace may close after the recorded source thread is active"
+            );
 
-        app_server.shutdown().await?;
-        Ok(())
-    }))
+            app_server.shutdown().await?;
+            Ok(())
+        })
+    })
 }
 
 #[test]
 fn workspace_context_bridge_inserts_prompt_and_returns_to_agent_mode() -> Result<()> {
-    run_workspace_dashboard_runtime_test(Box::pin(async {
-        let mut app = make_test_app().await;
-        let codex_home = tempdir()?;
-        app.config.codex_home = codex_home.path().to_path_buf().abs();
-        app.config.sqlite_home = codex_home.path().to_path_buf();
+    run_workspace_dashboard_runtime_test(|| {
+        Box::pin(async {
+            let mut app = make_test_app().await;
+            let codex_home = tempdir()?;
+            app.config.codex_home = codex_home.path().to_path_buf().abs();
+            app.config.sqlite_home = codex_home.path().to_path_buf();
 
-        let mut app_server =
-            Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
-        let mut dashboard = WorkspaceDashboard::default();
-        dashboard.load(&mut app_server).await?;
-        dashboard.set_context_for_tests(
-            "Alex Example",
-            "Progress note",
-            "Client reports improved sleep.",
-        );
-        dashboard.save(&mut app_server).await?;
-        app.workspace_dashboard = Some(dashboard);
-        app.workspace_dashboard_visible = true;
+            let mut app_server =
+                Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
+            let mut dashboard = WorkspaceDashboard::default();
+            dashboard.load(&mut app_server).await?;
+            dashboard.set_context_for_tests(
+                "Alex Example",
+                "Progress note",
+                "Client reports improved sleep.",
+            );
+            dashboard.save(&mut app_server).await?;
+            app.workspace_dashboard = Some(dashboard);
+            app.workspace_dashboard_visible = true;
 
-        app.send_workspace_context_to_agent(&mut app_server).await?;
+            app.send_workspace_context_to_agent(&mut app_server).await?;
 
-        assert!(!app.workspace_dashboard_active());
-        let composer = app.chat_widget.composer_text_with_pending();
-        assert!(composer.contains("Workspace context"));
-        assert!(composer.contains("Alex Example"));
-        assert!(composer.contains("Progress note"));
-        assert!(composer.contains("Client reports improved sleep."));
-        assert!(composer.contains("Propose note edits as a clear diff or replacement draft"));
-        app_server.shutdown().await?;
-        Ok(())
-    }))
+            assert!(!app.workspace_dashboard_active());
+            let composer = app.chat_widget.composer_text_with_pending();
+            assert!(composer.contains("Workspace context"));
+            assert!(composer.contains("Alex Example"));
+            assert!(composer.contains("Progress note"));
+            assert!(composer.contains("Client reports improved sleep."));
+            assert!(composer.contains("Propose note edits as a clear diff or replacement draft"));
+            app_server.shutdown().await?;
+            Ok(())
+        })
+    })
 }
 
 #[test]
 fn medical_workspace_context_bridge_submits_in_background_and_stays_visible() -> Result<()> {
-    run_workspace_dashboard_runtime_test(Box::pin(async {
-        let (mut app, _app_event_rx, mut op_rx) = make_test_app_with_channels().await;
-        configure_medical_workspace_test_thread(&mut app);
-        let codex_home = tempdir()?;
-        app.config.codex_home = codex_home.path().to_path_buf().abs();
-        app.config.sqlite_home = codex_home.path().to_path_buf();
+    run_workspace_dashboard_runtime_test(|| {
+        Box::pin(async {
+            let (mut app, _app_event_rx, mut op_rx) = make_test_app_with_channels().await;
+            configure_medical_workspace_test_thread(&mut app);
+            let codex_home = tempdir()?;
+            app.config.codex_home = codex_home.path().to_path_buf().abs();
+            app.config.sqlite_home = codex_home.path().to_path_buf();
 
-        let mut app_server =
-            Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
-        let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
-        dashboard.load(&mut app_server).await?;
-        dashboard.set_context_for_tests(
-            "Alex Example",
-            "Visit note",
-            "Patient reports improved sleep.",
-        );
-        dashboard.set_agent_request_for_tests(
-            "Review the current chart and propose a concise daily note for clinician review.",
-        );
-        dashboard.save(&mut app_server).await?;
-        let client_id = dashboard.client_id_for_tests().unwrap().to_string();
-        let note_id = dashboard.note_id_for_tests().unwrap().to_string();
-        app.workspace_dashboard = Some(dashboard);
-        app.workspace_dashboard_visible = true;
+            let mut app_server =
+                Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
+            let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+            dashboard.load(&mut app_server).await?;
+            dashboard.set_context_for_tests(
+                "Alex Example",
+                "Visit note",
+                "Patient reports improved sleep.",
+            );
+            dashboard.set_agent_request_for_tests(
+                "Review the current chart and propose a concise daily note for clinician review.",
+            );
+            dashboard.save(&mut app_server).await?;
+            let client_id = dashboard.client_id_for_tests().unwrap().to_string();
+            let note_id = dashboard.note_id_for_tests().unwrap().to_string();
+            app.workspace_dashboard = Some(dashboard);
+            app.workspace_dashboard_visible = true;
 
-        app.send_workspace_context_to_agent(&mut app_server).await?;
+            publish_current_test_workspace_plan(&mut app, &mut app_server).await?;
+            app.send_workspace_context_to_agent(&mut app_server).await?;
 
-        assert!(app.workspace_dashboard_active());
-        assert!(app.chat_widget.composer_text_with_pending().is_empty());
-        let submitted_prompt = take_submitted_workspace_prompt(&mut op_rx);
-        assert!(submitted_prompt.contains("Medical workspace Context Plan selected."));
-        assert!(submitted_prompt.contains("Agent-visible packet handle"));
-        assert!(submitted_prompt.contains("workspace/context/packet/replay"));
-        assert!(submitted_prompt.contains("run_id:"));
-        assert!(submitted_prompt.contains("Execution audit:"));
-        assert!(submitted_prompt.contains("packet_id:"));
-        assert!(submitted_prompt.contains("context_envelope_sha256:"));
-        assert!(submitted_prompt.contains("Stored packet envelope JSON"));
-        assert!(submitted_prompt.contains("Rendered packet context snapshot"));
-        assert!(submitted_prompt.contains("Medical workspace context selected."));
-        assert!(submitted_prompt.contains(&format!("Active patient: {client_id}")));
-        assert!(submitted_prompt.contains(&format!("Active note: {note_id}")));
-        assert!(submitted_prompt.contains("model tool: workspace_context_read"));
-        assert!(!submitted_prompt.contains("- backend endpoint: workspace/context/get"));
-        assert!(submitted_prompt.contains("include_documents: false"));
-        assert!(submitted_prompt.contains(
-            "selected artifact metadata is listed inline; do not fetch unselected documents"
-        ));
-        assert!(submitted_prompt.contains("Do not overwrite saved workspace data"));
-        assert!(submitted_prompt.contains("Context packet safety"));
-        assert!(submitted_prompt.contains("Alex Example"));
-        assert!(submitted_prompt.contains("Visit note"));
-        assert!(submitted_prompt.contains("Patient reports improved sleep."));
-        app_server.shutdown().await?;
-        Ok(())
-    }))
+            assert!(app.workspace_dashboard_active());
+            assert!(app.chat_widget.composer_text_with_pending().is_empty());
+            let submitted_prompt = take_submitted_workspace_prompt(&mut op_rx);
+            assert!(submitted_prompt.contains("Medical workspace Context Plan selected."));
+            assert!(submitted_prompt.contains("Agent-visible packet handle"));
+            assert!(submitted_prompt.contains("workspace/context/packet/replay"));
+            assert!(submitted_prompt.contains("run_id:"));
+            assert!(submitted_prompt.contains("Execution audit:"));
+            assert!(submitted_prompt.contains("packet_id:"));
+            assert!(submitted_prompt.contains("context_envelope_sha256:"));
+            assert!(submitted_prompt.contains("Stored packet envelope JSON"));
+            assert!(submitted_prompt.contains("Rendered packet context snapshot"));
+            assert!(submitted_prompt.contains("Medical workspace context selected."));
+            assert!(submitted_prompt.contains(&format!("Active patient: {client_id}")));
+            assert!(submitted_prompt.contains(&format!("Active note: {note_id}")));
+            assert!(submitted_prompt.contains("model tool: workspace_context_read"));
+            assert!(!submitted_prompt.contains("- backend endpoint: workspace/context/get"));
+            assert!(submitted_prompt.contains("include_documents: false"));
+            assert!(submitted_prompt.contains(
+                "selected artifact metadata is listed inline; do not fetch unselected documents"
+            ));
+            assert!(submitted_prompt.contains("Do not overwrite saved workspace data"));
+            assert!(submitted_prompt.contains("Context packet safety"));
+            assert!(submitted_prompt.contains("Alex Example"));
+            assert!(submitted_prompt.contains("Visit note"));
+            assert!(submitted_prompt.contains("Patient reports improved sleep."));
+            app_server.shutdown().await?;
+            Ok(())
+        })
+    })
 }
 
 #[test]
-fn medical_workspace_failed_background_submission_cancels_the_audited_run() -> Result<()> {
-    run_workspace_dashboard_runtime_test(Box::pin(async {
-        // `make_test_app` intentionally drops the direct Codex-op receiver, which exercises the
-        // failure after the immutable packet and durable run have been created.
-        let mut app = make_test_app().await;
-        configure_medical_workspace_test_thread(&mut app);
-        let codex_home = tempdir()?;
-        app.config.codex_home = codex_home.path().to_path_buf().abs();
-        app.config.sqlite_home = codex_home.path().to_path_buf();
+fn medical_workspace_failed_background_submission_is_restart_retryable_with_exact_run() -> Result<()>
+{
+    run_workspace_dashboard_runtime_test(|| {
+        Box::pin(async {
+            // `make_test_app` intentionally drops the direct Codex-op receiver, which exercises the
+            // failure after the immutable Plan receipt and durable run have been created.
+            let mut app = make_test_app().await;
+            configure_medical_workspace_test_thread(&mut app);
+            let source_thread_id = app.active_thread_id.expect("configured source thread");
+            let codex_home = tempdir()?;
+            app.config.codex_home = codex_home.path().to_path_buf().abs();
+            app.config.sqlite_home = codex_home.path().to_path_buf();
 
-        let mut app_server =
-            Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
-        let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
-        dashboard.load(&mut app_server).await?;
-        dashboard.set_context_for_tests(
-            "Failed Handoff Testpatient",
-            "Visit note",
-            "Synthetic context whose audited turn cannot reach Codex.",
-        );
-        dashboard.set_agent_request_for_tests(
-            "Create a review-only proposal after reading this Context Plan.",
-        );
-        dashboard.save(&mut app_server).await?;
-        let client_id = dashboard
-            .client_id_for_tests()
-            .expect("saved client")
-            .to_string();
-        let note_id = dashboard.note_id_for_tests().map(str::to_string);
-        app.workspace_dashboard = Some(dashboard);
-        app.workspace_dashboard_visible = true;
+            let mut app_server =
+                Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
+            let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+            dashboard.load(&mut app_server).await?;
+            dashboard.set_context_for_tests(
+                "Failed Handoff Testpatient",
+                "Visit note",
+                "Synthetic context whose audited turn cannot reach Codex.",
+            );
+            dashboard.set_agent_request_for_tests(
+                "Create a review-only proposal after reading this Context Plan.",
+            );
+            dashboard.save(&mut app_server).await?;
+            let client_id = dashboard
+                .client_id_for_tests()
+                .expect("saved client")
+                .to_string();
+            let note_id = dashboard.note_id_for_tests().map(str::to_string);
+            app.workspace_dashboard = Some(dashboard);
+            app.workspace_dashboard_visible = true;
 
-        let error = app
-            .send_workspace_context_to_agent(&mut app_server)
-            .await
-            .expect_err("closed Codex-op channel must reject the audited handoff");
+            publish_current_test_workspace_plan(&mut app, &mut app_server).await?;
+            app.send_workspace_context_to_agent(&mut app_server).await?;
 
-        assert!(
-            error
-                .to_string()
-                .contains("audited handoff could not be submitted")
-        );
-        assert!(app.workspace_dashboard_active());
-        assert!(app.pending_workspace_agent_capture.is_none());
-        assert_eq!(
-            app.workspace_dashboard
+            assert!(app.workspace_dashboard_active());
+            let pending = app
+                .pending_workspace_agent_capture
                 .as_ref()
-                .expect("medical dashboard remains open")
-                .context_packet_count_for_tests(),
-            1
-        );
-        let runs = app_server
-            .workspace_agent_run_list(WorkspaceAgentRunListParams {
-                client_id,
-                note_id,
-                packet_id: None,
-                limit: Some(10),
-            })
-            .await?
-            .runs;
-        assert_eq!(runs.len(), 1);
-        assert_eq!(runs[0].status, "canceled");
-        assert_eq!(
-            runs[0].error_summary.as_deref(),
-            Some("the audited handoff could not be submitted to the active Codex thread")
-        );
-        app_server.shutdown().await?;
-        Ok(())
-    }))
+                .expect("durable unqueued handoff remains retryable");
+            assert!(pending.handoff_is_authorized());
+            assert!(!pending.handoff_is_enqueued());
+            let run_id = pending.run_id().to_string();
+            assert_eq!(
+                app.workspace_dashboard
+                    .as_ref()
+                    .expect("medical dashboard remains open")
+                    .context_packet_count_for_tests(),
+                1
+            );
+            let runs = app_server
+                .workspace_agent_run_list(WorkspaceAgentRunListParams {
+                    client_id: client_id.clone(),
+                    note_id: note_id.clone(),
+                    packet_id: None,
+                    limit: Some(10),
+                })
+                .await?
+                .runs;
+            assert_eq!(runs.len(), 1);
+            assert_eq!(runs[0].id, run_id);
+            assert_eq!(runs[0].status, "running");
+            assert!(runs[0].source_turn_id.is_none());
+            let packet_id = runs[0].packet_id.clone();
+            let plan_snapshot = app_server
+                .workspace_plan_snapshot_get(
+                    codex_app_server_protocol::WorkspacePlanSnapshotGetParams {
+                        client_id: client_id.clone(),
+                        plan_session_id: None,
+                        after_message_sequence: None,
+                        message_limit: Some(10),
+                        revision_limit: Some(10),
+                        proposal_limit: Some(10),
+                    },
+                )
+                .await?;
+            let submitted_revision = plan_snapshot
+                .revisions
+                .iter()
+                .find(|revision| {
+                    revision.status
+                        == codex_app_server_protocol::WorkspacePlanRevisionStatus::Submitted
+                })
+                .expect("submitted revision remains durable");
+            assert!(plan_snapshot.revisions.iter().all(|revision| {
+                revision.status != codex_app_server_protocol::WorkspacePlanRevisionStatus::Current
+            }));
+            let receipt = plan_snapshot
+                .submission_receipts
+                .iter()
+                .find(|receipt| receipt.plan_revision_id == submitted_revision.id)
+                .expect("submitted revision exposes its immutable handoff receipt");
+            assert_eq!(receipt.packet_id, packet_id);
+            assert_eq!(receipt.agent_run_id, run_id);
+            assert_eq!(receipt.plan_session_id, submitted_revision.plan_session_id);
+            assert_eq!(receipt.client_id, client_id);
+            assert_eq!(
+                receipt.plan_content_sha256,
+                submitted_revision.content_sha256
+            );
+            assert_eq!(
+                receipt.evidence_manifest_sha256,
+                submitted_revision.evidence_manifest_sha256
+            );
+            app_server.shutdown().await?;
+
+            // Simulate a full TUI restart: the in-memory pending capture is gone, while the submitted
+            // revision, exact packet/run receipt, and unclaimed run remain in SQLite.
+            drop(app);
+            let (mut reloaded_app, _app_event_rx, mut op_rx) = make_test_app_with_channels().await;
+            reloaded_app.config.codex_home = codex_home.path().to_path_buf().abs();
+            reloaded_app.config.sqlite_home = codex_home.path().to_path_buf();
+            reloaded_app.active_thread_id = Some(source_thread_id);
+            reloaded_app
+                .chat_widget
+                .handle_thread_session_quiet(test_thread_session(
+                    source_thread_id,
+                    reloaded_app.config.cwd.to_path_buf(),
+                ));
+            let mut reloaded_app_server = Box::pin(crate::start_embedded_app_server_for_picker(
+                &reloaded_app.config,
+            ))
+            .await?;
+            let mut reloaded_dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+            reloaded_dashboard.load(&mut reloaded_app_server).await?;
+            reloaded_app.workspace_dashboard = Some(reloaded_dashboard);
+            reloaded_app.workspace_dashboard_visible = true;
+            reloaded_app
+                .refresh_workspace_plan_snapshot(&mut reloaded_app_server)
+                .await?;
+
+            reloaded_app
+                .send_workspace_context_to_agent(&mut reloaded_app_server)
+                .await?;
+            let retried_prompt = take_submitted_workspace_prompt(&mut op_rx);
+            assert!(retried_prompt.contains(&format!("run_id: {run_id}")));
+            assert!(retried_prompt.contains(&format!("packet_id: {packet_id}")));
+            let recovered = reloaded_app
+                .pending_workspace_agent_capture
+                .as_ref()
+                .expect("restart reconstructs the exact pending capture");
+            assert_eq!(recovered.run_id(), run_id);
+            assert!(recovered.handoff_is_authorized());
+            assert!(recovered.handoff_is_enqueued());
+            let reloaded_runs = reloaded_app_server
+                .workspace_agent_run_list(WorkspaceAgentRunListParams {
+                    client_id,
+                    note_id,
+                    packet_id: None,
+                    limit: Some(10),
+                })
+                .await?
+                .runs;
+            assert_eq!(reloaded_runs.len(), 1);
+            assert_eq!(reloaded_runs[0].id, run_id);
+            assert_eq!(reloaded_runs[0].packet_id, packet_id);
+            assert_eq!(reloaded_runs[0].status, "running");
+            assert!(reloaded_runs[0].source_turn_id.is_none());
+
+            reloaded_app_server.shutdown().await?;
+            Ok(())
+        })
+    })
 }
 
 #[test]
 fn medical_workspace_failed_agent_turn_closes_the_durable_run_and_keeps_context_visible()
 -> Result<()> {
-    run_workspace_dashboard_runtime_test(Box::pin(async {
-        let (mut app, _app_event_rx, mut op_rx) = make_test_app_with_channels().await;
-        configure_medical_workspace_test_thread(&mut app);
-        let codex_home = tempdir()?;
-        app.config.codex_home = codex_home.path().to_path_buf().abs();
-        app.config.sqlite_home = codex_home.path().to_path_buf();
+    run_workspace_dashboard_runtime_test(|| {
+        Box::pin(async {
+            let (mut app, _app_event_rx, mut op_rx) = make_test_app_with_channels().await;
+            configure_medical_workspace_test_thread(&mut app);
+            let codex_home = tempdir()?;
+            app.config.codex_home = codex_home.path().to_path_buf().abs();
+            app.config.sqlite_home = codex_home.path().to_path_buf();
 
-        let mut app_server =
-            Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
-        let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
-        dashboard.load(&mut app_server).await?;
-        dashboard.set_context_for_tests(
-            "Failed Run Testpatient",
-            "Visit note",
-            "Synthetic context that remains reviewable after an agent failure.",
-        );
-        dashboard.set_agent_request_for_tests("Attempt a review-only proposal.");
-        dashboard.save(&mut app_server).await?;
-        let client_id = dashboard
-            .client_id_for_tests()
-            .expect("saved client")
-            .to_string();
-        let note_id = dashboard.note_id_for_tests().map(str::to_string);
-        app.workspace_dashboard = Some(dashboard);
-        app.workspace_dashboard_visible = true;
+            let mut app_server =
+                Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
+            let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+            dashboard.load(&mut app_server).await?;
+            dashboard.set_context_for_tests(
+                "Failed Run Testpatient",
+                "Visit note",
+                "Synthetic context that remains reviewable after an agent failure.",
+            );
+            dashboard.set_agent_request_for_tests("Attempt a review-only proposal.");
+            dashboard.save(&mut app_server).await?;
+            let client_id = dashboard
+                .client_id_for_tests()
+                .expect("saved client")
+                .to_string();
+            let note_id = dashboard.note_id_for_tests().map(str::to_string);
+            app.workspace_dashboard = Some(dashboard);
+            app.workspace_dashboard_visible = true;
 
-        app.send_workspace_context_to_agent(&mut app_server).await?;
-        let submitted_prompt = take_submitted_workspace_prompt(&mut op_rx);
-        let run_id = app
-            .pending_workspace_agent_capture
-            .as_ref()
-            .expect("pending audited capture")
-            .run_id()
-            .to_string();
-        let source_thread_id = app
-            .active_thread_id
-            .expect("configured source thread")
-            .to_string();
-        let turn_id = "failed-medical-turn";
-
-        app.handle_workspace_agent_capture_event(
-            &mut app_server,
-            &ThreadBufferedEvent::Notification(ServerNotification::ItemCompleted(
-                ItemCompletedNotification {
-                    item: ThreadItem::UserMessage {
-                        id: "failed-medical-user-message".to_string(),
-                        client_id: None,
-                        content: vec![UserInput::Text {
-                            text: submitted_prompt,
-                            text_elements: Vec::new(),
-                        }],
-                    },
-                    thread_id: source_thread_id.clone(),
-                    turn_id: turn_id.to_string(),
-                    completed_at_ms: 1,
-                },
-            )),
-        )
-        .await;
-        app.handle_workspace_agent_capture_event(
-            &mut app_server,
-            &ThreadBufferedEvent::Notification(ServerNotification::TurnCompleted(
-                TurnCompletedNotification {
-                    thread_id: source_thread_id,
-                    turn: Turn {
-                        error: Some(AppServerTurnError {
-                            message: "synthetic model failure".to_string(),
-                            codex_error_info: None,
-                            additional_details: None,
-                        }),
-                        completed_at: Some(2),
-                        duration_ms: Some(1),
-                        ..test_turn(turn_id, TurnStatus::Failed, Vec::new())
-                    },
-                },
-            )),
-        )
-        .await;
-
-        assert!(app.workspace_dashboard_active());
-        assert!(app.pending_workspace_agent_capture.is_none());
-        assert_eq!(
-            app.workspace_dashboard
+            publish_current_test_workspace_plan(&mut app, &mut app_server).await?;
+            app.send_workspace_context_to_agent(&mut app_server).await?;
+            let submitted_prompt = take_submitted_workspace_prompt(&mut op_rx);
+            let run_id = app
+                .pending_workspace_agent_capture
                 .as_ref()
-                .expect("medical dashboard remains open")
-                .context_packet_count_for_tests(),
-            1
-        );
-        let runs = app_server
-            .workspace_agent_run_list(WorkspaceAgentRunListParams {
-                client_id,
-                note_id,
-                packet_id: None,
-                limit: Some(10),
-            })
-            .await?
-            .runs;
-        let run = runs
-            .iter()
-            .find(|run| run.id == run_id)
-            .expect("failed durable run remains auditable");
-        assert_eq!(run.status, "failed");
-        assert_eq!(
-            run.error_summary.as_deref(),
-            Some("synthetic model failure")
-        );
+                .expect("pending audited capture")
+                .run_id()
+                .to_string();
+            let source_thread_id = app
+                .active_thread_id
+                .expect("configured source thread")
+                .to_string();
+            let turn_id = "failed-medical-turn";
 
-        app_server.shutdown().await?;
-        Ok(())
-    }))
+            // A real workspace-only Codex turn claims this exact durable execution before its
+            // app-server item notifications reach the TUI. This fixture feeds those notifications
+            // directly, so bind the equivalent core-owned execution first.
+            let state_db = codex_state::StateRuntime::init(
+                app.config.sqlite_home.clone(),
+                app.config.model_provider_id.clone(),
+            )
+            .await
+            .expect("workspace state should open for a failed-turn fixture");
+            state_db
+                .workspace()
+                .claim_agent_turn(codex_state::WorkspaceAgentTurnClaim {
+                    execution: codex_state::WorkspaceAgentExecutionBinding {
+                        run_id: run_id.clone(),
+                        source_thread_id: source_thread_id.clone(),
+                        source_turn_id: turn_id.to_string(),
+                        provider: app.chat_widget.config_ref().model_provider_id.clone(),
+                        model: app.chat_widget.current_model().to_string(),
+                    },
+                    prompt: submitted_prompt.clone(),
+                })
+                .await
+                .expect("the failed synthetic turn should claim its exact handoff");
+
+            app.handle_workspace_agent_capture_event(
+                &mut app_server,
+                &ThreadBufferedEvent::Notification(ServerNotification::ItemCompleted(
+                    ItemCompletedNotification {
+                        item: ThreadItem::UserMessage {
+                            id: "failed-medical-user-message".to_string(),
+                            client_id: None,
+                            content: vec![UserInput::Text {
+                                text: submitted_prompt,
+                                text_elements: Vec::new(),
+                            }],
+                        },
+                        thread_id: source_thread_id.clone(),
+                        turn_id: turn_id.to_string(),
+                        completed_at_ms: 1,
+                    },
+                )),
+            )
+            .await;
+            app.handle_workspace_agent_capture_event(
+                &mut app_server,
+                &ThreadBufferedEvent::Notification(ServerNotification::TurnCompleted(
+                    TurnCompletedNotification {
+                        thread_id: source_thread_id,
+                        turn: Turn {
+                            error: Some(AppServerTurnError {
+                                message: "synthetic model failure".to_string(),
+                                codex_error_info: None,
+                                additional_details: None,
+                            }),
+                            completed_at: Some(2),
+                            duration_ms: Some(1),
+                            ..test_turn(turn_id, TurnStatus::Failed, Vec::new())
+                        },
+                    },
+                )),
+            )
+            .await;
+
+            assert!(app.workspace_dashboard_active());
+            assert!(app.pending_workspace_agent_capture.is_none());
+            assert_eq!(
+                app.workspace_dashboard
+                    .as_ref()
+                    .expect("medical dashboard remains open")
+                    .context_packet_count_for_tests(),
+                1
+            );
+            let runs = app_server
+                .workspace_agent_run_list(WorkspaceAgentRunListParams {
+                    client_id,
+                    note_id,
+                    packet_id: None,
+                    limit: Some(10),
+                })
+                .await?
+                .runs;
+            let run = runs
+                .iter()
+                .find(|run| run.id == run_id)
+                .expect("failed durable run remains auditable");
+            assert_eq!(run.status, "failed");
+            assert_eq!(
+                run.error_summary.as_deref(),
+                Some("synthetic model failure")
+            );
+
+            app_server.shutdown().await?;
+            Ok(())
+        })
+    })
 }
 
 #[test]
 fn medical_workspace_context_bridge_rejects_without_active_thread() -> Result<()> {
-    run_workspace_dashboard_runtime_test(Box::pin(async {
-        let mut app = make_test_app().await;
-        let codex_home = tempdir()?;
-        app.config.codex_home = codex_home.path().to_path_buf().abs();
-        app.config.sqlite_home = codex_home.path().to_path_buf();
-        let mut app_server =
-            Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
-        let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
-        dashboard.load(&mut app_server).await?;
-        dashboard.set_context_for_tests(
-            "No Thread Testpatient",
-            "Visit note",
-            "Synthetic context that must not start a run.",
-        );
-        dashboard.save(&mut app_server).await?;
-        let client_id = dashboard
-            .client_id_for_tests()
-            .expect("saved client")
-            .to_string();
-        let note_id = dashboard.note_id_for_tests().map(str::to_string);
-        app.workspace_dashboard = Some(dashboard);
-        app.workspace_dashboard_visible = true;
+    run_workspace_dashboard_runtime_test(|| {
+        Box::pin(async {
+            let mut app = make_test_app().await;
+            let codex_home = tempdir()?;
+            app.config.codex_home = codex_home.path().to_path_buf().abs();
+            app.config.sqlite_home = codex_home.path().to_path_buf();
+            let mut app_server =
+                Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
+            let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+            dashboard.load(&mut app_server).await?;
+            dashboard.set_context_for_tests(
+                "No Thread Testpatient",
+                "Visit note",
+                "Synthetic context that must not start a run.",
+            );
+            dashboard.save(&mut app_server).await?;
+            let client_id = dashboard
+                .client_id_for_tests()
+                .expect("saved client")
+                .to_string();
+            let note_id = dashboard.note_id_for_tests().map(str::to_string);
+            app.workspace_dashboard = Some(dashboard);
+            app.workspace_dashboard_visible = true;
 
-        app.send_workspace_context_to_agent(&mut app_server).await?;
+            app.send_workspace_context_to_agent(&mut app_server).await?;
 
-        assert!(app.workspace_dashboard_active());
-        assert!(app.pending_workspace_agent_capture.is_none());
-        assert!(app.chat_widget.composer_text_with_pending().is_empty());
-        assert_eq!(
-            app.workspace_dashboard
-                .as_ref()
-                .expect("medical dashboard remains open")
-                .context_packet_count_for_tests(),
-            0
-        );
-        let runs = app_server
-            .workspace_agent_run_list(WorkspaceAgentRunListParams {
-                client_id,
-                note_id,
-                packet_id: None,
-                limit: Some(10),
-            })
-            .await?
-            .runs;
-        assert!(runs.is_empty());
-        app_server.shutdown().await?;
-        Ok(())
-    }))
+            assert!(app.workspace_dashboard_active());
+            assert!(app.pending_workspace_agent_capture.is_none());
+            assert!(app.chat_widget.composer_text_with_pending().is_empty());
+            assert_eq!(
+                app.workspace_dashboard
+                    .as_ref()
+                    .expect("medical dashboard remains open")
+                    .context_packet_count_for_tests(),
+                0
+            );
+            let runs = app_server
+                .workspace_agent_run_list(WorkspaceAgentRunListParams {
+                    client_id,
+                    note_id,
+                    packet_id: None,
+                    limit: Some(10),
+                })
+                .await?
+                .runs;
+            assert!(runs.is_empty());
+            app_server.shutdown().await?;
+            Ok(())
+        })
+    })
 }
 
 #[test]
 fn medical_workspace_context_bridge_waits_for_an_active_codex_turn() -> Result<()> {
-    run_workspace_dashboard_runtime_test(Box::pin(async {
-        let (mut app, _app_event_rx, mut op_rx) = make_test_app_with_channels().await;
-        configure_medical_workspace_test_thread(&mut app);
-        app.chat_widget.mark_agent_turn_running_for_tests();
-        let codex_home = tempdir()?;
-        app.config.codex_home = codex_home.path().to_path_buf().abs();
-        app.config.sqlite_home = codex_home.path().to_path_buf();
-        let mut app_server =
-            Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
-        let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
-        dashboard.load(&mut app_server).await?;
-        dashboard.set_context_for_tests(
-            "Busy Run Testpatient",
-            "Visit note",
-            "Synthetic context that must wait for the active Codex turn.",
-        );
-        dashboard.set_agent_request_for_tests(
-            "Create a review-only note proposal after the active run finishes.",
-        );
-        dashboard.save(&mut app_server).await?;
-        let client_id = dashboard
-            .client_id_for_tests()
-            .expect("saved client")
-            .to_string();
-        let note_id = dashboard.note_id_for_tests().map(str::to_string);
-        app.workspace_dashboard = Some(dashboard);
-        app.workspace_dashboard_visible = true;
-
-        app.send_workspace_context_to_agent(&mut app_server).await?;
-
-        assert!(app.workspace_dashboard_active());
-        assert!(app.pending_workspace_agent_capture.is_none());
-        while let Ok(op) = op_rx.try_recv() {
-            assert!(
-                !matches!(op, Op::UserTurn { .. }),
-                "busy Codex turn must not receive a Context Plan user turn"
+    run_workspace_dashboard_runtime_test(|| {
+        Box::pin(async {
+            let (mut app, _app_event_rx, mut op_rx) = make_test_app_with_channels().await;
+            configure_medical_workspace_test_thread(&mut app);
+            app.chat_widget.mark_agent_turn_running_for_tests();
+            let codex_home = tempdir()?;
+            app.config.codex_home = codex_home.path().to_path_buf().abs();
+            app.config.sqlite_home = codex_home.path().to_path_buf();
+            let mut app_server =
+                Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
+            let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+            dashboard.load(&mut app_server).await?;
+            dashboard.set_context_for_tests(
+                "Busy Run Testpatient",
+                "Visit note",
+                "Synthetic context that must wait for the active Codex turn.",
             );
-        }
-        let dashboard = app
-            .workspace_dashboard
-            .as_ref()
-            .expect("medical dashboard remains open");
-        assert_eq!(dashboard.context_packet_count_for_tests(), 0);
-        let runs = app_server
-            .workspace_agent_run_list(WorkspaceAgentRunListParams {
-                client_id,
-                note_id,
-                packet_id: None,
-                limit: Some(10),
-            })
-            .await?
-            .runs;
-        assert!(runs.is_empty());
-        app_server.shutdown().await?;
-        Ok(())
-    }))
+            dashboard.set_agent_request_for_tests(
+                "Create a review-only note proposal after the active run finishes.",
+            );
+            dashboard.save(&mut app_server).await?;
+            let client_id = dashboard
+                .client_id_for_tests()
+                .expect("saved client")
+                .to_string();
+            let note_id = dashboard.note_id_for_tests().map(str::to_string);
+            app.workspace_dashboard = Some(dashboard);
+            app.workspace_dashboard_visible = true;
+
+            app.send_workspace_context_to_agent(&mut app_server).await?;
+
+            assert!(app.workspace_dashboard_active());
+            assert!(app.pending_workspace_agent_capture.is_none());
+            while let Ok(op) = op_rx.try_recv() {
+                assert!(
+                    !matches!(op, Op::UserTurn { .. }),
+                    "busy Codex turn must not receive a Context Plan user turn"
+                );
+            }
+            let dashboard = app
+                .workspace_dashboard
+                .as_ref()
+                .expect("medical dashboard remains open");
+            assert_eq!(dashboard.context_packet_count_for_tests(), 0);
+            let runs = app_server
+                .workspace_agent_run_list(WorkspaceAgentRunListParams {
+                    client_id,
+                    note_id,
+                    packet_id: None,
+                    limit: Some(10),
+                })
+                .await?
+                .runs;
+            assert!(runs.is_empty());
+            app_server.shutdown().await?;
+            Ok(())
+        })
+    })
 }
 
 #[test]
 fn medical_workspace_context_bridge_preserves_preexisting_composer_while_run_starts() -> Result<()>
 {
-    run_workspace_dashboard_runtime_test(Box::pin(async {
-        let (mut app, _app_event_rx, mut op_rx) = make_test_app_with_channels().await;
-        configure_medical_workspace_test_thread(&mut app);
-        let codex_home = tempdir()?;
-        app.config.codex_home = codex_home.path().to_path_buf().abs();
-        app.config.sqlite_home = codex_home.path().to_path_buf();
-        let mut app_server =
-            Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
-        let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
-        dashboard.load(&mut app_server).await?;
-        dashboard.set_context_for_tests(
-            "Composer Guard Testpatient",
-            "Visit note",
-            "Synthetic context that must not create a packet or run.",
-        );
-        dashboard.set_agent_request_for_tests(
-            "Analyze this synthetic visit and return a review-only note proposal.",
-        );
-        dashboard.save(&mut app_server).await?;
-        let client_id = dashboard
-            .client_id_for_tests()
-            .expect("saved client")
-            .to_string();
-        let note_id = dashboard.note_id_for_tests().map(str::to_string);
-        app.workspace_dashboard = Some(dashboard);
-        app.workspace_dashboard_visible = true;
-        app.chat_widget
-            .set_composer_text("unrelated draft".to_string(), Vec::new(), Vec::new());
+    run_workspace_dashboard_runtime_test(|| {
+        Box::pin(async {
+            let (mut app, _app_event_rx, mut op_rx) = make_test_app_with_channels().await;
+            configure_medical_workspace_test_thread(&mut app);
+            let codex_home = tempdir()?;
+            app.config.codex_home = codex_home.path().to_path_buf().abs();
+            app.config.sqlite_home = codex_home.path().to_path_buf();
+            let mut app_server =
+                Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
+            let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+            dashboard.load(&mut app_server).await?;
+            dashboard.set_context_for_tests(
+                "Composer Guard Testpatient",
+                "Visit note",
+                "Synthetic context that must not create a packet or run.",
+            );
+            dashboard.set_agent_request_for_tests(
+                "Analyze this synthetic visit and return a review-only note proposal.",
+            );
+            dashboard.save(&mut app_server).await?;
+            let client_id = dashboard
+                .client_id_for_tests()
+                .expect("saved client")
+                .to_string();
+            let note_id = dashboard.note_id_for_tests().map(str::to_string);
+            app.workspace_dashboard = Some(dashboard);
+            app.workspace_dashboard_visible = true;
+            app.chat_widget.set_composer_text(
+                "unrelated draft".to_string(),
+                Vec::new(),
+                Vec::new(),
+            );
 
-        app.send_workspace_context_to_agent(&mut app_server).await?;
+            publish_current_test_workspace_plan(&mut app, &mut app_server).await?;
+            app.send_workspace_context_to_agent(&mut app_server).await?;
 
-        assert!(app.workspace_dashboard_active());
-        assert!(app.pending_workspace_agent_capture.is_some());
-        assert_eq!(
-            app.chat_widget.composer_text_with_pending(),
-            "unrelated draft"
-        );
-        assert_eq!(
-            app.workspace_dashboard
-                .as_ref()
-                .expect("medical dashboard remains open")
-                .context_packet_count_for_tests(),
-            1
-        );
-        let submitted_prompt = take_submitted_workspace_prompt(&mut op_rx);
-        assert!(submitted_prompt.contains("Composer Guard Testpatient"));
-        let runs = app_server
-            .workspace_agent_run_list(WorkspaceAgentRunListParams {
-                client_id,
-                note_id,
-                packet_id: None,
-                limit: Some(10),
-            })
-            .await?
-            .runs;
-        assert_eq!(runs.len(), 1);
-        assert_eq!(runs[0].status, "running");
-        app_server.shutdown().await?;
-        Ok(())
-    }))
+            assert!(app.workspace_dashboard_active());
+            assert!(app.pending_workspace_agent_capture.is_some());
+            assert_eq!(
+                app.chat_widget.composer_text_with_pending(),
+                "unrelated draft"
+            );
+            assert_eq!(
+                app.workspace_dashboard
+                    .as_ref()
+                    .expect("medical dashboard remains open")
+                    .context_packet_count_for_tests(),
+                1
+            );
+            let submitted_prompt = take_submitted_workspace_prompt(&mut op_rx);
+            assert!(submitted_prompt.contains("Composer Guard Testpatient"));
+            let runs = app_server
+                .workspace_agent_run_list(WorkspaceAgentRunListParams {
+                    client_id,
+                    note_id,
+                    packet_id: None,
+                    limit: Some(10),
+                })
+                .await?
+                .runs;
+            assert_eq!(runs.len(), 1);
+            assert_eq!(runs[0].status, "running");
+            app_server.shutdown().await?;
+            Ok(())
+        })
+    })
 }
 
 #[test]
 fn medical_workspace_first_eval_round_trip_stays_packet_scoped_and_review_pending() -> Result<()> {
-    run_workspace_dashboard_runtime_test(Box::pin(async {
-        let (mut app, _app_event_rx, mut op_rx) = make_test_app_with_channels().await;
-        configure_medical_workspace_test_thread(&mut app);
-        let codex_home = tempdir()?;
-        app.config.codex_home = codex_home.path().to_path_buf().abs();
-        app.config.sqlite_home = codex_home.path().to_path_buf();
-        let workspace_db_path = codex_state::workspace_db_path(app.config.sqlite_home.as_path());
+    run_workspace_dashboard_runtime_test(|| {
+        Box::pin(async {
+            let (mut app, _app_event_rx, mut op_rx) = make_test_app_with_channels().await;
+            configure_medical_workspace_test_thread(&mut app);
+            let codex_home = tempdir()?;
+            app.config.codex_home = codex_home.path().to_path_buf().abs();
+            app.config.sqlite_home = codex_home.path().to_path_buf();
+            let workspace_db_path =
+                codex_state::workspace_db_path(app.config.sqlite_home.as_path());
 
-        let mut app_server =
-            Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
-        let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
-        dashboard.load(&mut app_server).await?;
-        dashboard.set_context_for_tests(
+            let mut app_server =
+                Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
+            let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+            dashboard.load(&mut app_server).await?;
+            dashboard.set_context_for_tests(
             "Riley Testpatient",
             "First eval",
             "HPI: Fake patient reports two weeks of mild cough.\nExam: Alert, breathing comfortably.\nAssessment: Viral URI likely.\nPlan:",
         );
-        dashboard.save(&mut app_server).await?;
-        let seeded_client_id = dashboard
-            .client_id_for_tests()
-            .expect("saved client id")
-            .to_string();
-        let prior_encounter = app_server
-            .workspace_encounter_upsert(WorkspaceEncounterUpsertParams {
-                id: None,
-                client_id: seeded_client_id.clone(),
-                kind: "office_visit".to_string(),
-                title: "Prior synthetic follow-up".to_string(),
-                status: "completed".to_string(),
-                started_at: Some(1_782_864_000),
-                ended_at: Some(1_782_867_600),
-            })
-            .await?
-            .encounter;
-        let prior_progress_note = app_server
-            .workspace_note_upsert(WorkspaceNoteUpsertParams {
-                id: None,
-                client_id: seeded_client_id,
-                encounter_id: Some(prior_encounter.id.clone()),
-                title: "Prior progress note".to_string(),
-                kind: "progress_note".to_string(),
-                body: "AUTHORIZED_PRIOR_PROGRESS_NOTE_SENTINEL".to_string(),
-                status: "draft".to_string(),
-                summary: Some("synthetic prior progress".to_string()),
-            })
-            .await?
-            .note;
+            dashboard.save(&mut app_server).await?;
+            let seeded_client_id = dashboard
+                .client_id_for_tests()
+                .expect("saved client id")
+                .to_string();
+            let prior_encounter = app_server
+                .workspace_encounter_upsert(WorkspaceEncounterUpsertParams {
+                    id: None,
+                    client_id: seeded_client_id.clone(),
+                    kind: "office_visit".to_string(),
+                    title: "Prior synthetic follow-up".to_string(),
+                    status: "completed".to_string(),
+                    started_at: Some(1_782_864_000),
+                    ended_at: Some(1_782_867_600),
+                })
+                .await?
+                .encounter;
+            let prior_progress_note = app_server
+                .workspace_note_upsert(WorkspaceNoteUpsertParams {
+                    id: None,
+                    client_id: seeded_client_id,
+                    encounter_id: Some(prior_encounter.id.clone()),
+                    title: "Prior progress note".to_string(),
+                    kind: "progress_note".to_string(),
+                    body: "AUTHORIZED_PRIOR_PROGRESS_NOTE_SENTINEL".to_string(),
+                    status: "draft".to_string(),
+                    summary: Some("synthetic prior progress".to_string()),
+                })
+                .await?
+                .note;
 
-        assert!(workspace_db_path.exists());
-        assert_eq!(
-            dashboard.client_display_name_for_tests(),
-            "Riley Testpatient"
-        );
-        assert_eq!(dashboard.note_title_for_tests(), "First eval");
-        assert_eq!(dashboard.note_revision_for_tests(), 1);
-        assert_eq!(
-            dashboard.note_body_for_tests(),
-            "HPI: Fake patient reports two weeks of mild cough.\nExam: Alert, breathing comfortably.\nAssessment: Viral URI likely.\nPlan:"
-        );
+            assert!(workspace_db_path.exists());
+            assert_eq!(
+                dashboard.client_display_name_for_tests(),
+                "Riley Testpatient"
+            );
+            assert_eq!(dashboard.note_title_for_tests(), "First eval");
+            assert_eq!(dashboard.note_revision_for_tests(), 1);
+            assert_eq!(
+                dashboard.note_body_for_tests(),
+                "HPI: Fake patient reports two weeks of mild cough.\nExam: Alert, breathing comfortably.\nAssessment: Viral URI likely.\nPlan:"
+            );
 
-        assert_eq!(
-            dashboard.execute_workspace_command(":agent request"),
-            WorkspaceDashboardAction::Consumed
-        );
-        for c in "Finish the plan for this fake first eval. Keep it reviewable and do not mutate the chart.".chars() {
+            assert_eq!(
+                dashboard.execute_workspace_command(":agent request"),
+                WorkspaceDashboardAction::Consumed
+            );
+            for c in "Finish the plan for this fake first eval. Keep it reviewable and do not mutate the chart.".chars() {
             dashboard.handle_key_event(KeyEvent::from(KeyCode::Char(c)));
         }
-        app.workspace_dashboard = Some(dashboard);
-        app.workspace_dashboard_visible = true;
-        let expected_run_provider = app.chat_widget.config_ref().model_provider_id.clone();
-        let expected_run_model = app.chat_widget.current_model().to_string();
-        app.send_workspace_context_to_agent(&mut app_server).await?;
+            app.workspace_dashboard = Some(dashboard);
+            app.workspace_dashboard_visible = true;
+            let expected_run_provider = app.chat_widget.config_ref().model_provider_id.clone();
+            let expected_run_model = app.chat_widget.current_model().to_string();
+            publish_current_test_workspace_plan(&mut app, &mut app_server).await?;
+            app.send_workspace_context_to_agent(&mut app_server).await?;
 
-        assert!(app.workspace_dashboard_active());
-        let submitted_prompt = take_submitted_workspace_prompt(&mut op_rx);
-        assert!(submitted_prompt.contains("Medical workspace Context Plan selected."));
-        assert!(submitted_prompt.contains("Agent-visible packet handle"));
-        assert!(submitted_prompt.contains("workspace/context/packet/replay"));
-        assert!(submitted_prompt.contains("Riley Testpatient"));
-        assert!(submitted_prompt.contains("First eval"));
-        assert!(submitted_prompt.contains("HPI: Fake patient reports two weeks of mild cough."));
-        assert!(submitted_prompt.contains("Finish the plan for this fake first eval."));
-        assert!(submitted_prompt.contains("include_documents: false"));
-        assert!(submitted_prompt.contains("Do not overwrite saved workspace data"));
-        assert!(submitted_prompt.contains("workspace_context_read"));
+            assert!(app.workspace_dashboard_active());
+            let submitted_prompt = take_submitted_workspace_prompt(&mut op_rx);
+            assert!(submitted_prompt.contains("Medical workspace Context Plan selected."));
+            assert!(submitted_prompt.contains("Agent-visible packet handle"));
+            assert!(submitted_prompt.contains("workspace/context/packet/replay"));
+            assert!(submitted_prompt.contains("Riley Testpatient"));
+            assert!(submitted_prompt.contains("First eval"));
+            assert!(
+                submitted_prompt.contains("HPI: Fake patient reports two weeks of mild cough.")
+            );
+            assert!(submitted_prompt.contains("Finish the plan for this fake first eval."));
+            assert!(submitted_prompt.contains("include_documents: false"));
+            assert!(submitted_prompt.contains("Do not overwrite saved workspace data"));
+            assert!(submitted_prompt.contains("workspace_context_read"));
 
-        let packet = app
-            .workspace_dashboard
-            .as_ref()
-            .and_then(WorkspaceDashboard::first_context_packet_for_tests)
-            .expect("sent packet");
-        let packet_id = packet.id.clone();
-        let packet_hash = packet.context_envelope_sha256.clone();
-        assert_eq!(packet.status, "submitted");
-        assert!(packet.submitted_at.is_some());
-        let handoff_run = app_server
-            .workspace_agent_run_list(WorkspaceAgentRunListParams {
-                client_id: packet.client_id.clone(),
-                note_id: packet.note_id.clone(),
-                packet_id: Some(packet_id.clone()),
-                limit: Some(10),
-            })
-            .await?
-            .runs
-            .into_iter()
-            .next()
-            .expect("handoff run");
-        let capture_thread_id = handoff_run
-            .source_thread_id
-            .clone()
-            .expect("handoff run should be bound to the active thread");
-        let capture_turn_id = "synthetic-medical-turn";
-        let execution = codex_state::WorkspaceAgentExecutionBinding {
-            run_id: handoff_run.id.clone(),
-            source_thread_id: capture_thread_id.clone(),
-            source_turn_id: capture_turn_id.to_string(),
-            provider: expected_run_provider.clone(),
-            model: expected_run_model.clone(),
-        };
-        // The app-server integration suite exercises the real WCO turn and tool. This TUI
-        // round-trip fixture binds the same durable execution identity before it feeds the
-        // resulting notifications through the capture UI.
-        let state_db = codex_state::StateRuntime::init(
-            app.config.sqlite_home.clone(),
-            app.config.model_provider_id.clone(),
-        )
-        .await
-        .expect("workspace state should open for a bound-turn fixture");
-        state_db
-            .workspace()
-            .claim_agent_turn(codex_state::WorkspaceAgentTurnClaim {
-                execution: execution.clone(),
-                prompt: submitted_prompt.clone(),
-            })
-            .await
-            .expect("the generated handoff should claim its exact synthetic turn");
-        let progress_sources = state_db
-            .workspace()
-            .read_authorized_agent_context_for_execution(
-                codex_state::WorkspaceAgentContextReadRequest {
-                    run_id: handoff_run.id.clone(),
-                    category: "progress_notes".to_string(),
-                    max_records: Some(10),
-                },
-                execution.clone(),
-            )
-            .await
-            .expect("the claimed turn should read authorized progress notes")
-            .sources;
-        assert!(progress_sources.iter().any(|source| {
-            source.source_entity_id == prior_progress_note.id
-                && source
-                    .snapshot_json
-                    .contains("AUTHORIZED_PRIOR_PROGRESS_NOTE_SENTINEL")
-        }));
-        let visit_sources = state_db
-            .workspace()
-            .read_authorized_agent_context_for_execution(
-                codex_state::WorkspaceAgentContextReadRequest {
-                    run_id: handoff_run.id,
-                    category: "visit_history".to_string(),
-                    max_records: Some(10),
-                },
-                execution,
-            )
-            .await
-            .expect("the claimed turn should read authorized visit history")
-            .sources;
-        assert!(
-            visit_sources
-                .iter()
-                .any(|source| source.source_entity_id == prior_encounter.id)
-        );
-        let user_item = ThreadItem::UserMessage {
-            id: "synthetic-medical-user-message".to_string(),
-            client_id: None,
-            content: vec![UserInput::Text {
-                text: submitted_prompt,
-                text_elements: Vec::new(),
-            }],
-        };
-        app.handle_workspace_agent_capture_event(
-            &mut app_server,
-            &ThreadBufferedEvent::Notification(ServerNotification::ItemCompleted(
-                ItemCompletedNotification {
-                    item: user_item,
-                    thread_id: capture_thread_id.clone(),
-                    turn_id: capture_turn_id.to_string(),
-                    completed_at_ms: 1,
-                },
-            )),
-        )
-        .await;
-        let returned_work = "Plan: Fluids, rest, return precautions, and follow up if symptoms worsen. This is returned Codex work for human review.";
-        app.handle_workspace_agent_capture_event(
-            &mut app_server,
-            &ThreadBufferedEvent::Notification(ServerNotification::ItemCompleted(
-                ItemCompletedNotification {
-                    item: ThreadItem::AgentMessage {
-                        id: "synthetic-medical-commentary".to_string(),
-                        text: "I am checking the authorized visit history.".to_string(),
-                        phase: Some(MessagePhase::Commentary),
-                        memory_citation: None,
-                    },
-                    thread_id: capture_thread_id.clone(),
-                    turn_id: capture_turn_id.to_string(),
-                    completed_at_ms: 2,
-                },
-            )),
-        )
-        .await;
-        app.handle_workspace_agent_capture_event(
-            &mut app_server,
-            &ThreadBufferedEvent::Notification(ServerNotification::ItemCompleted(
-                ItemCompletedNotification {
-                    item: ThreadItem::AgentMessage {
-                        id: "synthetic-medical-agent-message".to_string(),
-                        text: returned_work.to_string(),
-                        phase: Some(MessagePhase::FinalAnswer),
-                        memory_citation: None,
-                    },
-                    thread_id: capture_thread_id.clone(),
-                    turn_id: capture_turn_id.to_string(),
-                    completed_at_ms: 2,
-                },
-            )),
-        )
-        .await;
-        app.handle_workspace_agent_capture_event(
-            &mut app_server,
-            &ThreadBufferedEvent::Notification(ServerNotification::TurnCompleted(
-                TurnCompletedNotification {
-                    thread_id: capture_thread_id.clone(),
-                    turn: Turn {
-                        completed_at: Some(0),
-                        duration_ms: Some(1),
-                        ..test_turn(capture_turn_id, TurnStatus::Completed, Vec::new())
-                    },
-                },
-            )),
-        )
-        .await;
-        assert!(app.pending_workspace_agent_capture.is_none());
-
-        let dashboard_after_handoff = app
-            .workspace_dashboard
-            .take()
-            .expect("dashboard remains in memory after handoff");
-        assert_eq!(dashboard_after_handoff.context_packet_count_for_tests(), 1);
-        assert_eq!(dashboard_after_handoff.agent_result_count_for_tests(), 1);
-        app_server.shutdown().await?;
-
-        let mut reloaded_app_server =
-            Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
-        let mut review_dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
-        review_dashboard.load(&mut reloaded_app_server).await?;
-        if review_dashboard.note_title_for_tests() != "First eval" {
-            review_dashboard
-                .select_note(&mut reloaded_app_server, 1)
-                .await?;
-        }
-        assert_eq!(
-            review_dashboard.client_display_name_for_tests(),
-            "Riley Testpatient"
-        );
-        assert_eq!(review_dashboard.note_title_for_tests(), "First eval");
-        assert_eq!(review_dashboard.context_packet_count_for_tests(), 1);
-        assert_eq!(review_dashboard.agent_result_count_for_tests(), 1);
-        assert_eq!(
-            review_dashboard.agent_result_body_for_tests(),
-            Some(returned_work)
-        );
-        assert_eq!(
-            review_dashboard.agent_result_status_for_tests(),
-            Some("review_pending")
-        );
-        assert_eq!(
-            review_dashboard
-                .first_context_packet_for_tests()
-                .expect("reloaded packet")
-                .id,
-            packet_id
-        );
-        assert_eq!(
-            review_dashboard
-                .first_context_packet_for_tests()
-                .expect("reloaded packet")
-                .context_envelope_sha256,
-            packet_hash
-        );
-
-        let client_id = review_dashboard
-            .client_id_for_tests()
-            .expect("saved client id")
-            .to_string();
-        let note_id = review_dashboard
-            .note_id_for_tests()
-            .expect("saved note id")
-            .to_string();
-        let runs = reloaded_app_server
-            .workspace_agent_run_list(WorkspaceAgentRunListParams {
-                client_id: client_id.clone(),
-                note_id: Some(note_id.clone()),
-                packet_id: Some(packet_id.clone()),
-                limit: Some(10),
-            })
-            .await?
-            .runs;
-        assert_eq!(runs.len(), 1);
-        assert_eq!(runs[0].status, "completed");
-        assert_eq!(runs[0].base_note_revision, Some(1));
-        assert_eq!(
-            runs[0].provider.as_deref(),
-            Some(expected_run_provider.as_str())
-        );
-        assert_eq!(runs[0].model.as_deref(), Some(expected_run_model.as_str()));
-        assert_eq!(
-            runs[0].source_thread_id.as_deref(),
-            Some(capture_thread_id.as_str())
-        );
-        assert_eq!(runs[0].source_turn_id.as_deref(), Some(capture_turn_id));
-        let run_id = runs[0].id.clone();
-        let sources = reloaded_app_server
-            .workspace_agent_run_source_list(WorkspaceAgentRunSourceListParams {
-                run_id: run_id.clone(),
-                limit: Some(10),
-            })
-            .await?
-            .sources;
-        assert!(sources.len() >= 4);
-        let packet_source = sources
-            .iter()
-            .find(|source| source.source_entity_type == "context_packet")
-            .expect("authoritative packet source");
-        assert_eq!(packet_source.source_entity_id, packet_id);
-        assert_eq!(packet_source.content_sha256, packet_hash);
-        let contract_source = sources
-            .iter()
-            .find(|source| source.source_entity_type == "packet_contract")
-            .expect("hashed packet authorization contract");
-        assert!(contract_source.snapshot_json.contains("authorizedScope"));
-        assert!(contract_source.snapshot_json.contains("expectedOutputKind"));
-
-        let replay = reloaded_app_server
-            .workspace_context_packet_replay(WorkspaceContextPacketReplayParams {
-                client_id: review_dashboard
-                    .client_id_for_tests()
-                    .expect("saved client id")
-                    .to_string(),
-                packet_id: packet_id.clone(),
-                context_envelope_sha256: Some(packet_hash.clone()),
-            })
-            .await?
-            .replay
-            .expect("packet replay");
-        assert_eq!(replay.id, packet_id);
-        assert_eq!(replay.context_envelope_sha256, packet_hash);
-        assert!(replay.context_envelope_json.contains("Riley Testpatient"));
-        assert!(
-            replay
-                .read_only_safety_constraints
-                .iter()
-                .any(|line| line.contains("use only the stored context packet envelope"))
-        );
-
-        let runs = reloaded_app_server
-            .workspace_agent_run_list(WorkspaceAgentRunListParams {
-                client_id,
-                note_id: Some(note_id),
-                packet_id: Some(packet_source.source_entity_id.clone()),
-                limit: Some(10),
-            })
-            .await?
-            .runs;
-        assert_eq!(runs.len(), 1);
-        assert_eq!(runs[0].id, run_id);
-        assert_eq!(runs[0].status, "completed");
-        assert_eq!(
-            review_dashboard.note_body_for_tests(),
-            "HPI: Fake patient reports two weeks of mild cough.\nExam: Alert, breathing comfortably.\nAssessment: Viral URI likely.\nPlan:"
-        );
-
-        let action = review_dashboard.execute_workspace_command(":agent result to proposal");
-        let WorkspaceDashboardAction::ConvertAgentResultToProposal { result_id } = action else {
-            panic!("expected agent result proposal conversion action");
-        };
-        review_dashboard
-            .convert_agent_result_to_proposal(&mut reloaded_app_server, result_id)
-            .await?;
-        assert_eq!(
-            review_dashboard.agent_result_status_for_tests(),
-            Some("converted")
-        );
-        assert_eq!(review_dashboard.pending_proposal_count_for_tests(), 1);
-        assert_eq!(
-            review_dashboard.note_body_for_tests(),
-            "HPI: Fake patient reports two weeks of mild cough.\nExam: Alert, breathing comfortably.\nAssessment: Viral URI likely.\nPlan:"
-        );
-
-        reloaded_app_server.shutdown().await?;
-        Ok(())
-    }))
-}
-
-#[test]
-fn medical_workspace_second_handoff_cancels_and_replaces_pending_run() -> Result<()> {
-    run_workspace_dashboard_runtime_test(Box::pin(async {
-        let (mut app, _app_event_rx, mut op_rx) = make_test_app_with_channels().await;
-        configure_medical_workspace_test_thread(&mut app);
-        let codex_home = tempdir()?;
-        app.config.codex_home = codex_home.path().to_path_buf().abs();
-        app.config.sqlite_home = codex_home.path().to_path_buf();
-        let mut app_server =
-            Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
-        let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
-        dashboard.load(&mut app_server).await?;
-        dashboard.set_context_for_tests(
-            "Replacement Testpatient",
-            "Daily note",
-            "Synthetic draft for duplicate handoff coverage.",
-        );
-        dashboard.set_agent_request_for_tests("Create the first review-only daily note proposal.");
-        dashboard.save(&mut app_server).await?;
-        app.workspace_dashboard = Some(dashboard);
-        app.workspace_dashboard_visible = true;
-
-        app.send_workspace_context_to_agent(&mut app_server).await?;
-        let first_prompt = take_submitted_workspace_prompt(&mut op_rx);
-        let first_packet = app
-            .workspace_dashboard
-            .as_ref()
-            .and_then(WorkspaceDashboard::first_context_packet_for_tests)
-            .expect("first submitted packet")
-            .clone();
-        let first_run_id = app
-            .pending_workspace_agent_capture
-            .as_ref()
-            .expect("first pending capture")
-            .run_id()
-            .to_string();
-
-        app.workspace_dashboard_visible = true;
-        app.workspace_dashboard
-            .as_mut()
-            .expect("medical dashboard remains open")
-            .set_agent_request_for_tests("Create a replacement review-only daily note proposal.");
-        app.send_workspace_context_to_agent(&mut app_server).await?;
-        let second_prompt = take_submitted_workspace_prompt(&mut op_rx);
-        let second_packet = app
-            .workspace_dashboard
-            .as_ref()
-            .and_then(WorkspaceDashboard::first_context_packet_for_tests)
-            .expect("replacement submitted packet")
-            .clone();
-        let second_run_id = app
-            .pending_workspace_agent_capture
-            .as_ref()
-            .expect("replacement pending capture")
-            .run_id()
-            .to_string();
-
-        assert_ne!(first_packet.id, second_packet.id);
-        assert_ne!(first_run_id, second_run_id);
-        assert!(app.chat_widget.composer_text_with_pending().is_empty());
-        assert!(first_prompt.contains(&first_packet.id));
-        assert!(!first_prompt.contains(&second_packet.id));
-        assert!(second_prompt.contains(&second_packet.id));
-        assert!(!second_prompt.contains(&first_packet.id));
-        let runs = app_server
-            .workspace_agent_run_list(WorkspaceAgentRunListParams {
-                client_id: second_packet.client_id.clone(),
-                note_id: second_packet.note_id.clone(),
-                packet_id: None,
-                limit: Some(10),
-            })
-            .await?
-            .runs;
-        assert_eq!(
-            runs.iter()
-                .find(|run| run.id == first_run_id)
-                .map(|run| run.status.as_str()),
-            Some("canceled")
-        );
-        assert_eq!(
-            runs.iter()
-                .find(|run| run.id == second_run_id)
-                .map(|run| run.status.as_str()),
-            Some("running")
-        );
-        let second_thread_id = runs
-            .iter()
-            .find(|run| run.id == second_run_id)
-            .and_then(|run| run.source_thread_id.clone())
-            .unwrap_or_else(|| "replacement-thread".to_string());
-        app.handle_workspace_agent_capture_event(
-            &mut app_server,
-            &ThreadBufferedEvent::Notification(ServerNotification::ItemCompleted(
-                ItemCompletedNotification {
-                    item: ThreadItem::UserMessage {
-                        id: "replacement-unrelated-user-message".to_string(),
-                        client_id: None,
-                        content: vec![UserInput::Text {
-                            text: "Send an unrelated message after clearing the packet prompt."
-                                .to_string(),
-                            text_elements: Vec::new(),
-                        }],
-                    },
-                    thread_id: second_thread_id,
-                    turn_id: "replacement-turn".to_string(),
-                    completed_at_ms: 1,
-                },
-            )),
-        )
-        .await;
-        assert!(app.pending_workspace_agent_capture.is_none());
-        let replacement_status = app_server
-            .workspace_agent_run_list(WorkspaceAgentRunListParams {
-                client_id: second_packet.client_id,
-                note_id: second_packet.note_id,
-                packet_id: Some(second_packet.id),
-                limit: Some(10),
-            })
-            .await?
-            .runs
-            .into_iter()
-            .next()
-            .map(|run| run.status);
-        assert_eq!(replacement_status.as_deref(), Some("canceled"));
-        app_server.shutdown().await?;
-        Ok(())
-    }))
-}
-
-#[test]
-fn medical_workspace_pending_handoff_preserves_edited_composer_while_replacing_run() -> Result<()> {
-    run_workspace_dashboard_runtime_test(Box::pin(async {
-        let (mut app, _app_event_rx, mut op_rx) = make_test_app_with_channels().await;
-        configure_medical_workspace_test_thread(&mut app);
-        let codex_home = tempdir()?;
-        app.config.codex_home = codex_home.path().to_path_buf().abs();
-        app.config.sqlite_home = codex_home.path().to_path_buf();
-        let mut app_server =
-            Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
-        let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
-        dashboard.load(&mut app_server).await?;
-        dashboard.set_context_for_tests(
-            "Edited Composer Testpatient",
-            "Daily note",
-            "Synthetic draft for pending handoff composer coverage.",
-        );
-        dashboard.set_agent_request_for_tests("Create the first review-only daily note proposal.");
-        dashboard.save(&mut app_server).await?;
-        app.workspace_dashboard = Some(dashboard);
-        app.workspace_dashboard_visible = true;
-
-        app.send_workspace_context_to_agent(&mut app_server).await?;
-        let first_prompt = take_submitted_workspace_prompt(&mut op_rx);
-        let first_packet = app
-            .workspace_dashboard
-            .as_ref()
-            .and_then(WorkspaceDashboard::first_context_packet_for_tests)
-            .expect("first submitted packet")
-            .clone();
-        let run_id = app
-            .pending_workspace_agent_capture
-            .as_ref()
-            .expect("first pending capture")
-            .run_id()
-            .to_string();
-        app.chat_widget.set_composer_text(
-            "unrelated edited draft".to_string(),
-            Vec::new(),
-            Vec::new(),
-        );
-        app.workspace_dashboard_visible = true;
-        app.workspace_dashboard
-            .as_mut()
-            .expect("medical dashboard remains open")
-            .set_agent_request_for_tests("Create a second review-only daily note proposal.");
-
-        app.send_workspace_context_to_agent(&mut app_server).await?;
-        let second_prompt = take_submitted_workspace_prompt(&mut op_rx);
-        let second_packet = app
-            .workspace_dashboard
-            .as_ref()
-            .and_then(WorkspaceDashboard::first_context_packet_for_tests)
-            .expect("replacement submitted packet")
-            .clone();
-        let second_run_id = app
-            .pending_workspace_agent_capture
-            .as_ref()
-            .expect("replacement capture remains pending")
-            .run_id()
-            .to_string();
-
-        assert!(app.workspace_dashboard_active());
-        assert_eq!(
-            app.chat_widget.composer_text_with_pending(),
-            "unrelated edited draft"
-        );
-        assert_ne!(second_run_id, run_id);
-        assert!(first_prompt.contains(&first_packet.id));
-        assert!(second_prompt.contains(&second_packet.id));
-        assert_eq!(
-            app.workspace_dashboard
+            let packet = app
+                .workspace_dashboard
                 .as_ref()
+                .and_then(WorkspaceDashboard::first_context_packet_for_tests)
+                .expect("sent packet");
+            let packet_id = packet.id.clone();
+            let packet_hash = packet.context_envelope_sha256.clone();
+            assert_eq!(packet.status, "submitted");
+            assert!(packet.submitted_at.is_some());
+            let handoff_run = app_server
+                .workspace_agent_run_list(WorkspaceAgentRunListParams {
+                    client_id: packet.client_id.clone(),
+                    note_id: packet.note_id.clone(),
+                    packet_id: Some(packet_id.clone()),
+                    limit: Some(10),
+                })
+                .await?
+                .runs
+                .into_iter()
+                .next()
+                .expect("handoff run");
+            let capture_thread_id = handoff_run
+                .source_thread_id
+                .clone()
+                .expect("handoff run should be bound to the active thread");
+            let capture_turn_id = "synthetic-medical-turn";
+            let execution = codex_state::WorkspaceAgentExecutionBinding {
+                run_id: handoff_run.id.clone(),
+                source_thread_id: capture_thread_id.clone(),
+                source_turn_id: capture_turn_id.to_string(),
+                provider: expected_run_provider.clone(),
+                model: expected_run_model.clone(),
+            };
+            // The app-server integration suite exercises the real WCO turn and tool. This TUI
+            // round-trip fixture binds the same durable execution identity before it feeds the
+            // resulting notifications through the capture UI.
+            let state_db = codex_state::StateRuntime::init(
+                app.config.sqlite_home.clone(),
+                app.config.model_provider_id.clone(),
+            )
+            .await
+            .expect("workspace state should open for a bound-turn fixture");
+            state_db
+                .workspace()
+                .claim_agent_turn(codex_state::WorkspaceAgentTurnClaim {
+                    execution: execution.clone(),
+                    prompt: submitted_prompt.clone(),
+                })
+                .await
+                .expect("the generated handoff should claim its exact synthetic turn");
+            let progress_sources = state_db
+                .workspace()
+                .read_authorized_agent_context_for_execution(
+                    codex_state::WorkspaceAgentContextReadRequest {
+                        run_id: handoff_run.id.clone(),
+                        category: "progress_notes".to_string(),
+                        max_records: Some(10),
+                    },
+                    execution.clone(),
+                )
+                .await
+                .expect("the claimed turn should read authorized progress notes")
+                .sources;
+            assert!(progress_sources.iter().any(|source| {
+                source.source_entity_id == prior_progress_note.id
+                    && source
+                        .snapshot_json
+                        .contains("AUTHORIZED_PRIOR_PROGRESS_NOTE_SENTINEL")
+            }));
+            let visit_sources = state_db
+                .workspace()
+                .read_authorized_agent_context_for_execution(
+                    codex_state::WorkspaceAgentContextReadRequest {
+                        run_id: handoff_run.id.clone(),
+                        category: "visit_history".to_string(),
+                        max_records: Some(10),
+                    },
+                    execution.clone(),
+                )
+                .await
+                .expect("the claimed turn should read authorized visit history")
+                .sources;
+            assert!(
+                visit_sources
+                    .iter()
+                    .any(|source| source.source_entity_id == prior_encounter.id)
+            );
+            let returned_work = "Plan: Fluids, rest, return precautions, and follow up if symptoms worsen. This is returned Codex work for human review.";
+            let completion = state_db
+                .workspace()
+                .complete_agent_turn(codex_state::WorkspaceAgentTurnComplete {
+                    execution,
+                    assistant_message_id: "synthetic-medical-agent-message".to_string(),
+                    body: returned_work.to_string(),
+                    idempotency_key: format!(
+                        "synthetic-medical-completion:{}:{capture_turn_id}",
+                        handoff_run.id
+                    ),
+                })
+                .await
+                .expect("core-equivalent completion should atomically persist returned work");
+            assert_eq!(completion.result.body, returned_work);
+            let user_item = ThreadItem::UserMessage {
+                id: "synthetic-medical-user-message".to_string(),
+                client_id: None,
+                content: vec![UserInput::Text {
+                    text: submitted_prompt,
+                    text_elements: Vec::new(),
+                }],
+            };
+            app.handle_workspace_agent_capture_event(
+                &mut app_server,
+                &ThreadBufferedEvent::Notification(ServerNotification::ItemCompleted(
+                    ItemCompletedNotification {
+                        item: user_item,
+                        thread_id: capture_thread_id.clone(),
+                        turn_id: capture_turn_id.to_string(),
+                        completed_at_ms: 1,
+                    },
+                )),
+            )
+            .await;
+            app.handle_workspace_agent_capture_event(
+                &mut app_server,
+                &ThreadBufferedEvent::Notification(ServerNotification::ItemCompleted(
+                    ItemCompletedNotification {
+                        item: ThreadItem::AgentMessage {
+                            id: "synthetic-medical-commentary".to_string(),
+                            text: "I am checking the authorized visit history.".to_string(),
+                            phase: Some(MessagePhase::Commentary),
+                            memory_citation: None,
+                        },
+                        thread_id: capture_thread_id.clone(),
+                        turn_id: capture_turn_id.to_string(),
+                        completed_at_ms: 2,
+                    },
+                )),
+            )
+            .await;
+            app.handle_workspace_agent_capture_event(
+                &mut app_server,
+                &ThreadBufferedEvent::Notification(ServerNotification::ItemCompleted(
+                    ItemCompletedNotification {
+                        item: ThreadItem::AgentMessage {
+                            id: "synthetic-medical-agent-message".to_string(),
+                            text: returned_work.to_string(),
+                            phase: Some(MessagePhase::FinalAnswer),
+                            memory_citation: None,
+                        },
+                        thread_id: capture_thread_id.clone(),
+                        turn_id: capture_turn_id.to_string(),
+                        completed_at_ms: 2,
+                    },
+                )),
+            )
+            .await;
+            app.handle_workspace_agent_capture_event(
+                &mut app_server,
+                &ThreadBufferedEvent::Notification(ServerNotification::TurnCompleted(
+                    TurnCompletedNotification {
+                        thread_id: capture_thread_id.clone(),
+                        turn: Turn {
+                            completed_at: Some(0),
+                            duration_ms: Some(1),
+                            ..test_turn(capture_turn_id, TurnStatus::Completed, Vec::new())
+                        },
+                    },
+                )),
+            )
+            .await;
+            assert!(app.pending_workspace_agent_capture.is_none());
+
+            let dashboard_after_handoff = app
+                .workspace_dashboard
+                .take()
+                .expect("dashboard remains in memory after handoff");
+            assert_eq!(dashboard_after_handoff.context_packet_count_for_tests(), 1);
+            assert_eq!(dashboard_after_handoff.agent_result_count_for_tests(), 1);
+            app_server.shutdown().await?;
+
+            let mut reloaded_app_server =
+                Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
+            let mut review_dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+            review_dashboard.load(&mut reloaded_app_server).await?;
+            if review_dashboard.note_title_for_tests() != "First eval" {
+                review_dashboard
+                    .select_note(&mut reloaded_app_server, 1)
+                    .await?;
+            }
+            assert_eq!(
+                review_dashboard.client_display_name_for_tests(),
+                "Riley Testpatient"
+            );
+            assert_eq!(review_dashboard.note_title_for_tests(), "First eval");
+            assert_eq!(review_dashboard.context_packet_count_for_tests(), 1);
+            assert_eq!(review_dashboard.agent_result_count_for_tests(), 1);
+            assert_eq!(
+                review_dashboard.agent_result_body_for_tests(),
+                Some(returned_work)
+            );
+            assert_eq!(
+                review_dashboard.agent_result_status_for_tests(),
+                Some("review_pending")
+            );
+            assert_eq!(
+                review_dashboard
+                    .first_context_packet_for_tests()
+                    .expect("reloaded packet")
+                    .id,
+                packet_id
+            );
+            assert_eq!(
+                review_dashboard
+                    .first_context_packet_for_tests()
+                    .expect("reloaded packet")
+                    .context_envelope_sha256,
+                packet_hash
+            );
+
+            let client_id = review_dashboard
+                .client_id_for_tests()
+                .expect("saved client id")
+                .to_string();
+            let note_id = review_dashboard
+                .note_id_for_tests()
+                .expect("saved note id")
+                .to_string();
+            let runs = reloaded_app_server
+                .workspace_agent_run_list(WorkspaceAgentRunListParams {
+                    client_id: client_id.clone(),
+                    note_id: Some(note_id.clone()),
+                    packet_id: Some(packet_id.clone()),
+                    limit: Some(10),
+                })
+                .await?
+                .runs;
+            assert_eq!(runs.len(), 1);
+            assert_eq!(runs[0].status, "completed");
+            assert_eq!(runs[0].base_note_revision, Some(1));
+            assert_eq!(
+                runs[0].provider.as_deref(),
+                Some(expected_run_provider.as_str())
+            );
+            assert_eq!(runs[0].model.as_deref(), Some(expected_run_model.as_str()));
+            assert_eq!(
+                runs[0].source_thread_id.as_deref(),
+                Some(capture_thread_id.as_str())
+            );
+            assert_eq!(runs[0].source_turn_id.as_deref(), Some(capture_turn_id));
+            let run_id = runs[0].id.clone();
+            let sources = reloaded_app_server
+                .workspace_agent_run_source_list(WorkspaceAgentRunSourceListParams {
+                    run_id: run_id.clone(),
+                    limit: Some(10),
+                })
+                .await?
+                .sources;
+            assert!(sources.len() >= 4);
+            let packet_source = sources
+                .iter()
+                .find(|source| source.source_entity_type == "context_packet")
+                .expect("authoritative packet source");
+            assert_eq!(packet_source.source_entity_id, packet_id);
+            assert_eq!(packet_source.content_sha256, packet_hash);
+            let contract_source = sources
+                .iter()
+                .find(|source| source.source_entity_type == "packet_contract")
+                .expect("hashed packet authorization contract");
+            assert!(contract_source.snapshot_json.contains("authorizedScope"));
+            assert!(contract_source.snapshot_json.contains("expectedOutputKind"));
+
+            let replay = reloaded_app_server
+                .workspace_context_packet_replay(WorkspaceContextPacketReplayParams {
+                    client_id: review_dashboard
+                        .client_id_for_tests()
+                        .expect("saved client id")
+                        .to_string(),
+                    packet_id: packet_id.clone(),
+                    context_envelope_sha256: Some(packet_hash.clone()),
+                })
+                .await?
+                .replay
+                .expect("packet replay");
+            assert_eq!(replay.id, packet_id);
+            assert_eq!(replay.context_envelope_sha256, packet_hash);
+            assert!(replay.context_envelope_json.contains("Riley Testpatient"));
+            assert!(
+                replay
+                    .read_only_safety_constraints
+                    .iter()
+                    .any(|line| line.contains("use only the stored context packet envelope"))
+            );
+
+            let runs = reloaded_app_server
+                .workspace_agent_run_list(WorkspaceAgentRunListParams {
+                    client_id,
+                    note_id: Some(note_id),
+                    packet_id: Some(packet_source.source_entity_id.clone()),
+                    limit: Some(10),
+                })
+                .await?
+                .runs;
+            assert_eq!(runs.len(), 1);
+            assert_eq!(runs[0].id, run_id);
+            assert_eq!(runs[0].status, "completed");
+            assert_eq!(
+                review_dashboard.note_body_for_tests(),
+                "HPI: Fake patient reports two weeks of mild cough.\nExam: Alert, breathing comfortably.\nAssessment: Viral URI likely.\nPlan:"
+            );
+
+            let action = review_dashboard.execute_workspace_command(":agent result to proposal");
+            let WorkspaceDashboardAction::ConvertAgentResultToProposal { result_id } = action
+            else {
+                panic!("expected agent result proposal conversion action");
+            };
+            review_dashboard
+                .convert_agent_result_to_proposal(&mut reloaded_app_server, result_id)
+                .await?;
+            assert_eq!(
+                review_dashboard.agent_result_status_for_tests(),
+                Some("converted")
+            );
+            assert_eq!(review_dashboard.pending_proposal_count_for_tests(), 1);
+            assert_eq!(
+                review_dashboard.note_body_for_tests(),
+                "HPI: Fake patient reports two weeks of mild cough.\nExam: Alert, breathing comfortably.\nAssessment: Viral URI likely.\nPlan:"
+            );
+
+            reloaded_app_server.shutdown().await?;
+            Ok(())
+        })
+    })
+}
+
+#[test]
+fn medical_workspace_second_handoff_keeps_exact_queued_receipt() -> Result<()> {
+    run_workspace_dashboard_runtime_test(|| {
+        Box::pin(async {
+            let (mut app, _app_event_rx, mut op_rx) = make_test_app_with_channels().await;
+            configure_medical_workspace_test_thread(&mut app);
+            let codex_home = tempdir()?;
+            app.config.codex_home = codex_home.path().to_path_buf().abs();
+            app.config.sqlite_home = codex_home.path().to_path_buf();
+            let mut app_server =
+                Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
+            let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+            dashboard.load(&mut app_server).await?;
+            dashboard.set_context_for_tests(
+                "Replacement Testpatient",
+                "Daily note",
+                "Synthetic draft for duplicate handoff coverage.",
+            );
+            dashboard
+                .set_agent_request_for_tests("Create the first review-only daily note proposal.");
+            dashboard.save(&mut app_server).await?;
+            app.workspace_dashboard = Some(dashboard);
+            app.workspace_dashboard_visible = true;
+
+            publish_current_test_workspace_plan(&mut app, &mut app_server).await?;
+            app.send_workspace_context_to_agent(&mut app_server).await?;
+            let first_prompt = take_submitted_workspace_prompt(&mut op_rx);
+            let first_packet = app
+                .workspace_dashboard
+                .as_ref()
+                .and_then(WorkspaceDashboard::first_context_packet_for_tests)
+                .expect("first submitted packet")
+                .clone();
+            let first_run_id = app
+                .pending_workspace_agent_capture
+                .as_ref()
+                .expect("first pending capture")
+                .run_id()
+                .to_string();
+
+            app.workspace_dashboard_visible = true;
+            app.workspace_dashboard
+                .as_mut()
                 .expect("medical dashboard remains open")
-                .context_packet_count_for_tests(),
-            2
-        );
-        let runs = app_server
-            .workspace_agent_run_list(WorkspaceAgentRunListParams {
-                client_id: second_packet.client_id,
-                note_id: second_packet.note_id,
-                packet_id: None,
-                limit: Some(10),
-            })
-            .await?
-            .runs;
-        assert_eq!(runs.len(), 2);
-        assert_eq!(
-            runs.iter()
-                .find(|run| run.id == run_id)
-                .map(|run| run.status.as_str()),
-            Some("canceled")
-        );
-        assert_eq!(
-            runs.iter()
-                .find(|run| run.id == second_run_id)
-                .map(|run| run.status.as_str()),
-            Some("running")
-        );
-        app_server.shutdown().await?;
-        Ok(())
-    }))
+                .set_agent_request_for_tests(
+                    "Create a replacement review-only daily note proposal.",
+                );
+            publish_current_test_workspace_plan(&mut app, &mut app_server).await?;
+            app.send_workspace_context_to_agent(&mut app_server).await?;
+            assert!(op_rx.try_recv().is_err());
+            let pending = app
+                .pending_workspace_agent_capture
+                .as_ref()
+                .expect("the exact queued handoff remains pending");
+
+            assert_eq!(pending.run_id(), first_run_id);
+            assert!(pending.handoff_is_authorized());
+            assert!(pending.handoff_is_enqueued());
+            assert!(app.chat_widget.composer_text_with_pending().is_empty());
+            assert!(first_prompt.contains(&first_packet.id));
+            assert_eq!(
+                app.workspace_dashboard
+                    .as_ref()
+                    .expect("medical dashboard remains open")
+                    .context_packet_count_for_tests(),
+                1
+            );
+            let runs = app_server
+                .workspace_agent_run_list(WorkspaceAgentRunListParams {
+                    client_id: first_packet.client_id.clone(),
+                    note_id: first_packet.note_id.clone(),
+                    packet_id: None,
+                    limit: Some(10),
+                })
+                .await?
+                .runs;
+            assert_eq!(runs.len(), 1);
+            assert_eq!(runs[0].id, first_run_id);
+            assert_eq!(runs[0].packet_id, first_packet.id);
+            assert_eq!(runs[0].status, "running");
+            assert!(runs[0].source_turn_id.is_none());
+            app_server.shutdown().await?;
+            Ok(())
+        })
+    })
+}
+
+#[test]
+fn medical_workspace_pending_handoff_preserves_edited_composer_without_replacement() -> Result<()> {
+    run_workspace_dashboard_runtime_test(|| {
+        Box::pin(async {
+            let (mut app, _app_event_rx, mut op_rx) = make_test_app_with_channels().await;
+            configure_medical_workspace_test_thread(&mut app);
+            let codex_home = tempdir()?;
+            app.config.codex_home = codex_home.path().to_path_buf().abs();
+            app.config.sqlite_home = codex_home.path().to_path_buf();
+            let mut app_server =
+                Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
+            let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+            dashboard.load(&mut app_server).await?;
+            dashboard.set_context_for_tests(
+                "Edited Composer Testpatient",
+                "Daily note",
+                "Synthetic draft for pending handoff composer coverage.",
+            );
+            dashboard
+                .set_agent_request_for_tests("Create the first review-only daily note proposal.");
+            dashboard.save(&mut app_server).await?;
+            app.workspace_dashboard = Some(dashboard);
+            app.workspace_dashboard_visible = true;
+
+            publish_current_test_workspace_plan(&mut app, &mut app_server).await?;
+            app.send_workspace_context_to_agent(&mut app_server).await?;
+            let first_prompt = take_submitted_workspace_prompt(&mut op_rx);
+            let first_packet = app
+                .workspace_dashboard
+                .as_ref()
+                .and_then(WorkspaceDashboard::first_context_packet_for_tests)
+                .expect("first submitted packet")
+                .clone();
+            let run_id = app
+                .pending_workspace_agent_capture
+                .as_ref()
+                .expect("first pending capture")
+                .run_id()
+                .to_string();
+            app.chat_widget.set_composer_text(
+                "unrelated edited draft".to_string(),
+                Vec::new(),
+                Vec::new(),
+            );
+            app.workspace_dashboard_visible = true;
+            app.workspace_dashboard
+                .as_mut()
+                .expect("medical dashboard remains open")
+                .set_agent_request_for_tests("Create a second review-only daily note proposal.");
+
+            publish_current_test_workspace_plan(&mut app, &mut app_server).await?;
+            app.send_workspace_context_to_agent(&mut app_server).await?;
+            assert!(op_rx.try_recv().is_err());
+
+            assert!(app.workspace_dashboard_active());
+            assert_eq!(
+                app.chat_widget.composer_text_with_pending(),
+                "unrelated edited draft"
+            );
+            let pending = app
+                .pending_workspace_agent_capture
+                .as_ref()
+                .expect("the exact queued handoff remains pending");
+            assert_eq!(pending.run_id(), run_id);
+            assert!(pending.handoff_is_authorized());
+            assert!(pending.handoff_is_enqueued());
+            assert!(first_prompt.contains(&first_packet.id));
+            assert_eq!(
+                app.workspace_dashboard
+                    .as_ref()
+                    .expect("medical dashboard remains open")
+                    .context_packet_count_for_tests(),
+                1
+            );
+            let runs = app_server
+                .workspace_agent_run_list(WorkspaceAgentRunListParams {
+                    client_id: first_packet.client_id,
+                    note_id: first_packet.note_id,
+                    packet_id: None,
+                    limit: Some(10),
+                })
+                .await?
+                .runs;
+            assert_eq!(runs.len(), 1);
+            assert_eq!(runs[0].id, run_id);
+            assert_eq!(runs[0].packet_id, first_packet.id);
+            assert_eq!(runs[0].status, "running");
+            assert!(runs[0].source_turn_id.is_none());
+            app_server.shutdown().await?;
+            Ok(())
+        })
+    })
 }
 
 #[test]
 fn workspace_dashboard_load_initializes_local_workspace_store() -> Result<()> {
-    run_workspace_dashboard_runtime_test(Box::pin(async {
-        let mut app = make_test_app().await;
-        let codex_home = tempdir()?;
-        app.config.codex_home = codex_home.path().to_path_buf().abs();
-        app.config.sqlite_home = codex_home.path().to_path_buf();
-        let workspace_db_path = codex_state::workspace_db_path(app.config.sqlite_home.as_path());
+    run_workspace_dashboard_runtime_test(|| {
+        Box::pin(async {
+            let mut app = make_test_app().await;
+            let codex_home = tempdir()?;
+            app.config.codex_home = codex_home.path().to_path_buf().abs();
+            app.config.sqlite_home = codex_home.path().to_path_buf();
+            let workspace_db_path =
+                codex_state::workspace_db_path(app.config.sqlite_home.as_path());
 
-        assert!(!workspace_db_path.exists());
+            assert!(!workspace_db_path.exists());
 
-        let mut app_server =
-            Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
-        let mut dashboard = WorkspaceDashboard::default();
-        dashboard.set_local_store_path(&workspace_db_path);
-        dashboard.load(&mut app_server).await?;
+            let mut app_server =
+                Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
+            let mut dashboard = WorkspaceDashboard::default();
+            dashboard.set_local_store_path(&workspace_db_path);
+            dashboard.load(&mut app_server).await?;
 
-        assert!(workspace_db_path.exists());
-        let expected_store_description = format!("Local SQLite: {}", workspace_db_path.display());
-        assert_eq!(
-            dashboard.store_description_for_tests(),
-            Some(expected_store_description.as_str())
-        );
+            assert!(workspace_db_path.exists());
+            let expected_store_description =
+                format!("Local SQLite: {}", workspace_db_path.display());
+            assert_eq!(
+                dashboard.store_description_for_tests(),
+                Some(expected_store_description.as_str())
+            );
 
-        app_server.shutdown().await?;
-        Ok(())
-    }))
+            app_server.shutdown().await?;
+            Ok(())
+        })
+    })
 }
 
 #[test]
 fn workspace_dashboard_saved_client_and_note_survive_reload() -> Result<()> {
-    run_workspace_dashboard_runtime_test(Box::pin(async {
-        let mut app = make_test_app().await;
-        let codex_home = tempdir()?;
-        app.config.codex_home = codex_home.path().to_path_buf().abs();
-        app.config.sqlite_home = codex_home.path().to_path_buf();
+    run_workspace_dashboard_runtime_test(|| {
+        Box::pin(async {
+            let mut app = make_test_app().await;
+            let codex_home = tempdir()?;
+            app.config.codex_home = codex_home.path().to_path_buf().abs();
+            app.config.sqlite_home = codex_home.path().to_path_buf();
 
-        let mut app_server =
-            Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
-        let mut dashboard = WorkspaceDashboard::default();
-        dashboard.load(&mut app_server).await?;
-        dashboard.set_context_for_tests("Jordan Client", "Intake note", "Human-entered note body.");
-        dashboard.save(&mut app_server).await?;
-        assert_eq!(dashboard.note_revision_for_tests(), 1);
-        app_server.shutdown().await?;
+            let mut app_server =
+                Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
+            let mut dashboard = WorkspaceDashboard::default();
+            dashboard.load(&mut app_server).await?;
+            dashboard.set_context_for_tests(
+                "Jordan Client",
+                "Intake note",
+                "Human-entered note body.",
+            );
+            dashboard.save(&mut app_server).await?;
+            assert_eq!(dashboard.note_revision_for_tests(), 1);
+            app_server.shutdown().await?;
 
-        let mut reloaded_app_server =
-            Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
-        let mut reloaded_dashboard = WorkspaceDashboard::default();
-        reloaded_dashboard.load(&mut reloaded_app_server).await?;
+            let mut reloaded_app_server =
+                Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
+            let mut reloaded_dashboard = WorkspaceDashboard::default();
+            reloaded_dashboard.load(&mut reloaded_app_server).await?;
 
-        assert_eq!(
-            reloaded_dashboard.client_display_name_for_tests(),
-            "Jordan Client"
-        );
-        assert_eq!(reloaded_dashboard.note_title_for_tests(), "Intake note");
-        assert_eq!(
-            reloaded_dashboard.note_body_for_tests(),
-            "Human-entered note body."
-        );
-        assert_eq!(reloaded_dashboard.note_revision_for_tests(), 1);
+            assert_eq!(
+                reloaded_dashboard.client_display_name_for_tests(),
+                "Jordan Client"
+            );
+            assert_eq!(reloaded_dashboard.note_title_for_tests(), "Intake note");
+            assert_eq!(
+                reloaded_dashboard.note_body_for_tests(),
+                "Human-entered note body."
+            );
+            assert_eq!(reloaded_dashboard.note_revision_for_tests(), 1);
 
-        reloaded_app_server.shutdown().await?;
-        Ok(())
-    }))
+            reloaded_app_server.shutdown().await?;
+            Ok(())
+        })
+    })
 }
 
 #[test]
 fn workspace_dashboard_saved_document_metadata_survives_reload() -> Result<()> {
-    run_workspace_dashboard_runtime_test(Box::pin(async {
-        let mut app = make_test_app().await;
-        let codex_home = tempdir()?;
-        app.config.codex_home = codex_home.path().to_path_buf().abs();
-        app.config.sqlite_home = codex_home.path().to_path_buf();
+    run_workspace_dashboard_runtime_test(|| {
+        Box::pin(async {
+            let mut app = make_test_app().await;
+            let codex_home = tempdir()?;
+            app.config.codex_home = codex_home.path().to_path_buf().abs();
+            app.config.sqlite_home = codex_home.path().to_path_buf();
 
-        let mut app_server =
-            Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
-        let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
-        dashboard.load(&mut app_server).await?;
-        dashboard.set_context_for_tests(
-            "Jordan Patient",
-            "Initial visit",
-            "Human-entered note body.",
-        );
-        dashboard.set_record_dates_for_tests("2026-01-01", "2026-06-09");
-        dashboard.set_document_draft_for_tests(
-            "referral",
-            "Outside referral PDF",
-            "/tmp/outside-referral.pdf",
-            "Linked metadata only.",
-        );
-        dashboard.save(&mut app_server).await?;
-        app_server.shutdown().await?;
+            let mut app_server =
+                Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
+            let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+            dashboard.load(&mut app_server).await?;
+            dashboard.set_context_for_tests(
+                "Jordan Patient",
+                "Initial visit",
+                "Human-entered note body.",
+            );
+            dashboard.set_record_dates_for_tests("2026-01-01", "2026-06-09");
+            dashboard.set_document_draft_for_tests(
+                "referral",
+                "Outside referral PDF",
+                "/tmp/outside-referral.pdf",
+                "Linked metadata only.",
+            );
+            dashboard.save(&mut app_server).await?;
+            app_server.shutdown().await?;
 
-        let mut reloaded_app_server =
-            Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
-        let mut reloaded_dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
-        reloaded_dashboard.load(&mut reloaded_app_server).await?;
+            let mut reloaded_app_server =
+                Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
+            let mut reloaded_dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+            reloaded_dashboard.load(&mut reloaded_app_server).await?;
 
-        assert_eq!(
-            reloaded_dashboard.client_display_name_for_tests(),
-            "Jordan Patient"
-        );
-        assert_eq!(
-            reloaded_dashboard.document_title_for_tests(),
-            Some("Outside referral PDF")
-        );
-        let prompt = reloaded_dashboard.agent_context_prompt();
-        assert!(prompt.contains("Chart start: 2026-01-01"));
-        assert!(prompt.contains("Chart end: 2026-06-09"));
-        assert!(prompt.contains("No saved artifact metadata selected"));
-        assert!(!prompt.contains("patient PDF: Outside referral PDF"));
+            assert_eq!(
+                reloaded_dashboard.client_display_name_for_tests(),
+                "Jordan Patient"
+            );
+            assert_eq!(
+                reloaded_dashboard.document_title_for_tests(),
+                Some("Outside referral PDF")
+            );
+            let prompt = reloaded_dashboard.agent_context_prompt();
+            assert!(prompt.contains("Chart start: 2026-01-01"));
+            assert!(prompt.contains("Chart end: 2026-06-09"));
+            assert!(prompt.contains("No saved artifact metadata selected"));
+            assert!(!prompt.contains("patient PDF: Outside referral PDF"));
 
-        assert_eq!(
-            reloaded_dashboard.execute_workspace_command(":artifact select 1"),
-            WorkspaceDashboardAction::Consumed
-        );
-        let selected_prompt = reloaded_dashboard.agent_context_prompt();
-        assert!(selected_prompt.contains("include_documents: false"));
-        assert!(selected_prompt.contains("patient PDF: Outside referral PDF"));
-        assert!(selected_prompt.contains("file_name: outside-referral.pdf"));
-        assert!(!selected_prompt.contains("/tmp/outside-referral.pdf"));
+            assert_eq!(
+                reloaded_dashboard.execute_workspace_command(":artifact select 1"),
+                WorkspaceDashboardAction::Consumed
+            );
+            let selected_prompt = reloaded_dashboard.agent_context_prompt();
+            assert!(selected_prompt.contains("include_documents: false"));
+            assert!(selected_prompt.contains("patient PDF: Outside referral PDF"));
+            assert!(selected_prompt.contains("file_name: outside-referral.pdf"));
+            assert!(!selected_prompt.contains("/tmp/outside-referral.pdf"));
 
-        reloaded_app_server.shutdown().await?;
-        Ok(())
-    }))
+            reloaded_app_server.shutdown().await?;
+            Ok(())
+        })
+    })
 }
 
 #[test]
 fn medical_workspace_dropped_file_reference_survives_reload() -> Result<()> {
-    run_workspace_dashboard_runtime_test(Box::pin(async {
-        let mut app = make_test_app().await;
-        let codex_home = tempdir()?;
-        app.config.codex_home = codex_home.path().to_path_buf().abs();
-        app.config.sqlite_home = codex_home.path().to_path_buf();
-        let dropped_file = codex_home.path().join("fake-referral-drop.pdf");
-        std::fs::write(&dropped_file, b"%PDF fake dropped referral")?;
-        let sidepane_drop = codex_home.path().join("fake-sidepane-id-card.png");
-        std::fs::write(&sidepane_drop, b"fake png dropped id card")?;
+    run_workspace_dashboard_runtime_test(|| {
+        Box::pin(async {
+            let mut app = make_test_app().await;
+            let codex_home = tempdir()?;
+            app.config.codex_home = codex_home.path().to_path_buf().abs();
+            app.config.sqlite_home = codex_home.path().to_path_buf();
+            let dropped_file = codex_home.path().join("fake-referral-drop.pdf");
+            std::fs::write(&dropped_file, b"%PDF fake dropped referral")?;
+            let sidepane_drop = codex_home.path().join("fake-sidepane-id-card.png");
+            std::fs::write(&sidepane_drop, b"fake png dropped id card")?;
 
-        let mut app_server =
-            Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
-        let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
-        dashboard.load(&mut app_server).await?;
-        dashboard.set_context_for_tests(
-            "Jordan Patient",
-            "Initial visit",
-            "Human-entered note body.",
-        );
-        dashboard.save(&mut app_server).await?;
-        assert_eq!(
-            dashboard.execute_workspace_command(":files"),
-            WorkspaceDashboardAction::Consumed
-        );
-        let action = dashboard.handle_paste(dropped_file.display().to_string());
-        let params = match action {
-            WorkspaceDashboardAction::SaveDroppedFileReferences(params) => params,
-            other => panic!("expected dropped file save action, got {other:?}"),
-        };
-        dashboard
-            .save_dropped_file_references(&mut app_server, params)
-            .await?;
-        assert_eq!(dashboard.focus_label_for_tests(), "patient files");
-        assert_eq!(dashboard.workflow_section_label_for_tests(), "visit");
-        assert_eq!(dashboard.inspected_document_title_for_tests(), None);
-        assert_eq!(dashboard.workflow_scroll_for_tests(), 0);
-        assert_eq!(
-            dashboard.document_title_for_tests(),
-            Some("fake referral drop")
-        );
-        assert!(
+            let mut app_server =
+                Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
+            let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+            dashboard.load(&mut app_server).await?;
+            dashboard.set_context_for_tests(
+                "Jordan Patient",
+                "Initial visit",
+                "Human-entered note body.",
+            );
+            dashboard.save(&mut app_server).await?;
+            assert_eq!(
+                dashboard.execute_workspace_command(":files"),
+                WorkspaceDashboardAction::Consumed
+            );
+            let action = dashboard.handle_paste(dropped_file.display().to_string());
+            let params = match action {
+                WorkspaceDashboardAction::SaveDroppedFileReferences(params) => params,
+                other => panic!("expected dropped file save action, got {other:?}"),
+            };
             dashboard
-                .agent_context_prompt()
-                .contains("No saved artifact metadata selected")
-        );
-        assert!(
-            !dashboard
-                .agent_context_prompt()
-                .contains("fake referral drop")
-        );
+                .save_dropped_file_references(&mut app_server, params)
+                .await?;
+            assert_eq!(dashboard.focus_label_for_tests(), "patient files");
+            assert_eq!(dashboard.workflow_section_label_for_tests(), "visit");
+            assert_eq!(dashboard.inspected_document_title_for_tests(), None);
+            assert_eq!(dashboard.workflow_scroll_for_tests(), 0);
+            assert_eq!(
+                dashboard.document_title_for_tests(),
+                Some("fake referral drop")
+            );
+            assert!(
+                dashboard
+                    .agent_context_prompt()
+                    .contains("No saved artifact metadata selected")
+            );
+            assert!(
+                !dashboard
+                    .agent_context_prompt()
+                    .contains("fake referral drop")
+            );
 
-        assert_eq!(
-            dashboard.execute_workspace_command(":chart"),
-            WorkspaceDashboardAction::Consumed
-        );
-        assert_eq!(dashboard.workflow_section_label_for_tests(), "visit");
-        assert_eq!(
-            dashboard.execute_workspace_command(":files"),
-            WorkspaceDashboardAction::Consumed
-        );
-        assert_eq!(dashboard.focus_label_for_tests(), "patient files");
-        let sidepane_action = dashboard.handle_paste(sidepane_drop.display().to_string());
-        let sidepane_params = match sidepane_action {
-            WorkspaceDashboardAction::SaveDroppedFileReferences(params) => params,
-            other => panic!("expected sidepane dropped file save action, got {other:?}"),
-        };
-        dashboard
-            .save_dropped_file_references(&mut app_server, sidepane_params)
-            .await?;
-        assert_eq!(dashboard.focus_label_for_tests(), "patient files");
-        assert_eq!(dashboard.workflow_section_label_for_tests(), "visit");
-        assert_eq!(dashboard.inspected_document_title_for_tests(), None);
-        assert_eq!(dashboard.workflow_scroll_for_tests(), 0);
-        app_server.shutdown().await?;
+            assert_eq!(
+                dashboard.execute_workspace_command(":chart"),
+                WorkspaceDashboardAction::Consumed
+            );
+            assert_eq!(dashboard.workflow_section_label_for_tests(), "visit");
+            assert_eq!(
+                dashboard.execute_workspace_command(":files"),
+                WorkspaceDashboardAction::Consumed
+            );
+            assert_eq!(dashboard.focus_label_for_tests(), "patient files");
+            let sidepane_action = dashboard.handle_paste(sidepane_drop.display().to_string());
+            let sidepane_params = match sidepane_action {
+                WorkspaceDashboardAction::SaveDroppedFileReferences(params) => params,
+                other => panic!("expected sidepane dropped file save action, got {other:?}"),
+            };
+            dashboard
+                .save_dropped_file_references(&mut app_server, sidepane_params)
+                .await?;
+            assert_eq!(dashboard.focus_label_for_tests(), "patient files");
+            assert_eq!(dashboard.workflow_section_label_for_tests(), "visit");
+            assert_eq!(dashboard.inspected_document_title_for_tests(), None);
+            assert_eq!(dashboard.workflow_scroll_for_tests(), 0);
+            app_server.shutdown().await?;
 
-        let mut reloaded_app_server =
-            Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
-        let mut reloaded_dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
-        reloaded_dashboard.load(&mut reloaded_app_server).await?;
-        let document_titles = reloaded_dashboard.document_titles_for_tests();
-        assert!(document_titles.contains(&"fake referral drop"));
-        assert!(document_titles.contains(&"fake sidepane id card"));
-        let prompt = reloaded_dashboard.agent_context_prompt();
-        assert!(prompt.contains("No saved artifact metadata selected"));
-        assert!(!prompt.contains("fake referral drop"));
+            let mut reloaded_app_server =
+                Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
+            let mut reloaded_dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+            reloaded_dashboard.load(&mut reloaded_app_server).await?;
+            let document_titles = reloaded_dashboard.document_titles_for_tests();
+            assert!(document_titles.contains(&"fake referral drop"));
+            assert!(document_titles.contains(&"fake sidepane id card"));
+            let prompt = reloaded_dashboard.agent_context_prompt();
+            assert!(prompt.contains("No saved artifact metadata selected"));
+            assert!(!prompt.contains("fake referral drop"));
 
-        let referral_index = document_titles
-            .iter()
-            .position(|title| *title == "fake referral drop")
-            .expect("referral drop persisted")
-            + 1;
-        let select_referral = format!(":artifact select {referral_index}");
-        assert_eq!(
-            reloaded_dashboard.execute_workspace_command(&select_referral),
-            WorkspaceDashboardAction::Consumed
-        );
-        let selected_prompt = reloaded_dashboard.agent_context_prompt();
-        assert!(selected_prompt.contains("patient PDF: fake referral drop"));
-        assert!(selected_prompt.contains("fake-referral-drop.pdf"));
-        assert!(selected_prompt.contains("include_documents: false"));
+            let referral_index = document_titles
+                .iter()
+                .position(|title| *title == "fake referral drop")
+                .expect("referral drop persisted")
+                + 1;
+            let select_referral = format!(":artifact select {referral_index}");
+            assert_eq!(
+                reloaded_dashboard.execute_workspace_command(&select_referral),
+                WorkspaceDashboardAction::Consumed
+            );
+            let selected_prompt = reloaded_dashboard.agent_context_prompt();
+            assert!(selected_prompt.contains("patient PDF: fake referral drop"));
+            assert!(selected_prompt.contains("fake-referral-drop.pdf"));
+            assert!(selected_prompt.contains("include_documents: false"));
 
-        reloaded_app_server.shutdown().await?;
-        Ok(())
-    }))
+            reloaded_app_server.shutdown().await?;
+            Ok(())
+        })
+    })
 }
 
 #[test]
 fn medical_workspace_context_packet_and_agent_result_survive_reload() -> Result<()> {
-    run_workspace_dashboard_runtime_test(Box::pin(async {
-        let mut app = make_test_app().await;
-        let codex_home = tempdir()?;
-        app.config.codex_home = codex_home.path().to_path_buf().abs();
-        app.config.sqlite_home = codex_home.path().to_path_buf();
+    run_workspace_dashboard_runtime_test(|| {
+        Box::pin(async {
+            let mut app = make_test_app().await;
+            let codex_home = tempdir()?;
+            app.config.codex_home = codex_home.path().to_path_buf().abs();
+            app.config.sqlite_home = codex_home.path().to_path_buf();
 
-        let mut app_server =
-            Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
-        let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
-        dashboard.load(&mut app_server).await?;
-        dashboard.set_context_for_tests(
-            "Jordan Patient",
-            "Follow-up visit",
-            "Human-entered note body.",
-        );
-        dashboard.set_document_draft_for_tests(
-            "x12 edi",
-            "June 837P claim batch",
-            "/tmp/june-837p.x12",
-            "metadata-only practice billing batch",
-        );
-        dashboard.save(&mut app_server).await?;
-        assert_eq!(
-            dashboard.execute_workspace_command(":scope practice"),
-            WorkspaceDashboardAction::Consumed
-        );
-        let association = dashboard.execute_workspace_command(":practice associate");
-        let WorkspaceDashboardAction::AssociatePracticeLibraryDocument(params) = association else {
-            panic!("expected Practice Library association action, got {association:?}");
-        };
-        dashboard
-            .associate_practice_library_document(&mut app_server, *params)
-            .await?;
-        assert_eq!(
-            dashboard.execute_workspace_command(":artifact select 1"),
-            WorkspaceDashboardAction::Consumed
-        );
-        assert_eq!(
-            dashboard.execute_workspace_command(":agent request"),
-            WorkspaceDashboardAction::Consumed
-        );
-        for c in "Check selected packet metadata for billing follow-up.".chars() {
-            dashboard.handle_key_event(KeyEvent::from(KeyCode::Char(c)));
-        }
+            let mut app_server =
+                Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
+            let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+            dashboard.load(&mut app_server).await?;
+            dashboard.set_context_for_tests(
+                "Jordan Patient",
+                "Follow-up visit",
+                "Human-entered note body.",
+            );
+            dashboard.set_document_draft_for_tests(
+                "x12 edi",
+                "June 837P claim batch",
+                "/tmp/june-837p.x12",
+                "metadata-only practice billing batch",
+            );
+            dashboard.save(&mut app_server).await?;
+            assert_eq!(
+                dashboard.execute_workspace_command(":scope practice"),
+                WorkspaceDashboardAction::Consumed
+            );
+            let association = dashboard.execute_workspace_command(":practice associate");
+            let WorkspaceDashboardAction::AssociatePracticeLibraryDocument(params) = association
+            else {
+                panic!("expected Practice Library association action, got {association:?}");
+            };
+            dashboard
+                .associate_practice_library_document(&mut app_server, *params)
+                .await?;
+            assert_eq!(
+                dashboard.execute_workspace_command(":artifact select 1"),
+                WorkspaceDashboardAction::Consumed
+            );
+            assert_eq!(
+                dashboard.execute_workspace_command(":agent request"),
+                WorkspaceDashboardAction::Consumed
+            );
+            for c in "Check selected packet metadata for billing follow-up.".chars() {
+                dashboard.handle_key_event(KeyEvent::from(KeyCode::Char(c)));
+            }
 
-        let packet_params = dashboard.context_packet_create_params().unwrap();
-        assert_ne!(packet_params.selected_artifact_ids_json, "[]");
-        assert!(
-            packet_params
-                .artifact_summary
-                .contains("1 selected artifact")
-        );
-        assert!(
-            packet_params
-                .artifact_summary
-                .contains("837P professional claim")
-        );
-        assert!(
-            packet_params
-                .context_envelope_json
-                .contains("medical-context-packet-v1")
-        );
-        assert!(
-            packet_params
-                .context_envelope_json
-                .contains("\"includeDocuments\":false")
-        );
-        let packet = app_server
-            .workspace_context_packet_create(packet_params)
-            .await?
-            .packet;
-        assert!(packet.context_envelope_json.contains("promptSnapshot"));
-        assert_eq!(packet.context_envelope_sha256.len(), 64);
-        let packet_id = packet.id.clone();
-        let packet_hash = packet.context_envelope_sha256.clone();
-        dashboard.mark_agent_context_sent(packet);
-        assert_eq!(dashboard.context_packet_count_for_tests(), 1);
-        app_server.shutdown().await?;
+            let packet_params = dashboard.context_packet_create_params().unwrap();
+            assert_ne!(packet_params.selected_artifact_ids_json, "[]");
+            assert!(
+                packet_params
+                    .artifact_summary
+                    .contains("1 selected artifact")
+            );
+            assert!(
+                packet_params
+                    .artifact_summary
+                    .contains("837P professional claim")
+            );
+            assert!(
+                packet_params
+                    .context_envelope_json
+                    .contains("medical-context-packet-v1")
+            );
+            assert!(
+                packet_params
+                    .context_envelope_json
+                    .contains("\"includeDocuments\":false")
+            );
+            let packet = app_server
+                .workspace_context_packet_create(packet_params)
+                .await?
+                .packet;
+            assert!(packet.context_envelope_json.contains("promptSnapshot"));
+            assert_eq!(packet.context_envelope_sha256.len(), 64);
+            let packet_id = packet.id.clone();
+            let packet_hash = packet.context_envelope_sha256.clone();
+            dashboard.mark_agent_context_sent(packet);
+            assert_eq!(dashboard.context_packet_count_for_tests(), 1);
+            app_server.shutdown().await?;
 
-        let mut reloaded_app_server =
-            Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
-        let mut reloaded_dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
-        reloaded_dashboard.load(&mut reloaded_app_server).await?;
-        assert_eq!(reloaded_dashboard.context_packet_count_for_tests(), 1);
-        assert_eq!(reloaded_dashboard.agent_result_count_for_tests(), 0);
-        assert!(
+            let mut reloaded_app_server =
+                Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
+            let mut reloaded_dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+            reloaded_dashboard.load(&mut reloaded_app_server).await?;
+            assert_eq!(reloaded_dashboard.context_packet_count_for_tests(), 1);
+            assert_eq!(reloaded_dashboard.agent_result_count_for_tests(), 0);
+            assert!(
+                reloaded_dashboard
+                    .first_context_packet_for_tests()
+                    .unwrap()
+                    .artifact_summary
+                    .contains("837P professional claim")
+            );
+            assert!(
+                reloaded_dashboard
+                    .first_context_packet_for_tests()
+                    .unwrap()
+                    .context_envelope_json
+                    .contains("June 837P claim batch")
+            );
+            assert_eq!(
+                reloaded_dashboard
+                    .first_context_packet_for_tests()
+                    .unwrap()
+                    .context_envelope_sha256,
+                packet_hash
+            );
+            let replay_client_id = reloaded_dashboard
+                .client_id_for_tests()
+                .expect("saved client id")
+                .to_string();
+            let prepared_replay = reloaded_app_server
+                .workspace_context_packet_replay(WorkspaceContextPacketReplayParams {
+                    client_id: replay_client_id.clone(),
+                    packet_id: packet_id.clone(),
+                    context_envelope_sha256: Some(packet_hash.clone()),
+                })
+                .await?
+                .replay;
+            assert!(prepared_replay.is_none());
+            assert_eq!(
+                reloaded_dashboard.execute_workspace_command(":agent result"),
+                WorkspaceDashboardAction::Consumed
+            );
+            for c in "Returned agent work awaiting human review.".chars() {
+                reloaded_dashboard.handle_key_event(KeyEvent::from(KeyCode::Char(c)));
+            }
+            let action = reloaded_dashboard.execute_workspace_command(":agent result save");
+            let WorkspaceDashboardAction::SaveAgentResult { packet_id, body } = action else {
+                panic!("expected SaveAgentResult action");
+            };
             reloaded_dashboard
-                .first_context_packet_for_tests()
-                .unwrap()
-                .artifact_summary
-                .contains("837P professional claim")
-        );
-        assert!(
-            reloaded_dashboard
-                .first_context_packet_for_tests()
-                .unwrap()
-                .context_envelope_json
-                .contains("June 837P claim batch")
-        );
-        assert_eq!(
-            reloaded_dashboard
-                .first_context_packet_for_tests()
-                .unwrap()
-                .context_envelope_sha256,
-            packet_hash
-        );
-        let replay_client_id = reloaded_dashboard
-            .client_id_for_tests()
-            .expect("saved client id")
-            .to_string();
-        let prepared_replay = reloaded_app_server
-            .workspace_context_packet_replay(WorkspaceContextPacketReplayParams {
-                client_id: replay_client_id.clone(),
-                packet_id: packet_id.clone(),
-                context_envelope_sha256: Some(packet_hash.clone()),
-            })
-            .await?
-            .replay;
-        assert!(prepared_replay.is_none());
-        assert_eq!(
-            reloaded_dashboard.execute_workspace_command(":agent result"),
-            WorkspaceDashboardAction::Consumed
-        );
-        for c in "Returned agent work awaiting human review.".chars() {
-            reloaded_dashboard.handle_key_event(KeyEvent::from(KeyCode::Char(c)));
-        }
-        let action = reloaded_dashboard.execute_workspace_command(":agent result save");
-        let WorkspaceDashboardAction::SaveAgentResult { packet_id, body } = action else {
-            panic!("expected SaveAgentResult action");
-        };
-        reloaded_dashboard
-            .save_agent_result(&mut reloaded_app_server, packet_id.clone(), body)
-            .await?;
-        let replay = reloaded_app_server
-            .workspace_context_packet_replay(WorkspaceContextPacketReplayParams {
-                client_id: replay_client_id.clone(),
-                packet_id: packet_id.clone(),
-                context_envelope_sha256: Some(packet_hash.clone()),
-            })
-            .await?
-            .replay
-            .expect("submitted packet replay");
-        assert_eq!(replay.id, packet_id);
-        assert_eq!(replay.client_id, replay_client_id);
-        assert!(
-            replay
-                .read_only_safety_constraints
-                .iter()
-                .any(|line| line.contains("use only the stored context packet envelope"))
-        );
-        assert_eq!(replay.context_envelope_sha256, packet_hash);
-        assert!(replay.context_envelope_json.contains("promptSnapshot"));
-        assert_eq!(reloaded_dashboard.agent_result_count_for_tests(), 1);
-        assert_eq!(
-            reloaded_dashboard.agent_result_body_for_tests(),
-            Some("Returned agent work awaiting human review.")
-        );
-        assert_eq!(
-            reloaded_dashboard.note_body_for_tests(),
-            "Human-entered note body."
-        );
-        reloaded_app_server.shutdown().await?;
+                .save_agent_result(&mut reloaded_app_server, packet_id.clone(), body)
+                .await?;
+            let replay = reloaded_app_server
+                .workspace_context_packet_replay(WorkspaceContextPacketReplayParams {
+                    client_id: replay_client_id.clone(),
+                    packet_id: packet_id.clone(),
+                    context_envelope_sha256: Some(packet_hash.clone()),
+                })
+                .await?
+                .replay
+                .expect("submitted packet replay");
+            assert_eq!(replay.id, packet_id);
+            assert_eq!(replay.client_id, replay_client_id);
+            assert!(
+                replay
+                    .read_only_safety_constraints
+                    .iter()
+                    .any(|line| line.contains("use only the stored context packet envelope"))
+            );
+            assert_eq!(replay.context_envelope_sha256, packet_hash);
+            assert!(replay.context_envelope_json.contains("promptSnapshot"));
+            assert_eq!(reloaded_dashboard.agent_result_count_for_tests(), 1);
+            assert_eq!(
+                reloaded_dashboard.agent_result_body_for_tests(),
+                Some("Returned agent work awaiting human review.")
+            );
+            assert_eq!(
+                reloaded_dashboard.note_body_for_tests(),
+                "Human-entered note body."
+            );
+            reloaded_app_server.shutdown().await?;
 
-        let mut final_app_server =
-            Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
-        let mut final_dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
-        final_dashboard.load(&mut final_app_server).await?;
-        assert_eq!(final_dashboard.context_packet_count_for_tests(), 1);
-        assert_eq!(final_dashboard.agent_result_count_for_tests(), 1);
-        assert_eq!(
-            final_dashboard.agent_result_body_for_tests(),
-            Some("Returned agent work awaiting human review.")
-        );
-        assert_eq!(
-            final_dashboard.note_body_for_tests(),
-            "Human-entered note body."
-        );
-        assert_eq!(
+            let mut final_app_server =
+                Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
+            let mut final_dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+            final_dashboard.load(&mut final_app_server).await?;
+            assert_eq!(final_dashboard.context_packet_count_for_tests(), 1);
+            assert_eq!(final_dashboard.agent_result_count_for_tests(), 1);
+            assert_eq!(
+                final_dashboard.agent_result_body_for_tests(),
+                Some("Returned agent work awaiting human review.")
+            );
+            assert_eq!(
+                final_dashboard.note_body_for_tests(),
+                "Human-entered note body."
+            );
+            assert_eq!(
+                final_dashboard
+                    .first_context_packet_for_tests()
+                    .unwrap()
+                    .status,
+                "submitted"
+            );
+            assert_eq!(
+                final_dashboard.agent_result_status_for_tests(),
+                Some("review_pending")
+            );
+
+            let action = final_dashboard.execute_workspace_command(":agent result reviewed");
+            let WorkspaceDashboardAction::UpdateAgentResultStatus { result_id, status } = action
+            else {
+                panic!("expected agent result status update action");
+            };
+            assert_eq!(status, "reviewed");
             final_dashboard
-                .first_context_packet_for_tests()
-                .unwrap()
-                .status,
-            "submitted"
-        );
-        assert_eq!(
-            final_dashboard.agent_result_status_for_tests(),
-            Some("review_pending")
-        );
+                .update_agent_result_status(&mut final_app_server, result_id, status)
+                .await?;
+            assert_eq!(
+                final_dashboard.agent_result_status_for_tests(),
+                Some("reviewed")
+            );
+            assert_eq!(
+                final_dashboard.note_body_for_tests(),
+                "Human-entered note body."
+            );
 
-        let action = final_dashboard.execute_workspace_command(":agent result reviewed");
-        let WorkspaceDashboardAction::UpdateAgentResultStatus { result_id, status } = action else {
-            panic!("expected agent result status update action");
-        };
-        assert_eq!(status, "reviewed");
-        final_dashboard
-            .update_agent_result_status(&mut final_app_server, result_id, status)
-            .await?;
-        assert_eq!(
-            final_dashboard.agent_result_status_for_tests(),
-            Some("reviewed")
-        );
-        assert_eq!(
-            final_dashboard.note_body_for_tests(),
-            "Human-entered note body."
-        );
+            let action = final_dashboard.execute_workspace_command(":agent result to proposal");
+            let WorkspaceDashboardAction::ConvertAgentResultToProposal { result_id } = action
+            else {
+                panic!("expected agent result proposal conversion action");
+            };
+            final_dashboard
+                .convert_agent_result_to_proposal(&mut final_app_server, result_id)
+                .await?;
+            assert_eq!(
+                final_dashboard.agent_result_status_for_tests(),
+                Some("converted")
+            );
+            assert_eq!(final_dashboard.pending_proposal_count_for_tests(), 1);
+            assert_eq!(
+                final_dashboard.note_body_for_tests(),
+                "Human-entered note body."
+            );
 
-        let action = final_dashboard.execute_workspace_command(":agent result to proposal");
-        let WorkspaceDashboardAction::ConvertAgentResultToProposal { result_id } = action else {
-            panic!("expected agent result proposal conversion action");
-        };
-        final_dashboard
-            .convert_agent_result_to_proposal(&mut final_app_server, result_id)
-            .await?;
-        assert_eq!(
-            final_dashboard.agent_result_status_for_tests(),
-            Some("converted")
-        );
-        assert_eq!(final_dashboard.pending_proposal_count_for_tests(), 1);
-        assert_eq!(
-            final_dashboard.note_body_for_tests(),
-            "Human-entered note body."
-        );
+            final_app_server.shutdown().await?;
 
-        final_app_server.shutdown().await?;
-
-        let mut converted_app_server =
-            Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
-        let mut converted_dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
-        converted_dashboard.load(&mut converted_app_server).await?;
-        assert_eq!(
-            converted_dashboard.agent_result_status_for_tests(),
-            Some("converted")
-        );
-        assert_eq!(converted_dashboard.pending_proposal_count_for_tests(), 1);
-        assert_eq!(
-            converted_dashboard.note_body_for_tests(),
-            "Human-entered note body."
-        );
-        converted_app_server.shutdown().await?;
-        Ok(())
-    }))
+            let mut converted_app_server =
+                Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
+            let mut converted_dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+            converted_dashboard.load(&mut converted_app_server).await?;
+            assert_eq!(
+                converted_dashboard.agent_result_status_for_tests(),
+                Some("converted")
+            );
+            assert_eq!(converted_dashboard.pending_proposal_count_for_tests(), 1);
+            assert_eq!(
+                converted_dashboard.note_body_for_tests(),
+                "Human-entered note body."
+            );
+            converted_app_server.shutdown().await?;
+            Ok(())
+        })
+    })
 }
 
 #[test]
 fn workspace_context_get_returns_saved_active_context() -> Result<()> {
-    run_workspace_dashboard_runtime_test(Box::pin(async {
-        let mut app = make_test_app().await;
-        let codex_home = tempdir()?;
-        app.config.codex_home = codex_home.path().to_path_buf().abs();
-        app.config.sqlite_home = codex_home.path().to_path_buf();
+    run_workspace_dashboard_runtime_test(|| {
+        Box::pin(async {
+            let mut app = make_test_app().await;
+            let codex_home = tempdir()?;
+            app.config.codex_home = codex_home.path().to_path_buf().abs();
+            app.config.sqlite_home = codex_home.path().to_path_buf();
 
-        let mut app_server =
-            Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
-        let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
-        dashboard.load(&mut app_server).await?;
-        dashboard.set_context_for_tests(
-            "Jordan Patient",
-            "Initial visit",
-            "Human-entered note body.",
-        );
-        dashboard.set_record_dates_for_tests("2026-01-01", "2026-06-09");
-        dashboard.set_document_draft_for_tests(
-            "referral",
-            "Outside referral PDF",
-            "/tmp/outside-referral.pdf",
-            "Linked metadata only.",
-        );
-        dashboard.save(&mut app_server).await?;
+            let mut app_server =
+                Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
+            let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+            dashboard.load(&mut app_server).await?;
+            dashboard.set_context_for_tests(
+                "Jordan Patient",
+                "Initial visit",
+                "Human-entered note body.",
+            );
+            dashboard.set_record_dates_for_tests("2026-01-01", "2026-06-09");
+            dashboard.set_document_draft_for_tests(
+                "referral",
+                "Outside referral PDF",
+                "/tmp/outside-referral.pdf",
+                "Linked metadata only.",
+            );
+            dashboard.save(&mut app_server).await?;
 
-        let client_id = dashboard
-            .client_id_for_tests()
-            .expect("dashboard should have saved client id")
-            .to_string();
-        let note_id = dashboard
-            .note_id_for_tests()
-            .expect("dashboard should have saved note id")
-            .to_string();
-        let response = app_server
-            .workspace_context_get(WorkspaceContextGetParams {
-                client_id: client_id.clone(),
-                note_id: Some(note_id.clone()),
-                include_documents: Some(true),
-            })
-            .await?;
-        let context = response.context.expect("saved client context should load");
+            let client_id = dashboard
+                .client_id_for_tests()
+                .expect("dashboard should have saved client id")
+                .to_string();
+            let note_id = dashboard
+                .note_id_for_tests()
+                .expect("dashboard should have saved note id")
+                .to_string();
+            let response = app_server
+                .workspace_context_get(WorkspaceContextGetParams {
+                    client_id: client_id.clone(),
+                    note_id: Some(note_id.clone()),
+                    include_documents: Some(true),
+                })
+                .await?;
+            let context = response.context.expect("saved client context should load");
 
-        assert_eq!(context.client.id, client_id);
-        assert_eq!(context.client.display_name, "Jordan Patient");
-        assert_eq!(
-            context.client.record_start_date.as_deref(),
-            Some("2026-01-01")
-        );
-        assert_eq!(
-            context.client.record_end_date.as_deref(),
-            Some("2026-06-09")
-        );
-        let active_note = context.active_note.expect("active note should load");
-        assert_eq!(active_note.id, note_id);
-        assert_eq!(active_note.title, "Initial visit");
-        assert_eq!(active_note.body, "Human-entered note body.");
-        assert!(
-            context
-                .recent_notes
-                .iter()
-                .any(|note| note.id == active_note.id && note.title == "Initial visit")
-        );
-        assert_eq!(context.documents.len(), 1);
-        assert_eq!(context.documents[0].title, "Outside referral PDF");
-        assert_eq!(context.documents[0].local_path, "/tmp/outside-referral.pdf");
+            assert_eq!(context.client.id, client_id);
+            assert_eq!(context.client.display_name, "Jordan Patient");
+            assert_eq!(
+                context.client.record_start_date.as_deref(),
+                Some("2026-01-01")
+            );
+            assert_eq!(
+                context.client.record_end_date.as_deref(),
+                Some("2026-06-09")
+            );
+            let active_note = context.active_note.expect("active note should load");
+            assert_eq!(active_note.id, note_id);
+            assert_eq!(active_note.title, "Initial visit");
+            assert_eq!(active_note.body, "Human-entered note body.");
+            assert!(
+                context
+                    .recent_notes
+                    .iter()
+                    .any(|note| note.id == active_note.id && note.title == "Initial visit")
+            );
+            assert_eq!(context.documents.len(), 1);
+            assert_eq!(context.documents[0].title, "Outside referral PDF");
+            assert_eq!(context.documents[0].local_path, "/tmp/outside-referral.pdf");
 
-        app_server.shutdown().await?;
-        Ok(())
-    }))
+            app_server.shutdown().await?;
+            Ok(())
+        })
+    })
 }
 
 #[test]
 fn workspace_context_get_supports_multi_note_patient_admin_workflow() -> Result<()> {
-    run_workspace_dashboard_runtime_test(Box::pin(async {
-        let mut app = make_test_app().await;
-        let codex_home = tempdir()?;
-        app.config.codex_home = codex_home.path().to_path_buf().abs();
-        app.config.sqlite_home = codex_home.path().to_path_buf();
+    run_workspace_dashboard_runtime_test(|| {
+        Box::pin(async {
+            let mut app = make_test_app().await;
+            let codex_home = tempdir()?;
+            app.config.codex_home = codex_home.path().to_path_buf().abs();
+            app.config.sqlite_home = codex_home.path().to_path_buf();
 
-        let mut app_server =
-            Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
-        let patient = app_server
+            let mut app_server =
+                Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
+            let patient = app_server
             .workspace_client_upsert(WorkspaceClientUpsertParams {
                 id: None,
                 display_name: "Riley Dailyflow".to_string(),
@@ -8118,265 +8370,267 @@ fn workspace_context_get_supports_multi_note_patient_admin_workflow() -> Result<
             })
             .await?
             .client;
-        let other_patient = app_server
-            .workspace_client_upsert(WorkspaceClientUpsertParams {
-                id: None,
-                display_name: "Other Dailyflow".to_string(),
-                preferred_name: None,
-                date_of_birth: None,
-                sex_or_gender: None,
-                external_id: None,
-                record_start_date: None,
-                record_end_date: None,
-                summary: "OTHER_PATIENT_ADMIN_SENTINEL".to_string(),
-                ..Default::default()
-            })
-            .await?
-            .client;
-        let first_eval = app_server
-            .workspace_note_upsert(WorkspaceNoteUpsertParams {
-                id: None,
-                client_id: patient.id.clone(),
-                encounter_id: None,
-                title: "Initial evaluation".to_string(),
-                kind: "first_eval".to_string(),
-                body: "HPI: Fake first evaluation.\nPlan: Start conservative care.".to_string(),
-                status: "draft".to_string(),
-                summary: Some("first eval".to_string()),
-            })
-            .await?
-            .note;
-        let follow_up = app_server
-            .workspace_note_upsert(WorkspaceNoteUpsertParams {
-                id: None,
-                client_id: patient.id.clone(),
-                encounter_id: None,
-                title: "Follow-up call".to_string(),
-                kind: "phone_note".to_string(),
-                body: "Phone: Fake patient reports improvement; needs Medicare follow-up task."
-                    .to_string(),
-                status: "draft".to_string(),
-                summary: Some("phone follow-up".to_string()),
-            })
-            .await?
-            .note;
-        let other_note = app_server
-            .workspace_note_upsert(WorkspaceNoteUpsertParams {
-                id: None,
-                client_id: other_patient.id.clone(),
-                encounter_id: None,
-                title: "Other patient note".to_string(),
-                kind: "note".to_string(),
-                body: "OTHER_PATIENT_NOTE_SENTINEL".to_string(),
-                status: "draft".to_string(),
-                summary: None,
-            })
-            .await?
-            .note;
-        let medicare_card = app_server
-            .workspace_document_upsert(WorkspaceDocumentUpsertParams {
-                id: None,
-                client_id: patient.id.clone(),
-                encounter_id: None,
-                title: "Fake Medicare card reference".to_string(),
-                kind: "insurance card".to_string(),
-                local_path: "/tmp/fake-medicare-card.pdf".to_string(),
-                notes: "metadata-only coverage reference; original file unchanged".to_string(),
-                scope: "patient".to_string(),
-                detected_kind: "PDF".to_string(),
-                mime_type: Some("application/pdf".to_string()),
-                file_size_bytes: None,
-                modified_at: None,
-                sha256: None,
-                tags: "coverage,medicare".to_string(),
-                source_label: "front desk".to_string(),
-                existence_status: "reference_only".to_string(),
-                metadata_json: "{}".to_string(),
-                original_path: "/tmp/fake-medicare-card.pdf".to_string(),
-                reference_kind: "local_reference".to_string(),
-                vault_path: String::new(),
-                content_sha256: None,
-                thumbnail_path: String::new(),
-                thumbnail_status: "none".to_string(),
-                thumbnail_mime_type: None,
-                intake_source: "test_fixture".to_string(),
-                imported_at: None,
-            })
-            .await?
-            .document;
-        app_server
-            .workspace_document_upsert(WorkspaceDocumentUpsertParams {
-                id: None,
-                client_id: other_patient.id.clone(),
-                encounter_id: None,
-                title: "OTHER_PATIENT_DOCUMENT_SENTINEL".to_string(),
-                kind: "document".to_string(),
-                local_path: "/tmp/other-patient.pdf".to_string(),
-                notes: String::new(),
-                scope: "patient".to_string(),
-                detected_kind: "PDF".to_string(),
-                mime_type: Some("application/pdf".to_string()),
-                file_size_bytes: None,
-                modified_at: None,
-                sha256: None,
-                tags: String::new(),
-                source_label: String::new(),
-                existence_status: "unknown".to_string(),
-                metadata_json: "{}".to_string(),
-                original_path: "/tmp/other-patient.pdf".to_string(),
-                reference_kind: "local_reference".to_string(),
-                vault_path: String::new(),
-                content_sha256: None,
-                thumbnail_path: String::new(),
-                thumbnail_status: "none".to_string(),
-                thumbnail_mime_type: None,
-                intake_source: "test_fixture".to_string(),
-                imported_at: None,
-            })
-            .await?;
-        let eligibility_task = app_server
-            .workspace_task_upsert(WorkspaceTaskUpsertParams {
-                id: None,
-                client_id: patient.id.clone(),
-                encounter_id: None,
-                note_id: Some(follow_up.id.clone()),
-                document_id: Some(medicare_card.id.clone()),
-                title: "Verify fake Medicare eligibility".to_string(),
-                details: "Use metadata only; do not contact payer automatically.".to_string(),
-                kind: "coverage_follow_up".to_string(),
-                status: WorkspaceTaskStatus::Open,
-                priority: WorkspaceTaskPriority::High,
-                due_date: Some("2026-06-22".to_string()),
-                assigned_to: Some("front desk".to_string()),
-            })
-            .await?
-            .task;
+            let other_patient = app_server
+                .workspace_client_upsert(WorkspaceClientUpsertParams {
+                    id: None,
+                    display_name: "Other Dailyflow".to_string(),
+                    preferred_name: None,
+                    date_of_birth: None,
+                    sex_or_gender: None,
+                    external_id: None,
+                    record_start_date: None,
+                    record_end_date: None,
+                    summary: "OTHER_PATIENT_ADMIN_SENTINEL".to_string(),
+                    ..Default::default()
+                })
+                .await?
+                .client;
+            let first_eval = app_server
+                .workspace_note_upsert(WorkspaceNoteUpsertParams {
+                    id: None,
+                    client_id: patient.id.clone(),
+                    encounter_id: None,
+                    title: "Initial evaluation".to_string(),
+                    kind: "first_eval".to_string(),
+                    body: "HPI: Fake first evaluation.\nPlan: Start conservative care.".to_string(),
+                    status: "draft".to_string(),
+                    summary: Some("first eval".to_string()),
+                })
+                .await?
+                .note;
+            let follow_up = app_server
+                .workspace_note_upsert(WorkspaceNoteUpsertParams {
+                    id: None,
+                    client_id: patient.id.clone(),
+                    encounter_id: None,
+                    title: "Follow-up call".to_string(),
+                    kind: "phone_note".to_string(),
+                    body: "Phone: Fake patient reports improvement; needs Medicare follow-up task."
+                        .to_string(),
+                    status: "draft".to_string(),
+                    summary: Some("phone follow-up".to_string()),
+                })
+                .await?
+                .note;
+            let other_note = app_server
+                .workspace_note_upsert(WorkspaceNoteUpsertParams {
+                    id: None,
+                    client_id: other_patient.id.clone(),
+                    encounter_id: None,
+                    title: "Other patient note".to_string(),
+                    kind: "note".to_string(),
+                    body: "OTHER_PATIENT_NOTE_SENTINEL".to_string(),
+                    status: "draft".to_string(),
+                    summary: None,
+                })
+                .await?
+                .note;
+            let medicare_card = app_server
+                .workspace_document_upsert(WorkspaceDocumentUpsertParams {
+                    id: None,
+                    client_id: patient.id.clone(),
+                    encounter_id: None,
+                    title: "Fake Medicare card reference".to_string(),
+                    kind: "insurance card".to_string(),
+                    local_path: "/tmp/fake-medicare-card.pdf".to_string(),
+                    notes: "metadata-only coverage reference; original file unchanged".to_string(),
+                    scope: "patient".to_string(),
+                    detected_kind: "PDF".to_string(),
+                    mime_type: Some("application/pdf".to_string()),
+                    file_size_bytes: None,
+                    modified_at: None,
+                    sha256: None,
+                    tags: "coverage,medicare".to_string(),
+                    source_label: "front desk".to_string(),
+                    existence_status: "reference_only".to_string(),
+                    metadata_json: "{}".to_string(),
+                    original_path: "/tmp/fake-medicare-card.pdf".to_string(),
+                    reference_kind: "local_reference".to_string(),
+                    vault_path: String::new(),
+                    content_sha256: None,
+                    thumbnail_path: String::new(),
+                    thumbnail_status: "none".to_string(),
+                    thumbnail_mime_type: None,
+                    intake_source: "test_fixture".to_string(),
+                    imported_at: None,
+                })
+                .await?
+                .document;
+            app_server
+                .workspace_document_upsert(WorkspaceDocumentUpsertParams {
+                    id: None,
+                    client_id: other_patient.id.clone(),
+                    encounter_id: None,
+                    title: "OTHER_PATIENT_DOCUMENT_SENTINEL".to_string(),
+                    kind: "document".to_string(),
+                    local_path: "/tmp/other-patient.pdf".to_string(),
+                    notes: String::new(),
+                    scope: "patient".to_string(),
+                    detected_kind: "PDF".to_string(),
+                    mime_type: Some("application/pdf".to_string()),
+                    file_size_bytes: None,
+                    modified_at: None,
+                    sha256: None,
+                    tags: String::new(),
+                    source_label: String::new(),
+                    existence_status: "unknown".to_string(),
+                    metadata_json: "{}".to_string(),
+                    original_path: "/tmp/other-patient.pdf".to_string(),
+                    reference_kind: "local_reference".to_string(),
+                    vault_path: String::new(),
+                    content_sha256: None,
+                    thumbnail_path: String::new(),
+                    thumbnail_status: "none".to_string(),
+                    thumbnail_mime_type: None,
+                    intake_source: "test_fixture".to_string(),
+                    imported_at: None,
+                })
+                .await?;
+            let eligibility_task = app_server
+                .workspace_task_upsert(WorkspaceTaskUpsertParams {
+                    id: None,
+                    client_id: patient.id.clone(),
+                    encounter_id: None,
+                    note_id: Some(follow_up.id.clone()),
+                    document_id: Some(medicare_card.id.clone()),
+                    title: "Verify fake Medicare eligibility".to_string(),
+                    details: "Use metadata only; do not contact payer automatically.".to_string(),
+                    kind: "coverage_follow_up".to_string(),
+                    status: WorkspaceTaskStatus::Open,
+                    priority: WorkspaceTaskPriority::High,
+                    due_date: Some("2026-06-22".to_string()),
+                    assigned_to: Some("front desk".to_string()),
+                })
+                .await?
+                .task;
 
-        let context = app_server
-            .workspace_context_get(WorkspaceContextGetParams {
-                client_id: patient.id.clone(),
-                note_id: Some(follow_up.id.clone()),
-                include_documents: Some(true),
-            })
-            .await?
-            .context
-            .expect("daily patient chart context should load");
+            let context = app_server
+                .workspace_context_get(WorkspaceContextGetParams {
+                    client_id: patient.id.clone(),
+                    note_id: Some(follow_up.id.clone()),
+                    include_documents: Some(true),
+                })
+                .await?
+                .context
+                .expect("daily patient chart context should load");
 
-        assert_eq!(context.client.id, patient.id);
-        assert_eq!(context.client.display_name, "Riley Dailyflow");
-        assert_eq!(context.client.preferred_name.as_deref(), Some("Riley"));
-        assert_eq!(
-            context.client.external_id.as_deref(),
-            Some("FAKE-MEDICARE-MBI-001")
-        );
-        assert!(context.client.summary.contains("fake mobile 555-0100"));
-        assert!(
-            context
-                .client
-                .summary
-                .contains("Medicare: fake Part B active")
-        );
-        let active_note = context
-            .active_note
-            .expect("follow-up note should be active");
-        assert_eq!(active_note.id, follow_up.id);
-        assert!(active_note.body.contains("needs Medicare follow-up task"));
-        assert!(
-            context
-                .recent_notes
-                .iter()
-                .any(|note| note.id == first_eval.id && note.title == "Initial evaluation")
-        );
-        assert!(
-            context
-                .recent_notes
-                .iter()
-                .any(|note| note.id == follow_up.id && note.title == "Follow-up call")
-        );
-        assert!(
-            context
-                .recent_notes
-                .iter()
-                .all(|note| note.id != other_note.id && note.client_id == patient.id)
-        );
-        assert_eq!(context.documents.len(), 1);
-        assert_eq!(context.documents[0].id, medicare_card.id);
-        assert_eq!(context.documents[0].scope, "patient");
-        assert!(!context.documents[0].notes.contains("OTHER_PATIENT"));
-        assert_eq!(context.tasks.len(), 1);
-        assert_eq!(context.tasks[0].id, eligibility_task.id);
-        assert_eq!(
-            context.tasks[0].note_id.as_deref(),
-            Some(follow_up.id.as_str())
-        );
-        assert_eq!(
-            context.tasks[0].document_id.as_deref(),
-            Some(medicare_card.id.as_str())
-        );
+            assert_eq!(context.client.id, patient.id);
+            assert_eq!(context.client.display_name, "Riley Dailyflow");
+            assert_eq!(context.client.preferred_name.as_deref(), Some("Riley"));
+            assert_eq!(
+                context.client.external_id.as_deref(),
+                Some("FAKE-MEDICARE-MBI-001")
+            );
+            assert!(context.client.summary.contains("fake mobile 555-0100"));
+            assert!(
+                context
+                    .client
+                    .summary
+                    .contains("Medicare: fake Part B active")
+            );
+            let active_note = context
+                .active_note
+                .expect("follow-up note should be active");
+            assert_eq!(active_note.id, follow_up.id);
+            assert!(active_note.body.contains("needs Medicare follow-up task"));
+            assert!(
+                context
+                    .recent_notes
+                    .iter()
+                    .any(|note| note.id == first_eval.id && note.title == "Initial evaluation")
+            );
+            assert!(
+                context
+                    .recent_notes
+                    .iter()
+                    .any(|note| note.id == follow_up.id && note.title == "Follow-up call")
+            );
+            assert!(
+                context
+                    .recent_notes
+                    .iter()
+                    .all(|note| note.id != other_note.id && note.client_id == patient.id)
+            );
+            assert_eq!(context.documents.len(), 1);
+            assert_eq!(context.documents[0].id, medicare_card.id);
+            assert_eq!(context.documents[0].scope, "patient");
+            assert!(!context.documents[0].notes.contains("OTHER_PATIENT"));
+            assert_eq!(context.tasks.len(), 1);
+            assert_eq!(context.tasks[0].id, eligibility_task.id);
+            assert_eq!(
+                context.tasks[0].note_id.as_deref(),
+                Some(follow_up.id.as_str())
+            );
+            assert_eq!(
+                context.tasks[0].document_id.as_deref(),
+                Some(medicare_card.id.as_str())
+            );
 
-        let context_without_documents = app_server
-            .workspace_context_get(WorkspaceContextGetParams {
-                client_id: patient.id,
-                note_id: Some(follow_up.id),
-                include_documents: Some(false),
-            })
-            .await?
-            .context
-            .expect("daily patient chart context should load without documents");
-        assert!(context_without_documents.documents.is_empty());
-        assert_eq!(context_without_documents.tasks.len(), 1);
-        assert!(
-            context_without_documents
-                .recent_notes
-                .iter()
-                .any(|note| note.title == "Initial evaluation")
-        );
+            let context_without_documents = app_server
+                .workspace_context_get(WorkspaceContextGetParams {
+                    client_id: patient.id,
+                    note_id: Some(follow_up.id),
+                    include_documents: Some(false),
+                })
+                .await?
+                .context
+                .expect("daily patient chart context should load without documents");
+            assert!(context_without_documents.documents.is_empty());
+            assert_eq!(context_without_documents.tasks.len(), 1);
+            assert!(
+                context_without_documents
+                    .recent_notes
+                    .iter()
+                    .any(|note| note.title == "Initial evaluation")
+            );
 
-        app_server.shutdown().await?;
-        Ok(())
-    }))
+            app_server.shutdown().await?;
+            Ok(())
+        })
+    })
 }
 
 #[test]
 fn workspace_context_packet_replay_stays_historical_after_daily_chart_changes() -> Result<()> {
-    run_workspace_dashboard_runtime_test(Box::pin(async {
-        let mut app = make_test_app().await;
-        let codex_home = tempdir()?;
-        app.config.codex_home = codex_home.path().to_path_buf().abs();
-        app.config.sqlite_home = codex_home.path().to_path_buf();
+    run_workspace_dashboard_runtime_test(|| {
+        Box::pin(async {
+            let mut app = make_test_app().await;
+            let codex_home = tempdir()?;
+            app.config.codex_home = codex_home.path().to_path_buf().abs();
+            app.config.sqlite_home = codex_home.path().to_path_buf();
 
-        let mut app_server =
-            Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
-        let patient = app_server
-            .workspace_client_upsert(WorkspaceClientUpsertParams {
-                id: None,
-                display_name: "Riley PacketHistory".to_string(),
-                preferred_name: Some("Riley".to_string()),
-                date_of_birth: Some("1972-04-05".to_string()),
-                sex_or_gender: None,
-                external_id: Some("OLD_FAKE_MEDICARE_SENTINEL".to_string()),
-                record_start_date: Some("2026-06-01".to_string()),
-                record_end_date: None,
-                summary: "OLD_CONTACT_SENTINEL; OLD_MEDICARE_SENTINEL".to_string(),
-                ..Default::default()
-            })
-            .await?
-            .client;
-        let note = app_server
-            .workspace_note_upsert(WorkspaceNoteUpsertParams {
-                id: None,
-                client_id: patient.id.clone(),
-                encounter_id: None,
-                title: "Follow-up visit".to_string(),
-                kind: "visit_note".to_string(),
-                body: "OLD_NOTE_BODY_SENTINEL: draft plan before admin update.".to_string(),
-                status: "draft".to_string(),
-                summary: Some("old note".to_string()),
-            })
-            .await?
-            .note;
-        let request = "Review the fake follow-up plan.";
-        let envelope = serde_json::json!({
+            let mut app_server =
+                Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
+            let patient = app_server
+                .workspace_client_upsert(WorkspaceClientUpsertParams {
+                    id: None,
+                    display_name: "Riley PacketHistory".to_string(),
+                    preferred_name: Some("Riley".to_string()),
+                    date_of_birth: Some("1972-04-05".to_string()),
+                    sex_or_gender: None,
+                    external_id: Some("OLD_FAKE_MEDICARE_SENTINEL".to_string()),
+                    record_start_date: Some("2026-06-01".to_string()),
+                    record_end_date: None,
+                    summary: "OLD_CONTACT_SENTINEL; OLD_MEDICARE_SENTINEL".to_string(),
+                    ..Default::default()
+                })
+                .await?
+                .client;
+            let note = app_server
+                .workspace_note_upsert(WorkspaceNoteUpsertParams {
+                    id: None,
+                    client_id: patient.id.clone(),
+                    encounter_id: None,
+                    title: "Follow-up visit".to_string(),
+                    kind: "visit_note".to_string(),
+                    body: "OLD_NOTE_BODY_SENTINEL: draft plan before admin update.".to_string(),
+                    status: "draft".to_string(),
+                    summary: Some("old note".to_string()),
+                })
+                .await?
+                .note;
+            let request = "Review the fake follow-up plan.";
+            let envelope = serde_json::json!({
             "assemblyVersion": "test-daily-workflow-v1",
             "sourceMode": "ctrl_g_handoff",
             "includeDocuments": false,
@@ -8408,425 +8662,435 @@ fn workspace_context_packet_replay_stays_historical_after_daily_chart_changes() 
             "promptSnapshot": "OLD_CONTACT_SENTINEL OLD_MEDICARE_SENTINEL OLD_NOTE_BODY_SENTINEL",
         })
         .to_string();
-        let packet = app_server
-            .workspace_context_packet_create(WorkspaceContextPacketCreateParams {
-                client_id: patient.id.clone(),
-                encounter_id: None,
-                note_id: Some(note.id.clone()),
-                human_request: request.to_string(),
-                selected_artifact_ids_json: "[]".to_string(),
-                selected_derivative_ids_json: "[]".to_string(),
-                selected_clip_ids_json: "[]".to_string(),
-                artifact_summary: "0 selected artifacts".to_string(),
-                derivative_summary: "0 selected derivatives".to_string(),
-                clip_summary: "0 selected clips".to_string(),
-                chart_context_summary:
-                    "patient Riley PacketHistory; note Follow-up visit [draft r1]".to_string(),
-                context_envelope_json: envelope,
-                clinician_actor: Some("test clinician".to_string()),
-                base_note_revision: Some(note.current_revision),
-                authorized_scope_json: Some(
-                    r#"{"version":1,"categories":["packet_snapshot"]}"#.to_string(),
-                ),
-                expected_output_kind: Some("recommendation".to_string()),
-                workspace_profile: None,
-                plan_schema_version: None,
-                source_checkpoint_id: None,
-                source_checkpoint_sha256: None,
-                readiness_json: None,
-            })
-            .await?
-            .packet;
-        app_server
-            .workspace_agent_run_start(WorkspaceAgentRunStartParams {
-                packet_id: packet.id.clone(),
-                idempotency_key: "historical-replay-test-v1".to_string(),
-                client_id: Some(patient.id.clone()),
-                context_envelope_sha256: Some(packet.context_envelope_sha256.clone()),
-                provider: Some("test-provider".to_string()),
-                model: Some("test-model".to_string()),
-                source_thread_id: Some("thread-historical-replay".to_string()),
-                source_turn_id: None,
-            })
-            .await?;
+            let packet = app_server
+                .workspace_context_packet_create(WorkspaceContextPacketCreateParams {
+                    client_id: patient.id.clone(),
+                    encounter_id: None,
+                    note_id: Some(note.id.clone()),
+                    human_request: request.to_string(),
+                    selected_artifact_ids_json: "[]".to_string(),
+                    selected_derivative_ids_json: "[]".to_string(),
+                    selected_clip_ids_json: "[]".to_string(),
+                    artifact_summary: "0 selected artifacts".to_string(),
+                    derivative_summary: "0 selected derivatives".to_string(),
+                    clip_summary: "0 selected clips".to_string(),
+                    chart_context_summary:
+                        "patient Riley PacketHistory; note Follow-up visit [draft r1]".to_string(),
+                    context_envelope_json: envelope,
+                    clinician_actor: Some("test clinician".to_string()),
+                    base_note_revision: Some(note.current_revision),
+                    authorized_scope_json: Some(
+                        r#"{"version":1,"categories":["packet_snapshot"]}"#.to_string(),
+                    ),
+                    expected_output_kind: Some("recommendation".to_string()),
+                    workspace_profile: None,
+                    plan_schema_version: None,
+                    source_checkpoint_id: None,
+                    source_checkpoint_sha256: None,
+                    readiness_json: None,
+                    workspace_plan_revision_id: None,
+                    workspace_plan_content_sha256: None,
+                    workspace_plan_evidence_manifest_sha256: None,
+                })
+                .await?
+                .packet;
+            app_server
+                .workspace_agent_run_start(WorkspaceAgentRunStartParams {
+                    packet_id: packet.id.clone(),
+                    idempotency_key: "historical-replay-test-v1".to_string(),
+                    client_id: Some(patient.id.clone()),
+                    context_envelope_sha256: Some(packet.context_envelope_sha256.clone()),
+                    expected_workspace_plan_revision_id: None,
+                    expected_workspace_plan_content_sha256: None,
+                    expected_workspace_plan_evidence_manifest_sha256: None,
+                    provider: Some("test-provider".to_string()),
+                    model: Some("test-model".to_string()),
+                    source_thread_id: Some("thread-historical-replay".to_string()),
+                    source_turn_id: None,
+                })
+                .await?;
 
-        app_server
-            .workspace_client_upsert(WorkspaceClientUpsertParams {
-                id: Some(patient.id.clone()),
-                expected_version: Some(patient.version.clone()),
-                display_name: "Riley PacketHistory".to_string(),
-                preferred_name: Some("Riley".to_string()),
-                date_of_birth: Some("1972-04-05".to_string()),
-                sex_or_gender: None,
-                external_id: Some("NEW_FAKE_MEDICARE_SENTINEL".to_string()),
-                record_start_date: Some("2026-06-01".to_string()),
-                record_end_date: None,
-                summary: "NEW_CONTACT_SENTINEL; NEW_MEDICARE_SENTINEL".to_string(),
-                ..Default::default()
-            })
-            .await?;
-        app_server
-            .workspace_note_upsert(WorkspaceNoteUpsertParams {
-                id: Some(note.id.clone()),
-                client_id: patient.id.clone(),
-                encounter_id: None,
-                title: "Follow-up visit".to_string(),
-                kind: "visit_note".to_string(),
-                body: "NEW_NOTE_BODY_SENTINEL: updated after packet send.".to_string(),
-                status: "draft".to_string(),
-                summary: Some("updated note".to_string()),
-            })
-            .await?;
-        app_server
-            .workspace_note_upsert(WorkspaceNoteUpsertParams {
-                id: None,
-                client_id: patient.id.clone(),
-                encounter_id: None,
-                title: "Daily care coordination".to_string(),
-                kind: "care_coordination".to_string(),
-                body: "NEW_RECENT_NOTE_SENTINEL".to_string(),
-                status: "draft".to_string(),
-                summary: Some("new daily note".to_string()),
-            })
-            .await?;
-        app_server
-            .workspace_document_upsert(WorkspaceDocumentUpsertParams {
-                id: None,
-                client_id: patient.id.clone(),
-                encounter_id: None,
-                title: "NEW_MEDICARE_CARD_DOCUMENT_SENTINEL".to_string(),
-                kind: "insurance card".to_string(),
-                local_path: "/tmp/new-medicare-card.pdf".to_string(),
-                notes: "new card metadata after packet send".to_string(),
-                scope: "patient".to_string(),
-                detected_kind: "PDF".to_string(),
-                mime_type: Some("application/pdf".to_string()),
-                file_size_bytes: None,
-                modified_at: None,
-                sha256: None,
-                tags: "coverage".to_string(),
-                source_label: "front desk".to_string(),
-                existence_status: "reference_only".to_string(),
-                metadata_json: "{}".to_string(),
-                original_path: "/tmp/new-medicare-card.pdf".to_string(),
-                reference_kind: "local_reference".to_string(),
-                vault_path: String::new(),
-                content_sha256: None,
-                thumbnail_path: String::new(),
-                thumbnail_status: "none".to_string(),
-                thumbnail_mime_type: None,
-                intake_source: "test_fixture".to_string(),
-                imported_at: None,
-            })
-            .await?;
+            app_server
+                .workspace_client_upsert(WorkspaceClientUpsertParams {
+                    id: Some(patient.id.clone()),
+                    expected_version: Some(patient.version.clone()),
+                    display_name: "Riley PacketHistory".to_string(),
+                    preferred_name: Some("Riley".to_string()),
+                    date_of_birth: Some("1972-04-05".to_string()),
+                    sex_or_gender: None,
+                    external_id: Some("NEW_FAKE_MEDICARE_SENTINEL".to_string()),
+                    record_start_date: Some("2026-06-01".to_string()),
+                    record_end_date: None,
+                    summary: "NEW_CONTACT_SENTINEL; NEW_MEDICARE_SENTINEL".to_string(),
+                    ..Default::default()
+                })
+                .await?;
+            app_server
+                .workspace_note_upsert(WorkspaceNoteUpsertParams {
+                    id: Some(note.id.clone()),
+                    client_id: patient.id.clone(),
+                    encounter_id: None,
+                    title: "Follow-up visit".to_string(),
+                    kind: "visit_note".to_string(),
+                    body: "NEW_NOTE_BODY_SENTINEL: updated after packet send.".to_string(),
+                    status: "draft".to_string(),
+                    summary: Some("updated note".to_string()),
+                })
+                .await?;
+            app_server
+                .workspace_note_upsert(WorkspaceNoteUpsertParams {
+                    id: None,
+                    client_id: patient.id.clone(),
+                    encounter_id: None,
+                    title: "Daily care coordination".to_string(),
+                    kind: "care_coordination".to_string(),
+                    body: "NEW_RECENT_NOTE_SENTINEL".to_string(),
+                    status: "draft".to_string(),
+                    summary: Some("new daily note".to_string()),
+                })
+                .await?;
+            app_server
+                .workspace_document_upsert(WorkspaceDocumentUpsertParams {
+                    id: None,
+                    client_id: patient.id.clone(),
+                    encounter_id: None,
+                    title: "NEW_MEDICARE_CARD_DOCUMENT_SENTINEL".to_string(),
+                    kind: "insurance card".to_string(),
+                    local_path: "/tmp/new-medicare-card.pdf".to_string(),
+                    notes: "new card metadata after packet send".to_string(),
+                    scope: "patient".to_string(),
+                    detected_kind: "PDF".to_string(),
+                    mime_type: Some("application/pdf".to_string()),
+                    file_size_bytes: None,
+                    modified_at: None,
+                    sha256: None,
+                    tags: "coverage".to_string(),
+                    source_label: "front desk".to_string(),
+                    existence_status: "reference_only".to_string(),
+                    metadata_json: "{}".to_string(),
+                    original_path: "/tmp/new-medicare-card.pdf".to_string(),
+                    reference_kind: "local_reference".to_string(),
+                    vault_path: String::new(),
+                    content_sha256: None,
+                    thumbnail_path: String::new(),
+                    thumbnail_status: "none".to_string(),
+                    thumbnail_mime_type: None,
+                    intake_source: "test_fixture".to_string(),
+                    imported_at: None,
+                })
+                .await?;
 
-        let replay = app_server
-            .workspace_context_packet_replay(WorkspaceContextPacketReplayParams {
-                client_id: patient.id.clone(),
-                packet_id: packet.id.clone(),
-                context_envelope_sha256: Some(packet.context_envelope_sha256.clone()),
-            })
-            .await?
-            .replay
-            .expect("historical packet replay should load");
-        assert_eq!(replay.id, packet.id);
-        assert!(
-            replay
-                .context_envelope_json
-                .contains("OLD_CONTACT_SENTINEL")
-        );
-        assert!(
-            replay
-                .context_envelope_json
-                .contains("OLD_MEDICARE_SENTINEL")
-        );
-        assert!(
-            replay
-                .context_envelope_json
-                .contains("OLD_NOTE_BODY_SENTINEL")
-        );
-        assert!(
-            !replay
-                .context_envelope_json
-                .contains("NEW_CONTACT_SENTINEL")
-        );
-        assert!(
-            !replay
-                .context_envelope_json
-                .contains("NEW_MEDICARE_SENTINEL")
-        );
-        assert!(
-            !replay
-                .context_envelope_json
-                .contains("NEW_NOTE_BODY_SENTINEL")
-        );
-        assert!(
-            !replay
-                .context_envelope_json
-                .contains("NEW_RECENT_NOTE_SENTINEL")
-        );
-        assert!(
-            !replay
-                .context_envelope_json
-                .contains("NEW_MEDICARE_CARD_DOCUMENT_SENTINEL")
-        );
+            let replay = app_server
+                .workspace_context_packet_replay(WorkspaceContextPacketReplayParams {
+                    client_id: patient.id.clone(),
+                    packet_id: packet.id.clone(),
+                    context_envelope_sha256: Some(packet.context_envelope_sha256.clone()),
+                })
+                .await?
+                .replay
+                .expect("historical packet replay should load");
+            assert_eq!(replay.id, packet.id);
+            assert!(
+                replay
+                    .context_envelope_json
+                    .contains("OLD_CONTACT_SENTINEL")
+            );
+            assert!(
+                replay
+                    .context_envelope_json
+                    .contains("OLD_MEDICARE_SENTINEL")
+            );
+            assert!(
+                replay
+                    .context_envelope_json
+                    .contains("OLD_NOTE_BODY_SENTINEL")
+            );
+            assert!(
+                !replay
+                    .context_envelope_json
+                    .contains("NEW_CONTACT_SENTINEL")
+            );
+            assert!(
+                !replay
+                    .context_envelope_json
+                    .contains("NEW_MEDICARE_SENTINEL")
+            );
+            assert!(
+                !replay
+                    .context_envelope_json
+                    .contains("NEW_NOTE_BODY_SENTINEL")
+            );
+            assert!(
+                !replay
+                    .context_envelope_json
+                    .contains("NEW_RECENT_NOTE_SENTINEL")
+            );
+            assert!(
+                !replay
+                    .context_envelope_json
+                    .contains("NEW_MEDICARE_CARD_DOCUMENT_SENTINEL")
+            );
 
-        let current_context = app_server
-            .workspace_context_get(WorkspaceContextGetParams {
-                client_id: patient.id,
-                note_id: Some(note.id),
-                include_documents: Some(true),
-            })
-            .await?
-            .context
-            .expect("current chart context should load after updates");
-        assert_eq!(
-            current_context.client.external_id.as_deref(),
-            Some("NEW_FAKE_MEDICARE_SENTINEL")
-        );
-        assert!(
-            current_context
-                .client
-                .summary
-                .contains("NEW_CONTACT_SENTINEL")
-        );
-        assert!(
-            current_context
-                .active_note
-                .as_ref()
-                .is_some_and(|note| note.body.contains("NEW_NOTE_BODY_SENTINEL"))
-        );
-        assert!(
-            current_context
-                .recent_notes
-                .iter()
-                .any(|note| note.title == "Daily care coordination")
-        );
-        assert!(
-            current_context
-                .documents
-                .iter()
-                .any(|document| document.title == "NEW_MEDICARE_CARD_DOCUMENT_SENTINEL")
-        );
+            let current_context = app_server
+                .workspace_context_get(WorkspaceContextGetParams {
+                    client_id: patient.id,
+                    note_id: Some(note.id),
+                    include_documents: Some(true),
+                })
+                .await?
+                .context
+                .expect("current chart context should load after updates");
+            assert_eq!(
+                current_context.client.external_id.as_deref(),
+                Some("NEW_FAKE_MEDICARE_SENTINEL")
+            );
+            assert!(
+                current_context
+                    .client
+                    .summary
+                    .contains("NEW_CONTACT_SENTINEL")
+            );
+            assert!(
+                current_context
+                    .active_note
+                    .as_ref()
+                    .is_some_and(|note| note.body.contains("NEW_NOTE_BODY_SENTINEL"))
+            );
+            assert!(
+                current_context
+                    .recent_notes
+                    .iter()
+                    .any(|note| note.title == "Daily care coordination")
+            );
+            assert!(
+                current_context
+                    .documents
+                    .iter()
+                    .any(|document| document.title == "NEW_MEDICARE_CARD_DOCUMENT_SENTINEL")
+            );
 
-        app_server.shutdown().await?;
-        Ok(())
-    }))
+            app_server.shutdown().await?;
+            Ok(())
+        })
+    })
 }
 
 #[test]
 fn workspace_context_get_handles_missing_and_cross_client_ids_safely() -> Result<()> {
-    run_workspace_dashboard_runtime_test(Box::pin(async {
-        let mut app = make_test_app().await;
-        let codex_home = tempdir()?;
-        app.config.codex_home = codex_home.path().to_path_buf().abs();
-        app.config.sqlite_home = codex_home.path().to_path_buf();
+    run_workspace_dashboard_runtime_test(|| {
+        Box::pin(async {
+            let mut app = make_test_app().await;
+            let codex_home = tempdir()?;
+            app.config.codex_home = codex_home.path().to_path_buf().abs();
+            app.config.sqlite_home = codex_home.path().to_path_buf();
 
-        let mut app_server =
-            Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
-        let client_a = app_server
-            .workspace_client_upsert(WorkspaceClientUpsertParams {
-                id: None,
-                display_name: "Client A".to_string(),
-                preferred_name: None,
-                date_of_birth: None,
-                sex_or_gender: None,
-                external_id: None,
-                record_start_date: Some("2026-01-01".to_string()),
-                record_end_date: None,
-                summary: String::new(),
-                ..Default::default()
-            })
-            .await?
-            .client;
-        let client_b = app_server
-            .workspace_client_upsert(WorkspaceClientUpsertParams {
-                id: None,
-                display_name: "Client B".to_string(),
-                preferred_name: None,
-                date_of_birth: None,
-                sex_or_gender: None,
-                external_id: None,
-                record_start_date: None,
-                record_end_date: None,
-                summary: String::new(),
-                ..Default::default()
-            })
-            .await?
-            .client;
-        let note_a = app_server
-            .workspace_note_upsert(WorkspaceNoteUpsertParams {
-                id: None,
-                client_id: client_a.id.clone(),
-                encounter_id: None,
-                title: "Client A note".to_string(),
-                kind: "note".to_string(),
-                body: "Do not leak into Client B context.".to_string(),
-                status: "draft".to_string(),
-                summary: None,
-            })
-            .await?
-            .note;
-        app_server
-            .workspace_document_upsert(WorkspaceDocumentUpsertParams {
-                id: None,
-                client_id: client_b.id.clone(),
-                encounter_id: None,
-                title: "Client B document".to_string(),
-                kind: "document".to_string(),
-                local_path: "/tmp/client-b.pdf".to_string(),
-                notes: String::new(),
-                scope: "patient".to_string(),
-                detected_kind: "PDF".to_string(),
-                mime_type: Some("application/pdf".to_string()),
-                file_size_bytes: None,
-                modified_at: None,
-                sha256: None,
-                tags: String::new(),
-                source_label: String::new(),
-                existence_status: "unknown".to_string(),
-                metadata_json: "{}".to_string(),
-                original_path: "/tmp/client-b.pdf".to_string(),
-                reference_kind: "local_reference".to_string(),
-                vault_path: String::new(),
-                content_sha256: None,
-                thumbnail_path: String::new(),
-                thumbnail_status: "none".to_string(),
-                thumbnail_mime_type: None,
-                intake_source: "test_fixture".to_string(),
-                imported_at: None,
-            })
-            .await?;
+            let mut app_server =
+                Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
+            let client_a = app_server
+                .workspace_client_upsert(WorkspaceClientUpsertParams {
+                    id: None,
+                    display_name: "Client A".to_string(),
+                    preferred_name: None,
+                    date_of_birth: None,
+                    sex_or_gender: None,
+                    external_id: None,
+                    record_start_date: Some("2026-01-01".to_string()),
+                    record_end_date: None,
+                    summary: String::new(),
+                    ..Default::default()
+                })
+                .await?
+                .client;
+            let client_b = app_server
+                .workspace_client_upsert(WorkspaceClientUpsertParams {
+                    id: None,
+                    display_name: "Client B".to_string(),
+                    preferred_name: None,
+                    date_of_birth: None,
+                    sex_or_gender: None,
+                    external_id: None,
+                    record_start_date: None,
+                    record_end_date: None,
+                    summary: String::new(),
+                    ..Default::default()
+                })
+                .await?
+                .client;
+            let note_a = app_server
+                .workspace_note_upsert(WorkspaceNoteUpsertParams {
+                    id: None,
+                    client_id: client_a.id.clone(),
+                    encounter_id: None,
+                    title: "Client A note".to_string(),
+                    kind: "note".to_string(),
+                    body: "Do not leak into Client B context.".to_string(),
+                    status: "draft".to_string(),
+                    summary: None,
+                })
+                .await?
+                .note;
+            app_server
+                .workspace_document_upsert(WorkspaceDocumentUpsertParams {
+                    id: None,
+                    client_id: client_b.id.clone(),
+                    encounter_id: None,
+                    title: "Client B document".to_string(),
+                    kind: "document".to_string(),
+                    local_path: "/tmp/client-b.pdf".to_string(),
+                    notes: String::new(),
+                    scope: "patient".to_string(),
+                    detected_kind: "PDF".to_string(),
+                    mime_type: Some("application/pdf".to_string()),
+                    file_size_bytes: None,
+                    modified_at: None,
+                    sha256: None,
+                    tags: String::new(),
+                    source_label: String::new(),
+                    existence_status: "unknown".to_string(),
+                    metadata_json: "{}".to_string(),
+                    original_path: "/tmp/client-b.pdf".to_string(),
+                    reference_kind: "local_reference".to_string(),
+                    vault_path: String::new(),
+                    content_sha256: None,
+                    thumbnail_path: String::new(),
+                    thumbnail_status: "none".to_string(),
+                    thumbnail_mime_type: None,
+                    intake_source: "test_fixture".to_string(),
+                    imported_at: None,
+                })
+                .await?;
 
-        let missing = app_server
-            .workspace_context_get(WorkspaceContextGetParams {
-                client_id: "missing-client".to_string(),
-                note_id: None,
-                include_documents: Some(true),
-            })
-            .await?;
-        assert!(missing.context.is_none());
+            let missing = app_server
+                .workspace_context_get(WorkspaceContextGetParams {
+                    client_id: "missing-client".to_string(),
+                    note_id: None,
+                    include_documents: Some(true),
+                })
+                .await?;
+            assert!(missing.context.is_none());
 
-        let cross_client = app_server
-            .workspace_context_get(WorkspaceContextGetParams {
-                client_id: client_b.id.clone(),
-                note_id: Some(note_a.id.clone()),
-                include_documents: Some(false),
-            })
-            .await?;
-        let context = cross_client
-            .context
-            .expect("existing client context should load");
+            let cross_client = app_server
+                .workspace_context_get(WorkspaceContextGetParams {
+                    client_id: client_b.id.clone(),
+                    note_id: Some(note_a.id.clone()),
+                    include_documents: Some(false),
+                })
+                .await?;
+            let context = cross_client
+                .context
+                .expect("existing client context should load");
 
-        assert_eq!(context.client.id, client_b.id);
-        assert!(context.active_note.is_none());
-        assert!(context.recent_notes.iter().all(|note| note.id != note_a.id));
-        assert!(context.documents.is_empty());
+            assert_eq!(context.client.id, client_b.id);
+            assert!(context.active_note.is_none());
+            assert!(context.recent_notes.iter().all(|note| note.id != note_a.id));
+            assert!(context.documents.is_empty());
 
-        app_server.shutdown().await?;
-        Ok(())
-    }))
+            app_server.shutdown().await?;
+            Ok(())
+        })
+    })
 }
 
 #[test]
 fn workspace_context_packet_replay_is_packet_scoped_and_hash_guarded() -> Result<()> {
-    run_workspace_dashboard_runtime_test(Box::pin(async {
-        let mut app = make_test_app().await;
-        let codex_home = tempdir()?;
-        app.config.codex_home = codex_home.path().to_path_buf().abs();
-        app.config.sqlite_home = codex_home.path().to_path_buf();
+    run_workspace_dashboard_runtime_test(|| {
+        Box::pin(async {
+            let mut app = make_test_app().await;
+            let codex_home = tempdir()?;
+            app.config.codex_home = codex_home.path().to_path_buf().abs();
+            app.config.sqlite_home = codex_home.path().to_path_buf();
 
-        let mut app_server =
-            Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
-        let client_a = app_server
-            .workspace_client_upsert(WorkspaceClientUpsertParams {
-                id: None,
-                display_name: "Client A".to_string(),
-                preferred_name: None,
-                date_of_birth: None,
-                sex_or_gender: None,
-                external_id: None,
-                record_start_date: None,
-                record_end_date: None,
-                summary: String::new(),
-                ..Default::default()
-            })
-            .await?
-            .client;
-        let client_b = app_server
-            .workspace_client_upsert(WorkspaceClientUpsertParams {
-                id: None,
-                display_name: "Client B".to_string(),
-                preferred_name: None,
-                date_of_birth: None,
-                sex_or_gender: None,
-                external_id: None,
-                record_start_date: None,
-                record_end_date: None,
-                summary: "OTHER_CLIENT_RECORD_SENTINEL".to_string(),
-                ..Default::default()
-            })
-            .await?
-            .client;
-        let note_a = app_server
-            .workspace_note_upsert(WorkspaceNoteUpsertParams {
-                id: None,
-                client_id: client_a.id.clone(),
-                encounter_id: None,
-                title: "Client A note".to_string(),
-                kind: "note".to_string(),
-                body: "Selected packet safe fake note.".to_string(),
-                status: "draft".to_string(),
-                summary: None,
-            })
-            .await?
-            .note;
-        let note_b = app_server
-            .workspace_note_upsert(WorkspaceNoteUpsertParams {
-                id: None,
-                client_id: client_b.id.clone(),
-                encounter_id: None,
-                title: "Client B note".to_string(),
-                kind: "note".to_string(),
-                body: "OTHER_CLIENT_NOTE_SENTINEL".to_string(),
-                status: "draft".to_string(),
-                summary: None,
-            })
-            .await?
-            .note;
-        app_server
-            .workspace_document_upsert(WorkspaceDocumentUpsertParams {
-                id: None,
-                client_id: client_a.id.clone(),
-                encounter_id: None,
-                title: "UNSELECTED_ARTIFACT_TITLE_SENTINEL".to_string(),
-                kind: "document".to_string(),
-                local_path: "/tmp/unselected-sentinel.pdf".to_string(),
-                notes: "UNSELECTED_ARTIFACT_NOTES_SENTINEL".to_string(),
-                scope: "patient".to_string(),
-                detected_kind: "PDF".to_string(),
-                mime_type: Some("application/pdf".to_string()),
-                file_size_bytes: None,
-                modified_at: None,
-                sha256: None,
-                tags: String::new(),
-                source_label: String::new(),
-                existence_status: "unknown".to_string(),
-                metadata_json: "{}".to_string(),
-                original_path: "/tmp/unselected-sentinel.pdf".to_string(),
-                reference_kind: "local_reference".to_string(),
-                vault_path: String::new(),
-                content_sha256: None,
-                thumbnail_path: String::new(),
-                thumbnail_status: "none".to_string(),
-                thumbnail_mime_type: None,
-                intake_source: "test_fixture".to_string(),
-                imported_at: None,
-            })
-            .await?;
+            let mut app_server =
+                Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
+            let client_a = app_server
+                .workspace_client_upsert(WorkspaceClientUpsertParams {
+                    id: None,
+                    display_name: "Client A".to_string(),
+                    preferred_name: None,
+                    date_of_birth: None,
+                    sex_or_gender: None,
+                    external_id: None,
+                    record_start_date: None,
+                    record_end_date: None,
+                    summary: String::new(),
+                    ..Default::default()
+                })
+                .await?
+                .client;
+            let client_b = app_server
+                .workspace_client_upsert(WorkspaceClientUpsertParams {
+                    id: None,
+                    display_name: "Client B".to_string(),
+                    preferred_name: None,
+                    date_of_birth: None,
+                    sex_or_gender: None,
+                    external_id: None,
+                    record_start_date: None,
+                    record_end_date: None,
+                    summary: "OTHER_CLIENT_RECORD_SENTINEL".to_string(),
+                    ..Default::default()
+                })
+                .await?
+                .client;
+            let note_a = app_server
+                .workspace_note_upsert(WorkspaceNoteUpsertParams {
+                    id: None,
+                    client_id: client_a.id.clone(),
+                    encounter_id: None,
+                    title: "Client A note".to_string(),
+                    kind: "note".to_string(),
+                    body: "Selected packet safe fake note.".to_string(),
+                    status: "draft".to_string(),
+                    summary: None,
+                })
+                .await?
+                .note;
+            let note_b = app_server
+                .workspace_note_upsert(WorkspaceNoteUpsertParams {
+                    id: None,
+                    client_id: client_b.id.clone(),
+                    encounter_id: None,
+                    title: "Client B note".to_string(),
+                    kind: "note".to_string(),
+                    body: "OTHER_CLIENT_NOTE_SENTINEL".to_string(),
+                    status: "draft".to_string(),
+                    summary: None,
+                })
+                .await?
+                .note;
+            app_server
+                .workspace_document_upsert(WorkspaceDocumentUpsertParams {
+                    id: None,
+                    client_id: client_a.id.clone(),
+                    encounter_id: None,
+                    title: "UNSELECTED_ARTIFACT_TITLE_SENTINEL".to_string(),
+                    kind: "document".to_string(),
+                    local_path: "/tmp/unselected-sentinel.pdf".to_string(),
+                    notes: "UNSELECTED_ARTIFACT_NOTES_SENTINEL".to_string(),
+                    scope: "patient".to_string(),
+                    detected_kind: "PDF".to_string(),
+                    mime_type: Some("application/pdf".to_string()),
+                    file_size_bytes: None,
+                    modified_at: None,
+                    sha256: None,
+                    tags: String::new(),
+                    source_label: String::new(),
+                    existence_status: "unknown".to_string(),
+                    metadata_json: "{}".to_string(),
+                    original_path: "/tmp/unselected-sentinel.pdf".to_string(),
+                    reference_kind: "local_reference".to_string(),
+                    vault_path: String::new(),
+                    content_sha256: None,
+                    thumbnail_path: String::new(),
+                    thumbnail_status: "none".to_string(),
+                    thumbnail_mime_type: None,
+                    intake_source: "test_fixture".to_string(),
+                    imported_at: None,
+                })
+                .await?;
 
-        let envelope = |human_request: &str, prompt_snapshot: &str| {
-            serde_json::json!({
+            let envelope = |human_request: &str, prompt_snapshot: &str| {
+                serde_json::json!({
                 "assemblyVersion": "test-v1",
                 "sourceMode": "ctrl_g_handoff",
                 "includeDocuments": false,
@@ -8850,603 +9114,634 @@ fn workspace_context_packet_replay_is_packet_scoped_and_hash_guarded() -> Result
                 ]
             })
             .to_string()
-        };
-        let packet_a = app_server
-            .workspace_context_packet_create(WorkspaceContextPacketCreateParams {
-                client_id: client_a.id.clone(),
-                encounter_id: None,
-                note_id: Some(note_a.id.clone()),
-                human_request: "Review selected safe packet.".to_string(),
-                selected_artifact_ids_json: "[]".to_string(),
-                selected_derivative_ids_json: "[]".to_string(),
-                selected_clip_ids_json: "[]".to_string(),
-                artifact_summary: "0 selected artifacts".to_string(),
-                derivative_summary: "0 selected derivatives".to_string(),
-                clip_summary: "0 selected clips".to_string(),
-                chart_context_summary: "packet scoped safe fake chart".to_string(),
-                context_envelope_json: envelope(
-                    "Review selected safe packet.",
-                    "SELECTED_PACKET_SAFE_SENTINEL",
-                ),
-                clinician_actor: Some("test clinician".to_string()),
-                base_note_revision: Some(note_a.current_revision),
-                authorized_scope_json: Some(
-                    r#"{"version":1,"categories":["packet_snapshot"]}"#.to_string(),
-                ),
-                expected_output_kind: Some("recommendation".to_string()),
-                workspace_profile: None,
-                plan_schema_version: None,
-                source_checkpoint_id: None,
-                source_checkpoint_sha256: None,
-                readiness_json: None,
-            })
-            .await?
-            .packet;
-        let packet_b = app_server
-            .workspace_context_packet_create(WorkspaceContextPacketCreateParams {
-                client_id: client_b.id.clone(),
-                encounter_id: None,
-                note_id: Some(note_b.id.clone()),
-                human_request: "OTHER_CLIENT_PACKET_SENTINEL".to_string(),
-                selected_artifact_ids_json: "[]".to_string(),
-                selected_derivative_ids_json: "[]".to_string(),
-                selected_clip_ids_json: "[]".to_string(),
-                artifact_summary: "0 selected artifacts".to_string(),
-                derivative_summary: "0 selected derivatives".to_string(),
-                clip_summary: "0 selected clips".to_string(),
-                chart_context_summary: "another client packet".to_string(),
-                context_envelope_json: envelope(
-                    "OTHER_CLIENT_PACKET_SENTINEL",
-                    "OTHER_CLIENT_PACKET_SENTINEL",
-                ),
-                clinician_actor: Some("test clinician".to_string()),
-                base_note_revision: Some(note_b.current_revision),
-                authorized_scope_json: Some(
-                    r#"{"version":1,"categories":["packet_snapshot"]}"#.to_string(),
-                ),
-                expected_output_kind: Some("recommendation".to_string()),
-                workspace_profile: None,
-                plan_schema_version: None,
-                source_checkpoint_id: None,
-                source_checkpoint_sha256: None,
-                readiness_json: None,
-            })
-            .await?
-            .packet;
-        app_server
-            .workspace_agent_run_start(WorkspaceAgentRunStartParams {
-                packet_id: packet_a.id.clone(),
-                idempotency_key: "packet-scoped-replay-test-v1".to_string(),
-                client_id: Some(client_a.id.clone()),
-                context_envelope_sha256: Some(packet_a.context_envelope_sha256.clone()),
-                provider: Some("test-provider".to_string()),
-                model: Some("test-model".to_string()),
-                source_thread_id: Some("thread-packet-scoped-replay".to_string()),
-                source_turn_id: None,
-            })
-            .await?;
+            };
+            let packet_a = app_server
+                .workspace_context_packet_create(WorkspaceContextPacketCreateParams {
+                    client_id: client_a.id.clone(),
+                    encounter_id: None,
+                    note_id: Some(note_a.id.clone()),
+                    human_request: "Review selected safe packet.".to_string(),
+                    selected_artifact_ids_json: "[]".to_string(),
+                    selected_derivative_ids_json: "[]".to_string(),
+                    selected_clip_ids_json: "[]".to_string(),
+                    artifact_summary: "0 selected artifacts".to_string(),
+                    derivative_summary: "0 selected derivatives".to_string(),
+                    clip_summary: "0 selected clips".to_string(),
+                    chart_context_summary: "packet scoped safe fake chart".to_string(),
+                    context_envelope_json: envelope(
+                        "Review selected safe packet.",
+                        "SELECTED_PACKET_SAFE_SENTINEL",
+                    ),
+                    clinician_actor: Some("test clinician".to_string()),
+                    base_note_revision: Some(note_a.current_revision),
+                    authorized_scope_json: Some(
+                        r#"{"version":1,"categories":["packet_snapshot"]}"#.to_string(),
+                    ),
+                    expected_output_kind: Some("recommendation".to_string()),
+                    workspace_profile: None,
+                    plan_schema_version: None,
+                    source_checkpoint_id: None,
+                    source_checkpoint_sha256: None,
+                    readiness_json: None,
+                    workspace_plan_revision_id: None,
+                    workspace_plan_content_sha256: None,
+                    workspace_plan_evidence_manifest_sha256: None,
+                })
+                .await?
+                .packet;
+            let packet_b = app_server
+                .workspace_context_packet_create(WorkspaceContextPacketCreateParams {
+                    client_id: client_b.id.clone(),
+                    encounter_id: None,
+                    note_id: Some(note_b.id.clone()),
+                    human_request: "OTHER_CLIENT_PACKET_SENTINEL".to_string(),
+                    selected_artifact_ids_json: "[]".to_string(),
+                    selected_derivative_ids_json: "[]".to_string(),
+                    selected_clip_ids_json: "[]".to_string(),
+                    artifact_summary: "0 selected artifacts".to_string(),
+                    derivative_summary: "0 selected derivatives".to_string(),
+                    clip_summary: "0 selected clips".to_string(),
+                    chart_context_summary: "another client packet".to_string(),
+                    context_envelope_json: envelope(
+                        "OTHER_CLIENT_PACKET_SENTINEL",
+                        "OTHER_CLIENT_PACKET_SENTINEL",
+                    ),
+                    clinician_actor: Some("test clinician".to_string()),
+                    base_note_revision: Some(note_b.current_revision),
+                    authorized_scope_json: Some(
+                        r#"{"version":1,"categories":["packet_snapshot"]}"#.to_string(),
+                    ),
+                    expected_output_kind: Some("recommendation".to_string()),
+                    workspace_profile: None,
+                    plan_schema_version: None,
+                    source_checkpoint_id: None,
+                    source_checkpoint_sha256: None,
+                    readiness_json: None,
+                    workspace_plan_revision_id: None,
+                    workspace_plan_content_sha256: None,
+                    workspace_plan_evidence_manifest_sha256: None,
+                })
+                .await?
+                .packet;
+            app_server
+                .workspace_agent_run_start(WorkspaceAgentRunStartParams {
+                    packet_id: packet_a.id.clone(),
+                    idempotency_key: "packet-scoped-replay-test-v1".to_string(),
+                    client_id: Some(client_a.id.clone()),
+                    context_envelope_sha256: Some(packet_a.context_envelope_sha256.clone()),
+                    expected_workspace_plan_revision_id: None,
+                    expected_workspace_plan_content_sha256: None,
+                    expected_workspace_plan_evidence_manifest_sha256: None,
+                    provider: Some("test-provider".to_string()),
+                    model: Some("test-model".to_string()),
+                    source_thread_id: Some("thread-packet-scoped-replay".to_string()),
+                    source_turn_id: None,
+                })
+                .await?;
 
-        let broad_context = app_server
-            .workspace_context_get(WorkspaceContextGetParams {
-                client_id: client_a.id.clone(),
-                note_id: Some(note_a.id.clone()),
-                include_documents: Some(true),
-            })
-            .await?
-            .context
-            .expect("broad dashboard context should load");
-        assert!(
-            broad_context
-                .documents
-                .iter()
-                .any(|document| document.title == "UNSELECTED_ARTIFACT_TITLE_SENTINEL")
-        );
+            let broad_context = app_server
+                .workspace_context_get(WorkspaceContextGetParams {
+                    client_id: client_a.id.clone(),
+                    note_id: Some(note_a.id.clone()),
+                    include_documents: Some(true),
+                })
+                .await?
+                .context
+                .expect("broad dashboard context should load");
+            assert!(
+                broad_context
+                    .documents
+                    .iter()
+                    .any(|document| document.title == "UNSELECTED_ARTIFACT_TITLE_SENTINEL")
+            );
 
-        let replay = app_server
-            .workspace_context_packet_replay(WorkspaceContextPacketReplayParams {
-                client_id: client_a.id.clone(),
-                packet_id: packet_a.id.clone(),
-                context_envelope_sha256: Some(packet_a.context_envelope_sha256.clone()),
-            })
-            .await?
-            .replay
-            .expect("packet-scoped replay should load");
-        assert_eq!(replay.id, packet_a.id);
-        assert_eq!(
-            replay.context_envelope_sha256,
-            packet_a.context_envelope_sha256
-        );
-        assert!(
-            replay
-                .context_envelope_json
-                .contains("SELECTED_PACKET_SAFE_SENTINEL")
-        );
-        assert!(!replay.context_envelope_json.contains("UNSELECTED_ARTIFACT"));
-        assert!(!replay.context_envelope_json.contains("OTHER_CLIENT"));
+            let replay = app_server
+                .workspace_context_packet_replay(WorkspaceContextPacketReplayParams {
+                    client_id: client_a.id.clone(),
+                    packet_id: packet_a.id.clone(),
+                    context_envelope_sha256: Some(packet_a.context_envelope_sha256.clone()),
+                })
+                .await?
+                .replay
+                .expect("packet-scoped replay should load");
+            assert_eq!(replay.id, packet_a.id);
+            assert_eq!(
+                replay.context_envelope_sha256,
+                packet_a.context_envelope_sha256
+            );
+            assert!(
+                replay
+                    .context_envelope_json
+                    .contains("SELECTED_PACKET_SAFE_SENTINEL")
+            );
+            assert!(!replay.context_envelope_json.contains("UNSELECTED_ARTIFACT"));
+            assert!(!replay.context_envelope_json.contains("OTHER_CLIENT"));
 
-        let wrong_hash = app_server
-            .workspace_context_packet_replay(WorkspaceContextPacketReplayParams {
-                client_id: client_a.id.clone(),
-                packet_id: packet_a.id.clone(),
-                context_envelope_sha256: Some("wrong-envelope-hash".to_string()),
-            })
-            .await?
-            .replay;
-        assert!(wrong_hash.is_none());
+            let wrong_hash = app_server
+                .workspace_context_packet_replay(WorkspaceContextPacketReplayParams {
+                    client_id: client_a.id.clone(),
+                    packet_id: packet_a.id.clone(),
+                    context_envelope_sha256: Some("wrong-envelope-hash".to_string()),
+                })
+                .await?
+                .replay;
+            assert!(wrong_hash.is_none());
 
-        let wrong_client = app_server
-            .workspace_context_packet_replay(WorkspaceContextPacketReplayParams {
-                client_id: client_b.id.clone(),
-                packet_id: packet_a.id.clone(),
-                context_envelope_sha256: Some(packet_a.context_envelope_sha256.clone()),
-            })
-            .await?
-            .replay;
-        assert!(wrong_client.is_none());
+            let wrong_client = app_server
+                .workspace_context_packet_replay(WorkspaceContextPacketReplayParams {
+                    client_id: client_b.id.clone(),
+                    packet_id: packet_a.id.clone(),
+                    context_envelope_sha256: Some(packet_a.context_envelope_sha256.clone()),
+                })
+                .await?
+                .replay;
+            assert!(wrong_client.is_none());
 
-        let other_client_packet = app_server
-            .workspace_context_packet_replay(WorkspaceContextPacketReplayParams {
-                client_id: client_a.id,
-                packet_id: packet_b.id,
-                context_envelope_sha256: Some(packet_b.context_envelope_sha256),
-            })
-            .await?
-            .replay;
-        assert!(other_client_packet.is_none());
+            let other_client_packet = app_server
+                .workspace_context_packet_replay(WorkspaceContextPacketReplayParams {
+                    client_id: client_a.id,
+                    packet_id: packet_b.id,
+                    context_envelope_sha256: Some(packet_b.context_envelope_sha256),
+                })
+                .await?
+                .replay;
+            assert!(other_client_packet.is_none());
 
-        let missing_client_id = app_server
-            .workspace_context_packet_replay(WorkspaceContextPacketReplayParams {
-                client_id: String::new(),
-                packet_id: packet_a.id,
-                context_envelope_sha256: None,
-            })
-            .await
-            .expect_err("missing client id should be rejected")
-            .to_string();
-        assert!(missing_client_id.contains("workspace/context/packet/replay"));
+            let missing_client_id = app_server
+                .workspace_context_packet_replay(WorkspaceContextPacketReplayParams {
+                    client_id: String::new(),
+                    packet_id: packet_a.id,
+                    context_envelope_sha256: None,
+                })
+                .await
+                .expect_err("missing client id should be rejected")
+                .to_string();
+            assert!(missing_client_id.contains("workspace/context/packet/replay"));
 
-        app_server.shutdown().await?;
-        Ok(())
-    }))
+            app_server.shutdown().await?;
+            Ok(())
+        })
+    })
 }
 
 #[test]
 fn workspace_task_api_scopes_by_client() -> Result<()> {
-    run_workspace_dashboard_runtime_test(Box::pin(async {
-        let mut app = make_test_app().await;
-        let codex_home = tempdir()?;
-        app.config.codex_home = codex_home.path().to_path_buf().abs();
-        app.config.sqlite_home = codex_home.path().to_path_buf();
+    run_workspace_dashboard_runtime_test(|| {
+        Box::pin(async {
+            let mut app = make_test_app().await;
+            let codex_home = tempdir()?;
+            app.config.codex_home = codex_home.path().to_path_buf().abs();
+            app.config.sqlite_home = codex_home.path().to_path_buf();
 
-        let mut app_server =
-            Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
-        let client_a = app_server
-            .workspace_client_upsert(WorkspaceClientUpsertParams {
-                id: None,
-                display_name: "Client A".to_string(),
-                preferred_name: None,
-                date_of_birth: None,
-                sex_or_gender: None,
-                external_id: None,
-                record_start_date: None,
-                record_end_date: None,
-                summary: String::new(),
-                ..Default::default()
-            })
-            .await?
-            .client;
-        let client_b = app_server
-            .workspace_client_upsert(WorkspaceClientUpsertParams {
-                id: None,
-                display_name: "Client B".to_string(),
-                preferred_name: None,
-                date_of_birth: None,
-                sex_or_gender: None,
-                external_id: None,
-                record_start_date: None,
-                record_end_date: None,
-                summary: String::new(),
-                ..Default::default()
-            })
-            .await?
-            .client;
-        let task = app_server
-            .workspace_task_upsert(WorkspaceTaskUpsertParams {
-                id: None,
-                client_id: client_a.id.clone(),
-                encounter_id: None,
-                note_id: None,
-                document_id: None,
-                title: "Client A follow-up".to_string(),
-                details: "Call with scheduling options.".to_string(),
-                kind: "follow-up".to_string(),
-                status: WorkspaceTaskStatus::Open,
-                priority: WorkspaceTaskPriority::High,
-                due_date: Some("2026-06-12".to_string()),
-                assigned_to: Some("local staff".to_string()),
-            })
-            .await?
-            .task;
+            let mut app_server =
+                Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
+            let client_a = app_server
+                .workspace_client_upsert(WorkspaceClientUpsertParams {
+                    id: None,
+                    display_name: "Client A".to_string(),
+                    preferred_name: None,
+                    date_of_birth: None,
+                    sex_or_gender: None,
+                    external_id: None,
+                    record_start_date: None,
+                    record_end_date: None,
+                    summary: String::new(),
+                    ..Default::default()
+                })
+                .await?
+                .client;
+            let client_b = app_server
+                .workspace_client_upsert(WorkspaceClientUpsertParams {
+                    id: None,
+                    display_name: "Client B".to_string(),
+                    preferred_name: None,
+                    date_of_birth: None,
+                    sex_or_gender: None,
+                    external_id: None,
+                    record_start_date: None,
+                    record_end_date: None,
+                    summary: String::new(),
+                    ..Default::default()
+                })
+                .await?
+                .client;
+            let task = app_server
+                .workspace_task_upsert(WorkspaceTaskUpsertParams {
+                    id: None,
+                    client_id: client_a.id.clone(),
+                    encounter_id: None,
+                    note_id: None,
+                    document_id: None,
+                    title: "Client A follow-up".to_string(),
+                    details: "Call with scheduling options.".to_string(),
+                    kind: "follow-up".to_string(),
+                    status: WorkspaceTaskStatus::Open,
+                    priority: WorkspaceTaskPriority::High,
+                    due_date: Some("2026-06-12".to_string()),
+                    assigned_to: Some("local staff".to_string()),
+                })
+                .await?
+                .task;
 
-        assert_eq!(
-            app_server
-                .workspace_task_list(client_a.id.clone())
+            assert_eq!(
+                app_server
+                    .workspace_task_list(client_a.id.clone())
+                    .await?
+                    .tasks,
+                vec![task.clone()]
+            );
+            assert!(
+                app_server
+                    .workspace_task_list(client_b.id.clone())
+                    .await?
+                    .tasks
+                    .is_empty()
+            );
+            let context = app_server
+                .workspace_context_get(WorkspaceContextGetParams {
+                    client_id: client_a.id.clone(),
+                    note_id: None,
+                    include_documents: Some(false),
+                })
                 .await?
-                .tasks,
-            vec![task.clone()]
-        );
-        assert!(
-            app_server
-                .workspace_task_list(client_b.id.clone())
-                .await?
-                .tasks
-                .is_empty()
-        );
-        let context = app_server
-            .workspace_context_get(WorkspaceContextGetParams {
-                client_id: client_a.id.clone(),
-                note_id: None,
-                include_documents: Some(false),
-            })
-            .await?
-            .context
-            .expect("client context should load");
-        assert_eq!(context.tasks.len(), 1);
-        assert_eq!(context.tasks[0].id, task.id);
-        assert_eq!(context.tasks[0].title, "Client A follow-up");
-        let cross_client = app_server
-            .workspace_task_status_update(WorkspaceTaskStatusUpdateParams {
-                client_id: client_b.id,
-                task_id: task.id.clone(),
-                status: WorkspaceTaskStatus::Done,
-            })
-            .await?;
-        assert!(cross_client.task.is_none());
-        assert_eq!(
-            app_server
-                .workspace_task_list(client_a.id)
-                .await?
-                .tasks
-                .first()
-                .map(|task| task.status),
-            Some(WorkspaceTaskStatus::Open)
-        );
+                .context
+                .expect("client context should load");
+            assert_eq!(context.tasks.len(), 1);
+            assert_eq!(context.tasks[0].id, task.id);
+            assert_eq!(context.tasks[0].title, "Client A follow-up");
+            let cross_client = app_server
+                .workspace_task_status_update(WorkspaceTaskStatusUpdateParams {
+                    client_id: client_b.id,
+                    task_id: task.id.clone(),
+                    status: WorkspaceTaskStatus::Done,
+                })
+                .await?;
+            assert!(cross_client.task.is_none());
+            assert_eq!(
+                app_server
+                    .workspace_task_list(client_a.id)
+                    .await?
+                    .tasks
+                    .first()
+                    .map(|task| task.status),
+                Some(WorkspaceTaskStatus::Open)
+            );
 
-        app_server.shutdown().await?;
-        Ok(())
-    }))
+            app_server.shutdown().await?;
+            Ok(())
+        })
+    })
 }
 
 #[test]
 fn medical_workspace_job_draft_saves_renders_and_updates_status() -> Result<()> {
-    run_workspace_dashboard_runtime_test(Box::pin(async {
-        let mut app = make_test_app().await;
-        let codex_home = tempdir()?;
-        app.config.codex_home = codex_home.path().to_path_buf().abs();
-        app.config.sqlite_home = codex_home.path().to_path_buf();
+    run_workspace_dashboard_runtime_test(|| {
+        Box::pin(async {
+            let mut app = make_test_app().await;
+            let codex_home = tempdir()?;
+            app.config.codex_home = codex_home.path().to_path_buf().abs();
+            app.config.sqlite_home = codex_home.path().to_path_buf();
 
-        let mut app_server =
-            Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
-        let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
-        dashboard.load(&mut app_server).await?;
-        assert_eq!(
-            dashboard.execute_workspace_command(":job new"),
-            WorkspaceDashboardAction::Consumed
-        );
-        assert!(
+            let mut app_server =
+                Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
+            let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+            dashboard.load(&mut app_server).await?;
+            assert_eq!(
+                dashboard.execute_workspace_command(":job new"),
+                WorkspaceDashboardAction::Consumed
+            );
+            assert!(
+                dashboard
+                    .agent_context_prompt()
+                    .contains("Active patient: unsaved draft")
+            );
+
+            dashboard.set_context_for_tests("Jordan Patient", "Visit note", "Human note body.");
+            dashboard.save(&mut app_server).await?;
+            assert_eq!(
+                dashboard.execute_workspace_command(":job new"),
+                WorkspaceDashboardAction::Consumed
+            );
+            for c in "Request outside records".chars() {
+                dashboard.handle_key_event(KeyEvent::from(KeyCode::Char(c)));
+            }
+            dashboard.save(&mut app_server).await?;
+
+            assert_eq!(
+                dashboard.task_titles_for_tests(),
+                vec!["Request outside records"]
+            );
+            assert!(dashboard.agent_context_prompt().contains("Active jobs"));
+            assert!(
+                dashboard
+                    .agent_context_prompt()
+                    .contains("Request outside records")
+            );
+
+            let WorkspaceDashboardAction::UpdateTaskStatus { task_id, status } =
+                dashboard.execute_workspace_command(":job done")
+            else {
+                panic!("expected job done to request a status update");
+            };
+            assert_eq!(status, WorkspaceTaskStatus::Done);
             dashboard
-                .agent_context_prompt()
-                .contains("Active patient: unsaved draft")
-        );
+                .update_task_status(&mut app_server, task_id, status)
+                .await?;
+            assert_eq!(
+                dashboard.selected_task_status_for_tests(),
+                Some(WorkspaceTaskStatus::Done)
+            );
 
-        dashboard.set_context_for_tests("Jordan Patient", "Visit note", "Human note body.");
-        dashboard.save(&mut app_server).await?;
-        assert_eq!(
-            dashboard.execute_workspace_command(":job new"),
-            WorkspaceDashboardAction::Consumed
-        );
-        for c in "Request outside records".chars() {
-            dashboard.handle_key_event(KeyEvent::from(KeyCode::Char(c)));
-        }
-        dashboard.save(&mut app_server).await?;
-
-        assert_eq!(
-            dashboard.task_titles_for_tests(),
-            vec!["Request outside records"]
-        );
-        assert!(dashboard.agent_context_prompt().contains("Active jobs"));
-        assert!(
+            assert_eq!(
+                dashboard.execute_workspace_command(":job new"),
+                WorkspaceDashboardAction::Consumed
+            );
+            for c in "Cancel referral call".chars() {
+                dashboard.handle_key_event(KeyEvent::from(KeyCode::Char(c)));
+            }
+            dashboard.save(&mut app_server).await?;
+            let WorkspaceDashboardAction::UpdateTaskStatus { task_id, status } =
+                dashboard.execute_workspace_command(":job cancel")
+            else {
+                panic!("expected job cancel to request a status update");
+            };
+            assert_eq!(status, WorkspaceTaskStatus::Canceled);
             dashboard
-                .agent_context_prompt()
-                .contains("Request outside records")
-        );
+                .update_task_status(&mut app_server, task_id, status)
+                .await?;
+            assert_eq!(
+                dashboard.selected_task_status_for_tests(),
+                Some(WorkspaceTaskStatus::Canceled)
+            );
 
-        let WorkspaceDashboardAction::UpdateTaskStatus { task_id, status } =
-            dashboard.execute_workspace_command(":job done")
-        else {
-            panic!("expected job done to request a status update");
-        };
-        assert_eq!(status, WorkspaceTaskStatus::Done);
-        dashboard
-            .update_task_status(&mut app_server, task_id, status)
-            .await?;
-        assert_eq!(
-            dashboard.selected_task_status_for_tests(),
-            Some(WorkspaceTaskStatus::Done)
-        );
-
-        assert_eq!(
-            dashboard.execute_workspace_command(":job new"),
-            WorkspaceDashboardAction::Consumed
-        );
-        for c in "Cancel referral call".chars() {
-            dashboard.handle_key_event(KeyEvent::from(KeyCode::Char(c)));
-        }
-        dashboard.save(&mut app_server).await?;
-        let WorkspaceDashboardAction::UpdateTaskStatus { task_id, status } =
-            dashboard.execute_workspace_command(":job cancel")
-        else {
-            panic!("expected job cancel to request a status update");
-        };
-        assert_eq!(status, WorkspaceTaskStatus::Canceled);
-        dashboard
-            .update_task_status(&mut app_server, task_id, status)
-            .await?;
-        assert_eq!(
-            dashboard.selected_task_status_for_tests(),
-            Some(WorkspaceTaskStatus::Canceled)
-        );
-
-        app_server.shutdown().await?;
-        Ok(())
-    }))
+            app_server.shutdown().await?;
+            Ok(())
+        })
+    })
 }
 
 #[test]
 fn workspace_dashboard_accepts_pending_note_proposal() -> Result<()> {
-    run_workspace_dashboard_runtime_test(Box::pin(async {
-        let mut app = make_test_app().await;
-        let codex_home = tempdir()?;
-        app.config.codex_home = codex_home.path().to_path_buf().abs();
-        app.config.sqlite_home = codex_home.path().to_path_buf();
+    run_workspace_dashboard_runtime_test(|| {
+        Box::pin(async {
+            let mut app = make_test_app().await;
+            let codex_home = tempdir()?;
+            app.config.codex_home = codex_home.path().to_path_buf().abs();
+            app.config.sqlite_home = codex_home.path().to_path_buf();
 
-        let mut app_server =
-            Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
-        let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
-        dashboard.load(&mut app_server).await?;
-        dashboard.set_context_for_tests("Jordan Patient", "Draft note", "Original body.");
-        dashboard.save(&mut app_server).await?;
-        let note_id = dashboard
-            .note_id_for_tests()
-            .expect("saved note id")
-            .to_string();
-        app_server
-            .workspace_note_proposal_create(WorkspaceNoteProposalCreateParams {
-                note_id: note_id.clone(),
-                base_revision: dashboard.note_revision_for_tests(),
-                proposed_body: "Accepted proposal body.".to_string(),
-                summary: "tighten wording".to_string(),
-                source_thread_id: Some("thread-1".to_string()),
-                source_turn_id: Some("turn-1".to_string()),
-                agent_result_id: None,
-            })
-            .await?;
-        dashboard.load(&mut app_server).await?;
+            let mut app_server =
+                Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
+            let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+            dashboard.load(&mut app_server).await?;
+            dashboard.set_context_for_tests("Jordan Patient", "Draft note", "Original body.");
+            dashboard.save(&mut app_server).await?;
+            let note_id = dashboard
+                .note_id_for_tests()
+                .expect("saved note id")
+                .to_string();
+            app_server
+                .workspace_note_proposal_create(WorkspaceNoteProposalCreateParams {
+                    note_id: note_id.clone(),
+                    base_revision: dashboard.note_revision_for_tests(),
+                    proposed_body: "Accepted proposal body.".to_string(),
+                    summary: "tighten wording".to_string(),
+                    source_thread_id: Some("thread-1".to_string()),
+                    source_turn_id: Some("turn-1".to_string()),
+                    agent_result_id: None,
+                })
+                .await?;
+            dashboard.load(&mut app_server).await?;
 
-        let action = dashboard.execute_workspace_command(":proposal accept");
-        let WorkspaceDashboardAction::ResolveProposal {
-            proposal_id,
-            accept,
-        } = action
-        else {
-            panic!("expected proposal resolve action");
-        };
-        assert!(accept);
-        let resolved_proposal_id = proposal_id.clone();
-        dashboard
-            .resolve_note_proposal(&mut app_server, proposal_id, accept)
-            .await?;
+            let action = dashboard.execute_workspace_command(":proposal accept");
+            let WorkspaceDashboardAction::ResolveProposal {
+                proposal_id,
+                accept,
+            } = action
+            else {
+                panic!("expected proposal resolve action");
+            };
+            assert!(accept);
+            let resolved_proposal_id = proposal_id.clone();
+            dashboard
+                .resolve_note_proposal(&mut app_server, proposal_id, accept)
+                .await?;
 
-        assert_eq!(dashboard.note_body_for_tests(), "Accepted proposal body.");
-        assert_eq!(dashboard.note_revision_for_tests(), 2);
-        let decisions = app_server
-            .workspace_note_proposal_decision_list(WorkspaceNoteProposalDecisionListParams {
-                proposal_id: resolved_proposal_id,
-            })
-            .await?
-            .decisions;
-        assert_eq!(decisions.len(), 1);
-        assert_eq!(
-            decisions[0].decision_kind,
-            WorkspaceNoteProposalDecisionKind::AcceptedAll
-        );
-        assert_eq!(decisions[0].resulting_note_revision, Some(2));
+            assert_eq!(dashboard.note_body_for_tests(), "Accepted proposal body.");
+            assert_eq!(dashboard.note_revision_for_tests(), 2);
+            let decisions = app_server
+                .workspace_note_proposal_decision_list(WorkspaceNoteProposalDecisionListParams {
+                    proposal_id: resolved_proposal_id,
+                })
+                .await?
+                .decisions;
+            assert_eq!(decisions.len(), 1);
+            assert_eq!(
+                decisions[0].decision_kind,
+                WorkspaceNoteProposalDecisionKind::AcceptedAll
+            );
+            assert_eq!(decisions[0].resulting_note_revision, Some(2));
 
-        app_server.shutdown().await?;
-        Ok(())
-    }))
+            app_server.shutdown().await?;
+            Ok(())
+        })
+    })
 }
 
 #[test]
 fn workspace_dashboard_declines_proposal_without_mutating_note() -> Result<()> {
-    run_workspace_dashboard_runtime_test(Box::pin(async {
-        let mut app = make_test_app().await;
-        let codex_home = tempdir()?;
-        app.config.codex_home = codex_home.path().to_path_buf().abs();
-        app.config.sqlite_home = codex_home.path().to_path_buf();
+    run_workspace_dashboard_runtime_test(|| {
+        Box::pin(async {
+            let mut app = make_test_app().await;
+            let codex_home = tempdir()?;
+            app.config.codex_home = codex_home.path().to_path_buf().abs();
+            app.config.sqlite_home = codex_home.path().to_path_buf();
 
-        let mut app_server =
-            Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
-        let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
-        dashboard.load(&mut app_server).await?;
-        dashboard.set_context_for_tests("Jordan Patient", "Draft note", "Original body.");
-        dashboard.save(&mut app_server).await?;
-        let note_id = dashboard
-            .note_id_for_tests()
-            .expect("saved note id")
-            .to_string();
-        app_server
-            .workspace_note_proposal_create(WorkspaceNoteProposalCreateParams {
-                note_id,
-                base_revision: dashboard.note_revision_for_tests(),
-                proposed_body: "Declined proposal body.".to_string(),
-                summary: "unsafe rewrite".to_string(),
-                source_thread_id: Some("thread-1".to_string()),
-                source_turn_id: Some("turn-1".to_string()),
-                agent_result_id: None,
-            })
-            .await?;
-        dashboard.load(&mut app_server).await?;
+            let mut app_server =
+                Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
+            let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+            dashboard.load(&mut app_server).await?;
+            dashboard.set_context_for_tests("Jordan Patient", "Draft note", "Original body.");
+            dashboard.save(&mut app_server).await?;
+            let note_id = dashboard
+                .note_id_for_tests()
+                .expect("saved note id")
+                .to_string();
+            app_server
+                .workspace_note_proposal_create(WorkspaceNoteProposalCreateParams {
+                    note_id,
+                    base_revision: dashboard.note_revision_for_tests(),
+                    proposed_body: "Declined proposal body.".to_string(),
+                    summary: "unsafe rewrite".to_string(),
+                    source_thread_id: Some("thread-1".to_string()),
+                    source_turn_id: Some("turn-1".to_string()),
+                    agent_result_id: None,
+                })
+                .await?;
+            dashboard.load(&mut app_server).await?;
 
-        let action = dashboard.execute_workspace_command(":proposal decline");
-        let WorkspaceDashboardAction::ResolveProposal {
-            proposal_id,
-            accept,
-        } = action
-        else {
-            panic!("expected proposal resolve action");
-        };
-        assert!(!accept);
-        let resolved_proposal_id = proposal_id.clone();
-        dashboard
-            .resolve_note_proposal(&mut app_server, proposal_id, accept)
-            .await?;
+            let action = dashboard.execute_workspace_command(":proposal decline");
+            let WorkspaceDashboardAction::ResolveProposal {
+                proposal_id,
+                accept,
+            } = action
+            else {
+                panic!("expected proposal resolve action");
+            };
+            assert!(!accept);
+            let resolved_proposal_id = proposal_id.clone();
+            dashboard
+                .resolve_note_proposal(&mut app_server, proposal_id, accept)
+                .await?;
 
-        assert_eq!(dashboard.note_body_for_tests(), "Original body.");
-        assert_eq!(dashboard.note_revision_for_tests(), 1);
-        let decisions = app_server
-            .workspace_note_proposal_decision_list(WorkspaceNoteProposalDecisionListParams {
-                proposal_id: resolved_proposal_id,
-            })
-            .await?
-            .decisions;
-        assert_eq!(decisions.len(), 1);
-        assert_eq!(
-            decisions[0].decision_kind,
-            WorkspaceNoteProposalDecisionKind::RejectedAll
-        );
-        assert_eq!(decisions[0].resulting_note_revision, None);
+            assert_eq!(dashboard.note_body_for_tests(), "Original body.");
+            assert_eq!(dashboard.note_revision_for_tests(), 1);
+            let decisions = app_server
+                .workspace_note_proposal_decision_list(WorkspaceNoteProposalDecisionListParams {
+                    proposal_id: resolved_proposal_id,
+                })
+                .await?
+                .decisions;
+            assert_eq!(decisions.len(), 1);
+            assert_eq!(
+                decisions[0].decision_kind,
+                WorkspaceNoteProposalDecisionKind::RejectedAll
+            );
+            assert_eq!(decisions[0].resulting_note_revision, None);
 
-        app_server.shutdown().await?;
-        Ok(())
-    }))
+            app_server.shutdown().await?;
+            Ok(())
+        })
+    })
 }
 
 #[test]
 fn workspace_dashboard_creates_addendum_for_signed_note() -> Result<()> {
-    run_workspace_dashboard_runtime_test(Box::pin(async {
-        let mut app = make_test_app().await;
-        let codex_home = tempdir()?;
-        app.config.codex_home = codex_home.path().to_path_buf().abs();
-        app.config.sqlite_home = codex_home.path().to_path_buf();
+    run_workspace_dashboard_runtime_test(|| {
+        Box::pin(async {
+            let mut app = make_test_app().await;
+            let codex_home = tempdir()?;
+            app.config.codex_home = codex_home.path().to_path_buf().abs();
+            app.config.sqlite_home = codex_home.path().to_path_buf();
 
-        let mut app_server =
-            Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
-        let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
-        dashboard.load(&mut app_server).await?;
-        dashboard.set_context_for_tests("Jordan Patient", "Signed note", "Signed body.");
-        dashboard.save(&mut app_server).await?;
-        dashboard.sign_current_note(&mut app_server).await?;
+            let mut app_server =
+                Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
+            let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+            dashboard.load(&mut app_server).await?;
+            dashboard.set_context_for_tests("Jordan Patient", "Signed note", "Signed body.");
+            dashboard.save(&mut app_server).await?;
+            dashboard.sign_current_note(&mut app_server).await?;
 
-        assert_eq!(
-            dashboard.execute_workspace_command(":addendum start"),
-            WorkspaceDashboardAction::Consumed
-        );
-        for c in "Human addendum text.".chars() {
-            dashboard.handle_key_event(KeyEvent::from(KeyCode::Char(c)));
-        }
-        let action = dashboard.execute_workspace_command(":addendum save");
-        let WorkspaceDashboardAction::CreateAddendum {
-            note_id,
-            base_revision,
-            body,
-        } = action
-        else {
-            panic!("expected addendum create action");
-        };
-        let saved_note_id = note_id.clone();
-        dashboard
-            .save_current_addendum(&mut app_server, note_id, base_revision, body)
-            .await?;
+            assert_eq!(
+                dashboard.execute_workspace_command(":addendum start"),
+                WorkspaceDashboardAction::Consumed
+            );
+            for c in "Human addendum text.".chars() {
+                dashboard.handle_key_event(KeyEvent::from(KeyCode::Char(c)));
+            }
+            let action = dashboard.execute_workspace_command(":addendum save");
+            let WorkspaceDashboardAction::CreateAddendum {
+                note_id,
+                base_revision,
+                body,
+            } = action
+            else {
+                panic!("expected addendum create action");
+            };
+            let saved_note_id = note_id.clone();
+            dashboard
+                .save_current_addendum(&mut app_server, note_id, base_revision, body)
+                .await?;
 
-        let prompt = dashboard.agent_context_prompt();
-        assert!(prompt.contains("1 addenda linked to this note"));
-        let audit = app_server
-            .workspace_audit_list(WorkspaceAuditListParams {
-                entity_type: None,
-                entity_id: None,
-                client_id: dashboard.client_id_for_tests().map(ToString::to_string),
-                note_id: Some(saved_note_id),
-                cursor: None,
-                limit: Some(8),
-            })
-            .await?
-            .data;
-        assert!(
-            audit
-                .iter()
-                .any(|event| event.entity_type == "note_addendum" && event.action == "created")
-        );
+            let prompt = dashboard.agent_context_prompt();
+            assert!(prompt.contains("1 addenda linked to this note"));
+            let audit = app_server
+                .workspace_audit_list(WorkspaceAuditListParams {
+                    entity_type: None,
+                    entity_id: None,
+                    client_id: dashboard.client_id_for_tests().map(ToString::to_string),
+                    note_id: Some(saved_note_id),
+                    cursor: None,
+                    limit: Some(8),
+                })
+                .await?
+                .data;
+            assert!(
+                audit
+                    .iter()
+                    .any(|event| event.entity_type == "note_addendum" && event.action == "created")
+            );
 
-        app_server.shutdown().await?;
-        Ok(())
-    }))
+            app_server.shutdown().await?;
+            Ok(())
+        })
+    })
 }
 
 #[test]
 fn workspace_context_bridge_uses_reloaded_store_backed_context() -> Result<()> {
-    run_workspace_dashboard_runtime_test(Box::pin(async {
-        let mut app = make_test_app().await;
-        let codex_home = tempdir()?;
-        app.config.codex_home = codex_home.path().to_path_buf().abs();
-        app.config.sqlite_home = codex_home.path().to_path_buf();
+    run_workspace_dashboard_runtime_test(|| {
+        Box::pin(async {
+            let mut app = make_test_app().await;
+            let codex_home = tempdir()?;
+            app.config.codex_home = codex_home.path().to_path_buf().abs();
+            app.config.sqlite_home = codex_home.path().to_path_buf();
 
-        let mut app_server =
-            Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
-        let mut dashboard = WorkspaceDashboard::default();
-        dashboard.load(&mut app_server).await?;
-        dashboard.set_context_for_tests(
-            "Taylor Workspace",
-            "Session note",
-            "Saved note context for the agent.",
-        );
-        dashboard.save(&mut app_server).await?;
-        app_server.shutdown().await?;
+            let mut app_server =
+                Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
+            let mut dashboard = WorkspaceDashboard::default();
+            dashboard.load(&mut app_server).await?;
+            dashboard.set_context_for_tests(
+                "Taylor Workspace",
+                "Session note",
+                "Saved note context for the agent.",
+            );
+            dashboard.save(&mut app_server).await?;
+            app_server.shutdown().await?;
 
-        let mut reloaded_app_server =
-            Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
-        let mut reloaded_dashboard = WorkspaceDashboard::default();
-        reloaded_dashboard.load(&mut reloaded_app_server).await?;
-        app.workspace_dashboard = Some(reloaded_dashboard);
-        app.workspace_dashboard_visible = true;
+            let mut reloaded_app_server =
+                Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
+            let mut reloaded_dashboard = WorkspaceDashboard::default();
+            reloaded_dashboard.load(&mut reloaded_app_server).await?;
+            app.workspace_dashboard = Some(reloaded_dashboard);
+            app.workspace_dashboard_visible = true;
 
-        app.send_workspace_context_to_agent(&mut reloaded_app_server)
-            .await?;
+            app.send_workspace_context_to_agent(&mut reloaded_app_server)
+                .await?;
 
-        assert!(!app.workspace_dashboard_active());
-        let composer = app.chat_widget.composer_text_with_pending();
-        assert!(composer.contains("Taylor Workspace"));
-        assert!(composer.contains("Session note"));
-        assert!(composer.contains("Saved note context for the agent."));
-        assert!(composer.contains("Propose note edits as a clear diff or replacement draft"));
+            assert!(!app.workspace_dashboard_active());
+            let composer = app.chat_widget.composer_text_with_pending();
+            assert!(composer.contains("Taylor Workspace"));
+            assert!(composer.contains("Session note"));
+            assert!(composer.contains("Saved note context for the agent."));
+            assert!(composer.contains("Propose note edits as a clear diff or replacement draft"));
 
-        reloaded_app_server.shutdown().await?;
-        Ok(())
-    }))
+            reloaded_app_server.shutdown().await?;
+            Ok(())
+        })
+    })
 }
 
-fn run_workspace_dashboard_runtime_test(
-    future: impl std::future::Future<Output = Result<()>>,
-) -> Result<()> {
+fn run_workspace_dashboard_runtime_test<MakeFuture, Future>(make_future: MakeFuture) -> Result<()>
+where
+    MakeFuture: FnOnce() -> Future + Send + 'static,
+    Future: std::future::Future<Output = Result<()>> + 'static,
+{
     const WORKER_THREADS: usize = 1;
-    const TEST_STACK_SIZE_BYTES: usize = 8 * 1024 * 1024;
+    const TEST_STACK_SIZE_BYTES: usize = 32 * 1024 * 1024;
 
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(WORKER_THREADS)
-        .thread_stack_size(TEST_STACK_SIZE_BYTES)
-        .enable_all()
-        .build()?;
-    runtime.block_on(future)
+    std::thread::Builder::new()
+        .name("workspace-dashboard-test".to_string())
+        .stack_size(TEST_STACK_SIZE_BYTES)
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(WORKER_THREADS)
+                .thread_stack_size(TEST_STACK_SIZE_BYTES)
+                .enable_all()
+                .build()?;
+            runtime.block_on(make_future())
+        })?
+        .join()
+        .map_err(|_| color_eyre::eyre::eyre!("workspace dashboard test thread panicked"))?
 }
 
 async fn start_config_write_test_app_server(app: &App) -> Result<AppServerSession> {

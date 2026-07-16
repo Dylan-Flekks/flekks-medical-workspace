@@ -5,6 +5,7 @@ use crate::tools::context::boxed_tool_output;
 use crate::tools::handlers::parse_arguments;
 use crate::tools::handlers::workspace_context_spec::WORKSPACE_CONTEXT_READ_TOOL_NAME;
 use crate::tools::handlers::workspace_context_spec::create_workspace_context_read_tool;
+use crate::tools::handlers::workspace_context_spec::create_workspace_planning_context_read_tool;
 use crate::tools::registry::CoreToolRuntime;
 use crate::tools::registry::ToolExecutor;
 use chrono::DateTime;
@@ -17,16 +18,41 @@ use codex_tools::ToolOutput;
 use codex_tools::ToolSpec;
 use serde::Deserialize;
 use serde::Serialize;
+use std::sync::Arc;
+use tokio::sync::Mutex;
 
 pub struct WorkspaceContextReadHandler {
-    execution: codex_state::WorkspaceAgentExecutionBinding,
+    execution: WorkspaceContextExecution,
+}
+
+#[derive(Clone)]
+enum WorkspaceContextExecution {
+    Agent(codex_state::WorkspaceAgentExecutionBinding),
+    Planning {
+        execution: codex_state::WorkspacePlanningGuideExecutionBinding,
+        evidence_read_ids: Arc<Mutex<Vec<String>>>,
+    },
 }
 
 impl WorkspaceContextReadHandler {
     pub(crate) fn bound_to_execution(
         execution: codex_state::WorkspaceAgentExecutionBinding,
     ) -> Self {
-        Self { execution }
+        Self {
+            execution: WorkspaceContextExecution::Agent(execution),
+        }
+    }
+
+    pub(crate) fn bound_to_planning_execution(
+        execution: codex_state::WorkspacePlanningGuideExecutionBinding,
+        evidence_read_ids: Arc<Mutex<Vec<String>>>,
+    ) -> Self {
+        Self {
+            execution: WorkspaceContextExecution::Planning {
+                execution,
+                evidence_read_ids,
+            },
+        }
     }
 }
 
@@ -35,6 +61,8 @@ impl WorkspaceContextReadHandler {
 enum WorkspaceContextCategory {
     VisitHistory,
     ProgressNotes,
+    PatientChart,
+    SelectedContext,
 }
 
 impl WorkspaceContextCategory {
@@ -42,6 +70,8 @@ impl WorkspaceContextCategory {
         match self {
             Self::VisitHistory => "visit_history",
             Self::ProgressNotes => "progress_notes",
+            Self::PatientChart => "patient_chart",
+            Self::SelectedContext => "selected_context",
         }
     }
 }
@@ -78,13 +108,41 @@ struct WorkspaceContextSource {
     accessed_at: i64,
 }
 
+#[derive(Debug, Serialize, PartialEq, Eq)]
+struct WorkspacePlanningContextReadResult {
+    #[serde(skip)]
+    id: String,
+    run_id: String,
+    plan_session_id: String,
+    client_id: String,
+    category: String,
+    max_records: u32,
+    response_sha256: String,
+    sources: Vec<WorkspacePlanningContextSource>,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+struct WorkspacePlanningContextSource {
+    source_entity_type: String,
+    source_entity_id: String,
+    source_revision: Option<i64>,
+    display_label: String,
+    snapshot_json: String,
+    content_sha256: String,
+}
+
 impl ToolExecutor<ToolInvocation> for WorkspaceContextReadHandler {
     fn tool_name(&self) -> ToolName {
         ToolName::plain(WORKSPACE_CONTEXT_READ_TOOL_NAME)
     }
 
     fn spec(&self) -> ToolSpec {
-        create_workspace_context_read_tool()
+        match &self.execution {
+            WorkspaceContextExecution::Agent(_) => create_workspace_context_read_tool(),
+            WorkspaceContextExecution::Planning { .. } => {
+                create_workspace_planning_context_read_tool()
+            }
+        }
     }
 
     fn supports_parallel_tool_calls(&self) -> bool {
@@ -95,7 +153,10 @@ impl ToolExecutor<ToolInvocation> for WorkspaceContextReadHandler {
         let execution = self.execution.clone();
         Box::pin(async move {
             let ToolInvocation {
-                session, payload, ..
+                session,
+                call_id,
+                payload,
+                ..
             } = invocation;
             let arguments = match payload {
                 ToolPayload::Function { arguments } => arguments,
@@ -111,11 +172,44 @@ impl ToolExecutor<ToolInvocation> for WorkspaceContextReadHandler {
                     "workspace store is unavailable for this session".to_string(),
                 )
             })?;
-            let result = read_workspace_context(state_db, args, &execution).await?;
-            let source_count = result.sources.len();
-            let value = serde_json::to_value(result).map_err(|err| {
-                FunctionCallError::Fatal(format!("failed to serialize workspace context: {err}"))
-            })?;
+            let (value, source_count) = match execution {
+                WorkspaceContextExecution::Agent(execution) => {
+                    let result = read_workspace_context(state_db, args, &execution).await?;
+                    let source_count = result.sources.len();
+                    let value = serde_json::to_value(result).map_err(|err| {
+                        FunctionCallError::Fatal(format!(
+                            "failed to serialize workspace context: {err}"
+                        ))
+                    })?;
+                    (value, source_count)
+                }
+                WorkspaceContextExecution::Planning {
+                    execution,
+                    evidence_read_ids,
+                } => {
+                    let result = read_workspace_planning_context(
+                        state_db,
+                        args,
+                        &execution,
+                        call_id.as_str(),
+                    )
+                    .await?;
+                    let read_id = result.id.clone();
+                    let source_count = result.sources.len();
+                    let value = serde_json::to_value(result).map_err(|err| {
+                        FunctionCallError::Fatal(format!(
+                            "failed to serialize workspace planning context: {err}"
+                        ))
+                    })?;
+                    {
+                        let mut ids = evidence_read_ids.lock().await;
+                        if !ids.contains(&read_id) {
+                            ids.push(read_id);
+                        }
+                    }
+                    (value, source_count)
+                }
+            };
             Ok(boxed_tool_output(WorkspaceContextReadToolOutput {
                 value,
                 source_count,
@@ -207,6 +301,54 @@ async fn read_workspace_context(
     })
 }
 
+async fn read_workspace_planning_context(
+    state_db: crate::StateDbHandle,
+    args: WorkspaceContextReadArgs,
+    execution: &codex_state::WorkspacePlanningGuideExecutionBinding,
+    idempotency_key: &str,
+) -> Result<WorkspacePlanningContextReadResult, FunctionCallError> {
+    let run_id = args.run_id.trim();
+    if run_id.is_empty() {
+        return Err(FunctionCallError::RespondToModel(
+            "run_id must not be empty".to_string(),
+        ));
+    }
+    if run_id != execution.guide_run_id {
+        return Err(FunctionCallError::RespondToModel(
+            "workspace_context_read run_id does not match the current restricted planning turn"
+                .to_string(),
+        ));
+    }
+    let context = state_db
+        .workspace()
+        .read_authorized_planning_context(codex_state::WorkspacePlanningContextReadRequest {
+            execution: execution.clone(),
+            category: args.category.as_str().to_string(),
+            max_records: args.limit,
+            idempotency_key: idempotency_key.to_string(),
+        })
+        .await
+        .map_err(|err| {
+            FunctionCallError::RespondToModel(format!(
+                "failed to read workspace planning context: {err}"
+            ))
+        })?;
+    Ok(WorkspacePlanningContextReadResult {
+        id: context.id,
+        run_id: context.guide_run_id,
+        plan_session_id: context.plan_session_id,
+        client_id: context.client_id,
+        category: context.category,
+        max_records: context.max_records,
+        response_sha256: context.response_sha256,
+        sources: context
+            .sources
+            .into_iter()
+            .map(WorkspacePlanningContextSource::from)
+            .collect(),
+    })
+}
+
 fn read_error(err: anyhow::Error) -> FunctionCallError {
     FunctionCallError::RespondToModel(format!("failed to read workspace context: {err}"))
 }
@@ -228,6 +370,19 @@ impl From<codex_state::WorkspaceAgentRunSource> for WorkspaceContextSource {
             content_sha256: value.content_sha256,
             access_purpose: value.access_purpose,
             accessed_at: timestamp(value.accessed_at),
+        }
+    }
+}
+
+impl From<codex_state::WorkspacePlanningContextSource> for WorkspacePlanningContextSource {
+    fn from(value: codex_state::WorkspacePlanningContextSource) -> Self {
+        Self {
+            source_entity_type: value.source_entity_type,
+            source_entity_id: value.source_entity_id,
+            source_revision: value.source_revision,
+            display_label: value.display_label,
+            snapshot_json: value.snapshot_json,
+            content_sha256: value.content_sha256,
         }
     }
 }

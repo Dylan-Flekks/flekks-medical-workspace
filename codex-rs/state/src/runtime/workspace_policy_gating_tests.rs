@@ -148,6 +148,7 @@ async fn policy_gate_precedes_guide_replay_and_preserves_run_and_audit_rows() {
         actor: "Clinician Example".to_string(),
         provider: "test-provider".to_string(),
         model: "test-model".to_string(),
+        model_tool_mode: Default::default(),
     };
     runtime
         .workspace()

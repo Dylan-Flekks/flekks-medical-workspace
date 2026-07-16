@@ -72,6 +72,7 @@ fn start(
         actor: "Clinician Example".to_string(),
         provider: "test-provider".to_string(),
         model: "test-model".to_string(),
+        model_tool_mode: Default::default(),
     }
 }
 
@@ -346,4 +347,83 @@ async fn workspace_guide_run_lifecycle_is_bounded_exact_stale_and_noncanonical()
     .await
     .unwrap();
     assert_eq!(audit_count, 6);
+}
+
+#[tokio::test]
+async fn workspace_planning_runs_require_atomic_completion_but_allow_recovery_terminalization() {
+    let (runtime, client, checkpoint) = fixture().await;
+    let mut planning_start = start(
+        &client,
+        &checkpoint,
+        "planning-completion-boundary",
+        r#"{"planSessionId":"plan-session"}"#,
+    );
+    planning_start.model_tool_mode = crate::WorkspaceGuideModelToolMode::WorkspacePlanningOnly;
+    let run = begin(&runtime, planning_start).await;
+
+    let error = runtime
+        .workspace()
+        .finish_guide_run(finish(
+            &run,
+            crate::WorkspaceGuideRunOutcome::Completed {
+                result_json: r#"{"schemaVersion":1,"summary":"forged completion"}"#.to_string(),
+            },
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), "validation");
+    assert_eq!(
+        error.to_string(),
+        "workspace planning guide runs can be completed only through the atomic plan-turn completion path"
+    );
+    let stored = runtime
+        .workspace()
+        .list_guide_runs(crate::WorkspaceGuideRunFilter {
+            client_id: client.id.clone(),
+            session_id: Some(checkpoint.session_id.clone()),
+            ..Default::default()
+        })
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|candidate| candidate.id == run.id)
+        .expect("rejected planning run should remain stored");
+    assert_eq!(
+        (stored.status, stored.terminal_envelope_json),
+        (crate::WorkspaceGuideRunStatus::Running, None)
+    );
+
+    let mut failed = finish(
+        &run,
+        crate::WorkspaceGuideRunOutcome::Failed {
+            error_summary: "planning model failed".to_string(),
+        },
+    );
+    failed.source_thread_id = None;
+    failed.source_turn_id = None;
+    assert_eq!(
+        end(&runtime, failed).await.status,
+        crate::WorkspaceGuideRunStatus::Failed
+    );
+
+    let mut canceled_start = start(
+        &client,
+        &checkpoint,
+        "planning-cancellation-boundary",
+        r#"{"planSessionId":"plan-session"}"#,
+    );
+    canceled_start.model_tool_mode = crate::WorkspaceGuideModelToolMode::WorkspacePlanningOnly;
+    let canceled_run = begin(&runtime, canceled_start).await;
+    let mut canceled = finish(
+        &canceled_run,
+        crate::WorkspaceGuideRunOutcome::Canceled {
+            reason: "planning turn was abandoned".to_string(),
+        },
+    );
+    canceled.source_thread_id = None;
+    canceled.source_turn_id = None;
+    assert_eq!(
+        end(&runtime, canceled).await.status,
+        crate::WorkspaceGuideRunStatus::Canceled
+    );
 }

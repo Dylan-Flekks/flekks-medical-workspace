@@ -7,7 +7,6 @@ use crate::context::world_state::EnvironmentsState;
 use crate::context::world_state::PluginsInstructionsState;
 use crate::context::world_state::WorldState;
 use codex_extension_api::WorldStateContributionInput;
-use codex_protocol::config_types::ModelToolMode;
 
 impl Session {
     #[tracing::instrument(name = "world_state.build", level = "info", skip_all)]
@@ -16,7 +15,7 @@ impl Session {
         step_context: &StepContext,
     ) -> WorldState {
         let turn_context = step_context.turn.as_ref();
-        if turn_context.model_tool_mode == ModelToolMode::WorkspaceContextOnly {
+        if turn_context.model_tool_mode.is_workspace_restricted() {
             return WorldState::default();
         }
         tracing::trace!(

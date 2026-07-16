@@ -49,6 +49,13 @@ fn user_turn_tool_mode(op: &AppCommand) -> Option<ModelToolMode> {
 }
 
 fn pending_capture(thread_id: ThreadId) -> PendingWorkspaceAgentCapture {
+    pending_capture_with_authorization(thread_id, true)
+}
+
+fn pending_capture_with_authorization(
+    thread_id: ThreadId,
+    authorized: bool,
+) -> PendingWorkspaceAgentCapture {
     let packet = WorkspaceContextPacket {
         id: "packet-1".to_string(),
         client_id: "patient-1".to_string(),
@@ -74,6 +81,9 @@ fn pending_capture(thread_id: ThreadId) -> PendingWorkspaceAgentCapture {
         source_checkpoint_sha256: None,
         readiness_json: r#"{"version":1,"warnings":[],"acknowledgements":[],"legacy":true}"#
             .to_string(),
+        workspace_plan_revision_id: None,
+        workspace_plan_content_sha256: None,
+        workspace_plan_evidence_manifest_sha256: None,
         status: "sent".to_string(),
         created_at: 1,
         sent_at: 1,
@@ -88,6 +98,9 @@ fn pending_capture(thread_id: ThreadId) -> PendingWorkspaceAgentCapture {
         note_id: packet.note_id.clone(),
         base_note_revision: packet.base_note_revision,
         context_envelope_sha256: packet.context_envelope_sha256.clone(),
+        workspace_plan_revision_id: None,
+        workspace_plan_content_sha256: None,
+        workspace_plan_evidence_manifest_sha256: None,
         run_kind: "note_proposal".to_string(),
         idempotency_key: "test-run".to_string(),
         provider: Some("test-provider".to_string()),
@@ -101,8 +114,13 @@ fn pending_capture(thread_id: ThreadId) -> PendingWorkspaceAgentCapture {
         created_at: 1,
         updated_at: 1,
     };
-    PendingWorkspaceAgentCapture::try_new(&packet, &run, medical_handoff_text("run-1"))
-        .expect("synthetic capture has concrete provenance")
+    let mut pending =
+        PendingWorkspaceAgentCapture::try_new(&packet, &run, medical_handoff_text("run-1"))
+            .expect("synthetic capture has concrete provenance");
+    if authorized {
+        pending.authorize_handoff();
+    }
+    pending
 }
 
 fn thread_session(thread_id: ThreadId) -> ThreadSessionState {
@@ -147,6 +165,22 @@ async fn pending_medical_capture_forces_workspace_context_only_mode() {
         user_turn_tool_mode(&op),
         Some(ModelToolMode::WorkspaceContextOnly)
     );
+}
+
+#[tokio::test]
+async fn unsubmitted_plan_binding_never_reaches_the_parent_turn() {
+    let mut app = test_support::make_test_app().await;
+    let thread_id = ThreadId::new();
+    app.pending_workspace_agent_capture =
+        Some(pending_capture_with_authorization(thread_id, false));
+
+    let op = app.prepare_workspace_context_turn_submission(
+        thread_id,
+        user_turn(&medical_handoff_text("run-1")),
+    );
+
+    assert!(op.is_none());
+    assert!(app.pending_workspace_agent_capture.is_none());
 }
 
 #[tokio::test]

@@ -484,6 +484,48 @@ impl Session {
             .store(true, Ordering::Release);
     }
 
+    /// Returns whether this persisted thread is durably bound to an active medical planning
+    /// session. The SQLite binding is authoritative across process restarts; the rollout tool mode
+    /// is deliberately not restored and therefore cannot serve as the lock.
+    ///
+    /// Discovering a binding also permanently opts the thread out of Codex memory generation
+    /// before any model-visible work can run. A lookup or privacy-persistence failure is returned
+    /// to the caller so ingress paths can fail closed.
+    pub(crate) async fn workspace_planning_lock_active(&self) -> anyhow::Result<bool> {
+        let Some(state_db) = self.services.state_db.as_ref() else {
+            // Workspace planning requires a persisted root thread and SQLite state, so a session
+            // without state cannot have a valid durable planning binding.
+            return Ok(false);
+        };
+        let active_session = state_db
+            .workspace()
+            .get_active_plan_session_by_thread(&self.thread_id.to_string())
+            .await
+            .map_err(anyhow::Error::from)?;
+        if active_session.is_none() {
+            return Ok(false);
+        }
+
+        if !self.workspace_context_only_memory_tainted() {
+            let live_thread = self.live_thread_for_persistence(
+                "disable memory for an active workspace medical planning thread",
+            )?;
+            live_thread.persist().await?;
+            live_thread.flush().await?;
+            live_thread
+                .update_memory_mode(ThreadMemoryMode::Disabled, /*include_archived*/ false)
+                .await?;
+            live_thread.flush().await?;
+            state_db
+                .memories()
+                .mark_thread_memory_mode_polluted(self.thread_id)
+                .await?;
+            self.mark_workspace_context_only_memory_tainted();
+        }
+
+        Ok(true)
+    }
+
     /// Returns the concrete identity for this thread.
     pub(crate) fn thread_id(&self) -> ThreadId {
         self.thread_id
@@ -1304,7 +1346,7 @@ impl Session {
             };
 
             // record_initial_history can emit events. We record only after the SessionConfiguredEvent is emitted.
-            Box::pin(sess.record_initial_history(initial_history)).await;
+            sess.record_initial_history(initial_history).await;
             {
                 let mut state = sess.state.lock().await;
                 state.queue_pending_session_start_source(session_start_source);

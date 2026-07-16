@@ -1,44 +1,44 @@
 ---
 source: tui/src/workspace_dashboard.rs
-expression: "render_dashboard_lines_at(&dashboard, width, height)"
+expression: rendered
 ---
 Medical Workspace  Unsaved  /workspace-medical  SYNTHETIC DATA ONLY
 Patient: Jordan Patient  DOB: blank  MRN: blank  Contact: Missing contact  Coverage: Missing coverage  Encounter: No encounter
- EXPLORER                          PATIENT CHART                                                                   CONTEXT PLAN
-┌Patient Directory───────────────┐┌Today's Visit─────────────────────────────────────────────────────────────────┐┌Context Plan────────────────────────────────┐
-│Local search: /                 ││Patient: Jordan Patient; note: Visit note                                     ││Patient Chart: File Reference Draft;        │
-│0 active patients; local only   ││Next                                                                          ││Jordan...; Save first eval                  │
-│No saved patients yet.          ││  ● Next: Save first eval                                                     ││Codex bridge: building                      │
-│New patient: :patient new       ││                                                                              ││[Current]  History  Audit  ←/→              │
-│                                ││Intake Checklist                                                              ││                                            │
-│                                ││  [ ] Demographics - missing DOB or Patient ID / MRN                          ││Workspace Planner                           │
-│                                ││  [ ] Emergency contact - missing                                             ││  Start with the patient                    │
-│                                ││  [ ] Coverage - missing                                                      ││  Open an existing patient or save the new  │
-│                                ││  [ ] ID card - missing                                                       ││patient before building agent context.      │
-│                                ││  [ ] Insurance card - missing                                                ││  ● next: Save patient                      │
-└────────────────────────────────┘│  [ ] Referral - missing                                                      ││  Guidance only; no model call and no chart │
-┌Patient Notes───────────────────┐│  [ ] Allergies - not recorded                                                ││mutation.                                   │
-│Patient Notes                   ││  [ ] Note - needs save                                                       ││                                            │
-│  Visit note [unsaved]          ││                                                                              ││Mode: > Build |   Review |   Returned       │
-│  Working draft; Ctrl-S saves it││                                                                              ││  ● draft: No instructions drafted          │
-│to the chart.                   ││                                                                              ││  ● context: 0 files | 0 text | 0 clips     │
-│  Medical, communication, and   ││                                                                              ││  ● plan: not sent                          │
-│admin notes appear here.        ││                                                                              ││  ● returned: none                          │
-│                                ││                                                                              ││  ● readiness: blocked · 2 hard gate(s)     │
+ EXPLORER                          PATIENT CHART                                                                   PLAN WITH CODEX
+┌Patient Directory───────────────┐┌Today's Visit─────────────────────────────────────────────────────────────────┐┌Plan with Codex─────────────────────────────┐
+│Local search: /                 ││Patient: Jordan Patient; note: Visit note                                     ││[Chat]  Context  Audit  ←/→ tabs            │
+│0 active patients; local only   ││Next                                                                          ││                                            │
+│No saved patients yet.          ││  ● Next: Save first eval                                                     ││Plan with Codex · Jordan Patient            │
+│New patient: :patient new       ││                                                                              ││  Context  0 files · 0 text · 0 clips       │
+│                                ││Intake Checklist                                                              ││  ● plan: blocked · save patient first      │
+│                                ││  [ ] Demographics - missing DOB or Patient ID / MRN                          ││                                            │
+│                                ││  [ ] Emergency contact - missing                                             ││Save Patient First                          │
+│                                ││  [ ] Coverage - missing                                                      ││  Persistent Plan with Codex needs a saved  │
+│                                ││  [ ] ID card - missing                                                       ││patient record.                             │
+│                                ││  [ ] Insurance card - missing                                                ││  ● Ctrl-S saves this patient and note      │
+└────────────────────────────────┘│  [ ] Referral - missing                                                      ││locally                                     │
+┌Patient Notes───────────────────┐│  [ ] Allergies - not recorded                                                ││  After save, return here to message Codex. │
+│Patient Notes                   ││  [ ] Note - needs save                                                       ││  Save the patient before messaging Codex or│
+│  Visit note [unsaved]          ││                                                                              ││building an audited plan.                   │
+│  Working draft; Ctrl-S saves it││                                                                              ││  Recommendations remain review-only until a│
+│to the chart.                   ││                                                                              ││clinician approves a change.                │
+│  Medical, communication, and   ││                                                                              ││                                            │
+│admin notes appear here.        ││                                                                              ││                                            │
 │                                ││                                                                              ││                                            │
-└────────────────────────────────┘│                                                                              ││  ● resolve the listed hard gates before    │
-┌Uploaded Documents──────────────┐│                                                                              ││Ctrl-G                                      │
-│Uploaded Documents              ││                                                                              ││  No upload/OCR/payer action/auto-apply.    │
-│No files yet                    ││                                                                              ││  ● patient_unsaved: Save the patient before│
-│Paste/drop JPG/PDF. Space...    ││                                                                              ││submitting a Context Plan.                  │
-│                                ││                                                                              ││  ● instructions_empty: Add instructions    │
-│                                ││                                                                              ││describing what Codex should analyze.       │
-│                                ││                                                                              ││  ● warning: no_supporting_context · No     │
-│                                ││                                                                              ││patient files, reviewed text, or clips are  │
-│                                ││                                                                              ││selected; Codex will receive chart context  │
-│                                ││                                                                              ││Instructions for Codex · local draft · Enter│
-│                                ││                                                                              ││  Tell Codex what to analyze; nothing is    │
-│                                ││                                                                              ││  submitted yet.                            │
+│                                ││                                                                              ││                                            │
+└────────────────────────────────┘│                                                                              ││                                            │
+┌Uploaded Documents──────────────┐│                                                                              ││                                            │
+│Uploaded Documents              ││                                                                              ││                                            │
+│No files yet                    ││                                                                              ││                                            │
+│Paste/drop JPG/PDF. Space...    ││                                                                              ││                                            │
+│                                ││                                                                              ││                                            │
+│                                ││                                                                              ││                                            │
+│                                ││                                                                              ││                                            │
+│                                ││                                                                              ││                                            │
+│                                ││                                                                              ││Save Patient First                          │
+│                                ││                                                                              ││Ctrl-S save patient · then message Codex    │
+│                                ││                                                                              ││  Save this patient before starting a       │
+│                                ││                                                                              ││  persistent Codex plan.                    │
 │                                ││                                                                              ││                                            │
 └────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────┘└────────────────────────────────────────────┘
 Focus: Center | Mode: Read-only chart | Keys: ↑/↓ section  PgUp/PgDn scroll  Tab/⇧Tab pane  Ctrl-P commands | Next: Save first eval | Status: Unsaved changes.

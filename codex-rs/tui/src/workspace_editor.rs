@@ -6,24 +6,69 @@
 
 use crate::bottom_pane::TextArea;
 use crate::bottom_pane::TextAreaState;
+use crate::key_hint::KeyBindingListExt;
+use crate::keymap::RuntimeKeymap;
 use crossterm::event::KeyEvent;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::widgets::StatefulWidgetRef;
 use std::cell::RefCell;
 
+/// Input behavior for one workspace text field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WorkspaceEditorPolicy {
+    /// Composer behavior: submit bindings win over overlapping newline bindings.
+    Prompt,
+    /// Text-editor behavior: newline bindings always edit the document.
+    Document,
+}
+
+/// Semantic result of dispatching a key through a [`WorkspaceEditor`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum WorkspaceEditorInput {
+    /// The field remains active. The text may be unchanged when the key only moved the cursor.
+    Editing(String),
+    /// The prompt should be submitted with the returned text.
+    Submit(String),
+}
+
+impl WorkspaceEditorInput {
+    pub(crate) fn into_text(self) -> String {
+        match self {
+            Self::Editing(text) | Self::Submit(text) => text,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct WorkspaceEditor {
     textarea: RefCell<TextArea>,
     state: RefCell<TextAreaState>,
+    keymap: RefCell<RuntimeKeymap>,
+    policy: WorkspaceEditorPolicy,
 }
 
 impl WorkspaceEditor {
     pub(crate) fn new() -> Self {
+        Self::with_policy(WorkspaceEditorPolicy::Document)
+    }
+
+    pub(crate) fn with_policy(policy: WorkspaceEditorPolicy) -> Self {
+        let keymap = RuntimeKeymap::defaults();
+        let mut textarea = TextArea::new();
+        textarea.set_keymap_bindings(&keymap);
         Self {
-            textarea: RefCell::new(TextArea::new()),
+            textarea: RefCell::new(textarea),
             state: RefCell::new(TextAreaState::default()),
+            keymap: RefCell::new(keymap),
+            policy,
         }
+    }
+
+    /// Apply a resolved runtime keymap without disturbing the active draft or cursor.
+    pub(crate) fn set_keymap_bindings(&self, keymap: &RuntimeKeymap) {
+        self.textarea.borrow_mut().set_keymap_bindings(keymap);
+        *self.keymap.borrow_mut() = keymap.clone();
     }
 
     /// Replace the loaded draft and place the cursor at its end.
@@ -31,6 +76,7 @@ impl WorkspaceEditor {
         // A fresh editor is intentional here. `TextArea::set_text_clearing_elements` preserves
         // its kill/yank buffer, which must never cross a patient, note, or request scope reset.
         let mut textarea = TextArea::new();
+        textarea.set_keymap_bindings(&self.keymap.borrow());
         textarea.set_text_clearing_elements(text);
         textarea.set_cursor(text.len());
         *self.textarea.borrow_mut() = textarea;
@@ -38,10 +84,28 @@ impl WorkspaceEditor {
     }
 
     /// Apply a conventional text-editing key and return the resulting draft text.
+    #[cfg(test)]
     pub(crate) fn input(&self, current_text: &str, event: KeyEvent) -> String {
         self.sync(current_text);
         self.textarea.borrow_mut().input(event);
         self.text()
+    }
+
+    /// Dispatch input according to this field's policy and return its semantic result.
+    pub(crate) fn handle_input(&self, current_text: &str, event: KeyEvent) -> WorkspaceEditorInput {
+        self.sync(current_text);
+
+        let keymap = self.keymap.borrow();
+        match self.policy {
+            WorkspaceEditorPolicy::Prompt if keymap.composer.submit.is_pressed(event) => {
+                return WorkspaceEditorInput::Submit(self.text());
+            }
+            WorkspaceEditorPolicy::Prompt | WorkspaceEditorPolicy::Document => {}
+        }
+        drop(keymap);
+
+        self.textarea.borrow_mut().input(event);
+        WorkspaceEditorInput::Editing(self.text())
     }
 
     /// Insert bracketed-paste text at the active cursor and return the resulting draft text.
@@ -85,7 +149,8 @@ impl WorkspaceEditor {
 
 impl Clone for WorkspaceEditor {
     fn clone(&self) -> Self {
-        let cloned = Self::new();
+        let cloned = Self::with_policy(self.policy);
+        cloned.set_keymap_bindings(&self.keymap.borrow());
         let textarea = self.textarea.borrow();
         cloned.reset(textarea.text());
         cloned.textarea.borrow_mut().set_cursor(textarea.cursor());

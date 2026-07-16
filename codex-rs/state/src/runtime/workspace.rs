@@ -1,4 +1,7 @@
 use super::workspace_context_plan::normalize_context_plan_metadata;
+use super::workspace_plan_binding::WorkspacePlanBindingContext;
+use super::workspace_plan_binding::normalize_plan_revision_binding;
+use super::workspace_plan_binding::validate_plan_revision_binding;
 use super::*;
 use crate::model::WorkspaceAgentResultRow;
 use crate::model::WorkspaceArtifactDerivativeRow;
@@ -2985,7 +2988,28 @@ ORDER BY created_at_ms DESC
             &input.selected_clip_ids_json,
         )
         .await?;
-        let context_plan = normalize_context_plan_metadata(&mut tx, &input).await?;
+        let plan_binding = normalize_plan_revision_binding(
+            input.workspace_plan_revision_id.as_deref(),
+            input.workspace_plan_content_sha256.as_deref(),
+            input.workspace_plan_evidence_manifest_sha256.as_deref(),
+        )?;
+        let context_plan =
+            normalize_context_plan_metadata(&mut tx, &input, plan_binding.is_some()).await?;
+        if let Some(binding) = plan_binding.as_ref() {
+            validate_plan_revision_binding(
+                &mut tx,
+                binding,
+                WorkspacePlanBindingContext {
+                    client_id: &input.client_id,
+                    encounter_id: input.encounter_id.as_deref(),
+                    note_id: input.note_id.as_deref(),
+                    source_checkpoint_id: context_plan.source_checkpoint_id.as_deref(),
+                    source_checkpoint_sha256: context_plan.source_checkpoint_sha256.as_deref(),
+                    context_envelope_json: &context_plan.context_envelope_json,
+                },
+            )
+            .await?;
+        }
         input.context_envelope_json = context_plan.context_envelope_json;
         validate_packet_context_envelope(&input)?;
         let base_note_revision = resolve_packet_base_note_revision(&mut tx, &input).await?;
@@ -3055,13 +3079,16 @@ INSERT INTO workspace_context_packets (
     source_checkpoint_id,
     source_checkpoint_sha256,
     readiness_json,
+    workspace_plan_revision_id,
+    workspace_plan_content_sha256,
+    workspace_plan_evidence_manifest_sha256,
     status,
     created_at_ms,
     sent_at_ms,
     submitted_at_ms,
     canceled_at_ms,
     updated_at_ms
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 RETURNING
     id,
     client_id,
@@ -3086,6 +3113,9 @@ RETURNING
     source_checkpoint_id,
     source_checkpoint_sha256,
     readiness_json,
+    workspace_plan_revision_id,
+    workspace_plan_content_sha256,
+    workspace_plan_evidence_manifest_sha256,
     status,
     created_at_ms,
     sent_at_ms,
@@ -3117,6 +3147,13 @@ RETURNING
         .bind(&context_plan.source_checkpoint_id)
         .bind(&context_plan.source_checkpoint_sha256)
         .bind(&context_plan.readiness_json)
+        .bind(plan_binding.as_ref().map(|binding| &binding.revision_id))
+        .bind(plan_binding.as_ref().map(|binding| &binding.content_sha256))
+        .bind(
+            plan_binding
+                .as_ref()
+                .map(|binding| &binding.evidence_manifest_sha256),
+        )
         .bind(&status)
         .bind(now_ms)
         .bind(now_ms)
@@ -3185,6 +3222,9 @@ SELECT
     source_checkpoint_id,
     source_checkpoint_sha256,
     readiness_json,
+    workspace_plan_revision_id,
+    workspace_plan_content_sha256,
+    workspace_plan_evidence_manifest_sha256,
     status,
     created_at_ms,
     sent_at_ms,
@@ -3243,6 +3283,9 @@ SELECT
     source_checkpoint_id,
     source_checkpoint_sha256,
     readiness_json,
+    workspace_plan_revision_id,
+    workspace_plan_content_sha256,
+    workspace_plan_evidence_manifest_sha256,
     status,
     created_at_ms,
     sent_at_ms,
@@ -3288,6 +3331,9 @@ LIMIT 1
                     expected_context_envelope_sha256: input
                         .expected_context_envelope_sha256
                         .clone(),
+                    expected_workspace_plan_revision_id: None,
+                    expected_workspace_plan_content_sha256: None,
+                    expected_workspace_plan_evidence_manifest_sha256: None,
                     run_kind: "manual_import".to_string(),
                     idempotency_key: format!("manual-import:{}", Uuid::new_v4()),
                     provider: "manual".to_string(),

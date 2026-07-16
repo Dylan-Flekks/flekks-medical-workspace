@@ -103,6 +103,7 @@ use codex_protocol::items::UserMessageItem;
 use codex_protocol::models::ActivePermissionProfile;
 use codex_protocol::models::AdditionalPermissionProfile;
 use codex_protocol::models::BaseInstructions;
+use codex_protocol::models::ContentItem;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::models::SandboxEnforcement;
 use codex_protocol::models::format_allow_prefixes;
@@ -249,6 +250,7 @@ pub enum SteerInputError {
     ExpectedTurnMismatch { expected: String, actual: String },
     ActiveTurnNotSteerable { turn_kind: NonSteerableTurnKind },
     WorkspaceContextOnlyTurn,
+    WorkspacePlanningOnlyTurn,
     EmptyInput,
 }
 
@@ -277,6 +279,10 @@ impl SteerInputError {
             }
             Self::WorkspaceContextOnlyTurn => ErrorEvent {
                 message: "cannot steer a workspaceContextOnly turn".to_string(),
+                codex_error_info: Some(CodexErrorInfo::BadRequest),
+            },
+            Self::WorkspacePlanningOnlyTurn => ErrorEvent {
+                message: "cannot steer a workspacePlanningOnly turn".to_string(),
                 codex_error_info: Some(CodexErrorInfo::BadRequest),
             },
             Self::EmptyInput => ErrorEvent {
@@ -541,14 +547,12 @@ impl Codex {
             external_time_provider,
             inherited_multi_agent_version,
         } = args;
-        if thread_extension_init
-            .get::<ModelToolMode>()
-            .is_some_and(|mode| *mode == ModelToolMode::WorkspaceContextOnly)
+        if let Some(mode) = thread_extension_init.get::<ModelToolMode>()
+            && mode.is_turn_only()
         {
-            return Err(CodexErr::InvalidRequest(
-                "workspaceContextOnly modelToolMode is valid only as a user-turn override"
-                    .to_string(),
-            ));
+            return Err(CodexErr::InvalidRequest(format!(
+                "{mode} modelToolMode is valid only as a user-turn override"
+            )));
         }
         let (tx_sub, rx_sub) = async_channel::bounded(SUBMISSION_CHANNEL_CAPACITY);
         let (tx_event, rx_event) = async_channel::unbounded();
@@ -1339,7 +1343,14 @@ impl Session {
         state.clear_connector_selection();
     }
 
-    async fn record_initial_history(&self, conversation_history: InitialHistory) {
+    fn record_initial_history(&self, conversation_history: InitialHistory) -> BoxFuture<'_, ()> {
+        // Rollout reconstruction is a large async state machine. Keep it behind a heap boundary
+        // so resumed threads fit the standard Tokio worker stack even when the retained rollout
+        // includes restricted planning turns and their durable lifecycle records.
+        Box::pin(self.record_initial_history_inner(conversation_history))
+    }
+
+    async fn record_initial_history_inner(&self, conversation_history: InitialHistory) {
         let is_subagent = {
             let state = self.state.lock().await;
             state
@@ -1544,9 +1555,13 @@ impl Session {
         let (previous_config, new_config, permission_profile_changed) = {
             let mut state = self.state.lock().await;
             let notify_config_contributors = has_config_contributors
-                && updates.model_tool_mode != Some(ModelToolMode::WorkspaceContextOnly)
-                && state.session_configuration.model_tool_mode
-                    != ModelToolMode::WorkspaceContextOnly;
+                && !updates
+                    .model_tool_mode
+                    .is_some_and(ModelToolMode::is_workspace_restricted)
+                && !state
+                    .session_configuration
+                    .model_tool_mode
+                    .is_workspace_restricted();
             let updated = match state.session_configuration.apply(&updates) {
                 Ok(updated) => updated,
                 Err(err) => {
@@ -1792,7 +1807,7 @@ impl Session {
     /// Persist the event to rollout and send it to clients.
     pub(crate) async fn send_event(&self, turn_context: &TurnContext, msg: EventMsg) {
         let legacy_source = msg.clone();
-        let trace_event = turn_context.model_tool_mode != ModelToolMode::WorkspaceContextOnly;
+        let trace_event = !turn_context.model_tool_mode.is_workspace_restricted();
         let should_emit_workflow_status = matches!(
             &legacy_source,
             EventMsg::TurnStarted(_) | EventMsg::TurnComplete(_)
@@ -2904,7 +2919,7 @@ impl Session {
         step_context: &step_context::StepContext,
     ) -> Arc<WorldState> {
         let turn_context = step_context.turn.as_ref();
-        if turn_context.model_tool_mode == ModelToolMode::WorkspaceContextOnly {
+        if turn_context.model_tool_mode.is_workspace_restricted() {
             return Arc::clone(previous_world_state);
         }
         // Render model-visible state from the same step used to build and run tools.
@@ -2956,9 +2971,7 @@ impl Session {
         } else {
             turn_context.environments.clone()
         };
-        if deferred_executor_enabled
-            && turn_context.model_tool_mode != ModelToolMode::WorkspaceContextOnly
-        {
+        if deferred_executor_enabled && !turn_context.model_tool_mode.is_workspace_restricted() {
             self.services
                 .agents_md_manager
                 .refresh(&turn_context.config, &environments)
@@ -2968,7 +2981,7 @@ impl Session {
         let selected_capability_roots = self
             .resolve_selected_capability_roots_for_step(&environments)
             .await;
-        let mcp = if turn_context.model_tool_mode == ModelToolMode::WorkspaceContextOnly {
+        let mcp = if turn_context.model_tool_mode.is_workspace_restricted() {
             self.services.latest_mcp_runtime()
         } else {
             self.mcp_runtime_for_step(
@@ -3198,7 +3211,7 @@ impl Session {
         &self,
         turn_context: &TurnContext,
     ) -> Vec<ResponseItem> {
-        if turn_context.model_tool_mode == ModelToolMode::WorkspaceContextOnly {
+        if turn_context.model_tool_mode.is_workspace_restricted() {
             return Vec::new();
         }
         let mut developer_sections = Vec::new();
@@ -3362,7 +3375,7 @@ impl Session {
                     .push(PersonalitySpecInstructions::new(personality_message).render());
             }
         }
-        if turn_context.model_tool_mode != ModelToolMode::WorkspaceContextOnly
+        if !turn_context.model_tool_mode.is_workspace_restricted()
             && turn_context.config.include_skill_instructions
         {
             let available_skills = build_available_skills(
@@ -3390,7 +3403,7 @@ impl Session {
                 developer_sections.push(skills_instructions.render());
             }
         }
-        if turn_context.model_tool_mode != ModelToolMode::WorkspaceContextOnly {
+        if !turn_context.model_tool_mode.is_workspace_restricted() {
             let loaded_plugins = self
                 .services
                 .plugins_manager
@@ -3462,7 +3475,7 @@ impl Session {
             }
         }
         // This is full-context metadata. Steady-state context diffs should not re-emit it.
-        if turn_context.model_tool_mode != ModelToolMode::WorkspaceContextOnly
+        if !turn_context.model_tool_mode.is_workspace_restricted()
             && turn_context.config.features.enabled(Feature::TokenBudget)
             && turn_context.model_context_window().is_some()
         {
@@ -3665,8 +3678,38 @@ impl Session {
         step_context: &StepContext,
     ) -> Arc<WorldState> {
         let turn_context = step_context.turn.as_ref();
-        if turn_context.model_tool_mode == ModelToolMode::WorkspaceContextOnly {
+        if turn_context.model_tool_mode.is_workspace_restricted() {
             self.mark_workspace_context_only_memory_tainted();
+            if turn_context.model_tool_mode == ModelToolMode::WorkspacePlanningOnly
+                && let Some(instructions) = CollaborationModeInstructions::from_collaboration_mode(
+                    &turn_context.collaboration_mode,
+                )
+            {
+                let rendered = instructions.render();
+                let already_recorded = {
+                    let state = self.state.lock().await;
+                    state.history.raw_items().iter().any(|item| {
+                        let ResponseItem::Message { role, content, .. } = item else {
+                            return false;
+                        };
+                        role == "developer"
+                            && content.iter().any(|content| {
+                                matches!(
+                                    content,
+                                    ContentItem::InputText { text }
+                                        | ContentItem::OutputText { text }
+                                        if text.contains(&rendered)
+                                )
+                            })
+                    })
+                };
+                if !already_recorded
+                    && let Some(item) =
+                        crate::context_manager::updates::build_developer_update_item(vec![rendered])
+                {
+                    self.record_conversation_items(turn_context, &[item]).await;
+                }
+            }
             // The restricted TurnContext and permanent memory taint are durably persisted before
             // task spawn in `user_input_or_turn_inner`. Do not append the marker a second time.
             // This turn intentionally receives no canonical initial context. Do not advance the
@@ -3786,7 +3829,7 @@ impl Session {
                 state.token_info()
             };
             let budget_result = self.record_rollout_budget_usage(token_usage);
-            if turn_context.model_tool_mode != ModelToolMode::WorkspaceContextOnly
+            if !turn_context.model_tool_mode.is_workspace_restricted()
                 && let Some(token_info) = token_info.as_ref()
             {
                 for contributor in self.services.extensions.token_usage_contributors() {
@@ -3963,6 +4006,10 @@ impl Session {
         client_user_message_id: Option<String>,
         responsesapi_client_metadata: Option<HashMap<String, String>>,
     ) -> Result<String, SteerInputError> {
+        let workspace_planning_locked = self
+            .workspace_planning_lock_active()
+            .await
+            .unwrap_or(/* fail closed */ true);
         let mut active = self.active_turn.lock().await;
         let Some(active_turn) = active.as_mut() else {
             return Err(SteerInputError::NoActiveTurn(input));
@@ -3971,6 +4018,9 @@ impl Session {
         let Some(active_task) = active_turn.task.as_ref() else {
             return Err(SteerInputError::NoActiveTurn(input));
         };
+        if workspace_planning_locked {
+            return Err(SteerInputError::WorkspacePlanningOnlyTurn);
+        }
         let active_turn_id = &active_task.turn_context.sub_id;
 
         if let Some(expected_turn_id) = expected_turn_id
@@ -3982,8 +4032,14 @@ impl Session {
             });
         }
 
-        if active_task.turn_context.model_tool_mode == ModelToolMode::WorkspaceContextOnly {
-            return Err(SteerInputError::WorkspaceContextOnlyTurn);
+        match active_task.turn_context.model_tool_mode {
+            ModelToolMode::WorkspaceContextOnly => {
+                return Err(SteerInputError::WorkspaceContextOnlyTurn);
+            }
+            ModelToolMode::WorkspacePlanningOnly => {
+                return Err(SteerInputError::WorkspacePlanningOnlyTurn);
+            }
+            ModelToolMode::Default | ModelToolMode::Disabled => {}
         }
 
         match active_task.kind {

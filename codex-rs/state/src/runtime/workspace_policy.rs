@@ -8,7 +8,7 @@ use sqlx::SqliteConnection;
 use sqlx::Transaction;
 use std::collections::BTreeSet;
 
-pub(super) const WORKSPACE_DOMAIN_TABLES: [&str; 26] = [
+pub(super) const WORKSPACE_DOMAIN_TABLES: [&str; 36] = [
     "workspace_clients",
     "workspace_notes",
     "workspace_note_revisions",
@@ -30,11 +30,21 @@ pub(super) const WORKSPACE_DOMAIN_TABLES: [&str; 26] = [
     "workspace_patient_safety_items",
     "workspace_agent_runs",
     "workspace_agent_run_sources",
+    "workspace_agent_turn_completions",
     "workspace_note_proposal_decisions",
     "workspace_chart_commits",
     "workspace_draft_sessions",
     "workspace_draft_checkpoints",
     "workspace_guide_runs",
+    "workspace_plan_sessions",
+    "workspace_plan_messages",
+    "workspace_planning_turn_claims",
+    "workspace_planning_context_reads",
+    "workspace_plan_revisions",
+    "workspace_plan_proposals",
+    "workspace_plan_turn_completions",
+    "workspace_plan_turn_evidence",
+    "workspace_plan_submission_receipts",
 ];
 
 const POLICY_TABLE: &str = "workspace_data_policy";

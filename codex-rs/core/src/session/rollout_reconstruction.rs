@@ -234,7 +234,7 @@ impl Session {
                             comp_hash: ctx.comp_hash.clone(),
                             realtime_active: ctx.realtime_active,
                         });
-                        if ctx.model_tool_mode != ModelToolMode::WorkspaceContextOnly
+                        if !ctx.model_tool_mode.is_workspace_restricted()
                             && matches!(
                                 active_segment.reference_context_item,
                                 TurnReferenceContextItem::NeverSet

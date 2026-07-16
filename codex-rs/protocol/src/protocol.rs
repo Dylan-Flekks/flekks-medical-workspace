@@ -2753,7 +2753,7 @@ pub fn rollout_items_contain_workspace_context_only_turn(items: &[RolloutItem]) 
         matches!(
             item,
             RolloutItem::TurnContext(turn_context)
-                if turn_context.model_tool_mode == ModelToolMode::WorkspaceContextOnly
+                if turn_context.model_tool_mode.is_workspace_restricted()
         )
     })
 }
@@ -2765,7 +2765,9 @@ fn persistent_model_tool_mode(mode: ModelToolMode) -> ModelToolMode {
         // This mode is valid only on an individual turn. A durable settings or session-metadata
         // record containing it is malformed, so resume with tools disabled instead of making the
         // restricted mode sticky or silently enabling the default tool surface.
-        ModelToolMode::WorkspaceContextOnly => ModelToolMode::Disabled,
+        ModelToolMode::WorkspaceContextOnly | ModelToolMode::WorkspacePlanningOnly => {
+            ModelToolMode::Disabled
+        }
     }
 }
 
@@ -6122,6 +6124,12 @@ mod tests {
             serde_json::to_value(&restricted_item)?["model_tool_mode"],
             json!("workspaceContextOnly")
         );
+        let mut planning_item = restricted_item.clone();
+        planning_item.model_tool_mode = ModelToolMode::WorkspacePlanningOnly;
+        assert_eq!(
+            serde_json::to_value(&planning_item)?["model_tool_mode"],
+            json!("workspacePlanningOnly")
+        );
         let restricted_history = vec![
             RolloutItem::SessionMeta(SessionMetaLine {
                 meta: SessionMeta::default(),
@@ -6138,6 +6146,15 @@ mod tests {
         );
         assert_eq!(
             InitialHistory::Forked(restricted_history).get_latest_model_tool_mode(),
+            Some(ModelToolMode::Disabled)
+        );
+
+        let planning_history = vec![RolloutItem::TurnContext(planning_item)];
+        assert!(rollout_items_contain_workspace_context_only_turn(
+            &planning_history
+        ));
+        assert_eq!(
+            InitialHistory::Forked(planning_history).get_latest_model_tool_mode(),
             Some(ModelToolMode::Disabled)
         );
 
@@ -6162,6 +6179,16 @@ mod tests {
         );
 
         session_meta.model_tool_mode = ModelToolMode::WorkspaceContextOnly;
+        assert_eq!(
+            InitialHistory::Forked(vec![RolloutItem::SessionMeta(SessionMetaLine {
+                meta: session_meta.clone(),
+                git: None,
+            })])
+            .get_latest_model_tool_mode(),
+            Some(ModelToolMode::Disabled)
+        );
+
+        session_meta.model_tool_mode = ModelToolMode::WorkspacePlanningOnly;
         assert_eq!(
             InitialHistory::Forked(vec![RolloutItem::SessionMeta(SessionMetaLine {
                 meta: session_meta,

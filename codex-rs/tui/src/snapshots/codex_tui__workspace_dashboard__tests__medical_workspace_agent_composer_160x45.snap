@@ -4,31 +4,31 @@ expression: "render_dashboard_lines_at(&composer, 160, 45)"
 ---
 Medical Workspace  /workspace-medical  SYNTHETIC DATA ONLY
 Patient: Jordan Patient  DOB: blank  MRN: blank  Contact: Missing contact  Coverage: Missing coverage  Encounter: No encounter
- EXPLORER                          PATIENT CHART                                                                   CONTEXT PLAN
-┌Patient Directory───────────────┐┌Patient Demographics──────────────────────────────────────────────────────────┐┌Context Plan────────────────────────────────┐
-│Local search: /                 ││Identity: Jordan Patient · preferred not set                                  ││Agent: Jordan...; preview                   │
-│0 active patients; local only   ││Legal/card: legal name missing                                                ││Codex bridge: building                      │
-│No saved patients yet.          ││DOB: missing · admin sex: missing · MRN: missing                              ││[Current]  History  Audit  ←/→              │
-│New patient: :patient new       ││Contact: phone missing; email missing; method not set                         ││                                            │
-│                                ││Address: address missing                                                      ││Workspace Planner                           │
-│                                ││Emergency: name missing; relationship missing; phone missing                  ││  Choose supporting context                 │
-│                                ││Coverage: P not entered; S not entered; T not entered                         ││  Select only the files, reviewed text, and │
-│                                ││Enter edits all identity/contact fields · Ctrl-P opens actions                ││clips the agent needs for this request.     │
-│                                │└──────────────────────────────────────────────────────────────────────────────┘│  ● next: Mark agent context                │
-│                                │┌Note Title────────────────────────────────────────────────────────────────────┐│  Guidance only; no model call and no chart │
-│                                ││Visit note                                                                    ││mutation.                                   │
+ EXPLORER                          PATIENT CHART                                                                   PLAN WITH CODEX
+┌Patient Directory───────────────┐┌Patient Demographics──────────────────────────────────────────────────────────┐┌Plan with Codex─────────────────────────────┐
+│Local search: /                 ││Identity: Jordan Patient · preferred not set                                  ││[Chat]  Context  Audit  ←/→ tabs            │
+│0 active patients; local only   ││Legal/card: legal name missing                                                ││                                            │
+│No saved patients yet.          ││DOB: missing · admin sex: missing · MRN: missing                              ││Plan with Codex · Jordan Patient            │
+│New patient: :patient new       ││Contact: phone missing; email missing; method not set                         ││  Context  0 files · 0 text · 0 clips       │
+│                                ││Address: address missing                                                      ││  ● plan: ready to plan                     │
+│                                ││Emergency: name missing; relationship missing; phone missing                  ││                                            │
+│                                ││Coverage: P not entered; S not entered; T not entered                         ││Codex                                       │
+│                                ││Enter edits all identity/contact fields · Ctrl-P opens actions                ││  I can help connect today's note to the    │
+│                                │└──────────────────────────────────────────────────────────────────────────────┘│patient's longer-term                       │
+│                                │┌Note Title────────────────────────────────────────────────────────────────────┐│  goals, prior visits, referrals, and       │
+│                                ││Visit note                                                                    ││selected files.                             │
 │                                │└──────────────────────────────────────────────────────────────────────────────┘│                                            │
-└────────────────────────────────┘┌Note Body─────────────────────────────────────────────────────────────────────┐│Mode: > Build |   Review |   Returned       │
-┌Patient Notes───────────────────┐│Fake human-entered visit note body.                                           ││  ● request: edit the local draft below     │
-│Patient Notes                   ││                                                                              ││  Nothing is sent until Context Plan review │
-│  New note                      ││                                                                              ││and Ctrl-G.                                 │
-│  No patient notes yet. Use     ││                                                                              ││  Local only; the composer stays pinned     │
-│:note new.                      ││                                                                              ││below guidance.                             │
+└────────────────────────────────┘┌Note Body─────────────────────────────────────────────────────────────────────┐│  Try: What context is missing before I     │
+┌Patient Notes───────────────────┐│Fake human-entered visit note body.                                           ││finish this note?                           │
+│Patient Notes                   ││                                                                              ││  Ask Codex to publish an evidence-linked   │
+│  New note                      ││                                                                              ││plan before Ctrl-G handoff.                 │
+│  No patient notes yet. Use     ││                                                                              ││  Recommendations remain review-only until a│
+│:note new.                      ││                                                                              ││clinician approves a change.                │
 │  Medical, communication, and   ││                                                                              ││                                            │
-│admin notes appear here.        ││                                                                              ││  ● context: 0 files | 0 text | 0 clips     │
-│                                ││                                                                              ││  ● review: :agent preview                  │
-│                                ││                                                                              ││Recent History                              │
-│                                ││                                                                              ││  No saved agent work for this note.        │
+│admin notes appear here.        ││                                                                              ││                                            │
+│                                ││                                                                              ││                                            │
+│                                ││                                                                              ││                                            │
+│                                ││                                                                              ││                                            │
 └────────────────────────────────┘│                                                                              ││                                            │
 ┌Uploaded Documents──────────────┐│                                                                              ││                                            │
 │Uploaded Documents              ││                                                                              ││                                            │
@@ -39,11 +39,11 @@ Patient: Jordan Patient  DOB: blank  MRN: blank  Contact: Missing contact  Cover
 │                                ││                                                                              ││                                            │
 │                                ││                                                                              ││                                            │
 │                                ││                                                                              ││                                            │
-│                                ││                                                                              ││                                            │
-│                                ││                                                                              ││Instructions for Codex · local draft · Enter│
+│                                ││                                                                              ││Message Codex                               │
+│                                ││                                                                              ││Enter send · Shift-Enter line · Esc leave   │
 │                                ││                                                                              ││  Draft assessment                          │
 │                                ││                                                                              ││  Keep goals measurable                     │
 │                                ││                                                                              ││  Flag missing evidence                     │
 │                                ││                                                                              ││                                            │
 └────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────┘└────────────────────────────────────────────┘
-Focus: Agent | Mode: Agent input | Keys: ↑/↓ line  ←/→ cursor  PgUp/PgDn guidance  Ctrl-G send  Tab/⇧Tab pane  Ctrl-P commands | Next: Mark agent context
+Focus: Agent | Mode: Message Codex | Keys: Enter send  Shift-Enter newline  Esc leave  Ctrl-G master handoff  Tab/⇧Tab pane  Ctrl-P commands

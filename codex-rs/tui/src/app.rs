@@ -138,6 +138,7 @@ use codex_app_server_protocol::TurnStatus;
 use codex_app_server_protocol::WorkspaceAgentRunStartParams;
 use codex_app_server_protocol::WorkspaceAgentRunStatusUpdateParams;
 use codex_app_server_protocol::WorkspaceContextPacketListParams;
+use codex_app_server_protocol::WorkspacePlanRevisionSubmitParams;
 use codex_app_server_protocol::WriteStatus;
 use codex_config::CloudConfigBundleLoader;
 use codex_config::ConfigLayerStackOrdering;
@@ -235,6 +236,7 @@ mod thread_settings;
 mod workspace_agent_capture;
 mod workspace_context_turn;
 mod workspace_drafts;
+mod workspace_plan;
 
 use self::agent_navigation::AgentNavigationDirection;
 use self::agent_navigation::AgentNavigationState;
@@ -248,6 +250,7 @@ use self::side::SideThreadState;
 use self::startup_prompts::*;
 use self::thread_events::*;
 use self::workspace_agent_capture::PendingWorkspaceAgentCapture;
+use self::workspace_plan::WorkspacePlanRuntime;
 
 const EXTERNAL_EDITOR_HINT: &str = "Save and close external editor to continue.";
 const THREAD_EVENT_CHANNEL_CAPACITY: usize = 32768;
@@ -523,6 +526,7 @@ pub(crate) struct App {
     workspace_dashboard: Option<WorkspaceDashboard>,
     workspace_dashboard_visible: bool,
     workspace_draft_runtime: workspace_drafts::WorkspaceDraftRuntime,
+    workspace_plan_runtime: WorkspacePlanRuntime,
     pending_workspace_agent_capture: Option<PendingWorkspaceAgentCapture>,
     /// Config is stored here so we can recreate ChatWidgets as needed.
     pub(crate) config: Config,
@@ -1045,6 +1049,7 @@ See the Codex keymap documentation for supported actions and examples."
             workspace_dashboard: None,
             workspace_dashboard_visible: false,
             workspace_draft_runtime: workspace_drafts::WorkspaceDraftRuntime::default(),
+            workspace_plan_runtime: WorkspacePlanRuntime::default(),
             pending_workspace_agent_capture: None,
             config,
             state_db,
@@ -1231,7 +1236,7 @@ See the Codex keymap documentation for supported actions and examples."
                     }
                     app_server_event = app_server.next_event(), if listen_for_app_server_events => {
                         match app_server_event {
-                            Some(event) => app.handle_app_server_event(&app_server, event).await,
+                            Some(event) => app.handle_app_server_event(&mut app_server, event).await,
                             None => {
                                 listen_for_app_server_events = false;
                                 tracing::warn!("app-server event stream closed");
@@ -1607,6 +1612,31 @@ See the Codex keymap documentation for supported actions and examples."
                         .add_error_message(format!("Failed to resolve workspace proposal: {err}"));
                 }
             }
+            WorkspaceDashboardAction::SendPlanMessage {
+                patient_id,
+                note_id,
+                encounter_id,
+                content,
+            } => {
+                if let Err(error) = self
+                    .send_workspace_plan_message(
+                        app_server,
+                        patient_id,
+                        note_id,
+                        encounter_id,
+                        content,
+                    )
+                    .await
+                {
+                    if let Some(dashboard) = self.workspace_dashboard.as_mut() {
+                        dashboard.fail_plan_message_send(format!(
+                            "Codex plan message was not sent; your exact draft is retained: {error}"
+                        ));
+                    }
+                    tracing::warn!(%error, "failed to send workspace plan message");
+                    tui.frame_requester().schedule_frame();
+                }
+            }
             WorkspaceDashboardAction::SendContextToAgent => {
                 if let Err(err) = self.send_workspace_context_to_agent(app_server).await {
                     if let Some(dashboard) = self.workspace_dashboard.as_mut() {
@@ -1892,6 +1922,9 @@ See the Codex keymap documentation for supported actions and examples."
                 } else {
                     self.initialize_workspace_draft_recovery_after_navigation(app_server)
                         .await;
+                    if let Err(error) = self.refresh_workspace_plan_snapshot(app_server).await {
+                        tracing::warn!(%error, "failed to refresh plan after patient navigation");
+                    }
                 }
             }
             WorkspaceDashboardAction::SelectNote(index) => {
@@ -1921,6 +1954,9 @@ See the Codex keymap documentation for supported actions and examples."
                 } else {
                     self.initialize_workspace_draft_recovery_after_navigation(app_server)
                         .await;
+                    if let Err(error) = self.refresh_workspace_plan_snapshot(app_server).await {
+                        tracing::warn!(%error, "failed to refresh plan after note navigation");
+                    }
                 }
             }
             WorkspaceDashboardAction::SignNote => {
@@ -2017,6 +2053,100 @@ See the Codex keymap documentation for supported actions and examples."
             }
             return Ok(());
         }
+        if is_medical_handoff
+            && !self
+                .chat_widget
+                .can_accept_audited_text_as_plain_user_turn("medical handoff readiness check")
+        {
+            if let Some(dashboard) = self.workspace_dashboard.as_mut() {
+                dashboard.set_status(
+                    "The active Codex thread is not ready to receive a medical handoff. Wait for thread setup to finish, then retry.",
+                );
+            }
+            return Ok(());
+        }
+        let run_provider = Some(self.chat_widget.config_ref().model_provider_id.clone());
+        let run_model = self.chat_widget.current_model().to_string();
+        if is_medical_handoff {
+            let target_thread_id = medical_target_thread_id.as_deref().ok_or_else(|| {
+                color_eyre::eyre::eyre!(
+                    "submitted medical handoff recovery is missing its active target thread"
+                )
+            })?;
+            let retry_prompt = if let Some(pending) = self
+                .pending_workspace_agent_capture
+                .as_ref()
+                .filter(|pending| pending.handoff_is_authorized())
+            {
+                if !pending.handoff_is_authorized() {
+                    return Err(color_eyre::eyre::eyre!(
+                        "submitted medical handoff has an unauthorized pending capture"
+                    ));
+                }
+                if !pending.thread_is_allowed(target_thread_id)
+                    || !pending.model_matches(&run_model)
+                {
+                    return Err(color_eyre::eyre::eyre!(
+                        "submitted medical handoff no longer matches the active thread and model"
+                    ));
+                }
+                if pending.handoff_is_enqueued() {
+                    if let Some(dashboard) = self.workspace_dashboard.as_mut() {
+                        dashboard.set_status(
+                            "This exact submitted Plan handoff is already queued. Wait for the master-agent turn to start or finish.",
+                        );
+                    }
+                    return Ok(());
+                }
+                Some(pending.expected_prompt().to_string())
+            } else if self.pending_workspace_agent_capture.is_none()
+                && let Some(revision) = self.submitted_workspace_plan_revision_for_handoff()
+            {
+                self.recover_submitted_workspace_agent_capture(
+                    app_server,
+                    &revision,
+                    target_thread_id,
+                    &run_model,
+                )
+                .await?
+            } else {
+                None
+            };
+            if let Some(prompt) = retry_prompt {
+                if self
+                    .chat_widget
+                    .accept_audited_text_as_plain_user_turn(prompt)
+                {
+                    if let Some(pending) = self.pending_workspace_agent_capture.as_mut() {
+                        pending.mark_handoff_enqueued();
+                    }
+                    if let Some(dashboard) = self.workspace_dashboard.as_mut() {
+                        dashboard.set_status(
+                            "Exact submitted Plan handoff queued for the master agent. The audited packet and run were reused.",
+                        );
+                    }
+                } else if let Some(dashboard) = self.workspace_dashboard.as_mut() {
+                    dashboard.set_status(
+                        "The Plan submission is durable, but the master-agent turn was not queued. Keep this workspace open and press Ctrl-G to retry the exact handoff.",
+                    );
+                }
+                return Ok(());
+            }
+            if self
+                .workspace_plan_revision_for_handoff()
+                .is_some_and(|revision| {
+                    revision.status
+                        == codex_app_server_protocol::WorkspacePlanRevisionStatus::Submitted
+                })
+            {
+                if let Some(dashboard) = self.workspace_dashboard.as_mut() {
+                    dashboard.set_status(
+                        "This submitted Plan already has a terminal or claimed master-agent run. Publish a new Codex Plan revision before another handoff.",
+                    );
+                }
+                return Ok(());
+            }
+        }
         if is_medical_handoff {
             self.ensure_workspace_draft_runtime_initialized(app_server)
                 .await;
@@ -2038,11 +2168,15 @@ See the Codex keymap documentation for supported actions and examples."
                 return Err(err);
             }
         }
-        let run_provider = Some(self.chat_widget.config_ref().model_provider_id.clone());
-        let run_model = self.chat_widget.current_model().to_string();
         let source_checkpoint = is_medical_handoff
             .then(|| self.confirmed_workspace_draft_checkpoint())
             .flatten();
+        let medical_plan_revision = is_medical_handoff
+            .then(|| self.workspace_plan_revision_for_handoff())
+            .flatten();
+        let mut pending_plan_revision_submission = None;
+        let mut pending_dashboard_packet = None;
+        let mut pending_dashboard_run = None;
         let Some(dashboard) = self.workspace_dashboard.as_mut() else {
             self.workspace_dashboard_visible = false;
             return Ok(());
@@ -2059,13 +2193,20 @@ See the Codex keymap documentation for supported actions and examples."
                 );
                 return Ok(());
             };
-            let params = match dashboard.context_plan_create_params(source_checkpoint) {
-                Ok(params) => params,
-                Err(status) => {
-                    dashboard.set_status(status);
-                    return Ok(());
-                }
+            let Some(plan_revision) = medical_plan_revision.as_ref() else {
+                dashboard.set_status(
+                    "Ctrl-G master handoff requires a current evidence-linked Codex plan. Ask Codex in Chat to publish the plan first.",
+                );
+                return Ok(());
             };
+            let params =
+                match dashboard.context_plan_create_params(source_checkpoint, plan_revision) {
+                    Ok(params) => params,
+                    Err(status) => {
+                        dashboard.set_status(status);
+                        return Ok(());
+                    }
+                };
             let prepared_packet = app_server
                 .workspace_context_packet_create(params)
                 .await?
@@ -2076,6 +2217,13 @@ See the Codex keymap documentation for supported actions and examples."
                     idempotency_key: format!("medical-context-plan:{}", prepared_packet.id),
                     client_id: Some(prepared_packet.client_id.clone()),
                     context_envelope_sha256: Some(prepared_packet.context_envelope_sha256.clone()),
+                    expected_workspace_plan_revision_id: Some(plan_revision.id.clone()),
+                    expected_workspace_plan_content_sha256: Some(
+                        plan_revision.content_sha256.clone(),
+                    ),
+                    expected_workspace_plan_evidence_manifest_sha256: Some(
+                        plan_revision.evidence_manifest_sha256.clone(),
+                    ),
                     provider: run_provider,
                     model: Some(run_model.clone()),
                     source_thread_id: Some(target_thread_id.clone()),
@@ -2083,6 +2231,17 @@ See the Codex keymap documentation for supported actions and examples."
                 })
                 .await?
                 .run;
+            pending_plan_revision_submission = Some(WorkspacePlanRevisionSubmitParams {
+                revision_id: plan_revision.id.clone(),
+                plan_session_id: plan_revision.plan_session_id.clone(),
+                client_id: plan_revision.client_id.clone(),
+                source_checkpoint_id: source_checkpoint.checkpoint_id.clone(),
+                source_checkpoint_revision: source_checkpoint.revision,
+                source_checkpoint_sha256: source_checkpoint.content_sha256.clone(),
+                content_sha256: plan_revision.content_sha256.clone(),
+                packet_id: prepared_packet.id.clone(),
+                agent_run_id: run.id.clone(),
+            });
             let packet = app_server
                 .workspace_context_packet_list(WorkspaceContextPacketListParams {
                     client_id: prepared_packet.client_id.clone(),
@@ -2136,51 +2295,85 @@ See the Codex keymap documentation for supported actions and examples."
                 }
             };
             self.pending_workspace_agent_capture = Some(pending_capture);
-            dashboard.mark_agent_run_started(run);
-            dashboard.mark_agent_context_sent(packet);
+            pending_dashboard_run = Some(run);
+            pending_dashboard_packet = Some(packet);
             prompt
         } else {
             dashboard.agent_context_prompt()
         };
 
         if is_medical_handoff {
+            let submission = pending_plan_revision_submission.ok_or_else(|| {
+                color_eyre::eyre::eyre!(
+                    "medical handoff was prepared without a durable Plan submission binding"
+                )
+            })?;
+            let expected_run_id = submission.agent_run_id.clone();
+            let submitted_revision = match app_server
+                .workspace_plan_revision_submit(submission)
+                .await
+            {
+                Ok(response) => response.revision,
+                Err(error) => {
+                    let error_summary = "the reviewed Plan revision could not be durably submitted";
+                    if let Some(pending) = self.pending_workspace_agent_capture.take()
+                        && let Err(cancel_error) = app_server
+                            .workspace_agent_run_status_update(
+                                WorkspaceAgentRunStatusUpdateParams {
+                                    run_id: pending.run_id().to_string(),
+                                    status: "canceled".to_string(),
+                                    error_summary: Some(error_summary.to_string()),
+                                },
+                            )
+                            .await
+                    {
+                        tracing::warn!(%cancel_error, "failed to cancel parent run after Plan submission failed");
+                    }
+                    if let Some(dashboard) = self.workspace_dashboard.as_mut() {
+                        dashboard.set_status(
+                            "Master handoff was held because the reviewed Plan submission did not commit. Retry from Audit.",
+                        );
+                    }
+                    return Err(error);
+                }
+            };
+            let pending = self
+                .pending_workspace_agent_capture
+                .as_mut()
+                .ok_or_else(|| {
+                    color_eyre::eyre::eyre!(
+                        "medical handoff lost its exact pending run after Plan submission"
+                    )
+                })?;
+            if pending.run_id() != expected_run_id {
+                return Err(color_eyre::eyre::eyre!(
+                    "medical handoff pending run changed before authorization"
+                ));
+            }
+            pending.authorize_handoff();
+            self.note_workspace_plan_revision_submitted(submitted_revision);
+            self.refresh_workspace_plan_snapshot(app_server).await?;
+            if let Some(dashboard) = self.workspace_dashboard.as_mut() {
+                if let Some(run) = pending_dashboard_run.take() {
+                    dashboard.mark_agent_run_started(run);
+                }
+                if let Some(packet) = pending_dashboard_packet.take() {
+                    dashboard.mark_agent_context_sent(packet);
+                }
+            }
             let submitted = self
                 .chat_widget
                 .accept_audited_text_as_plain_user_turn(prompt);
             if !submitted {
-                let error_summary =
-                    "the audited handoff could not be submitted to the active Codex thread";
-                if let Some(pending) = self.pending_workspace_agent_capture.take() {
-                    let canceled = match app_server
-                        .workspace_agent_run_status_update(WorkspaceAgentRunStatusUpdateParams {
-                            run_id: pending.run_id().to_string(),
-                            status: "canceled".to_string(),
-                            error_summary: Some(error_summary.to_string()),
-                        })
-                        .await
-                    {
-                        Ok(_) => true,
-                        Err(err) => {
-                            tracing::warn!(
-                                error = %err,
-                                "failed to cancel an unsubmitted medical workspace run"
-                            );
-                            false
-                        }
-                    };
-                    if canceled
-                        && let Some(dashboard) = self.workspace_dashboard.as_mut()
-                        && let Err(err) = dashboard
-                            .refresh_after_agent_run_ended(app_server, "canceled", error_summary)
-                            .await
-                    {
-                        tracing::warn!(
-                            error = %err,
-                            "canceled unsubmitted medical run but failed to refresh Context Plan state"
-                        );
-                    }
+                if let Some(dashboard) = self.workspace_dashboard.as_mut() {
+                    dashboard.set_status(
+                        "The Plan submission is durable, but the master-agent turn was not queued. Press Ctrl-G to retry the exact audited packet and run.",
+                    );
                 }
-                return Err(color_eyre::eyre::eyre!(error_summary));
+                return Ok(());
+            }
+            if let Some(pending) = self.pending_workspace_agent_capture.as_mut() {
+                pending.mark_handoff_enqueued();
             }
         } else {
             if self

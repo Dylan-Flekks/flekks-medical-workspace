@@ -1177,6 +1177,12 @@ pub struct WorkspaceContextPacket {
     pub source_checkpoint_sha256: Option<String>,
     #[serde(default = "default_context_plan_readiness_json")]
     pub readiness_json: String,
+    #[serde(default)]
+    pub workspace_plan_revision_id: Option<String>,
+    #[serde(default)]
+    pub workspace_plan_content_sha256: Option<String>,
+    #[serde(default)]
+    pub workspace_plan_evidence_manifest_sha256: Option<String>,
     pub status: String,
     #[ts(type = "number")]
     pub created_at: i64,
@@ -1245,6 +1251,12 @@ pub struct WorkspaceContextPacketCreateParams {
     pub source_checkpoint_sha256: Option<String>,
     #[ts(optional = nullable)]
     pub readiness_json: Option<String>,
+    #[ts(optional = nullable)]
+    pub workspace_plan_revision_id: Option<String>,
+    #[ts(optional = nullable)]
+    pub workspace_plan_content_sha256: Option<String>,
+    #[ts(optional = nullable)]
+    pub workspace_plan_evidence_manifest_sha256: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
@@ -1291,6 +1303,12 @@ pub struct WorkspaceContextPacketReplay {
     pub source_checkpoint_sha256: Option<String>,
     #[serde(default = "default_context_plan_readiness_json")]
     pub readiness_json: String,
+    #[serde(default)]
+    pub workspace_plan_revision_id: Option<String>,
+    #[serde(default)]
+    pub workspace_plan_content_sha256: Option<String>,
+    #[serde(default)]
+    pub workspace_plan_evidence_manifest_sha256: Option<String>,
     pub read_only_safety_constraints: Vec<String>,
     pub status: String,
     #[ts(type = "number")]
@@ -1313,6 +1331,12 @@ pub struct WorkspaceAgentRun {
     #[ts(type = "number | null")]
     pub base_note_revision: Option<i64>,
     pub context_envelope_sha256: String,
+    #[serde(default)]
+    pub workspace_plan_revision_id: Option<String>,
+    #[serde(default)]
+    pub workspace_plan_content_sha256: Option<String>,
+    #[serde(default)]
+    pub workspace_plan_evidence_manifest_sha256: Option<String>,
     pub run_kind: String,
     pub idempotency_key: String,
     pub provider: Option<String>,
@@ -1341,6 +1365,12 @@ pub struct WorkspaceAgentRunStartParams {
     pub client_id: Option<String>,
     #[ts(optional = nullable)]
     pub context_envelope_sha256: Option<String>,
+    #[ts(optional = nullable)]
+    pub expected_workspace_plan_revision_id: Option<String>,
+    #[ts(optional = nullable)]
+    pub expected_workspace_plan_content_sha256: Option<String>,
+    #[ts(optional = nullable)]
+    pub expected_workspace_plan_evidence_manifest_sha256: Option<String>,
     #[ts(optional = nullable)]
     pub provider: Option<String>,
     #[ts(optional = nullable)]
@@ -1482,6 +1512,131 @@ fn default_context_plan_schema_version() -> i64 {
 
 fn default_context_plan_readiness_json() -> String {
     r#"{"version":1,"warnings":[],"acknowledgements":[],"legacy":true}"#.to_string()
+}
+
+#[cfg(test)]
+mod plan_binding_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn packet_and_run_plan_bindings_use_explicit_camel_case_fields() {
+        let hash = "a".repeat(64);
+        let packet_params: WorkspaceContextPacketCreateParams = serde_json::from_value(json!({
+            "clientId": "client",
+            "encounterId": null,
+            "noteId": "note",
+            "humanRequest": "Execute reviewed plan",
+            "selectedArtifactIdsJson": "[]",
+            "selectedDerivativeIdsJson": "[]",
+            "selectedClipIdsJson": "[]",
+            "artifactSummary": "",
+            "derivativeSummary": "",
+            "clipSummary": "",
+            "chartContextSummary": "",
+            "contextEnvelopeJson": "{}",
+            "workspacePlanRevisionId": "revision",
+            "workspacePlanContentSha256": hash,
+            "workspacePlanEvidenceManifestSha256": hash,
+        }))
+        .expect("packet create params");
+        assert_eq!(
+            packet_params.workspace_plan_revision_id.as_deref(),
+            Some("revision")
+        );
+
+        let run_params: WorkspaceAgentRunStartParams = serde_json::from_value(json!({
+            "packetId": "packet",
+            "idempotencyKey": "key",
+            "expectedWorkspacePlanRevisionId": "revision",
+            "expectedWorkspacePlanContentSha256": hash,
+            "expectedWorkspacePlanEvidenceManifestSha256": hash,
+        }))
+        .expect("run start params");
+        assert_eq!(
+            run_params.expected_workspace_plan_revision_id.as_deref(),
+            Some("revision")
+        );
+
+        let packet = WorkspaceContextPacket {
+            id: "packet".to_string(),
+            client_id: "client".to_string(),
+            encounter_id: None,
+            note_id: Some("note".to_string()),
+            human_request: "Execute reviewed plan".to_string(),
+            selected_artifact_ids_json: "[]".to_string(),
+            selected_derivative_ids_json: "[]".to_string(),
+            selected_clip_ids_json: "[]".to_string(),
+            artifact_summary: String::new(),
+            derivative_summary: String::new(),
+            clip_summary: String::new(),
+            chart_context_summary: String::new(),
+            context_envelope_json: "{}".to_string(),
+            context_envelope_sha256: hash.clone(),
+            clinician_actor: "clinician".to_string(),
+            base_note_revision: Some(1),
+            authorized_scope_json: "{}".to_string(),
+            expected_output_kind: "medical_plan_execution".to_string(),
+            workspace_profile: "medical".to_string(),
+            plan_schema_version: 1,
+            source_checkpoint_id: Some("checkpoint".to_string()),
+            source_checkpoint_sha256: Some(hash.clone()),
+            readiness_json: default_context_plan_readiness_json(),
+            workspace_plan_revision_id: Some("revision".to_string()),
+            workspace_plan_content_sha256: Some(hash.clone()),
+            workspace_plan_evidence_manifest_sha256: Some(hash.clone()),
+            status: "submitted".to_string(),
+            created_at: 1,
+            sent_at: 1,
+            submitted_at: Some(1),
+            canceled_at: None,
+            updated_at: 1,
+        };
+        let packet_json = serde_json::to_value(packet).expect("packet response JSON");
+        assert_eq!(packet_json["workspacePlanRevisionId"], "revision");
+        assert_eq!(packet_json["workspacePlanContentSha256"], hash);
+        assert_eq!(packet_json["workspacePlanEvidenceManifestSha256"], hash);
+
+        let run = WorkspaceAgentRun {
+            id: "run".to_string(),
+            packet_id: "packet".to_string(),
+            client_id: "client".to_string(),
+            note_id: Some("note".to_string()),
+            base_note_revision: Some(1),
+            context_envelope_sha256: hash.clone(),
+            workspace_plan_revision_id: Some("revision".to_string()),
+            workspace_plan_content_sha256: Some(hash.clone()),
+            workspace_plan_evidence_manifest_sha256: Some(hash.clone()),
+            run_kind: "agent".to_string(),
+            idempotency_key: "key".to_string(),
+            provider: Some("provider".to_string()),
+            model: Some("model".to_string()),
+            source_thread_id: Some("thread".to_string()),
+            source_turn_id: None,
+            status: "running".to_string(),
+            error_summary: None,
+            started_at: 1,
+            completed_at: None,
+            created_at: 1,
+            updated_at: 1,
+        };
+        let run_json = serde_json::to_value(run).expect("run response JSON");
+        assert_eq!(run_json["workspacePlanRevisionId"], "revision");
+        assert_eq!(run_json["workspacePlanContentSha256"], hash);
+        assert_eq!(run_json["workspacePlanEvidenceManifestSha256"], hash);
+
+        let legacy: WorkspaceAgentRunStartParams = serde_json::from_value(json!({
+            "packetId": "legacy-packet",
+            "idempotencyKey": "legacy-key",
+        }))
+        .expect("legacy run start params");
+        assert_eq!(legacy.expected_workspace_plan_revision_id, None);
+        assert_eq!(legacy.expected_workspace_plan_content_sha256, None);
+        assert_eq!(
+            legacy.expected_workspace_plan_evidence_manifest_sha256,
+            None
+        );
+    }
 }
 
 /// Agent results are review-pending outputs bound to one context packet. The

@@ -1406,7 +1406,7 @@ impl ChatWidget {
         self.bottom_pane.show_shutdown_in_progress();
     }
 
-    fn request_redraw(&mut self) {
+    pub(crate) fn request_redraw(&mut self) {
         self.frame_requester.schedule_frame();
     }
 
