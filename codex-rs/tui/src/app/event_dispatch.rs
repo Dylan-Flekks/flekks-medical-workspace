@@ -11,6 +11,15 @@ use crate::external_agent_config_migration_flow::ExternalAgentConfigMigrationFlo
 use codex_config::types::WindowsSandboxModeToml;
 
 const SHUTDOWN_FIRST_EXIT_TIMEOUT: Duration = Duration::from_secs(/*secs*/ 2);
+const REMOTE_MEDICAL_WORKSPACE_BLOCK_MESSAGE: &str = "Medical Workspace is local-only and cannot open against a remote app-server store. Reconnect with the local app-server before using /workspace-medical.";
+
+fn remote_workspace_block_message(
+    profile: WorkspaceProfile,
+    uses_remote_workspace: bool,
+) -> Option<&'static str> {
+    (profile == WorkspaceProfile::Medical && uses_remote_workspace)
+        .then_some(REMOTE_MEDICAL_WORKSPACE_BLOCK_MESSAGE)
+}
 
 impl App {
     pub(super) async fn handle_event(
@@ -21,9 +30,71 @@ impl App {
     ) -> Result<AppRunControl> {
         match event {
             AppEvent::OpenWorkspaceDashboard { profile } => {
-                let _ = tui.enter_workspace_alt_screen();
-                if self.workspace_dashboard.is_none() {
+                if profile != WorkspaceProfile::Medical && self.workspace_draft_recovery_pending() {
+                    self.chat_widget.add_error_message(
+                        "A Medical Workspace recovery is pending. Reopen /workspace-medical and explicitly restore or discard it before switching workspace profiles."
+                            .to_string(),
+                    );
+                    tui.frame_requester().schedule_frame();
+                    return Ok(AppRunControl::Continue);
+                }
+                if let Some(message) =
+                    remote_workspace_block_message(profile, app_server.uses_remote_workspace())
+                {
+                    self.chat_widget.add_error_message(message.to_string());
+                    tui.frame_requester().schedule_frame();
+                    return Ok(AppRunControl::Continue);
+                }
+                if profile == WorkspaceProfile::Medical
+                    && let Err(error) = app_server.ensure_synthetic_workspace().await
+                {
+                    self.chat_widget
+                        .add_error_message(workspace_open_error_message(error));
+                    tui.frame_requester().schedule_frame();
+                    return Ok(AppRunControl::Continue);
+                }
+                let switching_profiles = self
+                    .workspace_dashboard
+                    .as_ref()
+                    .is_some_and(|dashboard| dashboard.profile() != profile);
+                if switching_profiles {
+                    let leaving_medical = self
+                        .workspace_dashboard
+                        .as_ref()
+                        .is_some_and(|dashboard| dashboard.profile() == WorkspaceProfile::Medical);
+                    if leaving_medical
+                        && let Err(error) = self
+                            .flush_workspace_draft(
+                                app_server,
+                                WorkspaceDraftCheckpointTrigger::WorkspaceClose,
+                            )
+                            .await
+                    {
+                        self.chat_widget.add_error_message(format!(
+                            "Workspace profile switch blocked until the local medical draft is checkpointed: {error}"
+                        ));
+                        tui.frame_requester().schedule_frame();
+                        return Ok(AppRunControl::Continue);
+                    }
+                    self.workspace_dashboard = None;
+                }
+                if let Err(err) = tui.enter_workspace_alt_screen() {
+                    self.workspace_dashboard_visible = false;
+                    self.chat_widget.add_error_message(format!(
+                        "Workspace could not open in an isolated full-screen surface: {err}"
+                    ));
+                    tui.terminal.invalidate_viewport();
+                    tui.frame_requester().schedule_frame();
+                    return Ok(AppRunControl::Continue);
+                }
+                // Entering from an already-active alternate screen does not perform a raw clear.
+                // Invalidate the prior chat diff buffer so the first workspace frame still paints
+                // every cell without introducing an intermediate blank screen.
+                tui.terminal.invalidate_viewport();
+                let opened_new_dashboard = self.workspace_dashboard.is_none();
+                if opened_new_dashboard {
                     let mut dashboard = WorkspaceDashboard::new(profile);
+                    dashboard.set_keymap_bindings(&self.keymap);
                     if app_server.uses_remote_workspace() {
                         dashboard.set_store_description("Remote app-server workspace store");
                     } else {
@@ -44,8 +115,37 @@ impl App {
                     }
                 } else if let Some(dashboard) = self.workspace_dashboard.as_mut() {
                     dashboard.set_profile(profile);
+                    dashboard.set_keymap_bindings(&self.keymap);
                 }
                 self.workspace_dashboard_visible = true;
+                if opened_new_dashboard {
+                    self.initialize_workspace_draft_recovery(app_server).await;
+                } else if self.workspace_draft_recovery_needs_retry() {
+                    self.retry_workspace_draft_recovery(app_server).await;
+                }
+                if profile == WorkspaceProfile::Medical
+                    && let Err(error) = self.refresh_workspace_plan_snapshot(app_server).await
+                {
+                    tracing::warn!(%error, "failed to load persistent workspace plan snapshot");
+                    if let Some(dashboard) = self.workspace_dashboard.as_mut() {
+                        dashboard.set_status(format!(
+                            "Workspace opened, but the persistent Codex plan could not load: {error}"
+                        ));
+                    }
+                }
+                tui.frame_requester().schedule_frame();
+            }
+            AppEvent::WorkspaceDraftAutosaveTick { token } => {
+                if self
+                    .handle_workspace_draft_autosave_tick(app_server, token)
+                    .await
+                {
+                    tui.frame_requester().schedule_frame();
+                }
+            }
+            AppEvent::WorkspaceDraftFocusCheckpoint { token } => {
+                self.handle_workspace_draft_focus_checkpoint(app_server, token)
+                    .await;
                 tui.frame_requester().schedule_frame();
             }
             AppEvent::NewSession => {
@@ -442,7 +542,9 @@ impl App {
                 self.apply_cancelled_turn_edit(prompt);
             }
             AppEvent::AppendMessageHistoryEntry { thread_id, text } => {
-                self.append_message_history_entry(thread_id, text);
+                if !self.suppress_workspace_context_message_history(thread_id) {
+                    self.append_message_history_entry(thread_id, text);
+                }
             }
             AppEvent::SyncThreadGitBranch { thread_id, branch } => {
                 if let Err(err) = app_server
@@ -2487,5 +2589,43 @@ impl App {
                 AppRunControl::Continue
             }
         }
+    }
+}
+
+pub(super) fn workspace_open_error_message(error: impl std::fmt::Display) -> String {
+    format!("Failed to open workspace: {error}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::REMOTE_MEDICAL_WORKSPACE_BLOCK_MESSAGE;
+    use super::WorkspaceProfile;
+    use super::remote_workspace_block_message;
+    use super::workspace_open_error_message;
+
+    #[test]
+    fn remote_store_blocks_medical_workspace_but_not_generic_workspace() {
+        assert_eq!(
+            remote_workspace_block_message(WorkspaceProfile::Medical, true),
+            Some(REMOTE_MEDICAL_WORKSPACE_BLOCK_MESSAGE)
+        );
+        assert_eq!(
+            remote_workspace_block_message(WorkspaceProfile::Generic, true),
+            None
+        );
+        assert_eq!(
+            remote_workspace_block_message(WorkspaceProfile::Medical, false),
+            None
+        );
+    }
+
+    #[test]
+    fn workspace_policy_failure_keeps_the_recovery_action_visible() {
+        let message = workspace_open_error_message(
+            crate::app_server_session::workspace_data_policy::LOCAL_UNCONFIGURED_MESSAGE,
+        );
+        assert!(message.starts_with("Failed to open workspace:"));
+        assert!(message.contains("restart with `just medical-workspace`"));
+        assert!(message.contains("no chart data was changed"));
     }
 }

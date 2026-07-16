@@ -22,6 +22,7 @@ use crate::tasks::CompactTask;
 use crate::tasks::UserShellCommandMode;
 use crate::tasks::UserShellCommandTask;
 use crate::tasks::execute_user_shell_command;
+use codex_protocol::config_types::ModelToolMode;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
@@ -48,6 +49,7 @@ use codex_protocol::protocol::TurnAbortReason;
 use codex_protocol::protocol::WarningEvent;
 use codex_protocol::request_permissions::RequestPermissionsResponse;
 use codex_protocol::request_user_input::RequestUserInputResponse;
+use codex_protocol::user_input::UserInput;
 
 use crate::context_manager::is_user_turn_boundary;
 use codex_protocol::dynamic_tools::DynamicToolResponse;
@@ -55,6 +57,8 @@ use codex_protocol::mcp::RequestId as ProtocolRequestId;
 use codex_rmcp_client::ElicitationAction;
 use codex_rmcp_client::ElicitationResponse;
 use serde_json::Value;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use tracing::debug;
 use tracing::info;
@@ -80,13 +84,21 @@ pub async fn realtime_conversation_list_voices(sess: &Session, sub_id: String) {
     .await;
 }
 
-pub async fn user_input_or_turn(
-    sess: &Arc<Session>,
+pub fn user_input_or_turn<'a>(
+    sess: &'a Arc<Session>,
     sub_id: String,
     op: Op,
     client_user_message_id: Option<String>,
-) {
-    user_input_or_turn_inner(sess, sub_id, op, client_user_message_id).await;
+) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+    // Planning-only turns add several fail-closed SQLite claim paths. Keep their combined async
+    // state machine off the submission-loop worker stack so every operation, including unrelated
+    // thread settings, retains the normal Tokio stack budget.
+    Box::pin(user_input_or_turn_inner(
+        sess,
+        sub_id,
+        op,
+        client_user_message_id,
+    ))
 }
 
 pub async fn update_thread_settings(
@@ -94,6 +106,20 @@ pub async fn update_thread_settings(
     sub_id: String,
     thread_settings: ThreadSettingsOverrides,
 ) {
+    if let Some(mode) = thread_settings
+        .model_tool_mode
+        .filter(|mode| mode.is_turn_only())
+    {
+        sess.send_event_raw(Event {
+            id: sub_id,
+            msg: EventMsg::Error(ErrorEvent {
+                message: format!("{mode} modelToolMode is valid only as a user-turn override"),
+                codex_error_info: Some(CodexErrorInfo::BadRequest),
+            }),
+        })
+        .await;
+        return;
+    }
     let updates = thread_settings_update(sess, thread_settings).await;
     match sess.update_settings(updates).await {
         Ok(()) => {
@@ -210,6 +236,157 @@ pub(super) async fn user_input_or_turn_inner(
     else {
         unreachable!();
     };
+    let workspace_mode = thread_settings
+        .model_tool_mode
+        .filter(|mode| mode.is_workspace_restricted());
+    let workspace_restricted = workspace_mode.is_some();
+    let active_workspace_mode = workspace_mode.unwrap_or_default();
+    if workspace_mode != Some(ModelToolMode::WorkspacePlanningOnly) {
+        match sess.workspace_planning_lock_active().await {
+            Ok(true) => {
+                send_workspace_planning_thread_lock_error(sess, sub_id).await;
+                return;
+            }
+            Ok(false) => {}
+            Err(_) => {
+                send_workspace_planning_thread_lock_verification_error(sess, sub_id).await;
+                return;
+            }
+        }
+    }
+    if let Some(workspace_mode) = workspace_mode {
+        let rejection = {
+            let state = sess.state.lock().await;
+            if state
+                .session_configuration
+                .original_config_do_not_use
+                .ephemeral
+            {
+                Some(format!("{workspace_mode} turns require a persisted thread"))
+            } else if state
+                .session_configuration
+                .session_source
+                .is_non_root_agent()
+            {
+                Some(format!("{workspace_mode} turns require a root session"))
+            } else {
+                None
+            }
+        };
+        if let Some(message) = rejection {
+            sess.send_event_raw(Event {
+                id: sub_id,
+                msg: EventMsg::Error(ErrorEvent {
+                    message,
+                    codex_error_info: Some(CodexErrorInfo::BadRequest),
+                }),
+            })
+            .await;
+            return;
+        }
+    }
+    if workspace_mode == Some(ModelToolMode::WorkspacePlanningOnly) {
+        let collaboration_mode = match thread_settings.collaboration_mode.as_ref() {
+            Some(mode) => mode.mode,
+            None => sess.collaboration_mode().await.mode,
+        };
+        if collaboration_mode != codex_protocol::config_types::ModeKind::Plan {
+            sess.send_event_raw(Event {
+                id: sub_id,
+                msg: EventMsg::Error(ErrorEvent {
+                    message: "workspacePlanningOnly turns require Plan collaboration mode"
+                        .to_string(),
+                    codex_error_info: Some(CodexErrorInfo::BadRequest),
+                }),
+            })
+            .await;
+            return;
+        }
+    }
+    if workspace_restricted
+        && (items.len() != 1
+            || items.iter().any(|item| {
+                !matches!(
+                    item,
+                    UserInput::Text {
+                        text,
+                        text_elements,
+                    } if !text.trim().is_empty() && text_elements.is_empty()
+                )
+            }))
+    {
+        sess.send_event_raw(Event {
+            id: sub_id,
+            msg: EventMsg::Error(ErrorEvent {
+                message: format!(
+                    "{active_workspace_mode} turns require non-empty plain text input items only"
+                ),
+                codex_error_info: Some(CodexErrorInfo::BadRequest),
+            }),
+        })
+        .await;
+        return;
+    }
+    let workspace_run_contract = if workspace_restricted {
+        match crate::tools::workspace_context_only::parse_run_contract(
+            active_workspace_mode,
+            &items,
+        ) {
+            Ok(contract) => Some(contract),
+            Err(err) => {
+                sess.send_event_raw(Event {
+                    id: sub_id,
+                    msg: EventMsg::Error(ErrorEvent {
+                        message: err.to_string(),
+                        codex_error_info: Some(CodexErrorInfo::BadRequest),
+                    }),
+                })
+                .await;
+                return;
+            }
+        }
+    } else {
+        None
+    };
+    if workspace_restricted && !additional_context.is_empty() {
+        sess.send_event_raw(Event {
+            id: sub_id,
+            msg: EventMsg::Error(ErrorEvent {
+                message: format!("{active_workspace_mode} turns do not accept additionalContext"),
+                codex_error_info: Some(CodexErrorInfo::BadRequest),
+            }),
+        })
+        .await;
+        return;
+    }
+    if workspace_restricted && final_output_json_schema.is_some() {
+        sess.send_event_raw(Event {
+            id: sub_id,
+            msg: EventMsg::Error(ErrorEvent {
+                message: format!("{active_workspace_mode} turns do not accept an output schema"),
+                codex_error_info: Some(CodexErrorInfo::BadRequest),
+            }),
+        })
+        .await;
+        return;
+    }
+    if workspace_restricted
+        && responsesapi_client_metadata
+            .as_ref()
+            .is_some_and(|metadata| !metadata.is_empty())
+    {
+        sess.send_event_raw(Event {
+            id: sub_id,
+            msg: EventMsg::Error(ErrorEvent {
+                message: format!(
+                    "{active_workspace_mode} turns do not accept responsesapiClientMetadata"
+                ),
+                codex_error_info: Some(CodexErrorInfo::BadRequest),
+            }),
+        })
+        .await;
+        return;
+    }
     if thread_settings.model_tool_mode.is_some()
         && sess.conversation.running_state().await.is_some()
     {
@@ -244,6 +421,12 @@ pub(super) async fn user_input_or_turn_inner(
         return;
     }
     let emit_thread_settings_applied = thread_settings != ThreadSettingsOverrides::default();
+    let restore_model_tool_mode = if workspace_restricted {
+        let state = sess.state.lock().await;
+        Some(state.session_configuration.model_tool_mode)
+    } else {
+        None
+    };
     let mut updates = if emit_thread_settings_applied {
         thread_settings_update(sess, thread_settings).await
     } else {
@@ -255,6 +438,167 @@ pub(super) async fn user_input_or_turn_inner(
         // new_turn_with_sub_id already emits the error event.
         return;
     };
+    if let Some(model_tool_mode) = restore_model_tool_mode
+        && let Err(err) = sess
+            .update_settings(SessionSettingsUpdate {
+                model_tool_mode: Some(model_tool_mode),
+                ..Default::default()
+            })
+            .await
+    {
+        sess.send_event_raw(Event {
+            id: sub_id,
+            msg: EventMsg::Error(ErrorEvent {
+                message: format!(
+                    "failed to restore modelToolMode after {active_workspace_mode} turn setup; the restricted mode remains active: {err}"
+                ),
+                codex_error_info: Some(CodexErrorInfo::Other),
+            }),
+        })
+        .await;
+        return;
+    }
+    if workspace_restricted {
+        sess.mark_workspace_context_only_memory_tainted();
+        if let Err(err) = persist_thread_memory_mode_update(sess, ThreadMemoryMode::Disabled).await
+        {
+            sess.send_event_raw(Event {
+                id: sub_id,
+                msg: EventMsg::Error(ErrorEvent {
+                    message: format!(
+                        "failed to disable thread memory before {active_workspace_mode} turn: {err}"
+                    ),
+                    codex_error_info: Some(CodexErrorInfo::Other),
+                }),
+            })
+            .await;
+            return;
+        }
+    }
+    if workspace_restricted {
+        let turn_context_item = current_context.to_turn_context_item();
+        let live_thread =
+            match sess.live_thread_for_persistence("persist restricted workspace privacy marker") {
+                Ok(live_thread) => live_thread,
+                Err(err) => {
+                    sess.send_event_raw(Event {
+                        id: sub_id,
+                        msg: EventMsg::Error(ErrorEvent {
+                            message: format!(
+                                "failed to persist {active_workspace_mode} privacy marker: {err}"
+                            ),
+                            codex_error_info: Some(CodexErrorInfo::Other),
+                        }),
+                    })
+                    .await;
+                    return;
+                }
+            };
+        let persist_result = match live_thread
+            .append_items(&[RolloutItem::TurnContext(turn_context_item)])
+            .await
+        {
+            Ok(()) => live_thread.flush().await,
+            Err(err) => Err(err),
+        };
+        if let Err(err) = persist_result {
+            sess.send_event_raw(Event {
+                id: sub_id,
+                msg: EventMsg::Error(ErrorEvent {
+                    message: format!(
+                        "failed to persist {active_workspace_mode} privacy marker: {err}"
+                    ),
+                    codex_error_info: Some(CodexErrorInfo::Other),
+                }),
+            })
+            .await;
+            return;
+        }
+        let Some(state_db) = sess.state_db() else {
+            sess.send_event_raw(Event {
+                id: sub_id,
+                msg: EventMsg::Error(ErrorEvent {
+                    message: format!(
+                        "failed to mark {active_workspace_mode} memory state: SQLite state is unavailable"
+                    ),
+                    codex_error_info: Some(CodexErrorInfo::Other),
+                }),
+            })
+            .await;
+            return;
+        };
+        if let Err(err) = state_db
+            .memories()
+            .mark_thread_memory_mode_polluted(sess.thread_id())
+            .await
+        {
+            sess.send_event_raw(Event {
+                id: sub_id,
+                msg: EventMsg::Error(ErrorEvent {
+                    message: format!(
+                        "failed to mark {active_workspace_mode} memory state polluted: {err}"
+                    ),
+                    codex_error_info: Some(CodexErrorInfo::Other),
+                }),
+            })
+            .await;
+            return;
+        }
+    }
+    if workspace_restricted {
+        let Some(run_contract) = workspace_run_contract else {
+            unreachable!("restricted run contract was parsed before turn setup")
+        };
+        let Some(state_db) = sess.state_db() else {
+            sess.send_event_raw(Event {
+                id: sub_id,
+                msg: EventMsg::Error(ErrorEvent {
+                    message: format!(
+                        "{active_workspace_mode} turn cannot verify its run contract because SQLite state is unavailable"
+                    ),
+                    codex_error_info: Some(CodexErrorInfo::Other),
+                }),
+            })
+            .await;
+            return;
+        };
+        let execution = match crate::tools::workspace_context_only::claim_run(
+            state_db,
+            current_context.as_ref(),
+            sess.thread_id().to_string(),
+            sub_id.clone(),
+            run_contract,
+            &items,
+        )
+        .await
+        {
+            Ok(execution) => execution,
+            Err(err) => {
+                sess.send_event_raw(Event {
+                    id: sub_id,
+                    msg: EventMsg::Error(ErrorEvent {
+                        message: err.to_string(),
+                        codex_error_info: Some(CodexErrorInfo::BadRequest),
+                    }),
+                })
+                .await;
+                return;
+            }
+        };
+        if let Err(err) =
+            crate::tools::workspace_context_only::bind_run(current_context.as_ref(), execution)
+        {
+            sess.send_event_raw(Event {
+                id: sub_id,
+                msg: EventMsg::Error(ErrorEvent {
+                    message: err.to_string(),
+                    codex_error_info: Some(CodexErrorInfo::Other),
+                }),
+            })
+            .await;
+            return;
+        }
+    }
     if emit_thread_settings_applied {
         sess.send_event_raw_without_materializing_rollout(Event {
             id: sub_id.clone(),
@@ -275,7 +619,9 @@ pub(super) async fn user_input_or_turn_inner(
         .await
     {
         Ok(_) => {
-            current_context.session_telemetry.user_prompt(&items);
+            if !workspace_restricted {
+                current_context.session_telemetry.user_prompt(&items);
+            }
         }
         Err(SteerInputError::NoActiveTurn(items)) => {
             if let Some(responsesapi_client_metadata) = responsesapi_client_metadata {
@@ -283,13 +629,19 @@ pub(super) async fn user_input_or_turn_inner(
                     .turn_metadata_state
                     .set_responsesapi_client_metadata(responsesapi_client_metadata);
             }
-            current_context.session_telemetry.user_prompt(&items);
-            sess.refresh_mcp_servers_if_requested(
-                &current_context,
-                Some(sess.mcp_elicitation_reviewer()),
-            )
-            .await;
-            let additional_context_input = {
+            if !workspace_restricted {
+                current_context.session_telemetry.user_prompt(&items);
+            }
+            if !current_context.model_tool_mode.is_workspace_restricted() {
+                sess.refresh_mcp_servers_if_requested(
+                    &current_context,
+                    Some(sess.mcp_elicitation_reviewer()),
+                )
+                .await;
+            }
+            let additional_context_input = if workspace_restricted {
+                Vec::new()
+            } else {
                 let mut state = sess.state.lock().await;
                 state.additional_context.merge(additional_context)
             };
@@ -343,6 +695,16 @@ pub async fn run_user_shell_command(sess: &Arc<Session>, sub_id: String, command
     if let Some((turn_context, cancellation_token)) =
         sess.active_turn_context_and_cancellation_token().await
     {
+        if turn_context.model_tool_mode.is_workspace_restricted() {
+            send_workspace_context_operation_error(
+                sess,
+                sub_id,
+                "shell command execution",
+                turn_context.model_tool_mode,
+            )
+            .await;
+            return;
+        }
         let session = Arc::clone(sess);
         tokio::spawn(async move {
             execute_user_shell_command(
@@ -490,6 +852,14 @@ pub async fn reload_user_config(sess: &Arc<Session>) {
 }
 
 pub async fn compact(sess: &Arc<Session>, sub_id: String) {
+    if let Some(mode) = sess
+        .active_turn_model_tool_mode()
+        .await
+        .filter(|mode| mode.is_workspace_restricted())
+    {
+        send_workspace_context_operation_error(sess, sub_id, "compaction", mode).await;
+        return;
+    }
     let turn_context = sess.new_default_turn_with_sub_id(sub_id).await;
 
     sess.spawn_task(Arc::clone(&turn_context), Vec::new(), CompactTask)
@@ -604,6 +974,16 @@ pub(super) async fn persist_thread_memory_mode_update(
     sess: &Arc<Session>,
     mode: ThreadMemoryMode,
 ) -> anyhow::Result<()> {
+    if sess.workspace_planning_lock_active().await? && mode == ThreadMemoryMode::Enabled {
+        anyhow::bail!(
+            "thread memory cannot be enabled while the thread is bound to an active workspace medical planning session"
+        );
+    }
+    if mode == ThreadMemoryMode::Enabled && sess.workspace_context_only_memory_tainted() {
+        anyhow::bail!(
+            "thread memory cannot be enabled after a workspaceContextOnly turn has been persisted"
+        );
+    }
     let live_thread = sess.live_thread_for_persistence("update thread memory mode")?;
     live_thread.persist().await?;
     live_thread.flush().await?;
@@ -619,6 +999,20 @@ pub(super) async fn persist_thread_memory_mode_update(
 /// This does not involve the model and only affects whether the thread is
 /// eligible for future memory generation.
 pub async fn set_thread_memory_mode(sess: &Arc<Session>, sub_id: String, mode: ThreadMemoryMode) {
+    if let Some(model_tool_mode) = sess
+        .active_turn_model_tool_mode()
+        .await
+        .filter(|mode| mode.is_workspace_restricted())
+    {
+        send_workspace_context_operation_error(
+            sess,
+            sub_id,
+            "memory-mode changes",
+            model_tool_mode,
+        )
+        .await;
+        return;
+    }
     if let Err(err) = persist_thread_memory_mode_update(sess, mode).await {
         warn!("Failed to persist thread memory mode update to rollout: {err}");
         let event = Event {
@@ -717,6 +1111,14 @@ pub async fn review(
     sub_id: String,
     review_request: ReviewRequest,
 ) {
+    if let Some(mode) = sess
+        .active_turn_model_tool_mode()
+        .await
+        .filter(|mode| mode.is_workspace_restricted())
+    {
+        send_workspace_context_operation_error(sess, sub_id, "review", mode).await;
+        return;
+    }
     let turn_context = sess.new_default_turn_with_sub_id(sub_id.clone()).await;
     sess.maybe_emit_model_warnings_for_turn(turn_context.as_ref())
         .await;
@@ -755,7 +1157,61 @@ pub(super) async fn submission_loop(
     // To break out of this loop, send Op::Shutdown.
     let mut shutdown_received = false;
     while let Ok(sub) = rx_sub.recv().await {
-        debug!(?sub, "Submission");
+        let always_allowed_on_planning_thread = matches!(&sub.op, Op::Interrupt | Op::Shutdown);
+        if !always_allowed_on_planning_thread {
+            match sess.workspace_planning_lock_active().await {
+                Ok(true) => {
+                    let allowed = matches!(
+                        &sub.op,
+                        Op::UserInput {
+                            thread_settings: ThreadSettingsOverrides {
+                                model_tool_mode: Some(ModelToolMode::WorkspacePlanningOnly),
+                                ..
+                            },
+                            ..
+                        }
+                    );
+                    if !allowed {
+                        send_workspace_planning_thread_lock_error(&sess, sub.id).await;
+                        continue;
+                    }
+                }
+                Ok(false) => {}
+                Err(_) => {
+                    send_workspace_planning_thread_lock_verification_error(&sess, sub.id).await;
+                    continue;
+                }
+            }
+        }
+        let restricted_user_turn = matches!(
+            &sub.op,
+            Op::UserInput {
+                thread_settings: ThreadSettingsOverrides {
+                    model_tool_mode: Some(mode),
+                    ..
+                },
+                ..
+            } if mode.is_workspace_restricted()
+        );
+        let restricted_control_operation = matches!(
+            &sub.op,
+            Op::RunUserShellCommand { .. }
+                | Op::Compact
+                | Op::Review { .. }
+                | Op::SetThreadMemoryMode { .. }
+        ) && sess
+            .active_turn_model_tool_mode()
+            .await
+            .is_some_and(ModelToolMode::is_workspace_restricted);
+        if restricted_user_turn || restricted_control_operation {
+            debug!(
+                submission.id = sub.id.as_str(),
+                op = sub.op.kind(),
+                "Workspace context submission (payload redacted)"
+            );
+        } else {
+            debug!(?sub, "Submission");
+        }
         let dispatch_span = submission_dispatch_span(&sub);
         let should_exit = async {
             match sub.op.clone() {
@@ -914,6 +1370,46 @@ pub(super) async fn submission_loop(
         }
     }
     debug!("Agent loop exited");
+}
+
+async fn send_workspace_context_operation_error(
+    sess: &Session,
+    sub_id: String,
+    operation: &str,
+    mode: ModelToolMode,
+) {
+    sess.send_event_raw(Event {
+        id: sub_id,
+        msg: EventMsg::Error(ErrorEvent {
+            message: format!("{operation} cannot run while a {mode} turn is active"),
+            codex_error_info: Some(CodexErrorInfo::BadRequest),
+        }),
+    })
+    .await;
+}
+
+async fn send_workspace_planning_thread_lock_error(sess: &Session, sub_id: String) {
+    sess.send_event_raw(Event {
+        id: sub_id,
+        msg: EventMsg::Error(ErrorEvent {
+            message: "thread is bound to an active workspace medical planning session; only verified workspacePlanningOnly turns are allowed"
+                .to_string(),
+            codex_error_info: Some(CodexErrorInfo::BadRequest),
+        }),
+    })
+    .await;
+}
+
+async fn send_workspace_planning_thread_lock_verification_error(sess: &Session, sub_id: String) {
+    sess.send_event_raw(Event {
+        id: sub_id,
+        msg: EventMsg::Error(ErrorEvent {
+            message: "unable to verify the workspace medical planning lock; operation rejected"
+                .to_string(),
+            codex_error_info: Some(CodexErrorInfo::Other),
+        }),
+    })
+    .await;
 }
 
 async fn approve_guardian_denied_action(sess: &Arc<Session>, event: GuardianAssessmentEvent) {

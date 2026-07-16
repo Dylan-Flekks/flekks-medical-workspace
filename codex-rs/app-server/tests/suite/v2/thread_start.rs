@@ -35,6 +35,7 @@ use codex_core::config::set_project_trust_level;
 use codex_exec_server::LOCAL_FS;
 use codex_git_utils::resolve_root_git_project_for_trust;
 use codex_login::REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR;
+use codex_protocol::config_types::ModelToolMode;
 use codex_protocol::config_types::SERVICE_TIER_DEFAULT_REQUEST_VALUE;
 use codex_protocol::config_types::TrustLevel;
 use codex_protocol::openai_models::ReasoningEffort;
@@ -118,7 +119,7 @@ model = "gpt-5.4-mini"
     .await??;
     let response: ThreadStartResponse = to_response(response)?;
 
-    assert_eq!(response.model, "openai.gpt-5.5");
+    assert_eq!(response.model, "openai.gpt-5.6-sol");
     Ok(())
 }
 
@@ -285,7 +286,7 @@ async fn thread_start_provider_model_fallback_uses_bedrock_static_catalog() -> R
             supported_with_fallback.model,
             unsupported_without_fallback.model,
         ],
-        vec!["openai.gpt-5.5", "openai.gpt-5.4", "gpt-5.4-mini"]
+        vec!["openai.gpt-5.6-sol", "openai.gpt-5.4", "gpt-5.4-mini"]
     );
     Ok(())
 }
@@ -509,6 +510,40 @@ async fn thread_start_history_mode_accepts_legacy_and_rejects_paginated() -> Res
         error.error.message,
         "paginated_threads is not supported yet"
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn thread_start_rejects_workspace_context_only_model_tool_mode() -> Result<()> {
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    let codex_home = TempDir::new()?;
+    create_config_toml_without_approval_policy(codex_home.path(), &server.uri())?;
+
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build()
+        .await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+
+    let request_id = mcp
+        .send_thread_start_request_with_auto_env(ThreadStartParams {
+            model_tool_mode: Some(ModelToolMode::WorkspaceContextOnly),
+            ..Default::default()
+        })
+        .await?;
+    let error: JSONRPCError = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_error_message(RequestId::Integer(request_id)),
+    )
+    .await??;
+
+    assert_eq!(error.id, RequestId::Integer(request_id));
+    assert_eq!(error.error.code, INVALID_REQUEST_ERROR_CODE);
+    assert_eq!(
+        error.error.message,
+        "workspaceContextOnly modelToolMode is valid only as a user-turn override"
+    );
+
     Ok(())
 }
 

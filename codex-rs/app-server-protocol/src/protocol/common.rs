@@ -576,6 +576,24 @@ client_request_definitions! {
         serialization: global("workspace"),
         response: v2::WorkspaceClientArchiveResponse,
     },
+    #[experimental("workspace/coverage/list")]
+    WorkspaceCoverageList => "workspace/coverage/list" {
+        params: v2::WorkspaceCoverageListParams,
+        serialization: global_shared_read("workspace"),
+        response: v2::WorkspaceCoverageListResponse,
+    },
+    #[experimental("workspace/coverage/verification/list")]
+    WorkspaceCoverageVerificationList => "workspace/coverage/verification/list" {
+        params: v2::WorkspaceCoverageVerificationListParams,
+        serialization: global_shared_read("workspace"),
+        response: v2::WorkspaceCoverageVerificationListResponse,
+    },
+    #[experimental("workspace/coverage/verification/create")]
+    WorkspaceCoverageVerificationCreate => "workspace/coverage/verification/create" {
+        params: v2::WorkspaceCoverageVerificationCreateParams,
+        serialization: global("workspace"),
+        response: v2::WorkspaceCoverageVerificationCreateResponse,
+    },
     #[experimental("workspace/chart/commit")]
     WorkspaceChartCommit => "workspace/chart/commit" {
         params: v2::WorkspaceChartCommitParams,
@@ -702,6 +720,18 @@ client_request_definitions! {
         serialization: global_shared_read("workspace"),
         response: v2::WorkspaceContextGetResponse,
     },
+    #[experimental("workspace/dataPolicy/read")]
+    WorkspaceDataPolicyRead => "workspace/dataPolicy/read" {
+        params: v2::WorkspaceDataPolicyReadParams,
+        serialization: global_shared_read("workspace"),
+        response: v2::WorkspaceDataPolicyReadResponse,
+    },
+    #[experimental("workspace/dataPolicy/provision")]
+    WorkspaceDataPolicyProvision => "workspace/dataPolicy/provision" {
+        params: v2::WorkspaceDataPolicyProvisionParams,
+        serialization: global("workspace"),
+        response: v2::WorkspaceDataPolicyProvisionResponse,
+    },
     #[experimental("workspace/draft/checkpoint/create")]
     WorkspaceDraftCheckpointCreate => "workspace/draft/checkpoint/create" {
         params: v2::WorkspaceDraftCheckpointCreateParams,
@@ -791,6 +821,72 @@ client_request_definitions! {
         params: v2::WorkspaceAgentResultStatusUpdateParams,
         serialization: global("workspace"),
         response: v2::WorkspaceAgentResultStatusUpdateResponse,
+    },
+    #[experimental("workspace/plan/session/open")]
+    WorkspacePlanSessionOpen => "workspace/plan/session/open" {
+        params: v2::WorkspacePlanSessionOpenParams,
+        serialization: global("workspace"),
+        response: v2::WorkspacePlanSessionOpenResponse,
+    },
+    #[experimental("workspace/plan/session/get")]
+    WorkspacePlanSessionGet => "workspace/plan/session/get" {
+        params: v2::WorkspacePlanSessionGetParams,
+        serialization: global_shared_read("workspace"),
+        response: v2::WorkspacePlanSessionGetResponse,
+    },
+    #[experimental("workspace/plan/session/bindThread")]
+    WorkspacePlanSessionBindThread => "workspace/plan/session/bindThread" {
+        params: v2::WorkspacePlanSessionBindThreadParams,
+        serialization: global("workspace"),
+        response: v2::WorkspacePlanSessionBindThreadResponse,
+    },
+    #[experimental("workspace/plan/snapshot/get")]
+    WorkspacePlanSnapshotGet => "workspace/plan/snapshot/get" {
+        params: v2::WorkspacePlanSnapshotGetParams,
+        serialization: global_shared_read("workspace"),
+        response: v2::WorkspacePlanSnapshotGetResponse,
+    },
+    #[experimental("workspace/plan/recovery/get")]
+    WorkspacePlanRecoveryGet => "workspace/plan/recovery/get" {
+        params: v2::WorkspacePlanRecoveryGetParams,
+        serialization: global_shared_read("workspace"),
+        response: v2::WorkspacePlanRecoveryGetResponse,
+    },
+    #[experimental("workspace/plan/guideRun/start")]
+    WorkspacePlanGuideRunStart => "workspace/plan/guideRun/start" {
+        params: v2::WorkspacePlanGuideRunStartParams,
+        serialization: global("workspace"),
+        response: v2::WorkspacePlanGuideRunStartResponse,
+    },
+    #[experimental("workspace/plan/guideRun/finish")]
+    WorkspacePlanGuideRunFinish => "workspace/plan/guideRun/finish" {
+        params: v2::WorkspacePlanGuideRunFinishParams,
+        serialization: global("workspace"),
+        response: v2::WorkspacePlanGuideRunFinishResponse,
+    },
+    #[experimental("workspace/plan/message/append")]
+    WorkspacePlanMessageAppend => "workspace/plan/message/append" {
+        params: v2::WorkspacePlanMessageAppendParams,
+        serialization: global("workspace"),
+        response: v2::WorkspacePlanMessageAppendResponse,
+    },
+    #[experimental("workspace/plan/revision/outdate")]
+    WorkspacePlanRevisionOutdate => "workspace/plan/revision/outdate" {
+        params: v2::WorkspacePlanRevisionOutdateParams,
+        serialization: global("workspace"),
+        response: v2::WorkspacePlanRevisionOutdateResponse,
+    },
+    #[experimental("workspace/plan/revision/submit")]
+    WorkspacePlanRevisionSubmit => "workspace/plan/revision/submit" {
+        params: v2::WorkspacePlanRevisionSubmitParams,
+        serialization: global("workspace"),
+        response: v2::WorkspacePlanRevisionSubmitResponse,
+    },
+    #[experimental("workspace/plan/proposal/resolve")]
+    WorkspacePlanProposalResolve => "workspace/plan/proposal/resolve" {
+        params: v2::WorkspacePlanProposalResolveParams,
+        serialization: global("workspace"),
+        response: v2::WorkspacePlanProposalResolveResponse,
     },
     #[experimental("workspace/note/list")]
     WorkspaceNoteList => "workspace/note/list" {

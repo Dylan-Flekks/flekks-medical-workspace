@@ -8,6 +8,9 @@ pub(super) async fn maybe_record(
     turn_context: &TurnContext,
     tokens_until_compaction: Option<i64>,
 ) {
+    if turn_context.model_tool_mode.is_workspace_restricted() {
+        return;
+    }
     if !turn_context.config.features.enabled(Feature::TokenBudget) {
         return;
     }

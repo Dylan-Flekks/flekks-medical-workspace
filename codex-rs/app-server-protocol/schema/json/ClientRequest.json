@@ -1840,11 +1840,36 @@
     },
     "ModelToolMode": {
       "description": "Controls whether a regular model sampling turn may discover or call tools.",
-      "enum": [
-        "default",
-        "disabled"
-      ],
-      "type": "string"
+      "oneOf": [
+        {
+          "description": "Use the normal tool surface configured for the thread and turn.",
+          "enum": [
+            "default"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Persistently disable every model-visible and executable tool for regular sampling.",
+          "enum": [
+            "disabled"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Restrict exactly one medical handoff turn to the submitted run's `workspace_context_read` function.\n\nThis mode is valid only as a `turn/start` override. It filters prior-turn history and extension context, suppresses hooks, rejects non-text input and every other tool, and is never restored as a persistent mode from rollout history.",
+          "enum": [
+            "workspaceContextOnly"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Restrict exactly one patient-planning turn to the submitted run's `workspace_context_read` function.\n\nThis mode is valid only as a `turn/start` override on a persisted root thread in Plan mode. It suppresses unrelated host context and tools while retaining the dedicated planning thread's own prior conversation. Clarifying questions are ordinary assistant messages answered by a new persisted planning turn, so a restart never has to recover an in-flight tool elicitation. Like [`Self::WorkspaceContextOnly`], this mode is never restored as a persistent mode from rollout history.",
+          "enum": [
+            "workspacePlanningOnly"
+          ],
+          "type": "string"
+        }
+      ]
     },
     "MultiAgentMode": {
       "description": "Controls the effective multi-agent delegation instructions for a turn. `custom` means the configured mode hint defines the policy instead of a built-in policy.",
@@ -4873,10 +4898,221 @@
       ],
       "type": "string"
     },
+    "WorkspaceCoverageUpsertParams": {
+      "properties": {
+        "clientId": {
+          "type": "string"
+        },
+        "coverageNotes": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "coverageStatus": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "coverageType": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "effectiveDate": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "groupNumber": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "memberId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "patientRelationshipToSubscriber": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "payerName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "planName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "priority": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "subscriberAddressLine1": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "subscriberAddressLine2": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "subscriberAddressSameAsPatient": {
+          "type": "boolean"
+        },
+        "subscriberAdministrativeSex": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "subscriberCity": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "subscriberCountry": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "subscriberDateOfBirth": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "subscriberFirstName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "subscriberLastName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "subscriberMiddleName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "subscriberPostalCode": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "subscriberStateOrProvince": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "subscriberSuffix": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "terminationDate": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "clientId",
+        "priority"
+      ],
+      "type": "object"
+    },
+    "WorkspaceCoverageVerificationSubject": {
+      "enum": [
+        "beneficiary",
+        "subscriber"
+      ],
+      "type": "string"
+    },
     "WorkspaceDraftSessionCloseStatus": {
       "enum": [
         "closed",
         "discarded"
+      ],
+      "type": "string"
+    },
+    "WorkspacePlanGuideRunOutcome": {
+      "oneOf": [
+        {
+          "properties": {
+            "error_summary": {
+              "type": "string"
+            },
+            "status": {
+              "enum": [
+                "failed"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "error_summary",
+            "status"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "reason": {
+              "type": "string"
+            },
+            "status": {
+              "enum": [
+                "canceled"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "reason",
+            "status"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "WorkspacePlanProposalResolution": {
+      "enum": [
+        "accept",
+        "decline"
       ],
       "type": "string"
     },

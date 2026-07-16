@@ -1,0 +1,44 @@
+---
+source: tui/src/workspace_dashboard.rs
+expression: "render_dashboard_lines_at(&summary, 160, 40)"
+---
+Medical Workspace  /workspace-medical  SYNTHETIC DATA ONLY
+Patient: Jordan Patient  DOB: blank  MRN: blank  Contact: Contact on file  Coverage: Missing coverage  Encounter: No encounter
+ EXPLORER                          PATIENT CHART                                                                   PLAN WITH CODEX
+┌Patient Directory───────────────┐┌Patient Demographics──────────────────────────────────────────────────────────┐┌Plan with Codex─────────────────────────────┐
+│Local search: /                 ││Identity: Jordan Patient · preferred not set                                  ││[Chat]  Context  Audit  ←/→ tabs            │
+│0 active patients; local only   ││Legal/card: Jordan Q Patient                                                  ││                                            │
+│No saved patients yet.          ││DOB: missing · admin sex: missing · MRN: missing                              ││Plan with Codex · Jordan Patient            │
+│New patient: :patient new       ││Contact: 555-0101; jordan.fake@example.test; method not set                   ││  Context  0 files · 0 text · 0 clips       │
+│                                ││Address: 10 Example Street; Exampleville IL 60000                             ││  ● plan: ready to plan                     │
+│                                ││Emergency: Maya Contact; relationship missing; 555-0199                       ││                                            │
+│                                ││Coverage: P not entered; S not entered; T not entered                         ││Codex                                       │
+│                                ││Enter edits all identity/contact fields · Ctrl-P opens actions                ││  I can help connect today's note to the    │
+│                                │└──────────────────────────────────────────────────────────────────────────────┘│patient's longer-term                       │
+│                                │┌Note Title────────────────────────────────────────────────────────────────────┐│  goals, prior visits, referrals, and       │
+└────────────────────────────────┘│Visit note                                                                    ││selected files.                             │
+┌Patient Notes───────────────────┐└──────────────────────────────────────────────────────────────────────────────┘│                                            │
+│Patient Notes                   │┌Note Body─────────────────────────────────────────────────────────────────────┐│  Try: What context is missing before I     │
+│  New note                      ││Fake human-entered visit note body.                                           ││finish this note?                           │
+│  No patient notes yet. Use     ││                                                                              ││  Ask Codex to publish an evidence-linked   │
+│:note new.                      ││                                                                              ││plan before Ctrl-G handoff.                 │
+│  Medical, communication, and   ││                                                                              ││  Recommendations remain review-only until a│
+│admin notes appear here.        ││                                                                              ││clinician approves a change.                │
+│                                ││                                                                              ││                                            │
+│                                ││                                                                              ││                                            │
+└────────────────────────────────┘│                                                                              ││                                            │
+┌Uploaded Documents──────────────┐│                                                                              ││                                            │
+│Uploaded Documents              ││                                                                              ││                                            │
+│No files yet                    ││                                                                              ││                                            │
+│Paste/drop JPG/PDF. Space...    ││                                                                              ││                                            │
+│                                ││                                                                              ││                                            │
+│                                ││                                                                              ││                                            │
+│                                ││                                                                              ││                                            │
+│                                ││                                                                              ││                                            │
+│                                ││                                                                              ││Message Codex                               │
+│                                ││                                                                              ││Enter send · Shift-Enter line · Esc leave   │
+│                                ││                                                                              ││  Ask about the patient picture, this note, │
+│                                ││                                                                              ││  or context readiness.                     │
+│                                ││                                                                              ││                                            │
+└────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────┘└────────────────────────────────────────────┘
+Focus: Demographics | Mode: Patient field | Keys: Enter edit  Ctrl-S save  Tab/⇧Tab pane  Ctrl-P actions | Next: Edit patient data

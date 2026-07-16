@@ -10,17 +10,37 @@ pub struct WorkspaceClient {
     pub id: String,
     pub version: String,
     pub display_name: String,
+    pub legal_first_name: Option<String>,
+    pub legal_middle_name: Option<String>,
+    pub legal_last_name: Option<String>,
+    pub legal_suffix: Option<String>,
     pub preferred_name: Option<String>,
+    pub previous_name: Option<String>,
     pub date_of_birth: Option<String>,
     pub sex_or_gender: Option<String>,
+    pub administrative_sex: Option<String>,
+    pub preferred_language: Option<String>,
+    #[serde(default)]
+    pub interpreter_required: bool,
     pub external_id: Option<String>,
     pub record_start_date: Option<String>,
     pub record_end_date: Option<String>,
     pub summary: String,
     pub primary_phone: Option<String>,
+    pub primary_phone_use: Option<String>,
     pub secondary_phone: Option<String>,
+    pub secondary_phone_use: Option<String>,
     pub email: Option<String>,
+    pub primary_email: Option<String>,
+    pub secondary_email: Option<String>,
     pub preferred_contact_method: Option<String>,
+    pub address_line_1: Option<String>,
+    pub address_line_2: Option<String>,
+    pub city: Option<String>,
+    pub state_or_province: Option<String>,
+    pub postal_code: Option<String>,
+    pub country: Option<String>,
+    pub address_use: Option<String>,
     pub emergency_contact_name: Option<String>,
     pub emergency_contact_relationship: Option<String>,
     pub emergency_contact_phone: Option<String>,
@@ -71,19 +91,174 @@ pub struct WorkspaceClientGetResponse {
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
 pub struct WorkspaceClientUpsertParams {
+    #[ts(optional = nullable)]
     pub id: Option<String>,
+    #[ts(optional = nullable)]
+    pub expected_version: Option<String>,
     pub display_name: String,
+    #[serde(
+        default,
+        deserialize_with = "crate::protocol::serde_helpers::deserialize_double_option",
+        serialize_with = "crate::protocol::serde_helpers::serialize_double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[ts(type = "string | null", optional = nullable)]
+    pub legal_first_name: Option<Option<String>>,
+    #[serde(
+        default,
+        deserialize_with = "crate::protocol::serde_helpers::deserialize_double_option",
+        serialize_with = "crate::protocol::serde_helpers::serialize_double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[ts(type = "string | null", optional = nullable)]
+    pub legal_middle_name: Option<Option<String>>,
+    #[serde(
+        default,
+        deserialize_with = "crate::protocol::serde_helpers::deserialize_double_option",
+        serialize_with = "crate::protocol::serde_helpers::serialize_double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[ts(type = "string | null", optional = nullable)]
+    pub legal_last_name: Option<Option<String>>,
+    #[serde(
+        default,
+        deserialize_with = "crate::protocol::serde_helpers::deserialize_double_option",
+        serialize_with = "crate::protocol::serde_helpers::serialize_double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[ts(type = "string | null", optional = nullable)]
+    pub legal_suffix: Option<Option<String>>,
     pub preferred_name: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "crate::protocol::serde_helpers::deserialize_double_option",
+        serialize_with = "crate::protocol::serde_helpers::serialize_double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[ts(type = "string | null", optional = nullable)]
+    pub previous_name: Option<Option<String>>,
     pub date_of_birth: Option<String>,
     pub sex_or_gender: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "crate::protocol::serde_helpers::deserialize_double_option",
+        serialize_with = "crate::protocol::serde_helpers::serialize_double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[ts(type = "string | null", optional = nullable)]
+    pub administrative_sex: Option<Option<String>>,
+    #[serde(
+        default,
+        deserialize_with = "crate::protocol::serde_helpers::deserialize_double_option",
+        serialize_with = "crate::protocol::serde_helpers::serialize_double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[ts(type = "string | null", optional = nullable)]
+    pub preferred_language: Option<Option<String>>,
+    #[serde(
+        default,
+        deserialize_with = "crate::protocol::serde_helpers::deserialize_double_option",
+        serialize_with = "crate::protocol::serde_helpers::serialize_double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[ts(type = "boolean | null", optional = nullable)]
+    pub interpreter_required: Option<Option<bool>>,
     pub external_id: Option<String>,
     pub record_start_date: Option<String>,
     pub record_end_date: Option<String>,
     pub summary: String,
     pub primary_phone: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "crate::protocol::serde_helpers::deserialize_double_option",
+        serialize_with = "crate::protocol::serde_helpers::serialize_double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[ts(type = "string | null", optional = nullable)]
+    pub primary_phone_use: Option<Option<String>>,
     pub secondary_phone: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "crate::protocol::serde_helpers::deserialize_double_option",
+        serialize_with = "crate::protocol::serde_helpers::serialize_double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[ts(type = "string | null", optional = nullable)]
+    pub secondary_phone_use: Option<Option<String>>,
     pub email: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "crate::protocol::serde_helpers::deserialize_double_option",
+        serialize_with = "crate::protocol::serde_helpers::serialize_double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[ts(type = "string | null", optional = nullable)]
+    pub primary_email: Option<Option<String>>,
+    #[serde(
+        default,
+        deserialize_with = "crate::protocol::serde_helpers::deserialize_double_option",
+        serialize_with = "crate::protocol::serde_helpers::serialize_double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[ts(type = "string | null", optional = nullable)]
+    pub secondary_email: Option<Option<String>>,
     pub preferred_contact_method: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "crate::protocol::serde_helpers::deserialize_double_option",
+        serialize_with = "crate::protocol::serde_helpers::serialize_double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[ts(type = "string | null", optional = nullable)]
+    pub address_line_1: Option<Option<String>>,
+    #[serde(
+        default,
+        deserialize_with = "crate::protocol::serde_helpers::deserialize_double_option",
+        serialize_with = "crate::protocol::serde_helpers::serialize_double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[ts(type = "string | null", optional = nullable)]
+    pub address_line_2: Option<Option<String>>,
+    #[serde(
+        default,
+        deserialize_with = "crate::protocol::serde_helpers::deserialize_double_option",
+        serialize_with = "crate::protocol::serde_helpers::serialize_double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[ts(type = "string | null", optional = nullable)]
+    pub city: Option<Option<String>>,
+    #[serde(
+        default,
+        deserialize_with = "crate::protocol::serde_helpers::deserialize_double_option",
+        serialize_with = "crate::protocol::serde_helpers::serialize_double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[ts(type = "string | null", optional = nullable)]
+    pub state_or_province: Option<Option<String>>,
+    #[serde(
+        default,
+        deserialize_with = "crate::protocol::serde_helpers::deserialize_double_option",
+        serialize_with = "crate::protocol::serde_helpers::serialize_double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[ts(type = "string | null", optional = nullable)]
+    pub postal_code: Option<Option<String>>,
+    #[serde(
+        default,
+        deserialize_with = "crate::protocol::serde_helpers::deserialize_double_option",
+        serialize_with = "crate::protocol::serde_helpers::serialize_double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[ts(type = "string | null", optional = nullable)]
+    pub country: Option<Option<String>>,
+    #[serde(
+        default,
+        deserialize_with = "crate::protocol::serde_helpers::deserialize_double_option",
+        serialize_with = "crate::protocol::serde_helpers::serialize_double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[ts(type = "string | null", optional = nullable)]
+    pub address_use: Option<Option<String>>,
     pub emergency_contact_name: Option<String>,
     pub emergency_contact_relationship: Option<String>,
     pub emergency_contact_phone: Option<String>,
@@ -991,6 +1166,23 @@ pub struct WorkspaceContextPacket {
     pub base_note_revision: Option<i64>,
     pub authorized_scope_json: String,
     pub expected_output_kind: String,
+    #[serde(default = "default_workspace_profile")]
+    pub workspace_profile: String,
+    #[serde(default = "default_context_plan_schema_version")]
+    #[ts(type = "number")]
+    pub plan_schema_version: i64,
+    #[serde(default)]
+    pub source_checkpoint_id: Option<String>,
+    #[serde(default)]
+    pub source_checkpoint_sha256: Option<String>,
+    #[serde(default = "default_context_plan_readiness_json")]
+    pub readiness_json: String,
+    #[serde(default)]
+    pub workspace_plan_revision_id: Option<String>,
+    #[serde(default)]
+    pub workspace_plan_content_sha256: Option<String>,
+    #[serde(default)]
+    pub workspace_plan_evidence_manifest_sha256: Option<String>,
     pub status: String,
     #[ts(type = "number")]
     pub created_at: i64,
@@ -1048,6 +1240,23 @@ pub struct WorkspaceContextPacketCreateParams {
     pub authorized_scope_json: Option<String>,
     #[ts(optional = nullable)]
     pub expected_output_kind: Option<String>,
+    #[ts(optional = nullable)]
+    pub workspace_profile: Option<String>,
+    #[ts(type = "number | null")]
+    #[ts(optional = nullable)]
+    pub plan_schema_version: Option<i64>,
+    #[ts(optional = nullable)]
+    pub source_checkpoint_id: Option<String>,
+    #[ts(optional = nullable)]
+    pub source_checkpoint_sha256: Option<String>,
+    #[ts(optional = nullable)]
+    pub readiness_json: Option<String>,
+    #[ts(optional = nullable)]
+    pub workspace_plan_revision_id: Option<String>,
+    #[ts(optional = nullable)]
+    pub workspace_plan_content_sha256: Option<String>,
+    #[ts(optional = nullable)]
+    pub workspace_plan_evidence_manifest_sha256: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
@@ -1083,6 +1292,23 @@ pub struct WorkspaceContextPacketReplay {
     pub base_note_revision: Option<i64>,
     pub authorized_scope_json: String,
     pub expected_output_kind: String,
+    #[serde(default = "default_workspace_profile")]
+    pub workspace_profile: String,
+    #[serde(default = "default_context_plan_schema_version")]
+    #[ts(type = "number")]
+    pub plan_schema_version: i64,
+    #[serde(default)]
+    pub source_checkpoint_id: Option<String>,
+    #[serde(default)]
+    pub source_checkpoint_sha256: Option<String>,
+    #[serde(default = "default_context_plan_readiness_json")]
+    pub readiness_json: String,
+    #[serde(default)]
+    pub workspace_plan_revision_id: Option<String>,
+    #[serde(default)]
+    pub workspace_plan_content_sha256: Option<String>,
+    #[serde(default)]
+    pub workspace_plan_evidence_manifest_sha256: Option<String>,
     pub read_only_safety_constraints: Vec<String>,
     pub status: String,
     #[ts(type = "number")]
@@ -1105,6 +1331,12 @@ pub struct WorkspaceAgentRun {
     #[ts(type = "number | null")]
     pub base_note_revision: Option<i64>,
     pub context_envelope_sha256: String,
+    #[serde(default)]
+    pub workspace_plan_revision_id: Option<String>,
+    #[serde(default)]
+    pub workspace_plan_content_sha256: Option<String>,
+    #[serde(default)]
+    pub workspace_plan_evidence_manifest_sha256: Option<String>,
     pub run_kind: String,
     pub idempotency_key: String,
     pub provider: Option<String>,
@@ -1133,6 +1365,12 @@ pub struct WorkspaceAgentRunStartParams {
     pub client_id: Option<String>,
     #[ts(optional = nullable)]
     pub context_envelope_sha256: Option<String>,
+    #[ts(optional = nullable)]
+    pub expected_workspace_plan_revision_id: Option<String>,
+    #[ts(optional = nullable)]
+    pub expected_workspace_plan_content_sha256: Option<String>,
+    #[ts(optional = nullable)]
+    pub expected_workspace_plan_evidence_manifest_sha256: Option<String>,
     #[ts(optional = nullable)]
     pub provider: Option<String>,
     #[ts(optional = nullable)]
@@ -1187,8 +1425,9 @@ pub struct WorkspaceAgentRunStatusUpdateResponse {
     pub run: Option<WorkspaceAgentRun>,
 }
 
-/// Exact, immutable record returned to one agent run. The snapshot omits local
-/// filesystem paths and is hashed server-side for later audit replay.
+/// Audit projection of an immutable record returned to one agent run. The
+/// canonical handoff-prompt snapshot is redacted at the app-server boundary;
+/// its `content_sha256` continues to identify the exact durable source record.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
@@ -1234,6 +1473,10 @@ pub enum WorkspaceAgentContextCategory {
     ProgressNotes,
 }
 
+/// Denial-only compatibility request for the public app-server RPC. A run id
+/// never authorizes context access; model reads are available only through the
+/// execution-bound `workspace_context_read` tool during the claimed
+/// `workspaceContextOnly` turn.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
@@ -1257,6 +1500,143 @@ pub struct WorkspaceAgentRunContextReadResponse {
 #[ts(export_to = "v2/")]
 pub struct WorkspaceContextPacketReplayResponse {
     pub replay: Option<WorkspaceContextPacketReplay>,
+}
+
+fn default_workspace_profile() -> String {
+    "medical".to_string()
+}
+
+fn default_context_plan_schema_version() -> i64 {
+    1
+}
+
+fn default_context_plan_readiness_json() -> String {
+    r#"{"version":1,"warnings":[],"acknowledgements":[],"legacy":true}"#.to_string()
+}
+
+#[cfg(test)]
+mod plan_binding_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn packet_and_run_plan_bindings_use_explicit_camel_case_fields() {
+        let hash = "a".repeat(64);
+        let packet_params: WorkspaceContextPacketCreateParams = serde_json::from_value(json!({
+            "clientId": "client",
+            "encounterId": null,
+            "noteId": "note",
+            "humanRequest": "Execute reviewed plan",
+            "selectedArtifactIdsJson": "[]",
+            "selectedDerivativeIdsJson": "[]",
+            "selectedClipIdsJson": "[]",
+            "artifactSummary": "",
+            "derivativeSummary": "",
+            "clipSummary": "",
+            "chartContextSummary": "",
+            "contextEnvelopeJson": "{}",
+            "workspacePlanRevisionId": "revision",
+            "workspacePlanContentSha256": hash,
+            "workspacePlanEvidenceManifestSha256": hash,
+        }))
+        .expect("packet create params");
+        assert_eq!(
+            packet_params.workspace_plan_revision_id.as_deref(),
+            Some("revision")
+        );
+
+        let run_params: WorkspaceAgentRunStartParams = serde_json::from_value(json!({
+            "packetId": "packet",
+            "idempotencyKey": "key",
+            "expectedWorkspacePlanRevisionId": "revision",
+            "expectedWorkspacePlanContentSha256": hash,
+            "expectedWorkspacePlanEvidenceManifestSha256": hash,
+        }))
+        .expect("run start params");
+        assert_eq!(
+            run_params.expected_workspace_plan_revision_id.as_deref(),
+            Some("revision")
+        );
+
+        let packet = WorkspaceContextPacket {
+            id: "packet".to_string(),
+            client_id: "client".to_string(),
+            encounter_id: None,
+            note_id: Some("note".to_string()),
+            human_request: "Execute reviewed plan".to_string(),
+            selected_artifact_ids_json: "[]".to_string(),
+            selected_derivative_ids_json: "[]".to_string(),
+            selected_clip_ids_json: "[]".to_string(),
+            artifact_summary: String::new(),
+            derivative_summary: String::new(),
+            clip_summary: String::new(),
+            chart_context_summary: String::new(),
+            context_envelope_json: "{}".to_string(),
+            context_envelope_sha256: hash.clone(),
+            clinician_actor: "clinician".to_string(),
+            base_note_revision: Some(1),
+            authorized_scope_json: "{}".to_string(),
+            expected_output_kind: "medical_plan_execution".to_string(),
+            workspace_profile: "medical".to_string(),
+            plan_schema_version: 1,
+            source_checkpoint_id: Some("checkpoint".to_string()),
+            source_checkpoint_sha256: Some(hash.clone()),
+            readiness_json: default_context_plan_readiness_json(),
+            workspace_plan_revision_id: Some("revision".to_string()),
+            workspace_plan_content_sha256: Some(hash.clone()),
+            workspace_plan_evidence_manifest_sha256: Some(hash.clone()),
+            status: "submitted".to_string(),
+            created_at: 1,
+            sent_at: 1,
+            submitted_at: Some(1),
+            canceled_at: None,
+            updated_at: 1,
+        };
+        let packet_json = serde_json::to_value(packet).expect("packet response JSON");
+        assert_eq!(packet_json["workspacePlanRevisionId"], "revision");
+        assert_eq!(packet_json["workspacePlanContentSha256"], hash);
+        assert_eq!(packet_json["workspacePlanEvidenceManifestSha256"], hash);
+
+        let run = WorkspaceAgentRun {
+            id: "run".to_string(),
+            packet_id: "packet".to_string(),
+            client_id: "client".to_string(),
+            note_id: Some("note".to_string()),
+            base_note_revision: Some(1),
+            context_envelope_sha256: hash.clone(),
+            workspace_plan_revision_id: Some("revision".to_string()),
+            workspace_plan_content_sha256: Some(hash.clone()),
+            workspace_plan_evidence_manifest_sha256: Some(hash.clone()),
+            run_kind: "agent".to_string(),
+            idempotency_key: "key".to_string(),
+            provider: Some("provider".to_string()),
+            model: Some("model".to_string()),
+            source_thread_id: Some("thread".to_string()),
+            source_turn_id: None,
+            status: "running".to_string(),
+            error_summary: None,
+            started_at: 1,
+            completed_at: None,
+            created_at: 1,
+            updated_at: 1,
+        };
+        let run_json = serde_json::to_value(run).expect("run response JSON");
+        assert_eq!(run_json["workspacePlanRevisionId"], "revision");
+        assert_eq!(run_json["workspacePlanContentSha256"], hash);
+        assert_eq!(run_json["workspacePlanEvidenceManifestSha256"], hash);
+
+        let legacy: WorkspaceAgentRunStartParams = serde_json::from_value(json!({
+            "packetId": "legacy-packet",
+            "idempotencyKey": "legacy-key",
+        }))
+        .expect("legacy run start params");
+        assert_eq!(legacy.expected_workspace_plan_revision_id, None);
+        assert_eq!(legacy.expected_workspace_plan_content_sha256, None);
+        assert_eq!(
+            legacy.expected_workspace_plan_evidence_manifest_sha256,
+            None
+        );
+    }
 }
 
 /// Agent results are review-pending outputs bound to one context packet. The

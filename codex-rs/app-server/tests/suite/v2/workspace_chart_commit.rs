@@ -123,6 +123,7 @@ async fn chart_commit_routes_atomic_save_replay_noop_and_typed_errors() -> Resul
         &mut server,
         json!({
             "id": committed.client.id,
+            "expectedVersion": committed.client.version,
             "displayName": "Patient One",
             "summary": "",
             "primaryPhone": "555-new",
@@ -169,12 +170,9 @@ async fn chart_commit_routes_atomic_save_replay_noop_and_typed_errors() -> Resul
     );
     assert_eq!(
         identity_only_note_commit.client.payer_name.as_deref(),
-        Some("New Payer")
+        Some("Old Payer")
     );
-    assert_eq!(
-        identity_only_note_commit.client.plan_name.as_deref(),
-        Some("Updated Plan")
-    );
+    assert_eq!(identity_only_note_commit.client.plan_name, None);
     let updated_note = identity_only_note_commit
         .note
         .clone()

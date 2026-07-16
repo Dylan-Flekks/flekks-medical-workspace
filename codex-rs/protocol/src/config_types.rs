@@ -86,9 +86,45 @@ pub enum Verbosity {
 #[strum(serialize_all = "camelCase")]
 #[ts(rename_all = "camelCase")]
 pub enum ModelToolMode {
+    /// Use the normal tool surface configured for the thread and turn.
     #[default]
     Default,
+    /// Persistently disable every model-visible and executable tool for regular sampling.
     Disabled,
+    /// Restrict exactly one medical handoff turn to the submitted run's
+    /// `workspace_context_read` function.
+    ///
+    /// This mode is valid only as a `turn/start` override. It filters prior-turn history and
+    /// extension context, suppresses hooks, rejects non-text input and every other tool, and is
+    /// never restored as a persistent mode from rollout history.
+    WorkspaceContextOnly,
+    /// Restrict exactly one patient-planning turn to the submitted run's
+    /// `workspace_context_read` function.
+    ///
+    /// This mode is valid only as a `turn/start` override on a persisted root thread in Plan
+    /// mode. It suppresses unrelated host context and tools while retaining the dedicated
+    /// planning thread's own prior conversation. Clarifying questions are ordinary assistant
+    /// messages answered by a new persisted planning turn, so a restart never has to recover an
+    /// in-flight tool elicitation. Like [`Self::WorkspaceContextOnly`], this mode is never
+    /// restored as a persistent mode from rollout history.
+    WorkspacePlanningOnly,
+}
+
+impl ModelToolMode {
+    /// Returns whether this turn handles patient-scoped workspace context under the restricted
+    /// medical tool and observability boundary.
+    pub const fn is_workspace_restricted(self) -> bool {
+        matches!(
+            self,
+            Self::WorkspaceContextOnly | Self::WorkspacePlanningOnly
+        )
+    }
+
+    /// Returns whether this mode can be selected only for one user turn and must not become a
+    /// durable thread setting.
+    pub const fn is_turn_only(self) -> bool {
+        self.is_workspace_restricted()
+    }
 }
 
 #[derive(

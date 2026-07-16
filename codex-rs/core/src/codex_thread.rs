@@ -94,6 +94,9 @@ pub enum TryStartTurnIfIdleRejectionReason {
     /// The thread is in Plan mode, where automatic idle work must not start a
     /// new model turn.
     PlanMode,
+    /// The thread is durably bound to an active patient planning session. Only verified
+    /// workspace-planning turns may add model-visible transcript to it.
+    WorkspacePlanningLocked,
     /// Another turn or task is active, or the idle reservation was lost before
     /// the automatic turn could start.
     Busy,
@@ -282,6 +285,21 @@ impl CodexThread {
     /// Persist whether this thread is eligible for future memory generation.
     pub async fn set_thread_memory_mode(&self, mode: ThreadMemoryMode) -> anyhow::Result<()> {
         self.codex.set_thread_memory_mode(mode).await
+    }
+
+    /// Returns the tool mode captured by the currently running turn, if any.
+    pub async fn active_turn_model_tool_mode(&self) -> Option<ModelToolMode> {
+        self.codex.session.active_turn_model_tool_mode().await
+    }
+
+    /// Returns whether this thread has permanently opted out of memory generation because it has
+    /// persisted a restricted medical-context turn.
+    pub fn workspace_context_only_memory_tainted(&self) -> bool {
+        self.codex.session.workspace_context_only_memory_tainted()
+    }
+
+    pub(crate) async fn workspace_planning_lock_active(&self) -> anyhow::Result<bool> {
+        self.codex.session.workspace_planning_lock_active().await
     }
 
     pub async fn steer_input(
@@ -477,6 +495,30 @@ impl CodexThread {
             return Err(CodexErr::InvalidRequest(
                 "items must not be empty".to_string(),
             ));
+        }
+        match self.codex.session.workspace_planning_lock_active().await {
+            Ok(true) => {
+                return Err(CodexErr::InvalidRequest(
+                    "cannot inject response items into a thread bound to an active workspace medical planning session"
+                        .to_string(),
+                ));
+            }
+            Ok(false) => {}
+            Err(_) => {
+                return Err(CodexErr::InvalidRequest(
+                    "cannot inject response items because the workspace medical planning lock could not be verified"
+                        .to_string(),
+                ));
+            }
+        }
+        if let Some(mode) = self
+            .active_turn_model_tool_mode()
+            .await
+            .filter(|mode| mode.is_workspace_restricted())
+        {
+            return Err(CodexErr::InvalidRequest(format!(
+                "cannot inject response items while a {mode} turn is active"
+            )));
         }
 
         let turn_context = self.codex.session.new_default_turn().await;

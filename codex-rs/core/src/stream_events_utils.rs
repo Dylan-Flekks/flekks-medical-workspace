@@ -2,6 +2,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use codex_extension_api::ExtensionData;
+use codex_protocol::ResponseItemId;
 use codex_protocol::config_types::ModeKind;
 use codex_protocol::items::TurnItem;
 use codex_utils_stream_parser::strip_citations;
@@ -13,6 +14,7 @@ use crate::session::session::Session;
 use crate::session::turn_context::TurnContext;
 use crate::tools::parallel::ToolCallRuntime;
 use crate::tools::router::ToolRouter;
+use crate::tools::workspace_context_only::tool_log_payload;
 use codex_memories_read::citations::parse_memory_citation;
 use codex_memories_read::citations::thread_ids_from_memory_citation;
 use codex_protocol::error::CodexErr;
@@ -334,7 +336,8 @@ pub(crate) async fn handle_output_item_done(
                 )
                 .await;
 
-            let payload_preview = call.payload.log_payload().into_owned();
+            let payload_preview =
+                tool_log_payload(ctx.turn_context.model_tool_mode, &call.payload).into_owned();
             tracing::info!(
                 thread_id = %ctx.sess.thread_id,
                 "ToolCall: {} {}",
@@ -359,7 +362,11 @@ pub(crate) async fn handle_output_item_done(
         Ok(None) => {
             let finalized_turn_item = finalize_non_tool_response_item(
                 ctx.sess.as_ref(),
-                TurnItemContributorPolicy::Run(ctx.turn_store.as_ref()),
+                if ctx.turn_context.model_tool_mode.is_workspace_restricted() {
+                    TurnItemContributorPolicy::Skip
+                } else {
+                    TurnItemContributorPolicy::Run(ctx.turn_store.as_ref())
+                },
                 &item,
                 plan_mode,
             )
@@ -444,7 +451,11 @@ pub(crate) async fn handle_non_tool_response_item(
         ResponseItem::ContextCompaction { .. } => "context_compaction",
         ResponseItem::Other => "other",
     };
-    debug!(item_type, item_id = item.id(), "Output item");
+    debug!(
+        item_type,
+        item_id = item.id().map(ResponseItemId::as_str),
+        "Output item"
+    );
 
     match item {
         ResponseItem::Message { .. }

@@ -1,0 +1,287 @@
+use super::*;
+
+#[derive(Debug, Clone)]
+pub(super) struct ClientDraft {
+    pub(super) id: Option<String>,
+    pub(super) version: Option<String>,
+    pub(super) display_name: String,
+    pub(super) legal_first_name: String,
+    pub(super) legal_middle_name: String,
+    pub(super) legal_last_name: String,
+    pub(super) legal_suffix: String,
+    pub(super) preferred_name: String,
+    pub(super) previous_name: String,
+    pub(super) date_of_birth: String,
+    pub(super) sex_or_gender: String,
+    pub(super) administrative_sex: String,
+    pub(super) preferred_language: String,
+    pub(super) interpreter_required: String,
+    pub(super) external_id: String,
+    pub(super) record_start_date: String,
+    pub(super) record_end_date: String,
+    pub(super) summary: String,
+    pub(super) primary_phone: String,
+    pub(super) primary_phone_use: String,
+    pub(super) secondary_phone: String,
+    pub(super) secondary_phone_use: String,
+    pub(super) email: String,
+    pub(super) secondary_email: String,
+    pub(super) preferred_contact_method: String,
+    pub(super) address_line_1: String,
+    pub(super) address_line_2: String,
+    pub(super) city: String,
+    pub(super) state_or_province: String,
+    pub(super) postal_code: String,
+    pub(super) country: String,
+    pub(super) address_use: String,
+    pub(super) emergency_contact_name: String,
+    pub(super) emergency_contact_relationship: String,
+    pub(super) emergency_contact_phone: String,
+    pub(super) emergency_contact_email: String,
+    pub(super) contact_notes: String,
+    pub(super) payer_name: String,
+    pub(super) plan_name: String,
+    pub(super) member_id: String,
+    pub(super) group_number: String,
+    pub(super) coverage_type: String,
+    pub(super) coverage_status: String,
+    pub(super) coverage_notes: String,
+}
+
+impl Default for ClientDraft {
+    fn default() -> Self {
+        Self {
+            id: None,
+            version: None,
+            display_name: "New client".to_string(),
+            legal_first_name: String::new(),
+            legal_middle_name: String::new(),
+            legal_last_name: String::new(),
+            legal_suffix: String::new(),
+            preferred_name: String::new(),
+            previous_name: String::new(),
+            date_of_birth: String::new(),
+            sex_or_gender: String::new(),
+            administrative_sex: String::new(),
+            preferred_language: String::new(),
+            interpreter_required: "no".to_string(),
+            external_id: String::new(),
+            record_start_date: String::new(),
+            record_end_date: String::new(),
+            summary: String::new(),
+            primary_phone: String::new(),
+            primary_phone_use: String::new(),
+            secondary_phone: String::new(),
+            secondary_phone_use: String::new(),
+            email: String::new(),
+            secondary_email: String::new(),
+            preferred_contact_method: String::new(),
+            address_line_1: String::new(),
+            address_line_2: String::new(),
+            city: String::new(),
+            state_or_province: String::new(),
+            postal_code: String::new(),
+            country: String::new(),
+            address_use: "home_and_mailing".to_string(),
+            emergency_contact_name: String::new(),
+            emergency_contact_relationship: String::new(),
+            emergency_contact_phone: String::new(),
+            emergency_contact_email: String::new(),
+            contact_notes: String::new(),
+            payer_name: String::new(),
+            plan_name: String::new(),
+            member_id: String::new(),
+            group_number: String::new(),
+            coverage_type: String::new(),
+            coverage_status: String::new(),
+            coverage_notes: String::new(),
+        }
+    }
+}
+
+impl ClientDraft {
+    pub(super) fn from_client(client: &WorkspaceClient) -> Self {
+        Self {
+            id: Some(client.id.clone()),
+            version: Some(client.version.clone()),
+            display_name: client.display_name.clone(),
+            legal_first_name: client.legal_first_name.clone().unwrap_or_default(),
+            legal_middle_name: client.legal_middle_name.clone().unwrap_or_default(),
+            legal_last_name: client.legal_last_name.clone().unwrap_or_default(),
+            legal_suffix: client.legal_suffix.clone().unwrap_or_default(),
+            preferred_name: client.preferred_name.clone().unwrap_or_default(),
+            previous_name: client.previous_name.clone().unwrap_or_default(),
+            date_of_birth: client.date_of_birth.clone().unwrap_or_default(),
+            sex_or_gender: client.sex_or_gender.clone().unwrap_or_default(),
+            administrative_sex: client.administrative_sex.clone().unwrap_or_default(),
+            preferred_language: client.preferred_language.clone().unwrap_or_default(),
+            interpreter_required: if client.interpreter_required {
+                "yes".to_string()
+            } else {
+                "no".to_string()
+            },
+            external_id: client.external_id.clone().unwrap_or_default(),
+            record_start_date: client.record_start_date.clone().unwrap_or_default(),
+            record_end_date: client.record_end_date.clone().unwrap_or_default(),
+            summary: client.summary.clone(),
+            primary_phone: client.primary_phone.clone().unwrap_or_default(),
+            primary_phone_use: client.primary_phone_use.clone().unwrap_or_default(),
+            secondary_phone: client.secondary_phone.clone().unwrap_or_default(),
+            secondary_phone_use: client.secondary_phone_use.clone().unwrap_or_default(),
+            email: client
+                .primary_email
+                .clone()
+                .or_else(|| client.email.clone())
+                .unwrap_or_default(),
+            secondary_email: client.secondary_email.clone().unwrap_or_default(),
+            preferred_contact_method: client.preferred_contact_method.clone().unwrap_or_default(),
+            address_line_1: client.address_line_1.clone().unwrap_or_default(),
+            address_line_2: client.address_line_2.clone().unwrap_or_default(),
+            city: client.city.clone().unwrap_or_default(),
+            state_or_province: client.state_or_province.clone().unwrap_or_default(),
+            postal_code: client.postal_code.clone().unwrap_or_default(),
+            country: client.country.clone().unwrap_or_default(),
+            address_use: client
+                .address_use
+                .clone()
+                .unwrap_or_else(|| "home_and_mailing".to_string()),
+            emergency_contact_name: client.emergency_contact_name.clone().unwrap_or_default(),
+            emergency_contact_relationship: client
+                .emergency_contact_relationship
+                .clone()
+                .unwrap_or_default(),
+            emergency_contact_phone: client.emergency_contact_phone.clone().unwrap_or_default(),
+            emergency_contact_email: client.emergency_contact_email.clone().unwrap_or_default(),
+            contact_notes: client.contact_notes.clone().unwrap_or_default(),
+            payer_name: client.payer_name.clone().unwrap_or_default(),
+            plan_name: client.plan_name.clone().unwrap_or_default(),
+            member_id: client.member_id.clone().unwrap_or_default(),
+            group_number: client.group_number.clone().unwrap_or_default(),
+            coverage_type: client.coverage_type.clone().unwrap_or_default(),
+            coverage_status: client.coverage_status.clone().unwrap_or_default(),
+            coverage_notes: client.coverage_notes.clone().unwrap_or_default(),
+        }
+    }
+
+    pub(super) fn upsert_params(&self) -> WorkspaceClientUpsertParams {
+        WorkspaceClientUpsertParams {
+            id: self.id.clone(),
+            expected_version: self.version.clone(),
+            display_name: self.display_name.trim().to_string(),
+            legal_first_name: Some(nonempty_option(&self.legal_first_name)),
+            legal_middle_name: Some(nonempty_option(&self.legal_middle_name)),
+            legal_last_name: Some(nonempty_option(&self.legal_last_name)),
+            legal_suffix: Some(nonempty_option(&self.legal_suffix)),
+            preferred_name: nonempty_option(&self.preferred_name),
+            previous_name: Some(nonempty_option(&self.previous_name)),
+            date_of_birth: nonempty_option(&self.date_of_birth),
+            sex_or_gender: nonempty_option(&self.sex_or_gender),
+            administrative_sex: Some(nonempty_option(&self.administrative_sex)),
+            preferred_language: Some(nonempty_option(&self.preferred_language)),
+            interpreter_required: Some(Some(affirmative_text(&self.interpreter_required))),
+            external_id: nonempty_option(&self.external_id),
+            record_start_date: nonempty_option(&self.record_start_date),
+            record_end_date: nonempty_option(&self.record_end_date),
+            summary: self.summary.clone(),
+            primary_phone: nonempty_option(&self.primary_phone),
+            primary_phone_use: Some(nonempty_option(&self.primary_phone_use)),
+            secondary_phone: nonempty_option(&self.secondary_phone),
+            secondary_phone_use: Some(nonempty_option(&self.secondary_phone_use)),
+            email: nonempty_option(&self.email),
+            primary_email: Some(nonempty_option(&self.email)),
+            secondary_email: Some(nonempty_option(&self.secondary_email)),
+            preferred_contact_method: nonempty_option(&self.preferred_contact_method),
+            address_line_1: Some(nonempty_option(&self.address_line_1)),
+            address_line_2: Some(nonempty_option(&self.address_line_2)),
+            city: Some(nonempty_option(&self.city)),
+            state_or_province: Some(nonempty_option(&self.state_or_province)),
+            postal_code: Some(nonempty_option(&self.postal_code)),
+            country: Some(nonempty_option(&self.country)),
+            address_use: Some(nonempty_option(&self.address_use)),
+            emergency_contact_name: nonempty_option(&self.emergency_contact_name),
+            emergency_contact_relationship: nonempty_option(&self.emergency_contact_relationship),
+            emergency_contact_phone: nonempty_option(&self.emergency_contact_phone),
+            emergency_contact_email: nonempty_option(&self.emergency_contact_email),
+            contact_notes: nonempty_option(&self.contact_notes),
+            payer_name: nonempty_option(&self.payer_name),
+            plan_name: nonempty_option(&self.plan_name),
+            member_id: nonempty_option(&self.member_id),
+            group_number: nonempty_option(&self.group_number),
+            coverage_type: nonempty_option(&self.coverage_type),
+            coverage_status: nonempty_option(&self.coverage_status),
+            coverage_notes: nonempty_option(&self.coverage_notes),
+        }
+    }
+
+    pub(super) fn value_mut(&mut self, field: DemographicsField) -> &mut String {
+        match field {
+            DemographicsField::DisplayName => &mut self.display_name,
+            DemographicsField::PreferredName => &mut self.preferred_name,
+            DemographicsField::DateOfBirth => &mut self.date_of_birth,
+            DemographicsField::SexOrGender => &mut self.sex_or_gender,
+            DemographicsField::ExternalId => &mut self.external_id,
+            DemographicsField::RecordStartDate => &mut self.record_start_date,
+            DemographicsField::RecordEndDate => &mut self.record_end_date,
+            DemographicsField::Summary => &mut self.summary,
+        }
+    }
+
+    pub(super) fn admin_value_mut(&mut self, field: PatientAdminField) -> &mut String {
+        match field {
+            PatientAdminField::DisplayName => &mut self.display_name,
+            PatientAdminField::PreferredName => &mut self.preferred_name,
+            PatientAdminField::LegalFirstName => &mut self.legal_first_name,
+            PatientAdminField::LegalMiddleName => &mut self.legal_middle_name,
+            PatientAdminField::LegalLastName => &mut self.legal_last_name,
+            PatientAdminField::LegalSuffix => &mut self.legal_suffix,
+            PatientAdminField::PreviousName => &mut self.previous_name,
+            PatientAdminField::DateOfBirth => &mut self.date_of_birth,
+            PatientAdminField::AdministrativeSex => &mut self.administrative_sex,
+            PatientAdminField::SexOrGender => &mut self.sex_or_gender,
+            PatientAdminField::PatientId => &mut self.external_id,
+            PatientAdminField::PreferredLanguage => &mut self.preferred_language,
+            PatientAdminField::InterpreterRequired => &mut self.interpreter_required,
+            PatientAdminField::PrimaryPhone => &mut self.primary_phone,
+            PatientAdminField::PrimaryPhoneUse => &mut self.primary_phone_use,
+            PatientAdminField::SecondaryPhone => &mut self.secondary_phone,
+            PatientAdminField::SecondaryPhoneUse => &mut self.secondary_phone_use,
+            PatientAdminField::Email => &mut self.email,
+            PatientAdminField::SecondaryEmail => &mut self.secondary_email,
+            PatientAdminField::PreferredContactMethod => &mut self.preferred_contact_method,
+            PatientAdminField::AddressLine1 => &mut self.address_line_1,
+            PatientAdminField::AddressLine2 => &mut self.address_line_2,
+            PatientAdminField::City => &mut self.city,
+            PatientAdminField::StateOrProvince => &mut self.state_or_province,
+            PatientAdminField::PostalCode => &mut self.postal_code,
+            PatientAdminField::Country => &mut self.country,
+            PatientAdminField::AddressUse => &mut self.address_use,
+            PatientAdminField::EmergencyContactName => &mut self.emergency_contact_name,
+            PatientAdminField::EmergencyContactRelationship => {
+                &mut self.emergency_contact_relationship
+            }
+            PatientAdminField::EmergencyContactPhone => &mut self.emergency_contact_phone,
+            PatientAdminField::EmergencyContactEmail => &mut self.emergency_contact_email,
+            PatientAdminField::ContactNotes => &mut self.contact_notes,
+            PatientAdminField::PayerName => &mut self.payer_name,
+            PatientAdminField::PlanName => &mut self.plan_name,
+            PatientAdminField::MemberId => &mut self.member_id,
+            PatientAdminField::GroupNumber => &mut self.group_number,
+            PatientAdminField::CoverageType => &mut self.coverage_type,
+            PatientAdminField::CoverageStatus => &mut self.coverage_status,
+            PatientAdminField::CoverageNotes => &mut self.coverage_notes,
+        }
+    }
+
+    pub(super) fn value(&self, field: DemographicsField) -> &str {
+        match field {
+            DemographicsField::DisplayName => &self.display_name,
+            DemographicsField::PreferredName => &self.preferred_name,
+            DemographicsField::DateOfBirth => &self.date_of_birth,
+            DemographicsField::SexOrGender => &self.sex_or_gender,
+            DemographicsField::ExternalId => &self.external_id,
+            DemographicsField::RecordStartDate => &self.record_start_date,
+            DemographicsField::RecordEndDate => &self.record_end_date,
+            DemographicsField::Summary => &self.summary,
+        }
+    }
+}

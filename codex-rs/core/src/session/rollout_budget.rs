@@ -10,6 +10,9 @@ pub(super) async fn maybe_record_reminder(
     turn_context: &TurnContext,
     window_id: &str,
 ) {
+    if turn_context.model_tool_mode.is_workspace_restricted() {
+        return;
+    }
     let budget = sess.services.agent_control.rollout_budget();
     let Some(reminder) = budget.pending_reminder(sess.thread_id(), window_id) else {
         return;

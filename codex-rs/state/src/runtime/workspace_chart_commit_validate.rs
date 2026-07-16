@@ -12,6 +12,7 @@ pub(super) fn normalize_before_hash(
     normalize_optional(&mut request.source_turn_id);
     normalize_optional(&mut request.client_id);
     normalize_optional(&mut request.expected_versions.client);
+    normalize_optional(&mut request.expected_versions.coverage);
     normalize_optional(&mut request.expected_versions.safety_item);
     normalize_optional(&mut request.expected_versions.encounter);
     normalize_optional(&mut request.expected_versions.document);
@@ -32,16 +33,42 @@ pub(super) fn normalize_before_hash(
     if let Some(client) = request.client.as_mut() {
         normalize_optional(&mut client.id);
         client.display_name = required_text(&client.display_name, "client display name")?;
+        normalize_optional(&mut client.legal_first_name);
+        normalize_optional(&mut client.legal_middle_name);
+        normalize_optional(&mut client.legal_last_name);
+        normalize_optional(&mut client.legal_suffix);
         normalize_optional(&mut client.preferred_name);
+        normalize_optional(&mut client.previous_name);
         normalize_optional(&mut client.date_of_birth);
         normalize_optional(&mut client.sex_or_gender);
+        normalize_optional(&mut client.administrative_sex);
+        normalize_optional(&mut client.preferred_language);
         normalize_optional(&mut client.external_id);
         normalize_optional(&mut client.record_start_date);
         normalize_optional(&mut client.record_end_date);
         normalize_optional(&mut client.primary_phone);
+        normalize_optional(&mut client.primary_phone_use);
         normalize_optional(&mut client.secondary_phone);
+        normalize_optional(&mut client.secondary_phone_use);
         normalize_optional(&mut client.email);
+        normalize_optional(&mut client.primary_email);
+        normalize_optional(&mut client.secondary_email);
+        match (&client.email, &client.primary_email) {
+            (Some(legacy), Some(primary)) if legacy != primary => {
+                return validation("workspace client email and primaryEmail must match");
+            }
+            (Some(legacy), None) => client.primary_email = Some(legacy.clone()),
+            (None, Some(primary)) => client.email = Some(primary.clone()),
+            (Some(_), Some(_)) | (None, None) => {}
+        }
         normalize_optional(&mut client.preferred_contact_method);
+        normalize_optional(&mut client.address_line_1);
+        normalize_optional(&mut client.address_line_2);
+        normalize_optional(&mut client.city);
+        normalize_optional(&mut client.state_or_province);
+        normalize_optional(&mut client.postal_code);
+        normalize_optional(&mut client.country);
+        normalize_optional(&mut client.address_use);
         normalize_optional(&mut client.emergency_contact_name);
         normalize_optional(&mut client.emergency_contact_relationship);
         normalize_optional(&mut client.emergency_contact_phone);
@@ -54,6 +81,35 @@ pub(super) fn normalize_before_hash(
         normalize_optional(&mut client.coverage_type);
         normalize_optional(&mut client.coverage_status);
         normalize_optional(&mut client.coverage_notes);
+    }
+    if let Some(coverage) = request.coverage.as_mut() {
+        normalize_optional(&mut coverage.id);
+        coverage.client_id = coverage.client_id.trim().to_string();
+        if !(1..=3).contains(&coverage.priority) {
+            return validation("workspace coverage priority must be 1, 2, or 3");
+        }
+        normalize_optional(&mut coverage.payer_name);
+        normalize_optional(&mut coverage.plan_name);
+        normalize_optional(&mut coverage.member_id);
+        normalize_optional(&mut coverage.group_number);
+        normalize_optional(&mut coverage.coverage_type);
+        normalize_optional(&mut coverage.coverage_status);
+        normalize_optional(&mut coverage.effective_date);
+        normalize_optional(&mut coverage.termination_date);
+        normalize_optional(&mut coverage.patient_relationship_to_subscriber);
+        normalize_optional(&mut coverage.subscriber_first_name);
+        normalize_optional(&mut coverage.subscriber_middle_name);
+        normalize_optional(&mut coverage.subscriber_last_name);
+        normalize_optional(&mut coverage.subscriber_suffix);
+        normalize_optional(&mut coverage.subscriber_date_of_birth);
+        normalize_optional(&mut coverage.subscriber_administrative_sex);
+        normalize_optional(&mut coverage.subscriber_address_line_1);
+        normalize_optional(&mut coverage.subscriber_address_line_2);
+        normalize_optional(&mut coverage.subscriber_city);
+        normalize_optional(&mut coverage.subscriber_state_or_province);
+        normalize_optional(&mut coverage.subscriber_postal_code);
+        normalize_optional(&mut coverage.subscriber_country);
+        normalize_optional(&mut coverage.coverage_notes);
     }
     normalize_root_shape(request)?;
 
@@ -206,6 +262,10 @@ pub(super) fn allocate_and_bind(
 ) -> Result<(), WorkspaceChartCommitError> {
     if let Some(client) = request.client.as_mut() {
         client.id = Some(client_id.to_string());
+    }
+    if let Some(coverage) = request.coverage.as_mut() {
+        allocate(&mut coverage.id);
+        bind_client("coverage", &mut coverage.client_id, client_id, root_exists)?;
     }
     let encounter_id = request
         .encounter

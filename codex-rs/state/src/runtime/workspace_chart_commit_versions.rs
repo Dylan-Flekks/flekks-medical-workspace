@@ -17,6 +17,18 @@ pub(super) fn validate(
         crate::WorkspaceClient::record_version,
     )?;
     validate_one(
+        WorkspaceChartEntityKind::Coverage,
+        request
+            .coverage
+            .as_ref()
+            .and_then(|input| input.id.as_deref())
+            .unwrap_or(""),
+        request.coverage.is_some(),
+        existing.coverage.as_ref(),
+        request.expected_versions.coverage.as_deref(),
+        crate::WorkspaceCoverage::record_version,
+    )?;
+    validate_one(
         WorkspaceChartEntityKind::SafetyItem,
         request
             .safety_item

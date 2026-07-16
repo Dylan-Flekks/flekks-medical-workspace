@@ -2350,7 +2350,7 @@ async fn slash_resume_opens_picker() {
 }
 
 #[tokio::test]
-async fn slash_workspacemedical_opens_medical_workspace_dashboard() {
+async fn slash_workspace_medical_opens_medical_workspace_dashboard() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
 
     chat.dispatch_command(SlashCommand::WorkspaceMedical);

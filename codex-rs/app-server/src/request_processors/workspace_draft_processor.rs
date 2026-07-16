@@ -50,13 +50,14 @@ impl WorkspaceRequestProcessor {
         if !params.draft.is_object() {
             return Err(invalid_request("workspace draft must be a JSON object"));
         }
-        if params
+        let schema_version = params
             .draft
             .get("schemaVersion")
-            .and_then(serde_json::Value::as_i64)
-            != Some(1)
-        {
-            return Err(invalid_request("workspace draft schemaVersion must be 1"));
+            .and_then(serde_json::Value::as_i64);
+        if !matches!(schema_version, Some(1 | 2)) {
+            return Err(invalid_request(
+                "workspace draft schemaVersion must be 1 or 2",
+            ));
         }
         let draft_json = serde_json::to_string(&params.draft)
             .map_err(|error| invalid_request(format!("workspace draft is invalid: {error}")))?;
@@ -66,6 +67,13 @@ impl WorkspaceRequestProcessor {
             .create_draft_checkpoint(codex_state::WorkspaceDraftCheckpointCreate {
                 session_id,
                 client_id,
+                expected_current_checkpoint_id: empty_to_none(
+                    params.expected_current_checkpoint_id,
+                ),
+                expected_current_checkpoint_revision: params.expected_current_checkpoint_revision,
+                expected_current_checkpoint_sha256: empty_to_none(
+                    params.expected_current_checkpoint_sha256,
+                ),
                 encounter_id: empty_to_none(params.encounter_id),
                 note_id: empty_to_none(params.note_id),
                 base_note_revision: params.base_note_revision,

@@ -104,6 +104,9 @@ pub(crate) async fn run_pending_session_start_hooks(
     sess: &Arc<Session>,
     turn_context: &Arc<TurnContext>,
 ) -> bool {
+    if hooks_suppressed(turn_context) {
+        return false;
+    }
     while let Some(session_start_source) = sess.take_pending_session_start_source().await {
         // Pending session-start hooks are reused to dispatch thread-spawn subagent
         // starts. Other subagent sessions are internal/system work and do not run
@@ -167,6 +170,11 @@ pub(crate) async fn run_pre_tool_use_hooks(
     tool_name: &HookToolName,
     tool_input: &Value,
 ) -> PreToolUseHookResult {
+    if hooks_suppressed(turn_context) {
+        return PreToolUseHookResult::Continue {
+            updated_input: None,
+        };
+    }
     let request = PreToolUseRequest {
         session_id: sess.session_id().into(),
         turn_id: turn_context.sub_id.clone(),
@@ -228,6 +236,9 @@ pub(crate) async fn run_permission_request_hooks(
     run_id_suffix: &str,
     payload: PermissionRequestPayload,
 ) -> Option<PermissionRequestDecision> {
+    if hooks_suppressed(turn_context) {
+        return None;
+    }
     let request = PermissionRequestRequest {
         session_id: sess.session_id().into(),
         turn_id: turn_context.sub_id.clone(),
@@ -270,6 +281,14 @@ pub(crate) async fn run_post_tool_use_hooks(
     tool_input: Value,
     tool_response: Value,
 ) -> PostToolUseOutcome {
+    if hooks_suppressed(turn_context) {
+        return PostToolUseOutcome {
+            hook_events: Vec::new(),
+            should_block: false,
+            additional_contexts: Vec::new(),
+            feedback_message: None,
+        };
+    }
     let request = PostToolUseRequest {
         session_id: sess.session_id().into(),
         turn_id: turn_context.sub_id.clone(),
@@ -301,6 +320,9 @@ pub(crate) async fn run_turn_stop_hooks(
     stop_hook_active: bool,
     last_assistant_message: Option<String>,
 ) -> StopOutcome {
+    if hooks_suppressed(turn_context) {
+        return StopOutcome::default();
+    }
     // Resolve the stop hook kind from the session source before building the
     // request. Root turns run Stop; thread-spawned child turns run SubagentStop.
     let (target, transcript_path) = match &turn_context.session_source {
@@ -370,6 +392,9 @@ pub(crate) async fn run_pre_compact_hooks(
     turn_context: &Arc<TurnContext>,
     trigger: CompactionTrigger,
 ) -> PreCompactHookOutcome {
+    if hooks_suppressed(turn_context) {
+        return PreCompactHookOutcome::Continue;
+    }
     let request = codex_hooks::PreCompactRequest {
         session_id: sess.session_id().into(),
         turn_id: turn_context.sub_id.clone(),
@@ -407,6 +432,9 @@ pub(crate) async fn run_post_compact_hooks(
     turn_context: &Arc<TurnContext>,
     trigger: CompactionTrigger,
 ) -> PostCompactHookOutcome {
+    if hooks_suppressed(turn_context) {
+        return PostCompactHookOutcome::Continue;
+    }
     let request = codex_hooks::PostCompactRequest {
         session_id: sess.session_id().into(),
         turn_id: turn_context.sub_id.clone(),
@@ -436,6 +464,9 @@ pub(crate) async fn run_legacy_after_agent_hook(
     input: &[ResponseItem],
     last_assistant_message: Option<String>,
 ) -> bool {
+    if hooks_suppressed(turn_context) {
+        return false;
+    }
     let mut abort_message = None;
     let input_messages = input
         .iter()
@@ -502,6 +533,12 @@ pub(crate) async fn inspect_pending_input(
     turn_context: &Arc<TurnContext>,
     pending_input_item: &TurnInput,
 ) -> HookRuntimeOutcome {
+    if hooks_suppressed(turn_context) {
+        return HookRuntimeOutcome {
+            should_stop: false,
+            additional_contexts: Vec::new(),
+        };
+    }
     match pending_input_item {
         TurnInput::UserInput { content, .. } => {
             let request = UserPromptSubmitRequest {
@@ -534,6 +571,10 @@ pub(crate) async fn inspect_pending_input(
             additional_contexts: Vec::new(),
         },
     }
+}
+
+fn hooks_suppressed(turn_context: &TurnContext) -> bool {
+    turn_context.model_tool_mode.is_workspace_restricted()
 }
 
 pub(crate) async fn record_pending_input(

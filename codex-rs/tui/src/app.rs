@@ -81,10 +81,13 @@ use crate::update_action::UpdateAction;
 use crate::version::CODEX_CLI_VERSION;
 use crate::workspace_command::AppServerWorkspaceCommandRunner;
 use crate::workspace_command::WorkspaceCommandRunner;
+use crate::workspace_context_assembly::compact_preview;
 use crate::workspace_context_assembly::packet_scoped_agent_handoff_prompt_for_run;
 use crate::workspace_dashboard::WorkspaceDashboard;
 use crate::workspace_dashboard::WorkspaceDashboardAction;
+use crate::workspace_dashboard::WorkspaceFocus;
 use crate::workspace_dashboard::WorkspaceProfile;
+use crate::workspace_draft::WorkspaceDraftCheckpointTrigger;
 use codex_ansi_escape::ansi_escape_line;
 use codex_app_server_client::AppServerRequestHandle;
 use codex_app_server_client::TypedRequestError;
@@ -135,6 +138,7 @@ use codex_app_server_protocol::TurnStatus;
 use codex_app_server_protocol::WorkspaceAgentRunStartParams;
 use codex_app_server_protocol::WorkspaceAgentRunStatusUpdateParams;
 use codex_app_server_protocol::WorkspaceContextPacketListParams;
+use codex_app_server_protocol::WorkspacePlanRevisionSubmitParams;
 use codex_app_server_protocol::WriteStatus;
 use codex_config::CloudConfigBundleLoader;
 use codex_config::ConfigLayerStackOrdering;
@@ -230,6 +234,9 @@ mod thread_routing;
 mod thread_session_state;
 mod thread_settings;
 mod workspace_agent_capture;
+mod workspace_context_turn;
+mod workspace_drafts;
+mod workspace_plan;
 
 use self::agent_navigation::AgentNavigationDirection;
 use self::agent_navigation::AgentNavigationState;
@@ -243,6 +250,7 @@ use self::side::SideThreadState;
 use self::startup_prompts::*;
 use self::thread_events::*;
 use self::workspace_agent_capture::PendingWorkspaceAgentCapture;
+use self::workspace_plan::WorkspacePlanRuntime;
 
 const EXTERNAL_EDITOR_HINT: &str = "Save and close external editor to continue.";
 const THREAD_EVENT_CHANNEL_CAPACITY: usize = 32768;
@@ -517,6 +525,8 @@ pub(crate) struct App {
     workspace_command_runner: Option<WorkspaceCommandRunner>,
     workspace_dashboard: Option<WorkspaceDashboard>,
     workspace_dashboard_visible: bool,
+    workspace_draft_runtime: workspace_drafts::WorkspaceDraftRuntime,
+    workspace_plan_runtime: WorkspacePlanRuntime,
     pending_workspace_agent_capture: Option<PendingWorkspaceAgentCapture>,
     /// Config is stored here so we can recreate ChatWidgets as needed.
     pub(crate) config: Config,
@@ -732,6 +742,10 @@ fn active_turn_interrupt_race(error: &TypedRequestError) -> Option<String> {
             .1
             .to_string(),
     )
+}
+
+fn workspace_dashboard_render_event(event: &TuiEvent) -> bool {
+    matches!(event, TuiEvent::Draw | TuiEvent::Resize)
 }
 
 impl App {
@@ -1034,6 +1048,8 @@ See the Codex keymap documentation for supported actions and examples."
             workspace_command_runner: Some(workspace_command_runner),
             workspace_dashboard: None,
             workspace_dashboard_visible: false,
+            workspace_draft_runtime: workspace_drafts::WorkspaceDraftRuntime::default(),
+            workspace_plan_runtime: WorkspacePlanRuntime::default(),
             pending_workspace_agent_capture: None,
             config,
             state_db,
@@ -1220,7 +1236,7 @@ See the Codex keymap documentation for supported actions and examples."
                     }
                     app_server_event = app_server.next_event(), if listen_for_app_server_events => {
                         match app_server_event {
-                            Some(event) => app.handle_app_server_event(&app_server, event).await,
+                            Some(event) => app.handle_app_server_event(&mut app_server, event).await,
                             None => {
                                 listen_for_app_server_events = false;
                                 tracing::warn!("app-server event stream closed");
@@ -1283,11 +1299,12 @@ See the Codex keymap documentation for supported actions and examples."
         app_server: &mut AppServerSession,
         event: TuiEvent,
     ) -> Result<AppRunControl> {
-        if matches!(event, TuiEvent::Draw | TuiEvent::Resize) {
+        if matches!(event, TuiEvent::Draw | TuiEvent::Resize) && !self.workspace_dashboard_active()
+        {
             self.handle_draw_pre_render(tui)?;
         }
 
-        if self.workspace_dashboard_active() && self.overlay.is_none() {
+        if self.workspace_dashboard_active() {
             return self
                 .handle_workspace_dashboard_event(tui, app_server, event)
                 .await;
@@ -1365,9 +1382,24 @@ See the Codex keymap documentation for supported actions and examples."
         app_server: &mut AppServerSession,
         event: TuiEvent,
     ) -> Result<AppRunControl> {
-        let _ = tui.enter_workspace_alt_screen();
+        if let Err(err) = tui.enter_workspace_alt_screen() {
+            self.hide_workspace_dashboard();
+            self.chat_widget.add_error_message(format!(
+                "Workspace returned to Codex because full-screen isolation could not be restored: {err}"
+            ));
+            tui.terminal.invalidate_viewport();
+            tui.frame_requester().schedule_frame();
+            return Ok(AppRunControl::Continue);
+        }
+        if workspace_dashboard_render_event(&event) {
+            return self.handle_workspace_dashboard_render_event(tui, event);
+        }
         match event {
             TuiEvent::Key(key_event) => {
+                let previous_focus = self
+                    .workspace_dashboard
+                    .as_ref()
+                    .map(WorkspaceDashboard::focus);
                 let viewport = tui
                     .terminal
                     .size()
@@ -1380,6 +1412,9 @@ See the Codex keymap documentation for supported actions and examples."
                     .unwrap_or(WorkspaceDashboardAction::Consumed);
                 self.handle_workspace_dashboard_action(tui, app_server, action)
                     .await;
+                if let Some(previous_focus) = previous_focus {
+                    self.request_workspace_draft_focus_checkpoint(previous_focus);
+                }
             }
             TuiEvent::Paste(pasted) => {
                 let pasted = pasted.replace("\r", "\n");
@@ -1390,7 +1425,6 @@ See the Codex keymap documentation for supported actions and examples."
                     .unwrap_or(WorkspaceDashboardAction::Consumed);
                 self.handle_workspace_dashboard_action(tui, app_server, action)
                     .await;
-                tui.frame_requester().schedule_frame();
             }
             TuiEvent::MouseScroll(scroll_event) => {
                 let viewport = tui
@@ -1405,26 +1439,20 @@ See the Codex keymap documentation for supported actions and examples."
                     .unwrap_or(WorkspaceDashboardAction::Consumed);
                 self.handle_workspace_dashboard_action(tui, app_server, action)
                     .await;
-                tui.frame_requester().schedule_frame();
             }
-            TuiEvent::Draw | TuiEvent::Resize => {
-                self.chat_widget.maybe_post_pending_notification(tui);
-                if self
-                    .chat_widget
-                    .handle_paste_burst_tick(tui.frame_requester())
-                {
-                    return Ok(AppRunControl::Continue);
-                }
-                self.chat_widget.pre_draw_tick();
-                let resized = matches!(event, TuiEvent::Resize);
-                self.render_workspace_dashboard_frame(tui, resized)?;
-                if self.chat_widget.external_editor_state() == ExternalEditorState::Requested {
-                    self.chat_widget
-                        .set_external_editor_state(ExternalEditorState::Active);
-                    self.app_event_tx.send(AppEvent::LaunchExternalEditor);
-                }
-            }
+            TuiEvent::Draw | TuiEvent::Resize => unreachable!("render events return above"),
         }
+        Ok(AppRunControl::Continue)
+    }
+
+    fn handle_workspace_dashboard_render_event(
+        &mut self,
+        tui: &mut tui::Tui,
+        event: TuiEvent,
+    ) -> Result<AppRunControl> {
+        debug_assert!(workspace_dashboard_render_event(&event));
+        let resized = matches!(event, TuiEvent::Resize);
+        self.render_workspace_dashboard_frame(tui, resized)?;
         Ok(AppRunControl::Continue)
     }
 
@@ -1453,10 +1481,73 @@ See the Codex keymap documentation for supported actions and examples."
                 }
             }
             WorkspaceDashboardAction::Consumed => {}
+            WorkspaceDashboardAction::CheckpointDraft => {
+                if let Err(err) = self
+                    .flush_workspace_draft(
+                        app_server,
+                        WorkspaceDraftCheckpointTrigger::PacketPreview,
+                    )
+                    .await
+                    && let Some(dashboard) = self.workspace_dashboard.as_mut()
+                {
+                    dashboard.set_status(format!(
+                        "Packet preview is read-only, but local recovery checkpoint failed: {err}"
+                    ));
+                }
+            }
             WorkspaceDashboardAction::Close => {
+                if self.workspace_draft_recovery_pending() {
+                    // The offered checkpoint is already durable and must remain untouched until
+                    // an explicit restore or discard. Closing the view is therefore safe without
+                    // creating a competing checkpoint.
+                    self.hide_workspace_dashboard_and_leave_alt_screen(tui);
+                    return;
+                }
+                if let Err(err) = self
+                    .flush_workspace_draft(
+                        app_server,
+                        WorkspaceDraftCheckpointTrigger::WorkspaceClose,
+                    )
+                    .await
+                {
+                    if let Some(dashboard) = self.workspace_dashboard.as_mut() {
+                        dashboard.set_status(format!(
+                            "Local recovery save failed; workspace remains open: {err}"
+                        ));
+                    }
+                    self.chat_widget.add_error_message(format!(
+                        "Failed to checkpoint workspace draft before close: {err}"
+                    ));
+                    self.observe_workspace_draft();
+                    tui.frame_requester().schedule_frame();
+                    return;
+                }
                 self.hide_workspace_dashboard_and_leave_alt_screen(tui);
             }
             WorkspaceDashboardAction::CloseAndDiscard => {
+                if let Err(err) = self
+                    .flush_workspace_draft(
+                        app_server,
+                        WorkspaceDraftCheckpointTrigger::WorkspaceClose,
+                    )
+                    .await
+                {
+                    self.chat_widget.add_error_message(format!(
+                        "Failed to checkpoint workspace draft before discard: {err}"
+                    ));
+                    tui.frame_requester().schedule_frame();
+                    return;
+                }
+                if let Err(err) = self
+                    .discard_current_workspace_draft_session(app_server)
+                    .await
+                {
+                    self.chat_widget.add_error_message(format!(
+                        "Failed to discard workspace draft session safely: {err}"
+                    ));
+                    tui.frame_requester().schedule_frame();
+                    return;
+                }
                 self.workspace_dashboard = None;
                 self.hide_workspace_dashboard_and_leave_alt_screen(tui);
             }
@@ -1469,6 +1560,40 @@ See the Codex keymap documentation for supported actions and examples."
                 if let Err(err) = result {
                     self.chat_widget
                         .add_error_message(format!("Failed to prepare encounter: {err}"));
+                }
+            }
+            WorkspaceDashboardAction::OpenAgentRun { thread_id, run_id } => {
+                let thread_id = match ThreadId::from_string(&thread_id) {
+                    Ok(thread_id) => thread_id,
+                    Err(err) => {
+                        if let Some(dashboard) = self.workspace_dashboard.as_mut() {
+                            dashboard.set_status(format!(
+                                "Recorded Codex run {} has an invalid source thread: {err}",
+                                compact_preview(&run_id, 12)
+                            ));
+                        }
+                        tui.frame_requester().schedule_frame();
+                        return;
+                    }
+                };
+                if let Err(err) = self.select_agent_thread(tui, app_server, thread_id).await {
+                    if let Some(dashboard) = self.workspace_dashboard.as_mut() {
+                        dashboard.set_status(format!(
+                            "Could not open Codex run {}: {err}",
+                            compact_preview(&run_id, 12)
+                        ));
+                    }
+                    tui.frame_requester().schedule_frame();
+                    return;
+                }
+                if self.active_thread_id == Some(thread_id) {
+                    self.hide_workspace_dashboard_and_leave_alt_screen(tui);
+                } else if let Some(dashboard) = self.workspace_dashboard.as_mut() {
+                    dashboard.set_status(format!(
+                        "Codex run {} is no longer available in its source thread.",
+                        compact_preview(&run_id, 12)
+                    ));
+                    tui.frame_requester().schedule_frame();
                 }
             }
             WorkspaceDashboardAction::ResolveProposal {
@@ -1487,16 +1612,54 @@ See the Codex keymap documentation for supported actions and examples."
                         .add_error_message(format!("Failed to resolve workspace proposal: {err}"));
                 }
             }
+            WorkspaceDashboardAction::SendPlanMessage {
+                patient_id,
+                note_id,
+                encounter_id,
+                content,
+            } => {
+                if let Err(error) = self
+                    .send_workspace_plan_message(
+                        app_server,
+                        patient_id,
+                        note_id,
+                        encounter_id,
+                        content,
+                    )
+                    .await
+                {
+                    if let Some(dashboard) = self.workspace_dashboard.as_mut() {
+                        dashboard.fail_plan_message_send(format!(
+                            "Codex plan message was not sent; your exact draft is retained: {error}"
+                        ));
+                    }
+                    tracing::warn!(%error, "failed to send workspace plan message");
+                    tui.frame_requester().schedule_frame();
+                }
+            }
             WorkspaceDashboardAction::SendContextToAgent => {
-                let was_visible = self.workspace_dashboard_active();
                 if let Err(err) = self.send_workspace_context_to_agent(app_server).await {
+                    if let Some(dashboard) = self.workspace_dashboard.as_mut() {
+                        dashboard.set_status(format!("Workspace handoff failed: {err}"));
+                    }
                     self.chat_widget
                         .add_error_message(format!("Failed to send workspace context: {err}"));
-                } else if was_visible && !self.workspace_dashboard_active() {
-                    let _ = tui.leave_alt_screen();
+                    self.observe_workspace_draft();
+                    tui.frame_requester().schedule_frame();
                 }
             }
             WorkspaceDashboardAction::Save => {
+                if let Err(err) = self
+                    .flush_workspace_draft(
+                        app_server,
+                        WorkspaceDraftCheckpointTrigger::ExplicitSave,
+                    )
+                    .await
+                {
+                    self.chat_widget.add_error_message(format!(
+                        "Local recovery checkpoint failed; continuing explicit canonical save: {err}"
+                    ));
+                }
                 let result = if let Some(dashboard) = self.workspace_dashboard.as_mut() {
                     dashboard.save(app_server).await
                 } else {
@@ -1660,7 +1823,94 @@ See the Codex keymap documentation for supported actions and examples."
                     ));
                 }
             }
+            WorkspaceDashboardAction::SelectCoveragePriority(priority) => {
+                let result = if let Some(dashboard) = self.workspace_dashboard.as_mut() {
+                    dashboard
+                        .select_coverage_priority(app_server, priority)
+                        .await
+                } else {
+                    Ok(())
+                };
+                if let Err(err) = result {
+                    self.chat_widget.add_error_message(format!(
+                        "Failed to switch workspace coverage priority: {err}"
+                    ));
+                }
+            }
+            WorkspaceDashboardAction::CreateCoverageVerification(params) => {
+                let result = if let Some(dashboard) = self.workspace_dashboard.as_mut() {
+                    dashboard
+                        .create_coverage_verification(app_server, params)
+                        .await
+                } else {
+                    Ok(())
+                };
+                if let Err(err) = result {
+                    self.chat_widget.add_error_message(format!(
+                        "Failed to record workspace coverage card comparison: {err}"
+                    ));
+                }
+            }
+            WorkspaceDashboardAction::StartNewClient => {
+                if let Err(err) = self
+                    .flush_workspace_draft(
+                        app_server,
+                        WorkspaceDraftCheckpointTrigger::PatientNavigation,
+                    )
+                    .await
+                {
+                    if let Some(dashboard) = self.workspace_dashboard.as_mut() {
+                        dashboard.set_status(format!(
+                            "New patient blocked until local draft checkpoint succeeds: {err}"
+                        ));
+                    }
+                    tui.frame_requester().schedule_frame();
+                    return;
+                }
+                if let Some(dashboard) = self.workspace_dashboard.as_mut() {
+                    dashboard.start_new_client();
+                }
+                self.initialize_workspace_draft_recovery_after_navigation(app_server)
+                    .await;
+            }
+            WorkspaceDashboardAction::StartNewNote => {
+                if let Err(err) = self
+                    .flush_workspace_draft(
+                        app_server,
+                        WorkspaceDraftCheckpointTrigger::NoteNavigation,
+                    )
+                    .await
+                {
+                    if let Some(dashboard) = self.workspace_dashboard.as_mut() {
+                        dashboard.set_status(format!(
+                            "New note blocked until local draft checkpoint succeeds: {err}"
+                        ));
+                    }
+                    tui.frame_requester().schedule_frame();
+                    return;
+                }
+                if let Some(dashboard) = self.workspace_dashboard.as_mut() {
+                    dashboard.start_new_note();
+                }
+                self.initialize_workspace_draft_recovery_after_navigation(app_server)
+                    .await;
+            }
             WorkspaceDashboardAction::SelectClient(index) => {
+                if let Err(err) = self
+                    .flush_workspace_draft(
+                        app_server,
+                        WorkspaceDraftCheckpointTrigger::PatientNavigation,
+                    )
+                    .await
+                {
+                    if let Some(dashboard) = self.workspace_dashboard.as_mut() {
+                        dashboard.set_status(format!(
+                            "Patient switch blocked until local draft checkpoint succeeds: {err}"
+                        ));
+                    }
+                    tui.frame_requester().schedule_frame();
+                    return;
+                }
                 let result = if let Some(dashboard) = self.workspace_dashboard.as_mut() {
                     dashboard.select_client(app_server, index).await
                 } else {
@@ -1669,9 +1919,30 @@ See the Codex keymap documentation for supported actions and examples."
                 if let Err(err) = result {
                     self.chat_widget
                         .add_error_message(format!("Failed to load workspace client: {err}"));
+                } else {
+                    self.initialize_workspace_draft_recovery_after_navigation(app_server)
+                        .await;
+                    if let Err(error) = self.refresh_workspace_plan_snapshot(app_server).await {
+                        tracing::warn!(%error, "failed to refresh plan after patient navigation");
+                    }
                 }
             }
             WorkspaceDashboardAction::SelectNote(index) => {
+                if let Err(err) = self
+                    .flush_workspace_draft(
+                        app_server,
+                        WorkspaceDraftCheckpointTrigger::NoteNavigation,
+                    )
+                    .await
+                {
+                    if let Some(dashboard) = self.workspace_dashboard.as_mut() {
+                        dashboard.set_status(format!(
+                            "Note switch blocked until local draft checkpoint succeeds: {err}"
+                        ));
+                    }
+                    tui.frame_requester().schedule_frame();
+                    return;
+                }
                 let result = if let Some(dashboard) = self.workspace_dashboard.as_mut() {
                     dashboard.select_note(app_server, index).await
                 } else {
@@ -1680,6 +1951,12 @@ See the Codex keymap documentation for supported actions and examples."
                 if let Err(err) = result {
                     self.chat_widget
                         .add_error_message(format!("Failed to load workspace note: {err}"));
+                } else {
+                    self.initialize_workspace_draft_recovery_after_navigation(app_server)
+                        .await;
+                    if let Err(error) = self.refresh_workspace_plan_snapshot(app_server).await {
+                        tracing::warn!(%error, "failed to refresh plan after note navigation");
+                    }
                 }
             }
             WorkspaceDashboardAction::SignNote => {
@@ -1706,7 +1983,22 @@ See the Codex keymap documentation for supported actions and examples."
                         .add_error_message(format!("Failed to update workspace job: {err}"));
                 }
             }
+            WorkspaceDashboardAction::RestoreLocalDraft => {
+                if let Err(err) = self.restore_workspace_draft_recovery().await {
+                    self.chat_widget.add_error_message(format!(
+                        "Failed to restore local workspace draft: {err}"
+                    ));
+                }
+            }
+            WorkspaceDashboardAction::DiscardLocalDraft => {
+                if let Err(err) = self.discard_workspace_draft_recovery(app_server).await {
+                    self.chat_widget.add_error_message(format!(
+                        "Failed to discard local workspace draft: {err}"
+                    ));
+                }
+            }
         }
+        self.observe_workspace_draft();
         tui.frame_requester().schedule_frame();
     }
 
@@ -1720,7 +2012,13 @@ See the Codex keymap documentation for supported actions and examples."
 
     fn hide_workspace_dashboard_and_leave_alt_screen(&mut self, tui: &mut tui::Tui) {
         self.hide_workspace_dashboard();
-        let _ = tui.leave_alt_screen();
+        if let Err(err) = tui.leave_alt_screen() {
+            self.chat_widget.add_error_message(format!(
+                "Workspace closed, but Codex could not fully restore the terminal screen: {err}"
+            ));
+        }
+        tui.terminal.invalidate_viewport();
+        tui.frame_requester().schedule_frame();
     }
 
     async fn send_workspace_context_to_agent(
@@ -1731,7 +2029,130 @@ See the Codex keymap documentation for supported actions and examples."
             .workspace_dashboard
             .as_ref()
             .is_some_and(|dashboard| dashboard.profile() == WorkspaceProfile::Medical);
-        let mut replaced_pending_handoff = false;
+        let medical_target_thread_id = if is_medical_handoff {
+            let Some(thread_id) = self.active_thread_id else {
+                if let Some(dashboard) = self.workspace_dashboard.as_mut() {
+                    dashboard.set_status(
+                        workspace_context_turn::WORKSPACE_CONTEXT_NO_ACTIVE_THREAD_MESSAGE,
+                    );
+                }
+                self.chat_widget.add_error_message(
+                    workspace_context_turn::WORKSPACE_CONTEXT_NO_ACTIVE_THREAD_MESSAGE.to_string(),
+                );
+                return Ok(());
+            };
+            Some(thread_id.to_string())
+        } else {
+            None
+        };
+        if is_medical_handoff && self.chat_widget.agent_turn_is_running() {
+            if let Some(dashboard) = self.workspace_dashboard.as_mut() {
+                dashboard.set_status(
+                    "Codex already has a run in progress. Use :agent open run to inspect it, or wait for it to finish before submitting another Context Plan.",
+                );
+            }
+            return Ok(());
+        }
+        if is_medical_handoff
+            && !self
+                .chat_widget
+                .can_accept_audited_text_as_plain_user_turn("medical handoff readiness check")
+        {
+            if let Some(dashboard) = self.workspace_dashboard.as_mut() {
+                dashboard.set_status(
+                    "The active Codex thread is not ready to receive a medical handoff. Wait for thread setup to finish, then retry.",
+                );
+            }
+            return Ok(());
+        }
+        let run_provider = Some(self.chat_widget.config_ref().model_provider_id.clone());
+        let run_model = self.chat_widget.current_model().to_string();
+        if is_medical_handoff {
+            let target_thread_id = medical_target_thread_id.as_deref().ok_or_else(|| {
+                color_eyre::eyre::eyre!(
+                    "submitted medical handoff recovery is missing its active target thread"
+                )
+            })?;
+            let retry_prompt = if let Some(pending) = self
+                .pending_workspace_agent_capture
+                .as_ref()
+                .filter(|pending| pending.handoff_is_authorized())
+            {
+                if !pending.handoff_is_authorized() {
+                    return Err(color_eyre::eyre::eyre!(
+                        "submitted medical handoff has an unauthorized pending capture"
+                    ));
+                }
+                if !pending.thread_is_allowed(target_thread_id)
+                    || !pending.model_matches(&run_model)
+                {
+                    return Err(color_eyre::eyre::eyre!(
+                        "submitted medical handoff no longer matches the active thread and model"
+                    ));
+                }
+                if pending.handoff_is_enqueued() {
+                    if let Some(dashboard) = self.workspace_dashboard.as_mut() {
+                        dashboard.set_status(
+                            "This exact submitted Plan handoff is already queued. Wait for the master-agent turn to start or finish.",
+                        );
+                    }
+                    return Ok(());
+                }
+                Some(pending.expected_prompt().to_string())
+            } else if self.pending_workspace_agent_capture.is_none()
+                && let Some(revision) = self.submitted_workspace_plan_revision_for_handoff()
+            {
+                self.recover_submitted_workspace_agent_capture(
+                    app_server,
+                    &revision,
+                    target_thread_id,
+                    &run_model,
+                )
+                .await?
+            } else {
+                None
+            };
+            if let Some(prompt) = retry_prompt {
+                if self
+                    .chat_widget
+                    .accept_audited_text_as_plain_user_turn(prompt)
+                {
+                    if let Some(pending) = self.pending_workspace_agent_capture.as_mut() {
+                        pending.mark_handoff_enqueued();
+                    }
+                    if let Some(dashboard) = self.workspace_dashboard.as_mut() {
+                        dashboard.set_status(
+                            "Exact submitted Plan handoff queued for the master agent. The audited packet and run were reused.",
+                        );
+                    }
+                } else if let Some(dashboard) = self.workspace_dashboard.as_mut() {
+                    dashboard.set_status(
+                        "The Plan submission is durable, but the master-agent turn was not queued. Keep this workspace open and press Ctrl-G to retry the exact handoff.",
+                    );
+                }
+                return Ok(());
+            }
+            if self
+                .workspace_plan_revision_for_handoff()
+                .is_some_and(|revision| {
+                    revision.status
+                        == codex_app_server_protocol::WorkspacePlanRevisionStatus::Submitted
+                })
+            {
+                if let Some(dashboard) = self.workspace_dashboard.as_mut() {
+                    dashboard.set_status(
+                        "This submitted Plan already has a terminal or claimed master-agent run. Publish a new Codex Plan revision before another handoff.",
+                    );
+                }
+                return Ok(());
+            }
+        }
+        if is_medical_handoff {
+            self.ensure_workspace_draft_runtime_initialized(app_server)
+                .await;
+            self.flush_workspace_draft(app_server, WorkspaceDraftCheckpointTrigger::AgentHandoff)
+                .await?;
+        }
         if is_medical_handoff && let Some(pending) = self.pending_workspace_agent_capture.take() {
             let cancel_result = app_server
                 .workspace_agent_run_status_update(WorkspaceAgentRunStatusUpdateParams {
@@ -1746,27 +2167,46 @@ See the Codex keymap documentation for supported actions and examples."
                 self.pending_workspace_agent_capture = Some(pending);
                 return Err(err);
             }
-            replaced_pending_handoff = true;
         }
-        let run_provider = Some(self.chat_widget.config_ref().model_provider_id.clone());
-        let run_model = self.chat_widget.current_model().to_string();
-        let run_source_thread_id = self
-            .active_thread_id
-            .as_ref()
-            .map(ToString::to_string)
-            .or_else(|| self.chat_widget.thread_id().map(|id| id.to_string()));
+        let source_checkpoint = is_medical_handoff
+            .then(|| self.confirmed_workspace_draft_checkpoint())
+            .flatten();
+        let medical_plan_revision = is_medical_handoff
+            .then(|| self.workspace_plan_revision_for_handoff())
+            .flatten();
+        let mut pending_plan_revision_submission = None;
+        let mut pending_dashboard_packet = None;
+        let mut pending_dashboard_run = None;
         let Some(dashboard) = self.workspace_dashboard.as_mut() else {
             self.workspace_dashboard_visible = false;
             return Ok(());
         };
         let prompt = if dashboard.profile() == WorkspaceProfile::Medical {
-            let params = match dashboard.context_packet_create_params() {
-                Ok(params) => params,
-                Err(status) => {
-                    dashboard.set_status(status);
-                    return Ok(());
-                }
+            let Some(target_thread_id) = medical_target_thread_id.as_ref() else {
+                return Err(color_eyre::eyre::eyre!(
+                    "medical handoff target was missing after active-thread validation"
+                ));
             };
+            let Some(source_checkpoint) = source_checkpoint.as_ref() else {
+                dashboard.set_status(
+                    "Context Plan submission requires a confirmed local recovery checkpoint. Save and review again.",
+                );
+                return Ok(());
+            };
+            let Some(plan_revision) = medical_plan_revision.as_ref() else {
+                dashboard.set_status(
+                    "Ctrl-G master handoff requires a current evidence-linked Codex plan. Ask Codex in Chat to publish the plan first.",
+                );
+                return Ok(());
+            };
+            let params =
+                match dashboard.context_plan_create_params(source_checkpoint, plan_revision) {
+                    Ok(params) => params,
+                    Err(status) => {
+                        dashboard.set_status(status);
+                        return Ok(());
+                    }
+                };
             let prepared_packet = app_server
                 .workspace_context_packet_create(params)
                 .await?
@@ -1774,16 +2214,34 @@ See the Codex keymap documentation for supported actions and examples."
             let run = app_server
                 .workspace_agent_run_start(WorkspaceAgentRunStartParams {
                     packet_id: prepared_packet.id.clone(),
-                    idempotency_key: "tui-context-handoff-v1".to_string(),
+                    idempotency_key: format!("medical-context-plan:{}", prepared_packet.id),
                     client_id: Some(prepared_packet.client_id.clone()),
                     context_envelope_sha256: Some(prepared_packet.context_envelope_sha256.clone()),
+                    expected_workspace_plan_revision_id: Some(plan_revision.id.clone()),
+                    expected_workspace_plan_content_sha256: Some(
+                        plan_revision.content_sha256.clone(),
+                    ),
+                    expected_workspace_plan_evidence_manifest_sha256: Some(
+                        plan_revision.evidence_manifest_sha256.clone(),
+                    ),
                     provider: run_provider,
-                    model: Some(run_model),
-                    source_thread_id: run_source_thread_id,
+                    model: Some(run_model.clone()),
+                    source_thread_id: Some(target_thread_id.clone()),
                     source_turn_id: None,
                 })
                 .await?
                 .run;
+            pending_plan_revision_submission = Some(WorkspacePlanRevisionSubmitParams {
+                revision_id: plan_revision.id.clone(),
+                plan_session_id: plan_revision.plan_session_id.clone(),
+                client_id: plan_revision.client_id.clone(),
+                source_checkpoint_id: source_checkpoint.checkpoint_id.clone(),
+                source_checkpoint_revision: source_checkpoint.revision,
+                source_checkpoint_sha256: source_checkpoint.content_sha256.clone(),
+                content_sha256: plan_revision.content_sha256.clone(),
+                packet_id: prepared_packet.id.clone(),
+                agent_run_id: run.id.clone(),
+            });
             let packet = app_server
                 .workspace_context_packet_list(WorkspaceContextPacketListParams {
                     client_id: prepared_packet.client_id.clone(),
@@ -1800,29 +2258,138 @@ See the Codex keymap documentation for supported actions and examples."
                         prepared_packet.id
                     )
                 })?;
-            self.pending_workspace_agent_capture =
-                Some(PendingWorkspaceAgentCapture::new(&packet, &run));
             let prompt = packet_scoped_agent_handoff_prompt_for_run(&packet, Some(run.id.as_str()));
-            dashboard.mark_agent_context_sent(packet);
+            let pending_capture =
+                PendingWorkspaceAgentCapture::try_new(&packet, &run, prompt.clone())
+                    .map_err(str::to_string)
+                    .and_then(|pending| {
+                        if pending.thread_is_allowed(target_thread_id)
+                            && pending.model_matches(&run_model)
+                        {
+                            Ok(pending)
+                        } else {
+                            Err(
+                        "medical agent run provenance did not match the active thread and model"
+                            .to_string(),
+                    )
+                        }
+                    });
+            let pending_capture = match pending_capture {
+                Ok(pending) => pending,
+                Err(error_summary) => {
+                    if let Err(err) = app_server
+                        .workspace_agent_run_status_update(WorkspaceAgentRunStatusUpdateParams {
+                            run_id: run.id.clone(),
+                            status: "canceled".to_string(),
+                            error_summary: Some(error_summary.clone()),
+                        })
+                        .await
+                    {
+                        tracing::warn!(
+                            error = %err,
+                            run_id = %run.id,
+                            "failed to cancel medical run with invalid provenance"
+                        );
+                    }
+                    return Err(color_eyre::eyre::eyre!(error_summary));
+                }
+            };
+            self.pending_workspace_agent_capture = Some(pending_capture);
+            pending_dashboard_run = Some(run);
+            pending_dashboard_packet = Some(packet);
             prompt
         } else {
             dashboard.agent_context_prompt()
         };
 
-        if replaced_pending_handoff
-            || self
+        if is_medical_handoff {
+            let submission = pending_plan_revision_submission.ok_or_else(|| {
+                color_eyre::eyre::eyre!(
+                    "medical handoff was prepared without a durable Plan submission binding"
+                )
+            })?;
+            let expected_run_id = submission.agent_run_id.clone();
+            let submitted_revision = match app_server
+                .workspace_plan_revision_submit(submission)
+                .await
+            {
+                Ok(response) => response.revision,
+                Err(error) => {
+                    let error_summary = "the reviewed Plan revision could not be durably submitted";
+                    if let Some(pending) = self.pending_workspace_agent_capture.take()
+                        && let Err(cancel_error) = app_server
+                            .workspace_agent_run_status_update(
+                                WorkspaceAgentRunStatusUpdateParams {
+                                    run_id: pending.run_id().to_string(),
+                                    status: "canceled".to_string(),
+                                    error_summary: Some(error_summary.to_string()),
+                                },
+                            )
+                            .await
+                    {
+                        tracing::warn!(%cancel_error, "failed to cancel parent run after Plan submission failed");
+                    }
+                    if let Some(dashboard) = self.workspace_dashboard.as_mut() {
+                        dashboard.set_status(
+                            "Master handoff was held because the reviewed Plan submission did not commit. Retry from Audit.",
+                        );
+                    }
+                    return Err(error);
+                }
+            };
+            let pending = self
+                .pending_workspace_agent_capture
+                .as_mut()
+                .ok_or_else(|| {
+                    color_eyre::eyre::eyre!(
+                        "medical handoff lost its exact pending run after Plan submission"
+                    )
+                })?;
+            if pending.run_id() != expected_run_id {
+                return Err(color_eyre::eyre::eyre!(
+                    "medical handoff pending run changed before authorization"
+                ));
+            }
+            pending.authorize_handoff();
+            self.note_workspace_plan_revision_submitted(submitted_revision);
+            self.refresh_workspace_plan_snapshot(app_server).await?;
+            if let Some(dashboard) = self.workspace_dashboard.as_mut() {
+                if let Some(run) = pending_dashboard_run.take() {
+                    dashboard.mark_agent_run_started(run);
+                }
+                if let Some(packet) = pending_dashboard_packet.take() {
+                    dashboard.mark_agent_context_sent(packet);
+                }
+            }
+            let submitted = self
+                .chat_widget
+                .accept_audited_text_as_plain_user_turn(prompt);
+            if !submitted {
+                if let Some(dashboard) = self.workspace_dashboard.as_mut() {
+                    dashboard.set_status(
+                        "The Plan submission is durable, but the master-agent turn was not queued. Press Ctrl-G to retry the exact audited packet and run.",
+                    );
+                }
+                return Ok(());
+            }
+            if let Some(pending) = self.pending_workspace_agent_capture.as_mut() {
+                pending.mark_handoff_enqueued();
+            }
+        } else {
+            if self
                 .chat_widget
                 .composer_text_with_pending()
                 .trim()
                 .is_empty()
-        {
-            self.chat_widget
-                .set_composer_text(prompt, Vec::new(), Vec::new());
-        } else {
-            self.chat_widget.insert_str("\n\n");
-            self.chat_widget.insert_str(&prompt);
+            {
+                self.chat_widget
+                    .set_composer_text(prompt, Vec::new(), Vec::new());
+            } else {
+                self.chat_widget.insert_str("\n\n");
+                self.chat_widget.insert_str(&prompt);
+            }
+            self.workspace_dashboard_visible = false;
         }
-        self.workspace_dashboard_visible = false;
         Ok(())
     }
 
@@ -1853,14 +2420,16 @@ See the Codex keymap documentation for supported actions and examples."
     fn render_workspace_dashboard_frame(
         &mut self,
         tui: &mut tui::Tui,
-        _resized: bool,
+        resized: bool,
     ) -> Result<Rect> {
         let desired_height = tui.terminal.size()?.height;
         let mut rendered_area = Rect::default();
-        // The workspace dashboard is a full-screen surface. Force a visible
-        // clear before drawing it so missed or coalesced resize events cannot
-        // leave stale chat-widget cells behind in Terminal.app.
-        tui.terminal.clear_visible_screen()?;
+        // Normal workspace frames rely on the terminal's buffer diff. A physical clear here
+        // flashes a blank screen between every typed character, so reserve it for resize recovery
+        // where stale cells may exist outside the newly sized viewport.
+        if resized {
+            tui.terminal.clear_visible_screen()?;
+        }
         tui.draw_with_resize_reflow(desired_height, |frame| {
             let area = frame.area();
             rendered_area = area;

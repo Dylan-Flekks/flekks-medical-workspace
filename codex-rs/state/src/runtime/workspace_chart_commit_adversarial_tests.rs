@@ -9,6 +9,7 @@ use crate::WorkspaceClient;
 use crate::WorkspaceClientUpsert;
 use crate::WorkspaceContextClipFilter;
 use crate::WorkspaceContextClipUpsert;
+use crate::WorkspaceCoverageUpsert;
 use crate::WorkspaceDocumentUpsert;
 use crate::WorkspaceEncounterUpsert;
 use crate::WorkspaceNoteUpsert;
@@ -18,6 +19,8 @@ use crate::runtime::test_support::unique_temp_dir;
 use chrono::DateTime;
 use chrono::Utc;
 use pretty_assertions::assert_eq;
+use sqlx::sqlite::SqlitePoolOptions;
+use std::borrow::Cow;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -53,6 +56,7 @@ fn new_request(key: &str, display_name: &str) -> WorkspaceChartCommitRequest {
             summary: "synthetic patient".to_string(),
             ..Default::default()
         }),
+        coverage: None,
         expected_versions: Default::default(),
         safety_item: None,
         encounter: None,
@@ -145,6 +149,7 @@ fn client_upsert(client: &WorkspaceClient) -> WorkspaceClientUpsert {
         coverage_type: client.coverage_type.clone(),
         coverage_status: client.coverage_status.clone(),
         coverage_notes: client.coverage_notes.clone(),
+        ..Default::default()
     }
 }
 
@@ -185,8 +190,10 @@ fn full_graph_existing_request(
         source_turn_id: Some("turn-atomic".to_string()),
         client_id: Some(result.client.id.clone()),
         client: Some(client_upsert(&result.client)),
+        coverage: None,
         expected_versions: crate::WorkspaceChartExpectedVersions {
             client: Some(result.client.record_version().expect("client version")),
+            coverage: None,
             safety_item: Some(safety.record_version().expect("safety version")),
             encounter: Some(encounter.record_version().expect("encounter version")),
             document: Some(document.record_version().expect("document version")),
@@ -321,6 +328,8 @@ SELECT
     (SELECT COUNT(*) FROM workspace_clients)
   + (SELECT COUNT(*) FROM workspace_client_contacts)
   + (SELECT COUNT(*) FROM workspace_client_coverages)
+  + (SELECT COUNT(*) FROM workspace_coverages)
+  + (SELECT COUNT(*) FROM workspace_coverage_card_verifications)
   + (SELECT COUNT(*) FROM workspace_patient_safety_items)
   + (SELECT COUNT(*) FROM workspace_encounters)
   + (SELECT COUNT(*) FROM workspace_notes)
@@ -1024,7 +1033,24 @@ async fn exact_replay_survives_restart_and_rejects_unknown_receipt_schema() {
     expected.replayed = true;
     assert_eq!(replayed, expected);
 
-    sqlx::query("UPDATE workspace_chart_commits SET schema_version = 2 WHERE idempotency_key = ?")
+    sqlx::query(
+        "UPDATE workspace_chart_commits SET schema_version = 1, request_sha256 = ? WHERE idempotency_key = ?",
+    )
+    .bind(chart_commit_hash(
+        LEGACY_CHART_COMMIT_HASH_PREFIX,
+        &stored.1,
+    ))
+    .bind("restart-replay")
+    .execute(reopened.workspace().pool.as_ref())
+    .await
+    .expect("mark transitional v1 receipt");
+    reopened
+        .workspace()
+        .commit_chart(request.clone())
+        .await
+        .expect("transitional v1 receipt replay");
+
+    sqlx::query("UPDATE workspace_chart_commits SET schema_version = 99 WHERE idempotency_key = ?")
         .bind("restart-replay")
         .execute(reopened.workspace().pool.as_ref())
         .await
@@ -1033,6 +1059,128 @@ async fn exact_replay_survives_restart_and_rejects_unknown_receipt_schema() {
         reopened.workspace().commit_chart(request).await,
         Err(WorkspaceChartCommitError::Storage { .. })
     ));
+}
+
+#[tokio::test]
+async fn pre_demographics_receipt_replays_after_workspace_migration() {
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .expect("in-memory workspace database");
+    let base = &crate::migrations::WORKSPACE_MIGRATOR;
+    let through_seventeen = sqlx::migrate::Migrator {
+        migrations: Cow::Owned(
+            base.migrations
+                .iter()
+                .filter(|migration| migration.version <= 17)
+                .cloned()
+                .collect(),
+        ),
+        ignore_missing: base.ignore_missing,
+        locking: base.locking,
+        table_name: base.table_name.clone(),
+        create_schemas: base.create_schemas.clone(),
+        no_tx: base.no_tx,
+    };
+    through_seventeen
+        .run(&pool)
+        .await
+        .expect("pre-demographics migrations");
+    sqlx::query(
+        "INSERT INTO workspace_clients (id, display_name, summary, created_at_ms, updated_at_ms) VALUES ('legacy-client', 'Legacy Retry', 'synthetic', 1, 1)",
+    )
+    .execute(&pool)
+    .await
+    .expect("legacy client");
+
+    let request = new_request("legacy-retry", "Legacy Retry");
+    let mut normalized = request.clone();
+    validate::normalize_before_hash(&mut normalized).expect("normalize legacy retry");
+    let request_json = legacy_request_json(&normalized)
+        .expect("legacy request projection")
+        .expect("v1-compatible request");
+    let result_json = serde_json::json!({
+        "commit_id": "legacy-commit",
+        "idempotency_key": "legacy-retry",
+        "replayed": false,
+        "changed_entity_kinds": ["client"],
+        "client": {
+            "id": "legacy-client",
+            "display_name": "Legacy Retry",
+            "preferred_name": null,
+            "date_of_birth": null,
+            "sex_or_gender": null,
+            "external_id": null,
+            "record_start_date": null,
+            "record_end_date": null,
+            "summary": "synthetic",
+            "primary_phone": null,
+            "secondary_phone": null,
+            "email": "legacy@example.test",
+            "preferred_contact_method": null,
+            "emergency_contact_name": null,
+            "emergency_contact_relationship": null,
+            "emergency_contact_phone": null,
+            "emergency_contact_email": null,
+            "contact_notes": null,
+            "payer_name": null,
+            "plan_name": null,
+            "member_id": null,
+            "group_number": null,
+            "coverage_type": null,
+            "coverage_status": null,
+            "coverage_notes": null,
+            "archived_at": null,
+            "created_at": "1970-01-01T00:00:00.001Z",
+            "updated_at": "1970-01-01T00:00:00.001Z"
+        },
+        "safety_item": null,
+        "encounter": null,
+        "note": null,
+        "document": null,
+        "artifact_derivative": null,
+        "context_clip": null,
+        "task": null,
+        "resulting_note_revision": null,
+        "committed_at": "1970-01-01T00:00:00.001Z"
+    })
+    .to_string();
+    sqlx::query(
+        r#"
+INSERT INTO workspace_chart_commits (
+    id, idempotency_key, schema_version, request_sha256, request_json,
+    client_id, actor, reason, changed_entity_kinds_json, result_json, created_at_ms
+) VALUES ('legacy-commit', 'legacy-retry', 1, ?, ?, 'legacy-client',
+          'Dr. Rivera', 'atomic chart save', '["client"]', ?, 1)
+        "#,
+    )
+    .bind(chart_commit_hash(
+        LEGACY_CHART_COMMIT_HASH_PREFIX,
+        &request_json,
+    ))
+    .bind(&request_json)
+    .bind(result_json)
+    .execute(&pool)
+    .await
+    .expect("legacy receipt");
+
+    base.run(&pool)
+        .await
+        .expect("demographics migration after legacy receipt");
+    let store = WorkspaceStore::new(Arc::new(pool));
+    let replayed = store
+        .commit_chart(request)
+        .await
+        .expect("legacy retry should replay");
+    assert!(replayed.replayed);
+    assert_eq!(replayed.commit_id, "legacy-commit");
+    assert_eq!(
+        replayed.client.primary_email.as_deref(),
+        Some("legacy@example.test")
+    );
+    assert!(!replayed.client.interpreter_required);
+    assert_eq!(replayed.coverage, None);
 }
 
 #[tokio::test]
@@ -1482,6 +1630,10 @@ async fn every_full_graph_write_and_audit_stage_rolls_back_atomically() {
             "CREATE TRIGGER fail_stage BEFORE INSERT ON workspace_client_coverages BEGIN SELECT RAISE(ABORT, 'coverage'); END",
         ),
         (
+            "normalized coverage",
+            "CREATE TRIGGER fail_stage BEFORE INSERT ON workspace_coverages BEGIN SELECT RAISE(ABORT, 'normalized coverage'); END",
+        ),
+        (
             "safety item",
             "CREATE TRIGGER fail_stage BEFORE INSERT ON workspace_patient_safety_items BEGIN SELECT RAISE(ABORT, 'safety'); END",
         ),
@@ -1520,6 +1672,10 @@ async fn every_full_graph_write_and_audit_stage_rolls_back_atomically() {
         (
             "client audit",
             "CREATE TRIGGER fail_stage BEFORE INSERT ON workspace_audit_events WHEN NEW.source = 'workspace_chart_commit' AND NEW.entity_type = 'client' BEGIN SELECT RAISE(ABORT, 'client audit'); END",
+        ),
+        (
+            "coverage audit",
+            "CREATE TRIGGER fail_stage BEFORE INSERT ON workspace_audit_events WHEN NEW.source = 'workspace_chart_commit' AND NEW.entity_type = 'coverage' BEGIN SELECT RAISE(ABORT, 'coverage audit'); END",
         ),
         (
             "safety audit",
@@ -1561,10 +1717,24 @@ async fn every_full_graph_write_and_audit_stage_rolls_back_atomically() {
             .execute(runtime.workspace().pool.as_ref())
             .await
             .unwrap_or_else(|error| panic!("create {label} trigger: {error}"));
-        let result = runtime
-            .workspace()
-            .commit_chart(full_graph_request(&format!("fail-{label}")))
-            .await;
+        let mut request = full_graph_request(&format!("fail-{label}"));
+        if label == "client coverage" {
+            request.client.as_mut().expect("client").payer_name =
+                Some("Synthetic legacy payer".to_string());
+        }
+        if matches!(label, "normalized coverage" | "coverage audit") {
+            request.coverage = Some(WorkspaceCoverageUpsert {
+                client_id: String::new(),
+                priority: 1,
+                payer_name: Some("Synthetic structured payer".to_string()),
+                member_id: Some("SYN-ROLLBACK".to_string()),
+                coverage_status: Some("active".to_string()),
+                patient_relationship_to_subscriber: Some("self".to_string()),
+                subscriber_address_same_as_patient: true,
+                ..Default::default()
+            });
+        }
+        let result = runtime.workspace().commit_chart(request).await;
         assert!(
             matches!(result, Err(WorkspaceChartCommitError::Storage { .. })),
             "stage {label} returned {result:?}"

@@ -29,30 +29,73 @@ pub(super) fn client(
     input: &crate::WorkspaceClientUpsert,
 ) -> bool {
     existing.display_name == input.display_name
+        && existing.legal_first_name == input.legal_first_name
+        && existing.legal_middle_name == input.legal_middle_name
+        && existing.legal_last_name == input.legal_last_name
+        && existing.legal_suffix == input.legal_suffix
         && existing.preferred_name == input.preferred_name
+        && existing.previous_name == input.previous_name
         && existing.date_of_birth == input.date_of_birth
         && existing.sex_or_gender == input.sex_or_gender
+        && existing.administrative_sex == input.administrative_sex
+        && existing.preferred_language == input.preferred_language
+        && existing.interpreter_required == input.interpreter_required
         && existing.external_id == input.external_id
         && existing.record_start_date == input.record_start_date
         && existing.record_end_date == input.record_end_date
         && existing.summary == input.summary
         && existing.primary_phone == input.primary_phone
+        && existing.primary_phone_use == input.primary_phone_use
         && existing.secondary_phone == input.secondary_phone
-        && existing.email == input.email
+        && existing.secondary_phone_use == input.secondary_phone_use
+        && existing.primary_email == input.primary_email
+        && existing.secondary_email == input.secondary_email
         && existing.preferred_contact_method == input.preferred_contact_method
+        && existing.address_line_1 == input.address_line_1
+        && existing.address_line_2 == input.address_line_2
+        && existing.city == input.city
+        && existing.state_or_province == input.state_or_province
+        && existing.postal_code == input.postal_code
+        && existing.country == input.country
+        && existing.address_use == input.address_use
         && existing.emergency_contact_name == input.emergency_contact_name
         && existing.emergency_contact_relationship == input.emergency_contact_relationship
         && existing.emergency_contact_phone == input.emergency_contact_phone
         && existing.emergency_contact_email == input.emergency_contact_email
         && existing.contact_notes == input.contact_notes
+        && existing.archived_at.is_none()
+}
+
+pub(super) fn coverage(
+    existing: &crate::WorkspaceCoverage,
+    input: &crate::WorkspaceCoverageUpsert,
+) -> bool {
+    existing.source_kind == "structured"
+        && existing.client_id == input.client_id
+        && existing.priority == input.priority
         && existing.payer_name == input.payer_name
         && existing.plan_name == input.plan_name
         && existing.member_id == input.member_id
         && existing.group_number == input.group_number
         && existing.coverage_type == input.coverage_type
         && existing.coverage_status == input.coverage_status
+        && existing.effective_date == input.effective_date
+        && existing.termination_date == input.termination_date
+        && existing.patient_relationship_to_subscriber == input.patient_relationship_to_subscriber
+        && existing.subscriber_first_name == input.subscriber_first_name
+        && existing.subscriber_middle_name == input.subscriber_middle_name
+        && existing.subscriber_last_name == input.subscriber_last_name
+        && existing.subscriber_suffix == input.subscriber_suffix
+        && existing.subscriber_date_of_birth == input.subscriber_date_of_birth
+        && existing.subscriber_administrative_sex == input.subscriber_administrative_sex
+        && existing.subscriber_address_same_as_patient == input.subscriber_address_same_as_patient
+        && existing.subscriber_address_line_1 == input.subscriber_address_line_1
+        && existing.subscriber_address_line_2 == input.subscriber_address_line_2
+        && existing.subscriber_city == input.subscriber_city
+        && existing.subscriber_state_or_province == input.subscriber_state_or_province
+        && existing.subscriber_postal_code == input.subscriber_postal_code
+        && existing.subscriber_country == input.subscriber_country
         && existing.coverage_notes == input.coverage_notes
-        && existing.archived_at.is_none()
 }
 
 pub(super) fn safety_item(

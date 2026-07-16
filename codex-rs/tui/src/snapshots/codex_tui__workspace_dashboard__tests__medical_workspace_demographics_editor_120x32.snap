@@ -1,0 +1,36 @@
+---
+source: tui/src/workspace_dashboard.rs
+expression: "render_dashboard_lines_at(&summary, 120, 32)"
+---
+Medical Workspace  /workspace-medical  SYNTHETIC DATA ONLY
+Patient: Jordan Patient  DOB: blank  MRN: blank  Contact: Contact on file  Coverage: Missing coverage  Encounter: No
+ EXPLORER                      PATIENT CHART
+┌Patient Directory───────────┐┌Patient Demographics Editor─────────────────────────────────────────────────────────────┐
+│Local search: /             ││  Interpreter needed: no                                                                │
+│0 active patients; local    ││                                                                                        │
+│only                        ││Contact                                                                                 │
+│No saved patients yet.      ││  Primary phone: 555-0101                                                               │
+│New patient: :patient new   ││  Primary phone type: missing                                                           │
+│                            ││  Secondary phone: missing                                                              │
+│                            ││  Secondary phone type: missing                                                         │
+│                            ││  Primary email: jordan.fake@example.test                                               │
+└────────────────────────────┘│  Secondary email: missing                                                              │
+┌Patient Notes───────────────┐│  Preferred contact: missing                                                            │
+│Patient Notes               ││                                                                                        │
+│  New note                  ││Home / Mailing Address                                                                  │
+│  No patient notes yet. Use ││  Address line 1: 10 Example Street                                                     │
+│:note new.                  ││  Address line 2: missing                                                               │
+│  Medical, communication,   ││  City: Exampleville                                                                    │
+│and admin notes appear here.││  State / province: IL                                                                  │
+└────────────────────────────┘│  Postal code: 60000                                                                    │
+┌Uploaded Documents──────────┐│  Country: missing                                                                      │
+│Uploaded Documents          ││  Address use: home_and_mailing                                                         │
+│No files yet                ││                                                                                        │
+│Paste/drop JPG/PDF. S...    ││Emergency Contact                                                                       │
+│                            ││  Emergency name: Maya Contact                                                          │
+│                            ││  Emergency relation: missing                                                           │
+│                            ││  Emergency phone: 555-0199                                                             │
+│                            ││  Emergency email: missing                                                              │
+│                            ││> Contact notes: Call the fake emergency contact before scheduling.                     │
+└────────────────────────────┘└────────────────────────────────────────────────────────────────────────────────────────┘
+Focus: Demographics | Mode: Admin field | Keys: Enter edit  Ctrl-S save  Tab/⇧Tab pane  Ctrl-P actions

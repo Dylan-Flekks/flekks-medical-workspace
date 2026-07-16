@@ -19,6 +19,8 @@ use self::errors::required;
 use self::errors::storage;
 use self::errors::terminal_conflict;
 use self::errors::validation;
+use super::workspace_policy::WorkspacePolicyRequirementError;
+use super::workspace_policy::require_synthetic_workspace;
 
 mod checkpoint;
 mod errors;
@@ -26,6 +28,7 @@ mod errors;
 const GUIDE_SCHEMA_VERSION: i64 = 1;
 const MAX_REQUEST_BYTES: usize = 32 * 1024;
 const MAX_TERMINAL_BYTES: usize = 16 * 1024;
+const PLANNING_TERMINAL_MESSAGE: &str = "Codex planning stopped before a complete response was saved. Send a new message to continue from the same patient context.";
 
 macro_rules! guide_run_query {
     ($suffix:literal) => {
@@ -76,10 +79,25 @@ impl WorkspaceStore {
         })?;
 
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let policy = require_synthetic_workspace(&mut tx)
+            .await
+            .map_err(|error| match error {
+                WorkspacePolicyRequirementError::NotSynthetic => {
+                    crate::WorkspaceGuideError::Validation {
+                        message: error.to_string(),
+                    }
+                }
+                WorkspacePolicyRequirementError::Integrity(error) => {
+                    crate::WorkspaceGuideError::Storage {
+                        message: error.to_string(),
+                    }
+                }
+            })?;
         if let Some(existing) =
             run_by_key(&mut tx, &input.session_id, &input.idempotency_key).await?
         {
-            let (envelope, hash) = request_envelope(&existing.id, &input, request)?;
+            let (envelope, hash) =
+                request_envelope(&existing.id, &input, request, policy.data_classification)?;
             if existing.client_id != input.client_id.trim()
                 || existing.source_checkpoint_id != input.source_checkpoint_id.trim()
                 || existing.source_checkpoint_revision != input.source_checkpoint_revision
@@ -90,6 +108,7 @@ impl WorkspaceStore {
                 || existing.actor != input.actor.trim()
                 || existing.provider != input.provider.trim()
                 || existing.model != input.model.trim()
+                || existing.model_tool_mode != input.model_tool_mode.as_str()
             {
                 return idempotency_conflict(format!(
                     "workspace guide idempotency key `{}` was reused with different content",
@@ -123,7 +142,8 @@ impl WorkspaceStore {
         }
 
         let id = Uuid::new_v4().to_string();
-        let (envelope, envelope_hash) = request_envelope(&id, &input, request)?;
+        let (envelope, envelope_hash) =
+            request_envelope(&id, &input, request, policy.data_classification)?;
         let now_ms = datetime_to_epoch_millis(Utc::now());
         sqlx::query(
             r#"
@@ -132,7 +152,7 @@ INSERT INTO workspace_guide_runs (
     source_checkpoint_sha256, request_schema_version, request_envelope_json,
     request_envelope_sha256, idempotency_key, trigger, actor, provider, model,
     model_tool_mode, status, created_at_ms, updated_at_ms
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'disabled', 'running', ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?)
             "#,
         )
         .bind(&id)
@@ -149,6 +169,7 @@ INSERT INTO workspace_guide_runs (
         .bind(input.actor.trim())
         .bind(input.provider.trim())
         .bind(input.model.trim())
+        .bind(input.model_tool_mode.as_str())
         .bind(now_ms)
         .bind(now_ms)
         .execute(&mut *tx)
@@ -206,6 +227,14 @@ INSERT INTO workspace_guide_runs (
                 ),
             })?;
         validate_finish_identity(&existing, &input)?;
+        if existing.model_tool_mode
+            == crate::WorkspaceGuideModelToolMode::WorkspacePlanningOnly.as_str()
+            && status == crate::WorkspaceGuideRunStatus::Completed
+        {
+            return validation(
+                "workspace planning guide runs can be completed only through the atomic plan-turn completion path",
+            );
+        }
         if existing.status != crate::WorkspaceGuideRunStatus::Running.as_str() {
             if existing.status == status.as_str()
                 && existing.source_thread_id.as_deref() == thread_id
@@ -221,6 +250,7 @@ INSERT INTO workspace_guide_runs (
                 existing.id
             ));
         }
+        validate_claimed_finish_identity(&existing, thread_id, turn_id)?;
 
         let updated = sqlx::query(
             "UPDATE workspace_guide_runs SET status = ?, source_thread_id = ?, source_turn_id = ?, terminal_envelope_json = ?, terminal_envelope_sha256 = ?, updated_at_ms = ?, terminal_at_ms = ? WHERE id = ? AND status = 'running'",
@@ -244,6 +274,19 @@ INSERT INTO workspace_guide_runs (
         let checkpoint = checkpoint_binding(&mut tx, &existing.source_checkpoint_id)
             .await?
             .ok_or_else(|| storage("workspace guide source checkpoint disappeared"))?;
+        if existing.model_tool_mode
+            == crate::WorkspaceGuideModelToolMode::WorkspacePlanningOnly.as_str()
+        {
+            append_planning_terminal_message(
+                &mut tx,
+                &existing,
+                &checkpoint,
+                thread_id,
+                turn_id,
+                now_ms,
+            )
+            .await?;
+        }
         insert_audit_event(
             &mut tx,
             crate::WorkspaceAuditEventCreate {
@@ -251,7 +294,13 @@ INSERT INTO workspace_guide_runs (
                 entity_id: existing.id.clone(),
                 action: status.as_str().to_string(),
                 actor: input.actor.trim().to_string(),
-                actor_kind: "agent".to_string(),
+                actor_kind: if existing.model_tool_mode
+                    == crate::WorkspaceGuideModelToolMode::WorkspacePlanningOnly.as_str()
+                {
+                    "system".to_string()
+                } else {
+                    "agent".to_string()
+                },
                 source: "workspace_guide".to_string(),
                 client_id: Some(existing.client_id),
                 encounter_id: checkpoint.encounter_id,
@@ -307,6 +356,112 @@ INSERT INTO workspace_guide_runs (
     }
 }
 
+async fn append_planning_terminal_message(
+    tx: &mut sqlx::Transaction<'_, Sqlite>,
+    run: &WorkspaceGuideRunRow,
+    checkpoint: &checkpoint::CheckpointBinding,
+    source_thread_id: Option<&str>,
+    source_turn_id: Option<&str>,
+    now_ms: i64,
+) -> GuideResult<()> {
+    let plan_session_id = sqlx::query_scalar::<_, String>(
+        r#"
+SELECT plan_session_id
+FROM workspace_plan_messages
+WHERE guide_run_id = ? AND client_id = ? AND role IN ('human', 'answer')
+ORDER BY sequence ASC
+LIMIT 1
+        "#,
+    )
+    .bind(&run.id)
+    .bind(&run.client_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let Some(plan_session_id) = plan_session_id else {
+        return Ok(());
+    };
+    let idempotency_key = format!("workspace-plan-terminal:{}", run.id);
+    let exists = sqlx::query_scalar::<_, i64>(
+        "SELECT EXISTS (SELECT 1 FROM workspace_plan_messages WHERE plan_session_id = ? AND idempotency_key = ?)",
+    )
+    .bind(&plan_session_id)
+    .bind(&idempotency_key)
+    .fetch_one(&mut **tx)
+    .await?
+        != 0;
+    if exists {
+        return Ok(());
+    }
+
+    let sequence = sqlx::query_scalar::<_, i64>(
+        "SELECT COALESCE(MAX(sequence), 0) + 1 FROM workspace_plan_messages WHERE plan_session_id = ?",
+    )
+    .bind(&plan_session_id)
+    .fetch_one(&mut **tx)
+    .await?;
+    let message_id = Uuid::new_v4().to_string();
+    let content_sha256 = format!("{:x}", Sha256::digest(PLANNING_TERMINAL_MESSAGE.as_bytes()));
+    sqlx::query(
+        r#"
+INSERT INTO workspace_plan_messages (
+    id, plan_session_id, client_id, guide_run_id, sequence, role, content,
+    content_sha256, idempotency_key, source_checkpoint_id,
+    source_checkpoint_revision, source_checkpoint_sha256, encounter_id, note_id,
+    source_thread_id, source_turn_id, created_at_ms
+) VALUES (?, ?, ?, ?, ?, 'error', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        "#,
+    )
+    .bind(&message_id)
+    .bind(&plan_session_id)
+    .bind(&run.client_id)
+    .bind(&run.id)
+    .bind(sequence)
+    .bind(PLANNING_TERMINAL_MESSAGE)
+    .bind(&content_sha256)
+    .bind(&idempotency_key)
+    .bind(&run.source_checkpoint_id)
+    .bind(run.source_checkpoint_revision)
+    .bind(&run.source_checkpoint_sha256)
+    .bind(&checkpoint.encounter_id)
+    .bind(&checkpoint.note_id)
+    .bind(source_thread_id)
+    .bind(source_turn_id)
+    .bind(now_ms)
+    .execute(&mut **tx)
+    .await?;
+    insert_audit_event(
+        tx,
+        crate::WorkspaceAuditEventCreate {
+            entity_type: "plan_message".to_string(),
+            entity_id: message_id,
+            action: "appended".to_string(),
+            actor: "workspace plan terminalizer".to_string(),
+            actor_kind: "system".to_string(),
+            source: "workspace_plan".to_string(),
+            client_id: Some(run.client_id.clone()),
+            encounter_id: checkpoint.encounter_id.clone(),
+            note_id: checkpoint.note_id.clone(),
+            source_thread_id: source_thread_id.map(str::to_string),
+            source_turn_id: source_turn_id.map(str::to_string),
+            success: true,
+            summary: format!("error message sequence {sequence}"),
+            metadata_json: Some(
+                serde_json::json!({
+                    "guideRunId": run.id,
+                    "planSessionId": plan_session_id,
+                    "sourceCheckpointId": run.source_checkpoint_id,
+                    "contentSha256": content_sha256,
+                })
+                .to_string(),
+            ),
+            ..Default::default()
+        },
+        now_ms,
+    )
+    .await?;
+    Ok(())
+}
+
 fn validate_start(input: &crate::WorkspaceGuideRunStart) -> GuideResult<()> {
     required("client id", &input.client_id)?;
     required("session id", &input.session_id)?;
@@ -338,10 +493,30 @@ fn validate_finish_identity(
     Ok(())
 }
 
+fn validate_claimed_finish_identity(
+    run: &WorkspaceGuideRunRow,
+    thread_id: Option<&str>,
+    turn_id: Option<&str>,
+) -> GuideResult<()> {
+    if run
+        .source_thread_id
+        .as_deref()
+        .is_some_and(|existing| thread_id != Some(existing))
+        || run
+            .source_turn_id
+            .as_deref()
+            .is_some_and(|existing| turn_id != Some(existing))
+    {
+        return validation("workspace guide finish does not match its claimed thread and turn");
+    }
+    Ok(())
+}
+
 fn request_envelope(
     run_id: &str,
     input: &crate::WorkspaceGuideRunStart,
     request: Value,
+    data_classification: crate::WorkspaceDataClassification,
 ) -> GuideResult<(String, String)> {
     let value = serde_json::json!({
         "schemaVersion": GUIDE_SCHEMA_VERSION,
@@ -355,9 +530,10 @@ fn request_envelope(
             "contentSha256": input.source_checkpoint_sha256.trim(),
         },
         "safety": {
-            "readOnly": true,
+            "readOnly": input.model_tool_mode == crate::WorkspaceGuideModelToolMode::Disabled,
             "canonicalChartWrites": false,
-            "modelToolMode": "disabled",
+            "modelToolMode": input.model_tool_mode.as_str(),
+            "dataClassification": data_classification.as_str(),
         },
         "request": request,
     });
@@ -422,7 +598,7 @@ fn normalize_envelope(
     Ok((json, hash))
 }
 
-async fn run_by_id(
+pub(crate) async fn run_by_id(
     tx: &mut sqlx::Transaction<'_, Sqlite>,
     id: &str,
 ) -> anyhow::Result<Option<WorkspaceGuideRunRow>> {

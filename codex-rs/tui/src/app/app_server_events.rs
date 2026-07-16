@@ -30,7 +30,7 @@ impl App {
 
     pub(super) async fn handle_app_server_event(
         &mut self,
-        app_server_client: &AppServerSession,
+        app_server_client: &mut AppServerSession,
         event: AppServerEvent,
     ) {
         match event {
@@ -60,9 +60,15 @@ impl App {
 
     async fn handle_server_notification_event(
         &mut self,
-        app_server_client: &AppServerSession,
+        app_server_client: &mut AppServerSession,
         notification: ServerNotification,
     ) {
+        if self
+            .handle_workspace_plan_notification(app_server_client, &notification)
+            .await
+        {
+            return;
+        }
         match &notification {
             ServerNotification::ServerRequestResolved(notification) => {
                 if let Some(request) = self
@@ -178,9 +184,15 @@ impl App {
 
     async fn handle_server_request_event(
         &mut self,
-        app_server_client: &AppServerSession,
+        app_server_client: &mut AppServerSession,
         request: ServerRequest,
     ) {
+        if self
+            .handle_workspace_plan_request(app_server_client, &request)
+            .await
+        {
+            return;
+        }
         if let Some(unsupported) = self
             .pending_app_server_requests
             .note_server_request(&request)

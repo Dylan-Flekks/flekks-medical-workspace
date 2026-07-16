@@ -5,10 +5,13 @@ use serde::Serialize;
 
 use super::WorkspaceArtifactDerivative;
 use super::WorkspaceArtifactDerivativeUpsert;
+use super::WorkspaceBillingReadiness;
 use super::WorkspaceClient;
 use super::WorkspaceClientUpsert;
 use super::WorkspaceContextClip;
 use super::WorkspaceContextClipUpsert;
+use super::WorkspaceCoverage;
+use super::WorkspaceCoverageUpsert;
 use super::WorkspaceDocument;
 use super::WorkspaceDocumentUpsert;
 use super::WorkspaceEncounter;
@@ -35,6 +38,8 @@ pub struct WorkspaceChartCommitRequest {
     pub source_turn_id: Option<String>,
     pub client_id: Option<String>,
     pub client: Option<WorkspaceClientUpsert>,
+    #[serde(default)]
+    pub coverage: Option<WorkspaceCoverageUpsert>,
     pub expected_versions: WorkspaceChartExpectedVersions,
     pub safety_item: Option<WorkspacePatientSafetyItemUpsert>,
     pub encounter: Option<WorkspaceEncounterUpsert>,
@@ -48,6 +53,8 @@ pub struct WorkspaceChartCommitRequest {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceChartExpectedVersions {
     pub client: Option<String>,
+    #[serde(default)]
+    pub coverage: Option<String>,
     pub safety_item: Option<String>,
     pub encounter: Option<String>,
     pub document: Option<String>,
@@ -60,6 +67,7 @@ pub struct WorkspaceChartExpectedVersions {
 #[serde(rename_all = "snake_case")]
 pub enum WorkspaceChartEntityKind {
     Client,
+    Coverage,
     SafetyItem,
     Encounter,
     Note,
@@ -73,6 +81,7 @@ impl WorkspaceChartEntityKind {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Client => "client",
+            Self::Coverage => "coverage",
             Self::SafetyItem => "safety_item",
             Self::Encounter => "encounter",
             Self::Note => "note",
@@ -91,6 +100,10 @@ pub struct WorkspaceChartCommitResult {
     pub replayed: bool,
     pub changed_entity_kinds: Vec<WorkspaceChartEntityKind>,
     pub client: WorkspaceClient,
+    #[serde(default)]
+    pub coverage: Option<WorkspaceCoverage>,
+    #[serde(default)]
+    pub coverage_billing_readiness: Option<WorkspaceBillingReadiness>,
     pub safety_item: Option<WorkspacePatientSafetyItem>,
     pub encounter: Option<WorkspaceEncounter>,
     pub note: Option<WorkspaceNote>,

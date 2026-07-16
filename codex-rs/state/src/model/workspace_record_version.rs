@@ -23,6 +23,7 @@ macro_rules! impl_record_version {
 }
 
 impl_record_version!(super::WorkspaceClient, "client");
+impl_record_version!(super::WorkspaceCoverage, "coverage");
 impl_record_version!(super::WorkspacePatientSafetyItem, "patient-safety-item");
 impl_record_version!(super::WorkspaceEncounter, "encounter");
 impl_record_version!(super::WorkspaceDocument, "document");

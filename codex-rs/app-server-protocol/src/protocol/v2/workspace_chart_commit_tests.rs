@@ -35,6 +35,35 @@ fn chart_commit_params_use_camel_case_and_allow_omitted_children() {
 }
 
 #[test]
+fn client_demographic_patch_distinguishes_omitted_null_and_value() {
+    let omitted: WorkspaceClientUpsertParams = serde_json::from_value(json!({
+        "displayName": "Patient One",
+        "summary": ""
+    }))
+    .expect("omitted demographic fields");
+    assert_eq!(omitted.legal_first_name, None);
+    assert_eq!(omitted.interpreter_required, None);
+
+    let explicit: WorkspaceClientUpsertParams = serde_json::from_value(json!({
+        "displayName": "Patient One",
+        "summary": "",
+        "legalFirstName": null,
+        "interpreterRequired": false
+    }))
+    .expect("explicit demographic patch fields");
+    assert_eq!(explicit.legal_first_name, Some(None));
+    assert_eq!(explicit.interpreter_required, Some(Some(false)));
+
+    let value: WorkspaceClientUpsertParams = serde_json::from_value(json!({
+        "displayName": "Patient One",
+        "summary": "",
+        "legalFirstName": "Avery"
+    }))
+    .expect("demographic patch value");
+    assert_eq!(value.legal_first_name, Some(Some("Avery".to_string())));
+}
+
+#[test]
 fn chart_commit_params_allow_existing_client_identity_without_snapshot() {
     let params: WorkspaceChartCommitParams = serde_json::from_value(json!({
         "idempotencyKey": "save-identity-only",
@@ -96,6 +125,11 @@ fn chart_commit_note_change_preserves_expected_revision() {
 
 #[test]
 fn chart_commit_kinds_and_error_data_serialize_for_clients() {
+    assert_eq!(
+        serde_json::to_value(WorkspaceChartEntityKind::Coverage)
+            .expect("coverage kind should serialize"),
+        json!("coverage")
+    );
     assert_eq!(
         serde_json::to_value(WorkspaceChartEntityKind::ArtifactDerivative)
             .expect("entity kind should serialize"),
@@ -159,6 +193,7 @@ fn chart_versions_serialize_with_camel_case_tokens() {
         serde_json::to_value(expected_versions).expect("expected versions should serialize"),
         json!({
             "client": "client-version",
+            "coverage": null,
             "safetyItem": null,
             "encounter": null,
             "document": null,

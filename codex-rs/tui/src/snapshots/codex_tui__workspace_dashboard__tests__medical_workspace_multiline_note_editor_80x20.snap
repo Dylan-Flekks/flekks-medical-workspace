@@ -1,0 +1,24 @@
+---
+source: tui/src/workspace_dashboard.rs
+expression: "render_dashboard_lines_at(&dashboard, 80, 20)"
+---
+Medical Workspace  Unsaved  /workspace-medical  SYNTHETIC DATA ONLY
+Zones: Explorer > [Patient Chart] > Plan with Codex  Focus: Note Body
+┌Note Body─────────────────────────────────────────────────────────────────────┐
+│aaaaaaaaaaaaXaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa│
+│aaaaaaaaaaaaa                                                                 │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+Focus: Note Body | Keys: ↑/↓ line  ←/→ cursor  Tab/⇧Tab pane  Ctrl-P commands

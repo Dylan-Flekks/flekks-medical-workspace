@@ -23,6 +23,9 @@ pub struct WorkspaceAgentRun {
     pub note_id: Option<String>,
     pub base_note_revision: Option<i64>,
     pub context_envelope_sha256: String,
+    pub workspace_plan_revision_id: Option<String>,
+    pub workspace_plan_content_sha256: Option<String>,
+    pub workspace_plan_evidence_manifest_sha256: Option<String>,
     pub run_kind: String,
     pub idempotency_key: String,
     pub provider: String,
@@ -42,6 +45,9 @@ pub struct WorkspaceAgentRunStart {
     pub packet_id: String,
     pub expected_client_id: String,
     pub expected_context_envelope_sha256: String,
+    pub expected_workspace_plan_revision_id: Option<String>,
+    pub expected_workspace_plan_content_sha256: Option<String>,
+    pub expected_workspace_plan_evidence_manifest_sha256: Option<String>,
     pub run_kind: String,
     pub idempotency_key: String,
     pub provider: String,
@@ -101,6 +107,26 @@ pub struct WorkspaceAgentContextReadRequest {
     pub run_id: String,
     pub category: String,
     pub max_records: Option<u32>,
+}
+
+/// Immutable execution identity for one claimed medical agent turn.
+///
+/// This is checked again for every model-facing context read so a run id cannot be moved to a
+/// different thread, turn, provider, or model after the claim succeeds.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WorkspaceAgentExecutionBinding {
+    pub run_id: String,
+    pub source_thread_id: String,
+    pub source_turn_id: String,
+    pub provider: String,
+    pub model: String,
+}
+
+/// Exact generated prompt and execution identity claimed before a restricted turn may sample.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WorkspaceAgentTurnClaim {
+    pub execution: WorkspaceAgentExecutionBinding,
+    pub prompt: String,
 }
 
 /// Exact state snapshots read for an authorized agent run.
@@ -206,6 +232,9 @@ pub(crate) struct WorkspaceAgentRunRow {
     pub note_id: Option<String>,
     pub base_note_revision: Option<i64>,
     pub context_envelope_sha256: String,
+    pub workspace_plan_revision_id: Option<String>,
+    pub workspace_plan_content_sha256: Option<String>,
+    pub workspace_plan_evidence_manifest_sha256: Option<String>,
     pub run_kind: String,
     pub idempotency_key: String,
     pub provider: String,
@@ -229,6 +258,10 @@ impl WorkspaceAgentRunRow {
             note_id: row.try_get("note_id")?,
             base_note_revision: row.try_get("base_note_revision")?,
             context_envelope_sha256: row.try_get("context_envelope_sha256")?,
+            workspace_plan_revision_id: row.try_get("workspace_plan_revision_id")?,
+            workspace_plan_content_sha256: row.try_get("workspace_plan_content_sha256")?,
+            workspace_plan_evidence_manifest_sha256: row
+                .try_get("workspace_plan_evidence_manifest_sha256")?,
             run_kind: row.try_get("run_kind")?,
             idempotency_key: row.try_get("idempotency_key")?,
             provider: row.try_get("provider")?,
@@ -256,6 +289,9 @@ impl TryFrom<WorkspaceAgentRunRow> for WorkspaceAgentRun {
             note_id: row.note_id,
             base_note_revision: row.base_note_revision,
             context_envelope_sha256: row.context_envelope_sha256,
+            workspace_plan_revision_id: row.workspace_plan_revision_id,
+            workspace_plan_content_sha256: row.workspace_plan_content_sha256,
+            workspace_plan_evidence_manifest_sha256: row.workspace_plan_evidence_manifest_sha256,
             run_kind: row.run_kind,
             idempotency_key: row.idempotency_key,
             provider: row.provider,

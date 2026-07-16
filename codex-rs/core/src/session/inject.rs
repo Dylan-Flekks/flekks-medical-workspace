@@ -7,6 +7,7 @@ use crate::state::ActiveTurn;
 use crate::state::TurnState;
 use crate::tasks::RegularTask;
 use codex_protocol::config_types::ModeKind;
+use codex_protocol::config_types::ModelToolMode;
 use codex_protocol::models::ResponseItem;
 use std::sync::Arc;
 
@@ -20,8 +21,22 @@ impl Session {
         &self,
         input: Vec<ResponseItem>,
     ) -> Result<(), Vec<ResponseItem>> {
+        if self
+            .workspace_planning_lock_active()
+            .await
+            .unwrap_or(/* fail closed */ true)
+        {
+            return Err(input);
+        }
         let mut active = self.active_turn.lock().await;
         match active.as_mut() {
+            Some(active_turn)
+                if active_turn.task.as_ref().is_some_and(|task| {
+                    task.turn_context.model_tool_mode.is_workspace_restricted()
+                }) =>
+            {
+                Err(input)
+            }
             Some(active_turn) => {
                 self.input_queue
                     .extend_pending_input_for_turn_state(
@@ -48,6 +63,16 @@ impl Session {
     ) -> Result<(), TryStartTurnIfIdleError> {
         if input.is_empty() {
             return Ok(());
+        }
+        if self
+            .workspace_planning_lock_active()
+            .await
+            .unwrap_or(/* fail closed */ true)
+        {
+            return Err(TryStartTurnIfIdleError::new(
+                TryStartTurnIfIdleRejectionReason::WorkspacePlanningLocked,
+                input,
+            ));
         }
         if self.input_queue.has_trigger_turn_mailbox_items().await {
             return Err(TryStartTurnIfIdleError::new(
@@ -145,9 +170,23 @@ impl Session {
         items: Vec<ResponseItem>,
         current_turn_context: Option<&TurnContext>,
     ) {
+        if self
+            .workspace_planning_lock_active()
+            .await
+            .unwrap_or(/* fail closed */ true)
+        {
+            return;
+        }
         let Err(items) = self.inject_if_running(items).await else {
             return;
         };
+        if self
+            .active_turn_model_tool_mode()
+            .await
+            .is_some_and(ModelToolMode::is_workspace_restricted)
+        {
+            return;
+        }
         let default_turn_context;
         let turn_context = match current_turn_context {
             Some(turn_context) => turn_context,

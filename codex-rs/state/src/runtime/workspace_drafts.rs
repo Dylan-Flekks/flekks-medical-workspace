@@ -10,8 +10,15 @@ use sha2::Sha256;
 use sqlx::Sqlite;
 use uuid::Uuid;
 
-const DRAFT_SCHEMA_VERSION: i64 = 1;
+const LEGACY_DRAFT_SCHEMA_VERSION: i64 = 1;
+const DRAFT_SCHEMA_VERSION: i64 = 2;
 const MAX_NORMALIZED_DRAFT_BYTES: usize = 1024 * 1024;
+
+struct ExpectedCurrentCheckpoint<'a> {
+    id: &'a str,
+    revision: i64,
+    content_sha256: &'a str,
+}
 
 impl WorkspaceStore {
     pub async fn create_draft_checkpoint(
@@ -19,6 +26,7 @@ impl WorkspaceStore {
         input: crate::WorkspaceDraftCheckpointCreate,
     ) -> Result<crate::WorkspaceDraftCheckpoint, crate::WorkspaceDraftError> {
         let (draft_json, schema_version, content_sha256) = normalize_draft(&input.draft_json)?;
+        let expected = expected_current_checkpoint(&input)?;
         let now_ms = datetime_to_epoch_millis(Utc::now());
         let actor = nonempty_or(&input.actor, "local human");
         let trigger = nonempty_or(&input.trigger, "manual");
@@ -36,7 +44,7 @@ impl WorkspaceStore {
             ));
         }
 
-        let session_id = match input.session_id.as_deref().map(str::trim) {
+        let (session_id, current_checkpoint) = match input.session_id.as_deref().map(str::trim) {
             Some("") => return validation("workspace draft session id must not be empty"),
             Some(session_id) => {
                 let session = session_by_id(&mut tx, session_id).await?.ok_or_else(|| {
@@ -56,9 +64,65 @@ impl WorkspaceStore {
                         session.status
                     ));
                 }
-                session_id.to_string()
+                let expected = expected.as_ref().ok_or_else(|| {
+                    crate::WorkspaceDraftError::Validation {
+                        message: "workspace draft existing-session append requires expected current checkpoint id, revision, and SHA-256"
+                            .to_string(),
+                    }
+                })?;
+                let current_checkpoint = checkpoint_by_revision(
+                    &mut tx,
+                    session_id,
+                    session.current_revision,
+                )
+                .await?
+                .ok_or_else(|| crate::WorkspaceDraftError::Storage {
+                    message: format!(
+                        "workspace draft session `{session_id}` current checkpoint revision {} was not found",
+                        session.current_revision
+                    ),
+                })?;
+                if !checkpoint_matches_expected(&current_checkpoint, expected) {
+                    if let Some(existing) =
+                        checkpoint_by_hash(&mut tx, session_id, &content_sha256).await?
+                    {
+                        validate_replay(&existing, &input, schema_version, &draft_json)?;
+                        if replay_matches_expected_predecessor(
+                            &mut tx,
+                            &existing,
+                            &current_checkpoint,
+                            expected,
+                        )
+                        .await?
+                        {
+                            tx.rollback().await?;
+                            return Ok(existing.try_into_model(true)?);
+                        }
+                    }
+                    return rollback_validation(
+                        tx,
+                        format!(
+                            "workspace draft session `{session_id}` current checkpoint changed; expected `{}` revision {} with SHA-256 `{}`, found `{}` revision {} with SHA-256 `{}`",
+                            expected.id,
+                            expected.revision,
+                            expected.content_sha256,
+                            current_checkpoint.id,
+                            current_checkpoint.revision,
+                            current_checkpoint.content_sha256,
+                        ),
+                    )
+                    .await;
+                }
+                (session_id.to_string(), Some(current_checkpoint))
             }
             None => {
+                if expected.is_some() {
+                    return rollback_validation(
+                        tx,
+                        "workspace draft new-session checkpoint must omit expected current checkpoint id, revision, and SHA-256",
+                    )
+                    .await;
+                }
                 let session_id = Uuid::new_v4().to_string();
                 sqlx::query(
                     r#"
@@ -75,30 +139,33 @@ INSERT INTO workspace_draft_sessions (
                 .bind(now_ms)
                 .execute(&mut *tx)
                 .await?;
-                session_id
+                (session_id, None)
             }
         };
 
         if let Some(existing) = checkpoint_by_hash(&mut tx, &session_id, &content_sha256).await? {
             validate_replay(&existing, &input, schema_version, &draft_json)?;
-            sqlx::query(
-                "UPDATE workspace_draft_sessions SET current_revision = ?, updated_at_ms = ? WHERE id = ?",
+            if current_checkpoint
+                .as_ref()
+                .is_some_and(|current| current.id == existing.id)
+            {
+                tx.rollback().await?;
+                return Ok(existing.try_into_model(true)?);
+            }
+            return rollback_validation(
+                tx,
+                format!(
+                    "workspace draft checkpoint content already exists at non-current revision {} and cannot move the session head backward",
+                    existing.revision
+                ),
             )
-            .bind(existing.revision)
-            .bind(now_ms)
-            .bind(&session_id)
-            .execute(&mut *tx)
-            .await?;
-            tx.commit().await?;
-            return Ok(existing.try_into_model(true)?);
+            .await;
         }
 
-        let revision: i64 = sqlx::query_scalar(
-            "SELECT COALESCE(MAX(revision), 0) + 1 FROM workspace_draft_checkpoints WHERE session_id = ?",
-        )
-        .bind(&session_id)
-        .fetch_one(&mut *tx)
-        .await?;
+        let previous_revision = current_checkpoint
+            .as_ref()
+            .map_or(0, |checkpoint| checkpoint.revision);
+        let revision = previous_revision + 1;
         let checkpoint_id = Uuid::new_v4().to_string();
         let checkpoint = sqlx::query_as::<_, WorkspaceDraftCheckpointRow>(
             r#"
@@ -125,14 +192,24 @@ RETURNING id, session_id, client_id, encounter_id, note_id, base_note_revision,
         .bind(now_ms)
         .fetch_one(&mut *tx)
         .await?;
-        sqlx::query(
-            "UPDATE workspace_draft_sessions SET current_revision = ?, updated_at_ms = ? WHERE id = ?",
+        let updated = sqlx::query(
+            "UPDATE workspace_draft_sessions SET current_revision = ?, updated_at_ms = ? WHERE id = ? AND status = 'active' AND current_revision = ?",
         )
         .bind(revision)
         .bind(now_ms)
         .bind(&session_id)
+        .bind(previous_revision)
         .execute(&mut *tx)
         .await?;
+        if updated.rows_affected() != 1 {
+            return rollback_validation(
+                tx,
+                format!(
+                    "workspace draft session `{session_id}` current checkpoint changed concurrently"
+                ),
+            )
+            .await;
+        }
         tx.commit().await?;
         Ok(checkpoint.try_into_model(false)?)
     }
@@ -296,6 +373,91 @@ WHERE session_id = ? AND content_sha256 = ?
     .map_err(Into::into)
 }
 
+async fn checkpoint_by_revision(
+    tx: &mut sqlx::Transaction<'_, Sqlite>,
+    session_id: &str,
+    revision: i64,
+) -> anyhow::Result<Option<WorkspaceDraftCheckpointRow>> {
+    sqlx::query_as::<_, WorkspaceDraftCheckpointRow>(
+        r#"
+SELECT id, session_id, client_id, encounter_id, note_id, base_note_revision,
+       schema_version, revision, draft_json, content_sha256, trigger, actor, created_at_ms
+FROM workspace_draft_checkpoints
+WHERE session_id = ? AND revision = ?
+        "#,
+    )
+    .bind(session_id)
+    .bind(revision)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(Into::into)
+}
+
+async fn replay_matches_expected_predecessor(
+    tx: &mut sqlx::Transaction<'_, Sqlite>,
+    existing: &WorkspaceDraftCheckpointRow,
+    current: &WorkspaceDraftCheckpointRow,
+    expected: &ExpectedCurrentCheckpoint<'_>,
+) -> anyhow::Result<bool> {
+    if existing.id != current.id || expected.revision.checked_add(1) != Some(existing.revision) {
+        return Ok(false);
+    }
+    Ok(
+        checkpoint_by_revision(tx, &existing.session_id, expected.revision)
+            .await?
+            .as_ref()
+            .is_some_and(|checkpoint| checkpoint_matches_expected(checkpoint, expected)),
+    )
+}
+
+fn checkpoint_matches_expected(
+    checkpoint: &WorkspaceDraftCheckpointRow,
+    expected: &ExpectedCurrentCheckpoint<'_>,
+) -> bool {
+    checkpoint.id == expected.id
+        && checkpoint.revision == expected.revision
+        && checkpoint.content_sha256 == expected.content_sha256
+}
+
+fn expected_current_checkpoint(
+    input: &crate::WorkspaceDraftCheckpointCreate,
+) -> Result<Option<ExpectedCurrentCheckpoint<'_>>, crate::WorkspaceDraftError> {
+    match (
+        input.expected_current_checkpoint_id.as_deref(),
+        input.expected_current_checkpoint_revision,
+        input.expected_current_checkpoint_sha256.as_deref(),
+    ) {
+        (None, None, None) => Ok(None),
+        (Some(id), Some(revision), Some(content_sha256)) => {
+            let id = required("draft expected current checkpoint id", id)?;
+            if revision < 1 {
+                return validation(
+                    "workspace draft expected current checkpoint revision must be positive",
+                );
+            }
+            let content_sha256 =
+                required("draft expected current checkpoint SHA-256", content_sha256)?;
+            if content_sha256.len() != 64
+                || !content_sha256
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            {
+                return validation(
+                    "workspace draft expected current checkpoint SHA-256 must be 64 lowercase hexadecimal characters",
+                );
+            }
+            Ok(Some(ExpectedCurrentCheckpoint {
+                id,
+                revision,
+                content_sha256,
+            }))
+        }
+        _ => validation(
+            "workspace draft expected current checkpoint id, revision, and SHA-256 must be provided together",
+        ),
+    }
+}
+
 fn normalize_draft(draft_json: &str) -> Result<(String, i64, String), crate::WorkspaceDraftError> {
     let value: Value = serde_json::from_str(draft_json.trim()).map_err(|error| {
         crate::WorkspaceDraftError::Validation {
@@ -311,7 +473,10 @@ fn normalize_draft(draft_json: &str) -> Result<(String, i64, String), crate::Wor
         .ok_or_else(|| crate::WorkspaceDraftError::Validation {
             message: "workspace draft checkpoint schemaVersion is required".to_string(),
         })?;
-    if schema_version != DRAFT_SCHEMA_VERSION {
+    if !matches!(
+        schema_version,
+        LEGACY_DRAFT_SCHEMA_VERSION | DRAFT_SCHEMA_VERSION
+    ) {
         return validation(format!(
             "unsupported workspace draft checkpoint schemaVersion {schema_version}"
         ));
@@ -375,6 +540,14 @@ fn normalize_optional(value: Option<&str>) -> Option<&str> {
 
 fn normalized_owned(value: Option<&str>) -> Option<String> {
     normalize_optional(value).map(str::to_string)
+}
+
+async fn rollback_validation<T>(
+    tx: sqlx::Transaction<'_, Sqlite>,
+    message: impl Into<String>,
+) -> Result<T, crate::WorkspaceDraftError> {
+    tx.rollback().await?;
+    validation(message)
 }
 
 #[cfg(test)]

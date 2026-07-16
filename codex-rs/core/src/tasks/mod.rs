@@ -350,7 +350,11 @@ impl Session {
             .await
             .clear_turn(&turn_context.sub_id);
 
-        let pending_items = self.input_queue.get_pending_input(&self.active_turn).await;
+        let pending_items = if turn_context.model_tool_mode.is_workspace_restricted() {
+            Vec::new()
+        } else {
+            self.input_queue.get_pending_input(&self.active_turn).await
+        };
         let turn_state = {
             let mut active = self.active_turn.lock().await;
             let turn = active.get_or_insert_with(ActiveTurn::default);
@@ -470,6 +474,13 @@ impl Session {
         self: &Arc<Self>,
         sub_id: String,
     ) {
+        if self
+            .workspace_planning_lock_active()
+            .await
+            .unwrap_or(/* fail closed */ true)
+        {
+            return;
+        }
         if !self.input_queue.has_trigger_turn_mailbox_items().await {
             return;
         }
@@ -514,7 +525,10 @@ impl Session {
             // in-flight approval wait can surface as a model-visible rejection before TurnAborted.
             self.input_queue.clear_pending(&active_turn).await;
         }
-        if reason == TurnAbortReason::Interrupted && aborted_turn {
+        let workspace_restricted_turn = turn_context
+            .as_ref()
+            .is_some_and(|turn_context| turn_context.model_tool_mode.is_workspace_restricted());
+        if reason == TurnAbortReason::Interrupted && aborted_turn && !workspace_restricted_turn {
             self.maybe_start_turn_for_pending_work().await;
         }
     }
@@ -553,7 +567,10 @@ impl Session {
         // in-flight approval wait can surface as a model-visible rejection before TurnAborted.
         self.input_queue.clear_pending(&active_turn).await;
 
-        if reason == TurnAbortReason::Interrupted {
+        let workspace_restricted_turn = turn_context
+            .as_ref()
+            .is_some_and(|turn_context| turn_context.model_tool_mode.is_workspace_restricted());
+        if reason == TurnAbortReason::Interrupted && !workspace_restricted_turn {
             self.maybe_start_turn_for_pending_work().await;
         }
 
@@ -600,7 +617,22 @@ impl Session {
                 ts.token_usage_at_turn_start.clone(),
             )
         };
-        if !pending_input.is_empty() {
+        if turn_context.model_tool_mode.is_workspace_restricted() {
+            for pending_input_item in pending_input {
+                match pending_input_item {
+                    TurnInput::InterAgentCommunication(communication) => {
+                        self.input_queue
+                            .enqueue_mailbox_communication(communication)
+                            .await;
+                    }
+                    TurnInput::UserInput { .. } | TurnInput::ResponseItem(_) => {
+                        warn!(
+                            "dropped unexpected out-of-band input from completed workspaceContextOnly turn"
+                        );
+                    }
+                }
+            }
+        } else if !pending_input.is_empty() {
             for pending_input_item in pending_input {
                 let hook_outcome =
                     inspect_pending_input(self, &turn_context, &pending_input_item).await;
@@ -767,8 +799,7 @@ impl Session {
                 .time_to_first_token_ms()
                 .await;
             let error = turn_context.terminal_error.lock().await.clone();
-            self.emit_turn_stop_lifecycle(turn_context.extension_data.as_ref())
-                .await;
+            self.emit_turn_stop_lifecycle(turn_context.as_ref()).await;
             EventMsg::TurnComplete(TurnCompleteEvent {
                 turn_id: turn_context.sub_id.clone(),
                 last_agent_message,
@@ -798,7 +829,7 @@ impl Session {
                 false
             }
         };
-        if cleared_active_turn {
+        if cleared_active_turn && !turn_context.model_tool_mode.is_workspace_restricted() {
             self.emit_thread_idle_lifecycle_if_idle().await;
         }
         // Regular items were flushed before this terminal event was appended; buffering

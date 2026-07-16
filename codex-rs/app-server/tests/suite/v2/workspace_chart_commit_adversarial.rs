@@ -49,6 +49,7 @@ async fn stale_client_and_task_versions_fail_and_client_id_payload_can_edit() ->
         &mut server,
         json!({
             "id": created.client.id,
+            "expectedVersion": created.client.version,
             "displayName": "Concurrent Patient",
             "summary": "concurrent update"
         }),

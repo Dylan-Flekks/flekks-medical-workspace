@@ -30,7 +30,6 @@ use crate::tools::handlers::TestSyncHandler;
 use crate::tools::handlers::ToolSearchHandlerCache;
 use crate::tools::handlers::ViewImageHandler;
 use crate::tools::handlers::WaitForEnvironmentHandler;
-use crate::tools::handlers::WorkspaceContextReadHandler;
 use crate::tools::handlers::WriteStdinHandler;
 use crate::tools::handlers::agent_jobs::ReportAgentJobResultHandler;
 use crate::tools::handlers::agent_jobs::SpawnAgentsOnCsvHandler;
@@ -350,14 +349,6 @@ fn collab_tools_enabled(turn_context: &TurnContext) -> bool {
         ),
         MultiAgentVersion::V2 => true,
     }
-}
-
-fn workspace_context_read_enabled(turn_context: &TurnContext) -> bool {
-    !turn_context.config.ephemeral
-        && !matches!(
-            turn_context.session_source,
-            SessionSource::SubAgent(SubAgentSource::Review)
-        )
 }
 
 fn agent_jobs_tools_enabled(turn_context: &TurnContext) -> bool {
@@ -720,10 +711,6 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, planned_tools: &mut
     if features.enabled(Feature::DeferredExecutor) {
         planned_tools.add(WaitForEnvironmentHandler);
     }
-    if workspace_context_read_enabled(turn_context) {
-        planned_tools.add(WorkspaceContextReadHandler);
-    }
-
     if turn_context.config.experimental_request_user_input_enabled {
         planned_tools.add_with_exposure(
             RequestUserInputHandler {

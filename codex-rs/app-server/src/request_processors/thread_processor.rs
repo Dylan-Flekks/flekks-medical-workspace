@@ -1,12 +1,14 @@
 use super::*;
 use crate::error_code::method_not_found;
 use codex_app_server_protocol::SelectedCapabilityRoot;
+use codex_app_server_protocol::ThreadMemoryMode;
 use codex_extension_api::ExtensionDataInit;
 use codex_protocol::config_types::ModelToolMode;
 use codex_protocol::config_types::MultiAgentMode;
 use codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_DANGER_FULL_ACCESS;
 use codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_WORKSPACE;
 use codex_protocol::protocol::ThreadHistoryMode;
+use codex_protocol::protocol::rollout_items_contain_workspace_context_only_turn;
 
 const THREAD_LIST_DEFAULT_LIMIT: usize = 25;
 const THREAD_LIST_MAX_LIMIT: usize = 100;
@@ -965,6 +967,12 @@ impl ThreadRequestProcessor {
             thread_source,
             environments,
         } = params;
+        if matches!(
+            history_mode,
+            Some(codex_app_server_protocol::ThreadHistoryMode::Paginated)
+        ) {
+            return Err(method_not_found("paginated_threads is not supported yet"));
+        }
         if sandbox.is_some() && permissions.is_some() {
             return Err(invalid_request(
                 "`permissions` cannot be combined with `sandbox`",
@@ -1605,6 +1613,18 @@ impl ThreadRequestProcessor {
         let ThreadMemoryModeSetParams { thread_id, mode } = params;
         let thread_id = ThreadId::from_string(&thread_id)
             .map_err(|err| invalid_request(format!("invalid thread id: {err}")))?;
+        let live_thread = self.thread_manager.get_thread(thread_id).await.ok();
+        if mode == ThreadMemoryMode::Enabled
+            && self
+                .thread_workspace_context_only_memory_tainted(thread_id, live_thread.as_ref())
+                .await?
+        {
+            self.restore_polluted_memory_mode(thread_id, live_thread.as_ref())
+                .await?;
+            return Err(invalid_request(
+                "thread memory cannot be enabled after a workspaceContextOnly turn has been persisted",
+            ));
+        }
 
         self.thread_manager
             .update_thread_metadata(
@@ -1618,7 +1638,99 @@ impl ThreadRequestProcessor {
             .await
             .map_err(|err| core_thread_write_error("set thread memory mode", err))?;
 
+        // Close the race where a restricted turn begins after the first check but before the
+        // metadata write. The live taint flips before the restricted turn records input, while a
+        // cold thread is checked from its canonical rollout.
+        if mode == ThreadMemoryMode::Enabled {
+            let refreshed_live_thread = self.thread_manager.get_thread(thread_id).await.ok();
+            if self
+                .thread_workspace_context_only_memory_tainted(
+                    thread_id,
+                    refreshed_live_thread.as_ref(),
+                )
+                .await?
+            {
+                self.restore_polluted_memory_mode(thread_id, refreshed_live_thread.as_ref())
+                    .await?;
+                return Err(invalid_request(
+                    "thread memory cannot be enabled after a workspaceContextOnly turn has been persisted",
+                ));
+            }
+        }
+
         Ok(ThreadMemoryModeSetResponse {})
+    }
+
+    async fn thread_workspace_context_only_memory_tainted(
+        &self,
+        thread_id: ThreadId,
+        live_thread: Option<&Arc<CodexThread>>,
+    ) -> Result<bool, JSONRPCErrorError> {
+        if let Some(thread) = live_thread {
+            return Ok(thread.workspace_context_only_memory_tainted());
+        }
+
+        let stored_thread = self
+            .thread_store
+            .read_thread(StoreReadThreadParams {
+                thread_id,
+                include_archived: false,
+                include_history: true,
+            })
+            .await
+            .map_err(thread_store_resume_read_error)?;
+        let history = stored_thread.history.ok_or_else(|| {
+            internal_error(format!(
+                "thread store did not return history while checking memory eligibility for {thread_id}"
+            ))
+        })?;
+        Ok(rollout_items_contain_workspace_context_only_turn(
+            &history.items,
+        ))
+    }
+
+    async fn restore_polluted_memory_mode(
+        &self,
+        thread_id: ThreadId,
+        live_thread: Option<&Arc<CodexThread>>,
+    ) -> Result<(), JSONRPCErrorError> {
+        if let Some(thread) = live_thread {
+            thread
+                .set_thread_memory_mode(codex_protocol::protocol::ThreadMemoryMode::Disabled)
+                .await
+                .map_err(|err| {
+                    internal_error(format!(
+                        "failed to restore disabled memory mode for restricted thread: {err}"
+                    ))
+                })?;
+        } else {
+            self.thread_manager
+                .update_thread_metadata(
+                    thread_id,
+                    StoreThreadMetadataPatch {
+                        memory_mode: Some(codex_protocol::protocol::ThreadMemoryMode::Disabled),
+                        ..Default::default()
+                    },
+                    /*include_archived*/ false,
+                )
+                .await
+                .map_err(|err| {
+                    core_thread_write_error("restore disabled thread memory mode", err)
+                })?;
+        }
+
+        if let Some(state_db) = self.state_db.as_ref() {
+            state_db
+                .memories()
+                .mark_thread_memory_mode_polluted(thread_id)
+                .await
+                .map_err(|err| {
+                    internal_error(format!(
+                        "failed to mark restricted thread memory mode polluted: {err}"
+                    ))
+                })?;
+        }
+        Ok(())
     }
 
     async fn memory_reset_response_inner(&self) -> Result<MemoryResetResponse, JSONRPCErrorError> {
@@ -1931,6 +2043,11 @@ impl ThreadRequestProcessor {
         }
 
         let (_, thread) = self.load_thread(&thread_id).await?;
+        if thread.active_turn_model_tool_mode().await == Some(ModelToolMode::WorkspaceContextOnly) {
+            return Err(invalid_request(
+                "shell commands are unavailable while a workspaceContextOnly turn is active",
+            ));
+        }
         self.submit_core_op(
             request_id,
             thread.as_ref(),
@@ -3478,6 +3595,14 @@ impl ThreadRequestProcessor {
             .read_stored_thread_for_resume(&thread_id, path.as_ref(), /*include_history*/ true)
             .await?;
         let source_thread_id = source_thread.thread_id;
+        if let Ok(live_thread) = self.thread_manager.get_thread(source_thread_id).await
+            && live_thread.active_turn_model_tool_mode().await
+                == Some(ModelToolMode::WorkspaceContextOnly)
+        {
+            return Err(invalid_request(
+                "cannot fork a thread while a workspaceContextOnly turn is active",
+            ));
+        }
         let source_thread_name = source_thread
             .name
             .as_deref()

@@ -25,6 +25,9 @@ max-threads = 4
 [test-groups.core_apply_patch_cli_integration]
 max-threads = 1
 
+[test-groups.core_workspace_planning_integration]
+max-threads = 1
+
 [test-groups.windows_sandbox_legacy_sessions]
 max-threads = 1
 
@@ -61,6 +64,13 @@ test-group = 'app_server_integration_local'
 # sensitive to Windows runner process-startup stalls when many cases launch at once.
 filter = 'package(codex-core) & kind(test) & test(apply_patch_cli)'
 test-group = 'core_apply_patch_cli_integration'
+
+[[profile.default.overrides]]
+# Persistent workspace planning cases each start a complete Codex thread and run
+# the workspace migration stack. Serializing this small group avoids false
+# 10-second event-wait failures under local and CI process contention.
+filter = 'package(codex-core) & kind(test) & test(workspace_planning_mode)'
+test-group = 'core_workspace_planning_integration'
 
 [[profile.default.overrides]]
 # These tests create restricted-token Windows child processes and private desktops.

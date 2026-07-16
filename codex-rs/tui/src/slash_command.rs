@@ -41,7 +41,7 @@ pub enum SlashCommand {
     Plan,
     Goal,
     Agent,
-    #[strum(to_string = "workspacemedical")]
+    #[strum(to_string = "workspace-medical", serialize = "workspacemedical")]
     WorkspaceMedical,
     Side,
     Btw,
@@ -123,7 +123,7 @@ impl SlashCommand {
             SlashCommand::Plan => "switch to Plan mode",
             SlashCommand::Goal => "set or view the goal for a long-running task",
             SlashCommand::Agent | SlashCommand::MultiAgents => "switch the active agent thread",
-            SlashCommand::WorkspaceMedical => "open the medical workspace dashboard",
+            SlashCommand::WorkspaceMedical => "open the auditable medical workspace",
             SlashCommand::Side | SlashCommand::Btw => {
                 "start a side conversation in an ephemeral fork"
             }
@@ -272,6 +272,7 @@ mod tests {
     use std::str::FromStr;
 
     use super::SlashCommand;
+    use super::built_in_slash_commands;
 
     #[test]
     fn stop_command_is_canonical_name() {
@@ -290,11 +291,25 @@ mod tests {
     }
 
     #[test]
-    fn workspacemedical_command_is_canonical_name() {
-        assert_eq!(SlashCommand::WorkspaceMedical.command(), "workspacemedical");
+    fn workspace_medical_command_has_hidden_compatibility_alias() {
+        assert_eq!(
+            SlashCommand::WorkspaceMedical.command(),
+            "workspace-medical"
+        );
+        assert_eq!(
+            SlashCommand::from_str("workspace-medical"),
+            Ok(SlashCommand::WorkspaceMedical)
+        );
         assert_eq!(
             SlashCommand::from_str("workspacemedical"),
             Ok(SlashCommand::WorkspaceMedical)
+        );
+        assert_eq!(
+            built_in_slash_commands()
+                .into_iter()
+                .filter(|(_, command)| *command == SlashCommand::WorkspaceMedical)
+                .collect::<Vec<_>>(),
+            vec![("workspace-medical", SlashCommand::WorkspaceMedical)]
         );
     }
 

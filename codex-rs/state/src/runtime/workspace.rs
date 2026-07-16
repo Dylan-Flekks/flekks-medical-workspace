@@ -1,3 +1,7 @@
+use super::workspace_context_plan::normalize_context_plan_metadata;
+use super::workspace_plan_binding::WorkspacePlanBindingContext;
+use super::workspace_plan_binding::normalize_plan_revision_binding;
+use super::workspace_plan_binding::validate_plan_revision_binding;
 use super::*;
 use crate::model::WorkspaceAgentResultRow;
 use crate::model::WorkspaceArtifactDerivativeRow;
@@ -21,6 +25,11 @@ use uuid::Uuid;
 
 const NOTE_STATUS_SIGNED: &str = "signed";
 const NOTE_STATUS_ADDENDED: &str = "addended";
+
+enum ClientUpsertVersionPolicy {
+    Unchecked,
+    RequireForUpdate(Option<String>),
+}
 
 #[derive(Clone)]
 pub struct WorkspaceStore {
@@ -51,18 +60,36 @@ impl WorkspaceStore {
 SELECT
     client.id AS id,
     client.display_name AS display_name,
+    client.legal_first_name AS legal_first_name,
+    client.legal_middle_name AS legal_middle_name,
+    client.legal_last_name AS legal_last_name,
+    client.legal_suffix AS legal_suffix,
     client.preferred_name AS preferred_name,
+    client.previous_name AS previous_name,
     client.date_of_birth AS date_of_birth,
     client.sex_or_gender AS sex_or_gender,
+    client.administrative_sex AS administrative_sex,
+    client.preferred_language AS preferred_language,
+    client.interpreter_required AS interpreter_required,
     client.external_id AS external_id,
     client.record_start_date AS record_start_date,
     client.record_end_date AS record_end_date,
     client.summary AS summary,
     contact.client_id AS contact_client_id,
     contact.primary_phone AS primary_phone,
+    contact.primary_phone_use AS primary_phone_use,
     contact.secondary_phone AS secondary_phone,
+    contact.secondary_phone_use AS secondary_phone_use,
     contact.email AS email,
+    contact.secondary_email AS secondary_email,
     contact.preferred_contact_method AS preferred_contact_method,
+    contact.address_line_1 AS address_line_1,
+    contact.address_line_2 AS address_line_2,
+    contact.city AS city,
+    contact.state_or_province AS state_or_province,
+    contact.postal_code AS postal_code,
+    contact.country AS country,
+    contact.address_use AS address_use,
     contact.emergency_contact_name AS emergency_contact_name,
     contact.emergency_contact_relationship AS emergency_contact_relationship,
     contact.emergency_contact_phone AS emergency_contact_phone,
@@ -100,18 +127,36 @@ ORDER BY client.updated_at_ms DESC, client.display_name ASC
 SELECT
     client.id AS id,
     client.display_name AS display_name,
+    client.legal_first_name AS legal_first_name,
+    client.legal_middle_name AS legal_middle_name,
+    client.legal_last_name AS legal_last_name,
+    client.legal_suffix AS legal_suffix,
     client.preferred_name AS preferred_name,
+    client.previous_name AS previous_name,
     client.date_of_birth AS date_of_birth,
     client.sex_or_gender AS sex_or_gender,
+    client.administrative_sex AS administrative_sex,
+    client.preferred_language AS preferred_language,
+    client.interpreter_required AS interpreter_required,
     client.external_id AS external_id,
     client.record_start_date AS record_start_date,
     client.record_end_date AS record_end_date,
     client.summary AS summary,
     contact.client_id AS contact_client_id,
     contact.primary_phone AS primary_phone,
+    contact.primary_phone_use AS primary_phone_use,
     contact.secondary_phone AS secondary_phone,
+    contact.secondary_phone_use AS secondary_phone_use,
     contact.email AS email,
+    contact.secondary_email AS secondary_email,
     contact.preferred_contact_method AS preferred_contact_method,
+    contact.address_line_1 AS address_line_1,
+    contact.address_line_2 AS address_line_2,
+    contact.city AS city,
+    contact.state_or_province AS state_or_province,
+    contact.postal_code AS postal_code,
+    contact.country AS country,
+    contact.address_use AS address_use,
     contact.emergency_contact_name AS emergency_contact_name,
     contact.emergency_contact_relationship AS emergency_contact_relationship,
     contact.emergency_contact_phone AS emergency_contact_phone,
@@ -146,25 +191,73 @@ WHERE client.id = ?
         &self,
         input: crate::WorkspaceClientUpsert,
     ) -> anyhow::Result<crate::WorkspaceClient> {
+        self.upsert_client_inner(input, ClientUpsertVersionPolicy::Unchecked)
+            .await
+    }
+
+    pub async fn upsert_client_checked(
+        &self,
+        input: crate::WorkspaceClientUpsert,
+        expected_version: Option<String>,
+    ) -> anyhow::Result<crate::WorkspaceClient> {
+        self.upsert_client_inner(
+            input,
+            ClientUpsertVersionPolicy::RequireForUpdate(expected_version),
+        )
+        .await
+    }
+
+    async fn upsert_client_inner(
+        &self,
+        input: crate::WorkspaceClientUpsert,
+        version_policy: ClientUpsertVersionPolicy,
+    ) -> anyhow::Result<crate::WorkspaceClient> {
         let id = input
             .id
             .clone()
             .unwrap_or_else(|| Uuid::new_v4().to_string());
         let now_ms = datetime_to_epoch_millis(Utc::now());
-        let mut tx = self.pool.begin().await?;
-        let existed: Option<String> =
-            sqlx::query_scalar("SELECT id FROM workspace_clients WHERE id = ?")
-                .bind(&id)
-                .fetch_optional(&mut *tx)
-                .await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let existing = super::workspace_chart_commit_sql::client(&mut tx, &id).await?;
+        if let ClientUpsertVersionPolicy::RequireForUpdate(expected_version) = &version_policy {
+            match (&existing, expected_version.as_deref()) {
+                (Some(_), None) => {
+                    anyhow::bail!(
+                        "workspace client `{id}` expected version is required for update"
+                    );
+                }
+                (Some(existing), Some(expected)) => {
+                    let actual = existing.record_version()?;
+                    if expected != actual {
+                        anyhow::bail!(
+                            "workspace client `{id}` has version {actual}, expected {expected}"
+                        );
+                    }
+                }
+                (None, Some(_)) => {
+                    anyhow::bail!(
+                        "new workspace client `{id}` must not include an expected version"
+                    );
+                }
+                (None, None) => {}
+            }
+        }
         sqlx::query(
             r#"
 INSERT INTO workspace_clients (
     id,
     display_name,
+    legal_first_name,
+    legal_middle_name,
+    legal_last_name,
+    legal_suffix,
     preferred_name,
+    previous_name,
     date_of_birth,
     sex_or_gender,
+    administrative_sex,
+    preferred_language,
+    interpreter_required,
     external_id,
     record_start_date,
     record_end_date,
@@ -172,12 +265,20 @@ INSERT INTO workspace_clients (
     archived_at_ms,
     created_at_ms,
     updated_at_ms
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
 ON CONFLICT(id) DO UPDATE SET
     display_name = excluded.display_name,
+    legal_first_name = excluded.legal_first_name,
+    legal_middle_name = excluded.legal_middle_name,
+    legal_last_name = excluded.legal_last_name,
+    legal_suffix = excluded.legal_suffix,
     preferred_name = excluded.preferred_name,
+    previous_name = excluded.previous_name,
     date_of_birth = excluded.date_of_birth,
     sex_or_gender = excluded.sex_or_gender,
+    administrative_sex = excluded.administrative_sex,
+    preferred_language = excluded.preferred_language,
+    interpreter_required = excluded.interpreter_required,
     external_id = excluded.external_id,
     record_start_date = excluded.record_start_date,
     record_end_date = excluded.record_end_date,
@@ -188,9 +289,17 @@ ON CONFLICT(id) DO UPDATE SET
         )
         .bind(&id)
         .bind(&input.display_name)
+        .bind(&input.legal_first_name)
+        .bind(&input.legal_middle_name)
+        .bind(&input.legal_last_name)
+        .bind(&input.legal_suffix)
         .bind(&input.preferred_name)
+        .bind(&input.previous_name)
         .bind(&input.date_of_birth)
         .bind(&input.sex_or_gender)
+        .bind(&input.administrative_sex)
+        .bind(&input.preferred_language)
+        .bind(input.interpreter_required)
         .bind(&input.external_id)
         .bind(&input.record_start_date)
         .bind(&input.record_end_date)
@@ -201,13 +310,19 @@ ON CONFLICT(id) DO UPDATE SET
         .await?;
 
         upsert_client_admin_metadata(&mut tx, &id, &input, now_ms).await?;
+        if existing.is_none() {
+            super::workspace_coverage::put_legacy_primary_coverage_if_present(
+                &mut tx, &id, &input, now_ms,
+            )
+            .await?;
+        }
 
         insert_audit_event(
             &mut tx,
             crate::WorkspaceAuditEventCreate {
                 entity_type: "client".to_string(),
                 entity_id: id.clone(),
-                action: if existed.is_some() {
+                action: if existing.is_some() {
                     "updated".to_string()
                 } else {
                     "created".to_string()
@@ -2853,7 +2968,7 @@ ORDER BY created_at_ms DESC
 
     pub async fn create_context_packet(
         &self,
-        input: crate::WorkspaceContextPacketCreate,
+        mut input: crate::WorkspaceContextPacketCreate,
     ) -> anyhow::Result<crate::WorkspaceContextPacket> {
         let id = Uuid::new_v4().to_string();
         let now_ms = datetime_to_epoch_millis(Utc::now());
@@ -2873,6 +2988,29 @@ ORDER BY created_at_ms DESC
             &input.selected_clip_ids_json,
         )
         .await?;
+        let plan_binding = normalize_plan_revision_binding(
+            input.workspace_plan_revision_id.as_deref(),
+            input.workspace_plan_content_sha256.as_deref(),
+            input.workspace_plan_evidence_manifest_sha256.as_deref(),
+        )?;
+        let context_plan =
+            normalize_context_plan_metadata(&mut tx, &input, plan_binding.is_some()).await?;
+        if let Some(binding) = plan_binding.as_ref() {
+            validate_plan_revision_binding(
+                &mut tx,
+                binding,
+                WorkspacePlanBindingContext {
+                    client_id: &input.client_id,
+                    encounter_id: input.encounter_id.as_deref(),
+                    note_id: input.note_id.as_deref(),
+                    source_checkpoint_id: context_plan.source_checkpoint_id.as_deref(),
+                    source_checkpoint_sha256: context_plan.source_checkpoint_sha256.as_deref(),
+                    context_envelope_json: &context_plan.context_envelope_json,
+                },
+            )
+            .await?;
+        }
+        input.context_envelope_json = context_plan.context_envelope_json;
         validate_packet_context_envelope(&input)?;
         let base_note_revision = resolve_packet_base_note_revision(&mut tx, &input).await?;
         let context_envelope_sha256 = context_envelope_sha256(&input.context_envelope_json);
@@ -2936,13 +3074,21 @@ INSERT INTO workspace_context_packets (
     base_note_revision,
     authorized_scope_json,
     expected_output_kind,
+    workspace_profile,
+    plan_schema_version,
+    source_checkpoint_id,
+    source_checkpoint_sha256,
+    readiness_json,
+    workspace_plan_revision_id,
+    workspace_plan_content_sha256,
+    workspace_plan_evidence_manifest_sha256,
     status,
     created_at_ms,
     sent_at_ms,
     submitted_at_ms,
     canceled_at_ms,
     updated_at_ms
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 RETURNING
     id,
     client_id,
@@ -2962,6 +3108,14 @@ RETURNING
     base_note_revision,
     authorized_scope_json,
     expected_output_kind,
+    workspace_profile,
+    plan_schema_version,
+    source_checkpoint_id,
+    source_checkpoint_sha256,
+    readiness_json,
+    workspace_plan_revision_id,
+    workspace_plan_content_sha256,
+    workspace_plan_evidence_manifest_sha256,
     status,
     created_at_ms,
     sent_at_ms,
@@ -2988,6 +3142,18 @@ RETURNING
         .bind(base_note_revision)
         .bind(&authorized_scope_json)
         .bind(&expected_output_kind)
+        .bind(&context_plan.workspace_profile)
+        .bind(context_plan.plan_schema_version)
+        .bind(&context_plan.source_checkpoint_id)
+        .bind(&context_plan.source_checkpoint_sha256)
+        .bind(&context_plan.readiness_json)
+        .bind(plan_binding.as_ref().map(|binding| &binding.revision_id))
+        .bind(plan_binding.as_ref().map(|binding| &binding.content_sha256))
+        .bind(
+            plan_binding
+                .as_ref()
+                .map(|binding| &binding.evidence_manifest_sha256),
+        )
         .bind(&status)
         .bind(now_ms)
         .bind(now_ms)
@@ -3051,6 +3217,14 @@ SELECT
     base_note_revision,
     authorized_scope_json,
     expected_output_kind,
+    workspace_profile,
+    plan_schema_version,
+    source_checkpoint_id,
+    source_checkpoint_sha256,
+    readiness_json,
+    workspace_plan_revision_id,
+    workspace_plan_content_sha256,
+    workspace_plan_evidence_manifest_sha256,
     status,
     created_at_ms,
     sent_at_ms,
@@ -3104,6 +3278,14 @@ SELECT
     base_note_revision,
     authorized_scope_json,
     expected_output_kind,
+    workspace_profile,
+    plan_schema_version,
+    source_checkpoint_id,
+    source_checkpoint_sha256,
+    readiness_json,
+    workspace_plan_revision_id,
+    workspace_plan_content_sha256,
+    workspace_plan_evidence_manifest_sha256,
     status,
     created_at_ms,
     sent_at_ms,
@@ -3149,6 +3331,9 @@ LIMIT 1
                     expected_context_envelope_sha256: input
                         .expected_context_envelope_sha256
                         .clone(),
+                    expected_workspace_plan_revision_id: None,
+                    expected_workspace_plan_content_sha256: None,
+                    expected_workspace_plan_evidence_manifest_sha256: None,
                     run_kind: "manual_import".to_string(),
                     idempotency_key: format!("manual-import:{}", Uuid::new_v4()),
                     provider: "manual".to_string(),
@@ -3458,9 +3643,19 @@ pub(super) async fn upsert_client_admin_metadata(
 INSERT INTO workspace_client_contacts (
     client_id,
     primary_phone,
+    primary_phone_use,
     secondary_phone,
+    secondary_phone_use,
     email,
+    secondary_email,
     preferred_contact_method,
+    address_line_1,
+    address_line_2,
+    city,
+    state_or_province,
+    postal_code,
+    country,
+    address_use,
     emergency_contact_name,
     emergency_contact_relationship,
     emergency_contact_phone,
@@ -3468,12 +3663,22 @@ INSERT INTO workspace_client_contacts (
     contact_notes,
     created_at_ms,
     updated_at_ms
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(client_id) DO UPDATE SET
     primary_phone = excluded.primary_phone,
+    primary_phone_use = excluded.primary_phone_use,
     secondary_phone = excluded.secondary_phone,
+    secondary_phone_use = excluded.secondary_phone_use,
     email = excluded.email,
+    secondary_email = excluded.secondary_email,
     preferred_contact_method = excluded.preferred_contact_method,
+    address_line_1 = excluded.address_line_1,
+    address_line_2 = excluded.address_line_2,
+    city = excluded.city,
+    state_or_province = excluded.state_or_province,
+    postal_code = excluded.postal_code,
+    country = excluded.country,
+    address_use = excluded.address_use,
     emergency_contact_name = excluded.emergency_contact_name,
     emergency_contact_relationship = excluded.emergency_contact_relationship,
     emergency_contact_phone = excluded.emergency_contact_phone,
@@ -3484,52 +3689,24 @@ ON CONFLICT(client_id) DO UPDATE SET
     )
     .bind(client_id)
     .bind(&input.primary_phone)
+    .bind(&input.primary_phone_use)
     .bind(&input.secondary_phone)
-    .bind(&input.email)
+    .bind(&input.secondary_phone_use)
+    .bind(input.primary_email.as_ref().or(input.email.as_ref()))
+    .bind(&input.secondary_email)
     .bind(&input.preferred_contact_method)
+    .bind(&input.address_line_1)
+    .bind(&input.address_line_2)
+    .bind(&input.city)
+    .bind(&input.state_or_province)
+    .bind(&input.postal_code)
+    .bind(&input.country)
+    .bind(&input.address_use)
     .bind(&input.emergency_contact_name)
     .bind(&input.emergency_contact_relationship)
     .bind(&input.emergency_contact_phone)
     .bind(&input.emergency_contact_email)
     .bind(&input.contact_notes)
-    .bind(now_ms)
-    .bind(now_ms)
-    .execute(&mut **tx)
-    .await?;
-
-    sqlx::query(
-        r#"
-INSERT INTO workspace_client_coverages (
-    client_id,
-    payer_name,
-    plan_name,
-    member_id,
-    group_number,
-    coverage_type,
-    coverage_status,
-    coverage_notes,
-    created_at_ms,
-    updated_at_ms
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT(client_id) DO UPDATE SET
-    payer_name = excluded.payer_name,
-    plan_name = excluded.plan_name,
-    member_id = excluded.member_id,
-    group_number = excluded.group_number,
-    coverage_type = excluded.coverage_type,
-    coverage_status = excluded.coverage_status,
-    coverage_notes = excluded.coverage_notes,
-    updated_at_ms = excluded.updated_at_ms
-        "#,
-    )
-    .bind(client_id)
-    .bind(&input.payer_name)
-    .bind(&input.plan_name)
-    .bind(&input.member_id)
-    .bind(&input.group_number)
-    .bind(&input.coverage_type)
-    .bind(&input.coverage_status)
-    .bind(&input.coverage_notes)
     .bind(now_ms)
     .bind(now_ms)
     .execute(&mut **tx)
@@ -3976,7 +4153,8 @@ fn string_contains_absolute_path(value: &str) -> bool {
         token.starts_with("~/")
             || token.starts_with("\\\\")
             || token.starts_with("//")
-            || (token.starts_with('/') && token != "/workspacemedical")
+            || (token.starts_with('/')
+                && !matches!(token, "/workspace-medical" | "/workspacemedical"))
     })
 }
 
@@ -4188,10 +4366,27 @@ mod tests {
     use crate::runtime::test_support::unique_temp_dir;
     use pretty_assertions::assert_eq;
 
+    #[test]
+    fn medical_workspace_command_tokens_are_not_absolute_paths() {
+        assert!(!string_contains_absolute_path(
+            "return to /workspace-medical"
+        ));
+        assert!(!string_contains_absolute_path(
+            "return to /workspacemedical"
+        ));
+        assert!(string_contains_absolute_path("read /tmp/private-record"));
+    }
+
     async fn test_runtime() -> std::sync::Arc<StateRuntime> {
-        StateRuntime::init(unique_temp_dir(), "test-provider".to_string())
+        let runtime = StateRuntime::init(unique_temp_dir(), "test-provider".to_string())
             .await
-            .expect("state db should initialize")
+            .expect("state db should initialize");
+        runtime
+            .workspace()
+            .provision_synthetic_workspace("state workspace test fixture")
+            .await
+            .expect("test workspace should be classified synthetic");
+        runtime
     }
 
     #[tokio::test]
@@ -4379,6 +4574,13 @@ mod tests {
         .execute(pool)
         .await;
         assert!(duplicate_contact.is_err());
+        sqlx::query(
+            "INSERT INTO workspace_client_coverages (client_id, created_at_ms, updated_at_ms) VALUES (?, 1, 1)",
+        )
+        .bind(&client.id)
+        .execute(pool)
+        .await
+        .expect("first coverage projection row");
         let duplicate_coverage = sqlx::query(
             "INSERT INTO workspace_client_coverages (client_id, created_at_ms, updated_at_ms) VALUES (?, 1, 1)",
         )
@@ -4627,7 +4829,7 @@ mod tests {
             .expect("client get")
             .expect("client exists");
         assert_eq!(cleared.primary_phone, None);
-        assert_eq!(cleared.member_id, None);
+        assert_eq!(cleared.member_id.as_deref(), Some("MED-777"));
         assert!(cleared.summary.contains("555-LEGACY"));
         assert!(cleared.summary.contains("LEGACY-MEMBER"));
     }

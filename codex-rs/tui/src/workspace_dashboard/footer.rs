@@ -10,6 +10,8 @@ pub(super) enum MedicalKeyContext {
     PatientNotes,
     Documents,
     PatientField,
+    CoverageEditor,
+    CardVerification,
     NoteTitle,
     NoteBody,
     LockedNote,
@@ -37,14 +39,18 @@ impl MedicalKeyContext {
             Self::Documents => {
                 "↑/↓ file  ←/→ fold  Enter detail  Space agent  Tab/⇧Tab pane  Ctrl-P commands"
             }
-            Self::PatientField => {
-                "↑/↓ field  Enter next  Ctrl-S save  Tab/⇧Tab pane  Ctrl-P commands"
+            Self::PatientField => "Enter edit  Ctrl-S save  Tab/⇧Tab pane  Ctrl-P actions",
+            Self::CoverageEditor => {
+                "↑/↓ field  ←/→ priority  Space toggle  Ctrl-S save  Ctrl-P actions"
+            }
+            Self::CardVerification => {
+                "↑/↓ field  Space source/subject  Ctrl-S record  Esc discard  Ctrl-P actions"
             }
             Self::NoteTitle => {
                 "↑/↓ stay  Type title  Enter body  Ctrl-S save  Tab/⇧Tab pane  Ctrl-P commands"
             }
             Self::NoteBody => {
-                "↑/↓ stay  Type note  Enter newline  Ctrl-S save  Tab/⇧Tab pane  Ctrl-P commands"
+                "↑/↓ line  ←/→ cursor  Enter newline  Ctrl-S save  Tab/⇧Tab pane  Ctrl-P commands"
             }
             Self::LockedNote => "Read-only  :addendum  Tab/⇧Tab pane  Ctrl-P commands  Esc close",
             Self::WorkflowEditor => {
@@ -53,16 +59,16 @@ impl MedicalKeyContext {
             Self::CenterSections => "↑/↓ section  PgUp/PgDn scroll  Tab/⇧Tab pane  Ctrl-P commands",
             Self::ProposalReview => "↑/↓ scroll  PgUp/PgDn page  Tab/⇧Tab pane  Ctrl-P commands",
             Self::AgentTabs => {
-                "←/→ Agent tab  ↑/↓ scroll  r request  Tab/⇧Tab pane  Ctrl-P commands"
+                "Type message  ←/→ Chat/Context/Audit  ↑/↓ scroll  Tab/⇧Tab pane  Ctrl-P commands"
             }
             Self::AgentInput => {
-                "Type request  Ctrl-G send  Tab/⇧Tab pane  Ctrl-P commands  Esc chart"
+                "Enter send  Shift-Enter newline  Esc leave  Ctrl-G master handoff  Tab/⇧Tab pane  Ctrl-P commands"
             }
             Self::PacketReview => {
-                "Review packet  Ctrl-G send  r edit  Tab/⇧Tab pane  Ctrl-P commands"
+                "Review packet  Ctrl-G master handoff  r edit  Tab/⇧Tab pane  Ctrl-P commands"
             }
             Self::ReturnedWorkReview => {
-                "↑/↓ scroll  i inspect  r input  Tab/⇧Tab pane  Ctrl-P commands"
+                "↑/↓ scroll  Type starts request  Tab/⇧Tab pane  Ctrl-P actions"
             }
             Self::ReturnedWorkDraft => "Type result  Ctrl-S save  Tab/⇧Tab pane  Ctrl-P commands",
             Self::ChartConflict => "Ctrl-S refresh  Esc/Ctrl-W close",
@@ -79,17 +85,18 @@ impl MedicalKeyContext {
             Self::Directory => "↑/↓ patient  Tab/⇧Tab pane  Ctrl-P commands",
             Self::PatientNotes => "↑/↓ note  Tab/⇧Tab pane  Ctrl-P commands",
             Self::Documents => "↑/↓ file  ←/→ fold  Tab/⇧Tab pane  Ctrl-P commands",
-            Self::PatientField | Self::WorkflowEditor => {
-                "↑/↓ field  Ctrl-S  Tab/⇧Tab pane  Ctrl-P commands"
-            }
+            Self::PatientField => "Enter  ↑↓ field  Ctrl-S  Ctrl-P commands  Tab pane",
+            Self::WorkflowEditor => "Enter next  ↑/↓ field  Ctrl-S  Ctrl-P actions  Tab pane",
+            Self::CoverageEditor => "↑/↓ field  ←/→ priority  Ctrl-S  Ctrl-P actions",
+            Self::CardVerification => "↑/↓ field  Ctrl-S record  Esc discard  Ctrl-P actions",
             Self::NoteTitle => "↑/↓ stay  Enter body  Tab/⇧Tab pane  Ctrl-P commands",
-            Self::NoteBody => "↑/↓ stay  Enter newline  Tab/⇧Tab pane  Ctrl-P commands",
+            Self::NoteBody => "↑/↓ line  ←/→ cursor  Tab/⇧Tab pane  Ctrl-P commands",
             Self::LockedNote => "Read-only  Tab/⇧Tab pane  Ctrl-P commands",
             Self::CenterSections => "↑/↓ section  Tab/⇧Tab pane  Ctrl-P commands",
             Self::ProposalReview => "↑/↓ scroll  Tab/⇧Tab pane  Ctrl-P commands",
-            Self::AgentTabs => "←/→ Agent tab  ↑/↓ scroll  Tab/⇧Tab pane  Ctrl-P commands",
-            Self::AgentInput => "Ctrl-G send  Tab/⇧Tab pane  Ctrl-P commands",
-            Self::PacketReview => "Ctrl-G send  Tab/⇧Tab pane  Ctrl-P commands",
+            Self::AgentTabs => "Type message  ←→ tab  ↑↓  Ctrl-P commands  Tab pane",
+            Self::AgentInput => "Enter send  Shift-Enter newline  Esc leave  Tab pane",
+            Self::PacketReview => "Ctrl-G master handoff  Tab/⇧Tab pane  Ctrl-P commands",
             Self::ReturnedWorkReview => "↑/↓ scroll  Tab/⇧Tab pane  Ctrl-P commands",
             Self::ReturnedWorkDraft => "Ctrl-S save  Tab/⇧Tab pane  Ctrl-P commands",
             Self::ChartConflict => "Ctrl-S refresh  Esc/Ctrl-W close",

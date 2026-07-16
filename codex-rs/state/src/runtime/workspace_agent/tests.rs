@@ -1,3 +1,4 @@
+use super::token_looks_like_local_path;
 use crate::StateRuntime;
 use crate::migrations::WORKSPACE_MIGRATOR;
 use crate::runtime::test_support::unique_temp_dir;
@@ -9,10 +10,23 @@ use sqlx::migrate::Migrator;
 use sqlx::sqlite::SqliteConnectOptions;
 use std::borrow::Cow;
 
+#[test]
+fn medical_workspace_command_tokens_are_not_redacted_as_local_paths() {
+    assert!(!token_looks_like_local_path("/workspace-medical"));
+    assert!(!token_looks_like_local_path("/workspacemedical"));
+    assert!(token_looks_like_local_path("/tmp/private-record"));
+}
+
 async fn test_runtime() -> std::sync::Arc<StateRuntime> {
-    StateRuntime::init(unique_temp_dir(), "test-provider".to_string())
+    let runtime = StateRuntime::init(unique_temp_dir(), "test-provider".to_string())
         .await
-        .expect("state db should initialize")
+        .expect("state db should initialize");
+    runtime
+        .workspace()
+        .provision_synthetic_workspace("state agent test fixture")
+        .await
+        .expect("test workspace should be classified synthetic");
+    runtime
 }
 
 async fn seed_client_note(
@@ -102,6 +116,11 @@ fn run_start(packet: &crate::WorkspaceContextPacket) -> crate::WorkspaceAgentRun
         packet_id: packet.id.clone(),
         expected_client_id: packet.client_id.clone(),
         expected_context_envelope_sha256: packet.context_envelope_sha256.clone(),
+        expected_workspace_plan_revision_id: packet.workspace_plan_revision_id.clone(),
+        expected_workspace_plan_content_sha256: packet.workspace_plan_content_sha256.clone(),
+        expected_workspace_plan_evidence_manifest_sha256: packet
+            .workspace_plan_evidence_manifest_sha256
+            .clone(),
         run_kind: "agent".to_string(),
         idempotency_key: "turn:synthetic-1".to_string(),
         provider: "test-provider".to_string(),
@@ -132,6 +151,842 @@ fn result_create(
         expected_note_id: packet.note_id.clone(),
         expected_context_envelope_sha256: packet.context_envelope_sha256.clone(),
     }
+}
+
+fn turn_completion(
+    execution: crate::WorkspaceAgentExecutionBinding,
+) -> crate::WorkspaceAgentTurnComplete {
+    crate::WorkspaceAgentTurnComplete {
+        assistant_message_id: format!("assistant-{}", execution.source_turn_id),
+        body: "Subjective\n\nObjective\n\nAssessment\n\nPlan".to_string(),
+        idempotency_key: format!("agent-completion:{}", execution.run_id),
+        execution,
+    }
+}
+
+async fn submit_packet(runtime: &StateRuntime, packet: &crate::WorkspaceContextPacket) {
+    runtime
+        .workspace()
+        .submit_context_packet(crate::WorkspaceContextPacketLifecycleUpdate {
+            packet_id: packet.id.clone(),
+            client_id: packet.client_id.clone(),
+            expected_context_envelope_sha256: packet.context_envelope_sha256.clone(),
+            actor: "Clinician Example".to_string(),
+        })
+        .await
+        .expect("packet submission should succeed")
+        .expect("submitted packet should exist");
+}
+
+async fn assert_no_turn_completion(runtime: &StateRuntime, run_id: &str) {
+    let counts: (i64, i64) = sqlx::query_as(
+        r#"
+SELECT
+    (SELECT COUNT(*) FROM workspace_agent_results WHERE run_id = ?),
+    (SELECT COUNT(*) FROM workspace_agent_turn_completions WHERE run_id = ?)
+        "#,
+    )
+    .bind(run_id)
+    .bind(run_id)
+    .fetch_one(runtime.workspace().pool.as_ref())
+    .await
+    .expect("rejected completion row counts should load");
+    assert_eq!(counts, (0, 0));
+}
+
+async fn claim_run(
+    runtime: &StateRuntime,
+    packet: &crate::WorkspaceContextPacket,
+    run: &crate::WorkspaceAgentRun,
+) -> crate::WorkspaceAgentExecutionBinding {
+    submit_packet(runtime, packet).await;
+    let execution = crate::WorkspaceAgentExecutionBinding {
+        run_id: run.id.clone(),
+        source_thread_id: run
+            .source_thread_id
+            .clone()
+            .expect("agent run should have a source thread"),
+        source_turn_id: "turn-synthetic".to_string(),
+        provider: run.provider.clone(),
+        model: run.model.clone(),
+    };
+    runtime
+        .workspace()
+        .claim_agent_turn(crate::WorkspaceAgentTurnClaim {
+            execution: execution.clone(),
+            prompt: crate::render_workspace_agent_handoff_prompt(
+                &crate::WorkspaceAgentHandoffPromptInput::from(packet),
+                Some(&run.id),
+            ),
+        })
+        .await
+        .expect("agent run should claim its model turn");
+    execution
+}
+
+#[tokio::test]
+async fn workspace_agent_run_start_rejects_asserted_source_turn() {
+    let runtime = test_runtime().await;
+    let (client, note) = seed_client_note(&runtime).await;
+    let packet = runtime
+        .workspace()
+        .prepare_context_packet(packet_create(&client, &note))
+        .await
+        .expect("packet should prepare");
+    let mut start = run_start(&packet);
+    start.source_turn_id = Some("caller-asserted-turn".to_string());
+
+    let error = runtime
+        .workspace()
+        .start_agent_run(start)
+        .await
+        .expect_err("ordinary agent starts must not assert a source turn")
+        .to_string();
+    assert!(error.contains("server-owned"));
+    let runs = runtime
+        .workspace()
+        .list_agent_runs(crate::WorkspaceAgentRunFilter {
+            client_id: client.id,
+            packet_id: Some(packet.id.clone()),
+            limit: Some(10),
+            ..Default::default()
+        })
+        .await
+        .expect("agent run list should remain readable");
+    assert_eq!(runs, Vec::new());
+}
+
+#[tokio::test]
+async fn workspace_agent_run_start_rejects_unsupported_run_kind() {
+    let runtime = test_runtime().await;
+    let (client, note) = seed_client_note(&runtime).await;
+    let packet = runtime
+        .workspace()
+        .prepare_context_packet(packet_create(&client, &note))
+        .await
+        .expect("packet should prepare");
+    let mut start = run_start(&packet);
+    start.run_kind = "caller_defined".to_string();
+
+    let error = runtime
+        .workspace()
+        .start_agent_run(start)
+        .await
+        .expect_err("unknown run kinds must not bypass claim provenance")
+        .to_string();
+    assert!(error.contains("unsupported workspace agent run kind"));
+}
+
+#[tokio::test]
+async fn workspace_agent_run_start_requires_and_normalizes_execution_identity() {
+    let runtime = test_runtime().await;
+    let (client, note) = seed_client_note(&runtime).await;
+    let packet = runtime
+        .workspace()
+        .prepare_context_packet(packet_create(&client, &note))
+        .await
+        .expect("packet should prepare");
+    let base = run_start(&packet);
+    let mut missing_thread = base.clone();
+    missing_thread.source_thread_id = None;
+    let mut blank_thread = base.clone();
+    blank_thread.source_thread_id = Some("  ".to_string());
+    let mut blank_provider = base.clone();
+    blank_provider.provider = "  ".to_string();
+    let mut blank_model = base.clone();
+    blank_model.model = "  ".to_string();
+
+    for (start, expected_error) in [
+        (missing_thread, "source thread must not be empty"),
+        (blank_thread, "source thread must not be empty"),
+        (blank_provider, "provider must not be empty"),
+        (blank_model, "model must not be empty"),
+    ] {
+        let error = runtime
+            .workspace()
+            .start_agent_run(start)
+            .await
+            .expect_err("incomplete agent execution identity must be rejected")
+            .to_string();
+        assert!(error.contains(expected_error), "unexpected error: {error}");
+    }
+    assert_eq!(
+        runtime
+            .workspace()
+            .list_agent_runs(crate::WorkspaceAgentRunFilter {
+                client_id: client.id.clone(),
+                packet_id: Some(packet.id.clone()),
+                limit: Some(10),
+                ..Default::default()
+            })
+            .await
+            .expect("agent run list should remain readable"),
+        Vec::new()
+    );
+
+    let mut normalized = base;
+    normalized.provider = "  test-provider  ".to_string();
+    normalized.model = "  test-model  ".to_string();
+    normalized.source_thread_id = Some("  thread-synthetic  ".to_string());
+    let run = runtime
+        .workspace()
+        .start_agent_run(normalized)
+        .await
+        .expect("complete normalized execution identity should start");
+    assert_eq!(run.provider, "test-provider");
+    assert_eq!(run.model, "test-model");
+    assert_eq!(run.source_thread_id.as_deref(), Some("thread-synthetic"));
+    assert_eq!(run.source_turn_id, None);
+}
+
+#[tokio::test]
+async fn workspace_manual_import_requires_complete_optional_provenance() {
+    let runtime = test_runtime().await;
+    let (client, note) = seed_client_note(&runtime).await;
+    let packet = runtime
+        .workspace()
+        .prepare_context_packet(packet_create(&client, &note))
+        .await
+        .expect("packet should prepare");
+    let mut thread_only = run_start(&packet);
+    thread_only.run_kind = "manual_import".to_string();
+    thread_only.idempotency_key = "manual-thread-only".to_string();
+    thread_only.provider = "manual".to_string();
+    thread_only.model.clear();
+    let mut turn_only = thread_only.clone();
+    turn_only.idempotency_key = "manual-turn-only".to_string();
+    turn_only.source_thread_id = None;
+    turn_only.source_turn_id = Some("external-turn".to_string());
+
+    for start in [thread_only, turn_only] {
+        let error = runtime
+            .workspace()
+            .start_agent_run(start)
+            .await
+            .expect_err("partial manual provenance must be rejected")
+            .to_string();
+        assert!(error.contains("must be provided together"));
+    }
+
+    let mut complete = run_start(&packet);
+    complete.run_kind = "manual_import".to_string();
+    complete.idempotency_key = "manual-complete".to_string();
+    complete.provider = "manual".to_string();
+    complete.model.clear();
+    complete.source_thread_id = Some("  external-thread  ".to_string());
+    complete.source_turn_id = Some("  external-turn  ".to_string());
+    let run = runtime
+        .workspace()
+        .start_agent_run(complete)
+        .await
+        .expect("complete manual provenance should start");
+    assert_eq!(run.source_thread_id.as_deref(), Some("external-thread"));
+    assert_eq!(run.source_turn_id.as_deref(), Some("external-turn"));
+
+    let mut unbound = run_start(&packet);
+    unbound.run_kind = "manual_import".to_string();
+    unbound.idempotency_key = "manual-unbound".to_string();
+    unbound.provider = "manual".to_string();
+    unbound.model.clear();
+    unbound.source_thread_id = None;
+    let unbound = runtime
+        .workspace()
+        .start_agent_run(unbound)
+        .await
+        .expect("manual import without external provenance should start");
+    let error = runtime
+        .workspace()
+        .complete_agent_run_with_result(result_create(&packet, &unbound))
+        .await
+        .expect_err("manual result completion must not create partial provenance")
+        .to_string();
+    assert!(error.contains("must be provided together"));
+    let stored = runtime
+        .workspace()
+        .list_agent_runs(crate::WorkspaceAgentRunFilter {
+            client_id: client.id,
+            packet_id: Some(packet.id),
+            limit: Some(10),
+            ..Default::default()
+        })
+        .await
+        .expect("manual runs should remain readable");
+    let unbound = stored
+        .iter()
+        .find(|candidate| candidate.id == unbound.id)
+        .expect("rejected manual run should remain stored");
+    assert_eq!(unbound.status, "running");
+    assert_eq!(unbound.source_thread_id, None);
+    assert_eq!(unbound.source_turn_id, None);
+}
+
+#[tokio::test]
+async fn workspace_agent_result_rejects_unclaimed_completion() {
+    let runtime = test_runtime().await;
+    let (client, note) = seed_client_note(&runtime).await;
+    let packet = runtime
+        .workspace()
+        .prepare_context_packet(packet_create(&client, &note))
+        .await
+        .expect("packet should prepare");
+    let run = runtime
+        .workspace()
+        .start_agent_run(run_start(&packet))
+        .await
+        .expect("run should start");
+    submit_packet(&runtime, &packet).await;
+    let execution = crate::WorkspaceAgentExecutionBinding {
+        run_id: run.id.clone(),
+        source_thread_id: run
+            .source_thread_id
+            .clone()
+            .expect("agent run should have a source thread"),
+        source_turn_id: "turn-synthetic".to_string(),
+        provider: run.provider.clone(),
+        model: run.model.clone(),
+    };
+
+    let error = runtime
+        .workspace()
+        .complete_agent_turn(turn_completion(execution.clone()))
+        .await
+        .expect_err("an unclaimed agent run must not complete")
+        .to_string();
+    assert!(error.contains("does not match the durably claimed run identity"));
+    let stored = runtime
+        .workspace()
+        .list_agent_runs(crate::WorkspaceAgentRunFilter {
+            client_id: client.id,
+            packet_id: Some(packet.id.clone()),
+            limit: Some(10),
+            ..Default::default()
+        })
+        .await
+        .expect("agent run list should succeed");
+    assert_eq!(stored.len(), 1);
+    assert_eq!(stored[0].status, "running");
+    assert_eq!(stored[0].source_turn_id, None);
+
+    sqlx::query("UPDATE workspace_agent_runs SET source_turn_id = ? WHERE id = ?")
+        .bind("turn-synthetic")
+        .bind(&run.id)
+        .execute(runtime.workspace().pool.as_ref())
+        .await
+        .expect("legacy asserted turn fixture should update");
+    let error = runtime
+        .workspace()
+        .complete_agent_turn(turn_completion(execution))
+        .await
+        .expect_err("a turn id without its durable claim source must not complete")
+        .to_string();
+    assert!(error.contains("does not have a durable claimed handoff prompt"));
+    assert_no_turn_completion(&runtime, &run.id).await;
+}
+
+#[tokio::test]
+async fn workspace_agent_result_rejects_a_mismatched_claimed_turn() {
+    let runtime = test_runtime().await;
+    let (client, note) = seed_client_note(&runtime).await;
+    let packet = runtime
+        .workspace()
+        .prepare_context_packet(packet_create(&client, &note))
+        .await
+        .expect("packet should prepare");
+    let run = runtime
+        .workspace()
+        .start_agent_run(run_start(&packet))
+        .await
+        .expect("run should start");
+    let execution = claim_run(&runtime, &packet, &run).await;
+    let mut mismatched_execution = execution;
+    mismatched_execution.source_turn_id = "different-turn".to_string();
+
+    let error = runtime
+        .workspace()
+        .complete_agent_turn(turn_completion(mismatched_execution))
+        .await
+        .expect_err("a result from another turn must not complete the run")
+        .to_string();
+    assert!(error.contains("does not match the durably claimed run identity"));
+    assert_no_turn_completion(&runtime, &run.id).await;
+    let stored = runtime
+        .workspace()
+        .list_agent_runs(crate::WorkspaceAgentRunFilter {
+            client_id: client.id,
+            packet_id: Some(packet.id),
+            limit: Some(10),
+            ..Default::default()
+        })
+        .await
+        .expect("agent run list should succeed");
+    assert_eq!(stored.len(), 1);
+    assert_eq!(stored[0].status, "running");
+    assert_eq!(stored[0].source_turn_id.as_deref(), Some("turn-synthetic"));
+}
+
+#[tokio::test]
+async fn workspace_agent_result_uses_stored_claim_provenance() {
+    let runtime = test_runtime().await;
+    let (client, note) = seed_client_note(&runtime).await;
+    let packet = runtime
+        .workspace()
+        .prepare_context_packet(packet_create(&client, &note))
+        .await
+        .expect("packet should prepare");
+    let run = runtime
+        .workspace()
+        .start_agent_run(run_start(&packet))
+        .await
+        .expect("run should start");
+    let execution = claim_run(&runtime, &packet, &run).await;
+
+    let completion = runtime
+        .workspace()
+        .complete_agent_turn(turn_completion(execution))
+        .await
+        .expect("claimed agent run should complete from stored provenance");
+    let audit = runtime
+        .workspace()
+        .list_audit_events("agent_result", &completion.result.id)
+        .await
+        .expect("result audit should list");
+    assert!(audit.iter().any(|event| {
+        event.action == "saved"
+            && event.actor == "agent"
+            && event.actor_kind == "agent"
+            && event.source == "agent_harness"
+            && event.source_thread_id.as_deref() == Some("thread-synthetic")
+            && event.source_turn_id.as_deref() == Some("turn-synthetic")
+    }));
+}
+
+#[tokio::test]
+async fn workspace_agent_turn_completion_is_atomic_idempotent_and_integrity_checked() {
+    let runtime = test_runtime().await;
+    let (client, note) = seed_client_note(&runtime).await;
+    let packet = runtime
+        .workspace()
+        .prepare_context_packet(packet_create(&client, &note))
+        .await
+        .expect("packet should prepare");
+    let run = runtime
+        .workspace()
+        .start_agent_run(run_start(&packet))
+        .await
+        .expect("run should start");
+    let execution = claim_run(&runtime, &packet, &run).await;
+    let input = turn_completion(execution.clone());
+
+    let completion = runtime
+        .workspace()
+        .complete_agent_turn(input.clone())
+        .await
+        .expect("claimed model output should complete atomically");
+    assert!(!completion.replayed);
+    assert_eq!(completion.result.body, input.body);
+    assert_eq!(
+        completion.body_sha256,
+        format!("{:x}", Sha256::digest(input.body.as_bytes()))
+    );
+    assert_eq!(completion.source_thread_id, execution.source_thread_id);
+    assert_eq!(completion.source_turn_id, execution.source_turn_id);
+    assert_eq!(completion.provider, execution.provider);
+    assert_eq!(completion.model, execution.model);
+    assert_eq!(completion.assistant_message_id, input.assistant_message_id);
+    assert_eq!(completion.idempotency_key, input.idempotency_key);
+
+    let mut expected_replay = completion.clone();
+    expected_replay.replayed = true;
+    let replay = runtime
+        .workspace()
+        .complete_agent_turn(input.clone())
+        .await
+        .expect("the exact terminal write should replay idempotently");
+    assert_eq!(replay, expected_replay);
+
+    let run_status: String =
+        sqlx::query_scalar("SELECT status FROM workspace_agent_runs WHERE id = ?")
+            .bind(&run.id)
+            .fetch_one(runtime.workspace().pool.as_ref())
+            .await
+            .expect("completed run status should load");
+    let result_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM workspace_agent_results WHERE run_id = ?")
+            .bind(&run.id)
+            .fetch_one(runtime.workspace().pool.as_ref())
+            .await
+            .expect("atomic result count should load");
+    let completion_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM workspace_agent_turn_completions WHERE run_id = ?",
+    )
+    .bind(&run.id)
+    .fetch_one(runtime.workspace().pool.as_ref())
+    .await
+    .expect("atomic completion receipt count should load");
+    assert_eq!(
+        (run_status, result_count, completion_count),
+        ("completed".to_string(), 1, 1)
+    );
+
+    let mut changed_body = input.clone();
+    changed_body.body.push_str("\nChanged after completion");
+    let error = runtime
+        .workspace()
+        .complete_agent_turn(changed_body)
+        .await
+        .expect_err("the same run must reject a changed response body")
+        .to_string();
+    assert!(error.contains("already has a different terminal completion"));
+
+    sqlx::query("UPDATE workspace_agent_results SET body = ? WHERE id = ?")
+        .bind("tampered body")
+        .bind(&completion.result.id)
+        .execute(runtime.workspace().pool.as_ref())
+        .await
+        .expect("integrity corruption fixture should update the stored body");
+    let error = runtime
+        .workspace()
+        .complete_agent_turn(input)
+        .await
+        .expect_err("an exact replay must verify the persisted result body")
+        .to_string();
+    assert!(error.contains("persisted integrity checks"));
+}
+
+#[tokio::test]
+async fn workspace_startup_recovery_cancels_unreceipted_unclaimed_and_claimed_agent_runs() {
+    let runtime = test_runtime().await;
+    let (client, note) = seed_client_note(&runtime).await;
+
+    let unclaimed_packet = runtime
+        .workspace()
+        .prepare_context_packet(packet_create(&client, &note))
+        .await
+        .expect("unclaimed packet should prepare");
+    let mut unclaimed_start = run_start(&unclaimed_packet);
+    unclaimed_start.idempotency_key = "turn:unclaimed-orphan".to_string();
+    let unclaimed_run = runtime
+        .workspace()
+        .start_agent_run(unclaimed_start)
+        .await
+        .expect("unclaimed run should start");
+
+    let claimed_packet = runtime
+        .workspace()
+        .prepare_context_packet(packet_create(&client, &note))
+        .await
+        .expect("claimed packet should prepare");
+    let mut claimed_start = run_start(&claimed_packet);
+    claimed_start.idempotency_key = "turn:claimed-orphan".to_string();
+    let claimed_run = runtime
+        .workspace()
+        .start_agent_run(claimed_start)
+        .await
+        .expect("claimed run should start");
+    claim_run(&runtime, &claimed_packet, &claimed_run).await;
+
+    assert_eq!(
+        runtime
+            .workspace()
+            .reconcile_orphaned_agent_turns()
+            .await
+            .expect("startup orphan recovery"),
+        2
+    );
+    let runs = runtime
+        .workspace()
+        .list_agent_runs(crate::WorkspaceAgentRunFilter {
+            client_id: client.id,
+            note_id: Some(note.id),
+            limit: Some(10),
+            ..Default::default()
+        })
+        .await
+        .expect("reconciled runs should list");
+    let unclaimed = runs
+        .iter()
+        .find(|candidate| candidate.id == unclaimed_run.id)
+        .expect("unclaimed run should remain auditable");
+    assert_eq!(unclaimed.status, "canceled");
+    assert_eq!(unclaimed.source_turn_id, None);
+    assert_eq!(
+        unclaimed.error_summary,
+        "recovered an unclaimed master-agent run without a Plan submission receipt"
+    );
+    let claimed = runs
+        .iter()
+        .find(|candidate| candidate.id == claimed_run.id)
+        .expect("claimed run should remain auditable");
+    assert_eq!(claimed.status, "canceled");
+    assert_eq!(claimed.source_turn_id.as_deref(), Some("turn-synthetic"));
+    assert_eq!(
+        claimed.error_summary,
+        "recovered after an interrupted master-agent turn"
+    );
+}
+
+#[tokio::test]
+async fn workspace_agent_turn_claim_persists_exact_handoff_prompt_source() {
+    let runtime = test_runtime().await;
+    let (client, note) = seed_client_note(&runtime).await;
+    let packet = runtime
+        .workspace()
+        .prepare_context_packet(packet_create(&client, &note))
+        .await
+        .expect("packet should prepare");
+    let run = runtime
+        .workspace()
+        .start_agent_run(run_start(&packet))
+        .await
+        .expect("run should start");
+    let expected_prompt = crate::render_workspace_agent_handoff_prompt(
+        &crate::WorkspaceAgentHandoffPromptInput::from(&packet),
+        Some(&run.id),
+    );
+    claim_run(&runtime, &packet, &run).await;
+
+    let sources = runtime
+        .workspace()
+        .list_agent_run_sources(&run.id)
+        .await
+        .expect("claimed run sources should list");
+    let prompt_source = sources
+        .iter()
+        .find(|source| source.source_entity_type == "handoff_prompt")
+        .expect("claim should persist its exact handoff prompt");
+    assert_eq!(prompt_source.source_entity_id, "turn-synthetic");
+    assert_eq!(prompt_source.source_revision, Some(1));
+    let snapshot: serde_json::Value =
+        serde_json::from_str(&prompt_source.snapshot_json).expect("prompt snapshot should be JSON");
+    assert_eq!(snapshot["schema"], "workspace-agent-handoff-prompt-v1");
+    assert_eq!(
+        snapshot["renderer"],
+        "render_workspace_agent_handoff_prompt"
+    );
+    assert_eq!(snapshot["rendererVersion"], 1);
+    assert_eq!(snapshot["runId"], run.id);
+    assert_eq!(snapshot["sourceThreadId"], "thread-synthetic");
+    assert_eq!(snapshot["sourceTurnId"], "turn-synthetic");
+    assert_eq!(snapshot["prompt"], expected_prompt);
+    assert_eq!(
+        snapshot["promptSha256"],
+        format!("{:x}", Sha256::digest(expected_prompt.as_bytes()))
+    );
+    assert_eq!(
+        prompt_source.content_sha256,
+        format!(
+            "{:x}",
+            Sha256::digest(prompt_source.snapshot_json.as_bytes())
+        )
+    );
+}
+
+#[tokio::test]
+async fn workspace_agent_turn_claim_enforces_exact_prompt_and_execution_provenance() {
+    let runtime = test_runtime().await;
+    let (client, note) = seed_client_note(&runtime).await;
+    let packet = runtime
+        .workspace()
+        .prepare_context_packet(packet_create(&client, &note))
+        .await
+        .expect("packet should prepare");
+    let run = runtime
+        .workspace()
+        .start_agent_run(run_start(&packet))
+        .await
+        .expect("run should start");
+    submit_packet(&runtime, &packet).await;
+    let prompt = crate::render_workspace_agent_handoff_prompt(
+        &crate::WorkspaceAgentHandoffPromptInput::from(&packet),
+        Some(&run.id),
+    );
+    let execution = crate::WorkspaceAgentExecutionBinding {
+        run_id: run.id.clone(),
+        source_thread_id: "thread-synthetic".to_string(),
+        source_turn_id: "turn-synthetic".to_string(),
+        provider: "test-provider".to_string(),
+        model: "test-model".to_string(),
+    };
+
+    for (label, claim) in [
+        (
+            "prompt",
+            crate::WorkspaceAgentTurnClaim {
+                execution: execution.clone(),
+                prompt: format!("{prompt}\nextra instructions"),
+            },
+        ),
+        (
+            "thread",
+            crate::WorkspaceAgentTurnClaim {
+                execution: crate::WorkspaceAgentExecutionBinding {
+                    source_thread_id: "different-thread".to_string(),
+                    ..execution.clone()
+                },
+                prompt: prompt.clone(),
+            },
+        ),
+        (
+            "provider",
+            crate::WorkspaceAgentTurnClaim {
+                execution: crate::WorkspaceAgentExecutionBinding {
+                    provider: "different-provider".to_string(),
+                    ..execution.clone()
+                },
+                prompt: prompt.clone(),
+            },
+        ),
+        (
+            "model",
+            crate::WorkspaceAgentTurnClaim {
+                execution: crate::WorkspaceAgentExecutionBinding {
+                    model: "different-model".to_string(),
+                    ..execution.clone()
+                },
+                prompt: prompt.clone(),
+            },
+        ),
+    ] {
+        let result = runtime.workspace().claim_agent_turn(claim).await;
+        assert!(result.is_err(), "{label} mismatch should fail");
+    }
+
+    let claimed = runtime
+        .workspace()
+        .claim_agent_turn(crate::WorkspaceAgentTurnClaim {
+            execution: execution.clone(),
+            prompt: prompt.clone(),
+        })
+        .await
+        .expect("exact claim should succeed");
+    assert_eq!(claimed, execution);
+
+    runtime
+        .workspace()
+        .read_authorized_agent_context_for_execution(
+            crate::WorkspaceAgentContextReadRequest {
+                run_id: run.id.clone(),
+                category: "visit_history".to_string(),
+                max_records: Some(5),
+            },
+            crate::WorkspaceAgentExecutionBinding {
+                source_turn_id: "different-turn".to_string(),
+                ..execution.clone()
+            },
+        )
+        .await
+        .expect_err("a context read from another turn must be denied");
+
+    let context = runtime
+        .workspace()
+        .read_authorized_agent_context_for_execution(
+            crate::WorkspaceAgentContextReadRequest {
+                run_id: run.id.clone(),
+                category: "visit_history".to_string(),
+                max_records: Some(5),
+            },
+            execution.clone(),
+        )
+        .await
+        .expect("claimed execution should read authorized context");
+    assert_eq!(context.run_id, run.id);
+
+    runtime
+        .workspace()
+        .claim_agent_turn(crate::WorkspaceAgentTurnClaim { execution, prompt })
+        .await
+        .expect_err("a claimed run must not authorize a second model turn");
+    let audit = runtime
+        .workspace()
+        .list_audit_events("agent_run", &run.id)
+        .await
+        .expect("claim audit should list");
+    assert_eq!(
+        audit
+            .iter()
+            .filter(|event| event.action == "turn_claimed")
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn workspace_agent_turn_claim_rejects_a_downgraded_unclassified_store() {
+    let runtime = test_runtime().await;
+    let (client, note) = seed_client_note(&runtime).await;
+    let packet = runtime
+        .workspace()
+        .prepare_context_packet(packet_create(&client, &note))
+        .await
+        .expect("packet should prepare");
+    let run = runtime
+        .workspace()
+        .start_agent_run(run_start(&packet))
+        .await
+        .expect("run should start while the store is synthetic");
+    let prompt = crate::render_workspace_agent_handoff_prompt(
+        &crate::WorkspaceAgentHandoffPromptInput::from(&packet),
+        Some(&run.id),
+    );
+
+    let mut connection = runtime
+        .workspace()
+        .pool
+        .acquire()
+        .await
+        .expect("policy corruption fixture connection");
+    sqlx::query("DROP TRIGGER workspace_data_policy_restrict_update")
+        .execute(&mut *connection)
+        .await
+        .expect("drop update guard fixture");
+    sqlx::query("PRAGMA ignore_check_constraints = ON")
+        .execute(&mut *connection)
+        .await
+        .expect("enable policy corruption fixture mode");
+    sqlx::query(
+        "UPDATE workspace_data_policy SET data_classification = 'unclassified', classified_at_ms = NULL, classified_by = NULL",
+    )
+    .execute(&mut *connection)
+    .await
+    .expect("downgrade fixture should apply after dropping the guard");
+    drop(connection);
+
+    let error = runtime
+        .workspace()
+        .claim_agent_turn(crate::WorkspaceAgentTurnClaim {
+            execution: crate::WorkspaceAgentExecutionBinding {
+                run_id: run.id.clone(),
+                source_thread_id: "thread-synthetic".to_string(),
+                source_turn_id: "turn-synthetic".to_string(),
+                provider: "test-provider".to_string(),
+                model: "test-model".to_string(),
+            },
+            prompt,
+        })
+        .await
+        .expect_err("unclassified stores must not claim a model turn");
+    assert!(error.to_string().contains("explicit synthetic"));
+
+    let stored = runtime
+        .workspace()
+        .list_agent_runs(crate::WorkspaceAgentRunFilter {
+            client_id: client.id,
+            packet_id: Some(packet.id),
+            limit: Some(10),
+            ..Default::default()
+        })
+        .await
+        .expect("run lookup should succeed");
+    assert_eq!(stored.len(), 1);
+    let stored = &stored[0];
+    assert_eq!(stored.status, "running");
+    assert_eq!(stored.source_turn_id, None);
+    let audit = runtime
+        .workspace()
+        .list_audit_events("agent_run", &run.id)
+        .await
+        .expect("audit should list");
+    assert!(audit.iter().all(|event| event.action != "turn_claimed"));
 }
 
 #[tokio::test]
@@ -203,6 +1058,11 @@ async fn workspace_agent_run_preserves_packet_revision_and_source_manifest() {
         .expect("packet authorization contract source");
     assert!(contract_source.snapshot_json.contains("authorizedScope"));
     assert!(contract_source.snapshot_json.contains("expectedOutputKind"));
+    assert!(
+        contract_source
+            .snapshot_json
+            .contains(r#""dataClassification":"synthetic""#)
+    );
     assert_eq!(
         contract_source.content_sha256,
         format!(
@@ -210,6 +1070,22 @@ async fn workspace_agent_run_preserves_packet_revision_and_source_manifest() {
             Sha256::digest(contract_source.snapshot_json.as_bytes())
         )
     );
+
+    let reserved_source_error = runtime
+        .workspace()
+        .record_agent_run_source(crate::WorkspaceAgentRunSourceCreate {
+            run_id: run.id.clone(),
+            source_entity_type: "handoff_prompt".to_string(),
+            source_entity_id: "caller-forged-turn".to_string(),
+            source_revision: Some(1),
+            display_label: "Caller prompt".to_string(),
+            snapshot_json: r#"{"prompt":"forged"}"#.to_string(),
+            access_purpose: "bypass claim".to_string(),
+        })
+        .await
+        .expect_err("handoff prompt sources must be reserved to the claim transaction")
+        .to_string();
+    assert!(reserved_source_error.contains("server-owned"));
 
     let note_snapshot = serde_json::json!({
         "clientId": client.id,
@@ -236,24 +1112,17 @@ async fn workspace_agent_run_preserves_packet_revision_and_source_manifest() {
         format!("{:x}", Sha256::digest(note_snapshot.as_bytes()))
     );
 
-    let mut mismatched_result = result_create(&packet, &run);
-    mismatched_result.result_kind = "unrelated_recommendation".to_string();
-    let mismatch_error = runtime
+    let execution = claim_run(&runtime, &packet, &run).await;
+    let completion = runtime
         .workspace()
-        .complete_agent_run_with_result(mismatched_result)
-        .await
-        .expect_err("result kind must match the packet contract")
-        .to_string();
-    assert!(mismatch_error.contains("does not match packet expected output kind"));
-
-    let result = runtime
-        .workspace()
-        .complete_agent_run_with_result(result_create(&packet, &run))
+        .complete_agent_turn(turn_completion(execution))
         .await
         .expect("run result should save");
+    let result = completion.result;
     assert_eq!(result.run_id.as_deref(), Some(run.id.as_str()));
     assert_eq!(result.base_note_revision, packet.base_note_revision);
     assert_eq!(result.packet_context_sha256, packet.context_envelope_sha256);
+    assert_eq!(result.result_kind, packet.expected_output_kind);
     let completed_runs = runtime
         .workspace()
         .list_agent_runs(crate::WorkspaceAgentRunFilter {
@@ -337,6 +1206,9 @@ async fn workspace_manual_result_import_is_audited_as_clinician_work() {
     assert_eq!(runs.len(), 1);
     assert_eq!(runs[0].id, run_id);
     assert_eq!(runs[0].run_kind, "manual_import");
+    assert_eq!(runs[0].source_thread_id, None);
+    assert_eq!(runs[0].source_turn_id, None);
+    assert_eq!(runs[0].status, "completed");
     let audit = runtime
         .workspace()
         .list_audit_events("agent_result", &result.id)
@@ -405,11 +1277,13 @@ async fn workspace_stale_agent_result_proposal_keeps_original_base_and_decisions
         .start_agent_run(run_start(&packet))
         .await
         .expect("run should start");
+    let execution = claim_run(&runtime, &packet, &run).await;
     let result = runtime
         .workspace()
-        .complete_agent_run_with_result(result_create(&packet, &run))
+        .complete_agent_turn(turn_completion(execution))
         .await
-        .expect("result should save");
+        .expect("result should save")
+        .result;
     let updated_note = runtime
         .workspace()
         .upsert_note(crate::WorkspaceNoteUpsert {
@@ -966,14 +1840,18 @@ async fn workspace_authorized_context_reader_returns_hashed_patient_owned_record
         .start_agent_run(run_start(&packet))
         .await
         .expect("run should start");
+    let execution = claim_run(&runtime, &packet, &run).await;
 
     let visits = runtime
         .workspace()
-        .read_authorized_agent_context(crate::WorkspaceAgentContextReadRequest {
-            run_id: run.id.clone(),
-            category: "visit_history".to_string(),
-            max_records: Some(10),
-        })
+        .read_authorized_agent_context_for_execution(
+            crate::WorkspaceAgentContextReadRequest {
+                run_id: run.id.clone(),
+                category: "visit_history".to_string(),
+                max_records: Some(10),
+            },
+            execution.clone(),
+        )
         .await
         .expect("visit history should be authorized");
     assert_eq!(visits.run_id, run.id);
@@ -998,11 +1876,14 @@ async fn workspace_authorized_context_reader_returns_hashed_patient_owned_record
 
     let notes = runtime
         .workspace()
-        .read_authorized_agent_context(crate::WorkspaceAgentContextReadRequest {
-            run_id: run.id.clone(),
-            category: "progress_notes".to_string(),
-            max_records: Some(10),
-        })
+        .read_authorized_agent_context_for_execution(
+            crate::WorkspaceAgentContextReadRequest {
+                run_id: run.id.clone(),
+                category: "progress_notes".to_string(),
+                max_records: Some(10),
+            },
+            execution,
+        )
         .await
         .expect("progress notes should be authorized");
     assert_eq!(notes.sources.len(), 2);
@@ -1034,9 +1915,142 @@ async fn workspace_authorized_context_reader_returns_hashed_patient_owned_record
         .expect("source manifest should list");
     assert_eq!(
         manifest.len(),
-        5,
-        "packet envelope + packet contract + visit + two note snapshots"
+        6,
+        "packet envelope + packet contract + handoff prompt + visit + two note snapshots"
     );
+}
+
+#[tokio::test]
+async fn workspace_agent_source_continuations_reject_unclassified_legacy_run_without_writes() {
+    let runtime = test_runtime().await;
+    let (client, note) = seed_client_note(&runtime).await;
+    runtime
+        .workspace()
+        .upsert_encounter(crate::WorkspaceEncounterUpsert {
+            client_id: client.id.clone(),
+            kind: "therapy".to_string(),
+            title: "Synthetic legacy visit".to_string(),
+            status: "completed".to_string(),
+            ..Default::default()
+        })
+        .await
+        .expect("encounter should save");
+    let packet = runtime
+        .workspace()
+        .prepare_context_packet(packet_create(&client, &note))
+        .await
+        .expect("packet should prepare");
+    let run = runtime
+        .workspace()
+        .start_agent_run(run_start(&packet))
+        .await
+        .expect("classified run should start");
+    let execution = claim_run(&runtime, &packet, &run).await;
+    let sources_before = runtime
+        .workspace()
+        .list_agent_run_sources(&run.id)
+        .await
+        .expect("source manifest should list");
+    let audits_before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM workspace_audit_events")
+        .fetch_one(runtime.workspace().pool.as_ref())
+        .await
+        .expect("audit count should load");
+
+    let mut connection = runtime
+        .workspace()
+        .pool
+        .acquire()
+        .await
+        .expect("policy corruption fixture connection");
+    sqlx::query("DROP TRIGGER workspace_data_policy_restrict_update")
+        .execute(&mut *connection)
+        .await
+        .expect("drop policy update guard fixture");
+    sqlx::query("PRAGMA ignore_check_constraints = ON")
+        .execute(&mut *connection)
+        .await
+        .expect("policy corruption fixture mode");
+    sqlx::query("UPDATE workspace_data_policy SET data_classification = 'unclassified', classified_at_ms = NULL, classified_by = NULL")
+        .execute(&mut *connection)
+        .await
+        .expect("legacy unclassified policy fixture");
+
+    let error = runtime
+        .workspace()
+        .read_authorized_agent_context_for_execution(
+            crate::WorkspaceAgentContextReadRequest {
+                run_id: run.id.clone(),
+                category: "visit_history".to_string(),
+                max_records: Some(10),
+            },
+            execution,
+        )
+        .await
+        .expect_err("unclassified legacy run must not read context");
+    assert!(error.to_string().contains("explicit synthetic"));
+    let error = runtime
+        .workspace()
+        .record_agent_run_source(crate::WorkspaceAgentRunSourceCreate {
+            run_id: run.id.clone(),
+            source_entity_type: "note_revision".to_string(),
+            source_entity_id: note.id,
+            source_revision: Some(1),
+            display_label: "Rejected legacy source".to_string(),
+            snapshot_json: r#"{"synthetic":true}"#.to_string(),
+            access_purpose: "policy gate regression".to_string(),
+        })
+        .await
+        .expect_err("unclassified legacy run must not record sources");
+    assert!(error.to_string().contains("explicit synthetic"));
+    assert_eq!(
+        runtime
+            .workspace()
+            .list_agent_run_sources(&run.id)
+            .await
+            .expect("rejected read must preserve sources"),
+        sources_before
+    );
+    let error = runtime
+        .workspace()
+        .update_agent_run_status(crate::WorkspaceAgentRunStatusUpdate {
+            run_id: run.id.clone(),
+            status: "canceled".to_string(),
+            error_summary: "must not persist".to_string(),
+            actor: "agent".to_string(),
+        })
+        .await
+        .expect_err("unclassified legacy run must not change status")
+        .to_string();
+    assert!(error.contains("explicit synthetic"));
+    let error = runtime
+        .workspace()
+        .complete_agent_run_with_result(result_create(&packet, &run))
+        .await
+        .expect_err("unclassified legacy run must not save a result")
+        .to_string();
+    assert!(error.contains("explicit synthetic"));
+    let stored_run = runtime
+        .workspace()
+        .list_agent_runs(crate::WorkspaceAgentRunFilter {
+            client_id: client.id,
+            packet_id: Some(packet.id),
+            limit: Some(10),
+            ..Default::default()
+        })
+        .await
+        .expect("run should remain readable");
+    assert_eq!(stored_run.len(), 1);
+    assert_eq!(stored_run[0].status, "running");
+    let result_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM workspace_agent_results")
+        .fetch_one(runtime.workspace().pool.as_ref())
+        .await
+        .expect("result count should load");
+    assert_eq!(result_count, 0);
+    let audits_after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM workspace_audit_events")
+        .fetch_one(runtime.workspace().pool.as_ref())
+        .await
+        .expect("audit count should load");
+    assert_eq!(audits_after, audits_before);
 }
 
 #[tokio::test]
@@ -1074,14 +2088,18 @@ async fn workspace_authorized_context_reader_enforces_default_and_max_limits() {
         .start_agent_run(run_start(&packet))
         .await
         .expect("run should start");
+    let execution = claim_run(&runtime, &packet, &run).await;
 
     let defaulted = runtime
         .workspace()
-        .read_authorized_agent_context(crate::WorkspaceAgentContextReadRequest {
-            run_id: run.id.clone(),
-            category: "visit_history".to_string(),
-            max_records: None,
-        })
+        .read_authorized_agent_context_for_execution(
+            crate::WorkspaceAgentContextReadRequest {
+                run_id: run.id.clone(),
+                category: "visit_history".to_string(),
+                max_records: None,
+            },
+            execution.clone(),
+        )
         .await
         .expect("default limit read should succeed");
     assert_eq!(defaulted.max_records, 20);
@@ -1089,11 +2107,14 @@ async fn workspace_authorized_context_reader_enforces_default_and_max_limits() {
 
     let clamped = runtime
         .workspace()
-        .read_authorized_agent_context(crate::WorkspaceAgentContextReadRequest {
-            run_id: run.id,
-            category: "visit_history".to_string(),
-            max_records: Some(u32::MAX),
-        })
+        .read_authorized_agent_context_for_execution(
+            crate::WorkspaceAgentContextReadRequest {
+                run_id: run.id,
+                category: "visit_history".to_string(),
+                max_records: Some(u32::MAX),
+            },
+            execution,
+        )
         .await
         .expect("maximum limit read should succeed");
     assert_eq!(clamped.max_records, 100);
@@ -1139,14 +2160,18 @@ async fn workspace_authorized_context_reader_bounds_and_redacts_note_content() {
         .start_agent_run(run_start(&packet))
         .await
         .expect("run should start");
+    let execution = claim_run(&runtime, &packet, &run).await;
 
     let notes = runtime
         .workspace()
-        .read_authorized_agent_context(crate::WorkspaceAgentContextReadRequest {
-            run_id: run.id,
-            category: "progress_notes".to_string(),
-            max_records: Some(100),
-        })
+        .read_authorized_agent_context_for_execution(
+            crate::WorkspaceAgentContextReadRequest {
+                run_id: run.id,
+                category: "progress_notes".to_string(),
+                max_records: Some(100),
+            },
+            execution,
+        )
         .await
         .expect("bounded progress notes should read");
     assert!(!notes.sources.is_empty());
@@ -1208,14 +2233,18 @@ async fn workspace_authorized_context_reader_denies_scope_and_lifecycle_expansio
         .start_agent_run(run_start(&packet))
         .await
         .expect("run should start");
+    let execution = claim_run(&runtime, &packet, &run).await;
 
     let scope_error = runtime
         .workspace()
-        .read_authorized_agent_context(crate::WorkspaceAgentContextReadRequest {
-            run_id: run.id.clone(),
-            category: "progress_notes".to_string(),
-            max_records: Some(100),
-        })
+        .read_authorized_agent_context_for_execution(
+            crate::WorkspaceAgentContextReadRequest {
+                run_id: run.id.clone(),
+                category: "progress_notes".to_string(),
+                max_records: Some(100),
+            },
+            execution.clone(),
+        )
         .await
         .expect_err("an omitted category must be denied")
         .to_string();
@@ -1227,8 +2256,8 @@ async fn workspace_authorized_context_reader_denies_scope_and_lifecycle_expansio
         .expect("source manifest should list");
     assert_eq!(
         manifest.len(),
-        2,
-        "denied read must not add to the packet envelope and contract sources"
+        3,
+        "denied read must not add to the packet envelope, contract, and handoff prompt sources"
     );
 
     sqlx::query("UPDATE workspace_context_packets SET status = 'sent' WHERE id = ?")
@@ -1238,11 +2267,14 @@ async fn workspace_authorized_context_reader_denies_scope_and_lifecycle_expansio
         .expect("test should change packet lifecycle");
     let lifecycle_error = runtime
         .workspace()
-        .read_authorized_agent_context(crate::WorkspaceAgentContextReadRequest {
-            run_id: run.id,
-            category: "visit_history".to_string(),
-            max_records: Some(100),
-        })
+        .read_authorized_agent_context_for_execution(
+            crate::WorkspaceAgentContextReadRequest {
+                run_id: run.id,
+                category: "visit_history".to_string(),
+                max_records: Some(100),
+            },
+            execution,
+        )
         .await
         .expect_err("only a submitted packet may authorize reads")
         .to_string();

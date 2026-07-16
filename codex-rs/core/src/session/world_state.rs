@@ -15,6 +15,9 @@ impl Session {
         step_context: &StepContext,
     ) -> WorldState {
         let turn_context = step_context.turn.as_ref();
+        if turn_context.model_tool_mode.is_workspace_restricted() {
+            return WorldState::default();
+        }
         tracing::trace!(
             selected_capability_root_count = step_context.selected_capability_roots.len(),
             "building step world state"

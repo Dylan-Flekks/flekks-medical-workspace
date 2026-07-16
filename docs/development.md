@@ -8,7 +8,8 @@ Install Git, the Rust toolchain from `codex-rs/rust-toolchain.toml`, and `just`.
 just medical-workspace
 ```
 
-Run `/workspacemedical` when the TUI opens. Use only synthetic records and files.
+Run `/workspace-medical` when the TUI opens. `/workspacemedical` is a hidden compatibility alias.
+Use only synthetic records and files.
 
 For a manual debug build, run `cargo build -p codex-cli` from `codex-rs`, set a
 readable terminal size with `stty cols 160 rows 45`, then launch
@@ -22,6 +23,9 @@ Follow `AGENTS.md`; the repository's canonical runner is `just test`.
 just test -p codex-tui workspace_dashboard
 just test -p codex-tui medical_workspace
 just test -p codex-state workspace
+just test -p codex-core workspace_planning_mode
+just test -p codex-core workspace_context_only
+just test -p codex-app-server-protocol workspace_plan
 ```
 
 For visible TUI changes, review pending Insta snapshots and validate 80×20, 100×28, 120×32, and 160×40 layouts. Keep screenshots synthetic and outside the repository unless they are intentionally curated documentation assets.

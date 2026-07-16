@@ -1,7 +1,6 @@
 use super::*;
 use chrono::DateTime;
 use chrono::Utc;
-use codex_app_server_protocol::WorkspaceAgentContextCategory;
 use codex_app_server_protocol::WorkspaceAgentResultCreateParams;
 use codex_app_server_protocol::WorkspaceAgentResultCreateResponse;
 use codex_app_server_protocol::WorkspaceAgentResultListParams;
@@ -9,7 +8,6 @@ use codex_app_server_protocol::WorkspaceAgentResultListResponse;
 use codex_app_server_protocol::WorkspaceAgentResultStatusUpdateParams;
 use codex_app_server_protocol::WorkspaceAgentResultStatusUpdateResponse;
 use codex_app_server_protocol::WorkspaceAgentRunContextReadParams;
-use codex_app_server_protocol::WorkspaceAgentRunContextReadResponse;
 use codex_app_server_protocol::WorkspaceAgentRunListParams;
 use codex_app_server_protocol::WorkspaceAgentRunListResponse;
 use codex_app_server_protocol::WorkspaceAgentRunSourceListParams;
@@ -107,8 +105,16 @@ use codex_app_server_protocol::WorkspaceTaskUpsertResponse;
 
 #[path = "workspace_chart_commit_processor.rs"]
 mod chart_commit;
+#[path = "workspace_client_patch.rs"]
+mod client_patch;
+#[path = "workspace_coverage_processor.rs"]
+mod coverage;
+#[path = "workspace_data_policy_processor.rs"]
+mod data_policy;
 #[path = "workspace_draft_processor.rs"]
 mod drafts;
+#[path = "workspace_plan_processor.rs"]
+mod plans;
 
 const AGENT_VISIBLE_PACKET_SAFETY_CONSTRAINTS: &[&str] = &[
     "use only the stored context packet envelope",
@@ -121,11 +127,19 @@ const AGENT_VISIBLE_PACKET_SAFETY_CONSTRAINTS: &[&str] = &[
 #[derive(Clone)]
 pub(crate) struct WorkspaceRequestProcessor {
     state_db: Option<StateDbHandle>,
+    synthetic_provisioning_authority: data_policy::WorkspaceSyntheticProvisioningAuthority,
 }
 
 impl WorkspaceRequestProcessor {
-    pub(crate) fn new(state_db: Option<StateDbHandle>) -> Self {
-        Self { state_db }
+    pub(crate) fn new(
+        state_db: Option<StateDbHandle>,
+        config: &codex_core::config::Config,
+    ) -> Self {
+        Self {
+            state_db,
+            synthetic_provisioning_authority:
+                data_policy::WorkspaceSyntheticProvisioningAuthority::from_config(config),
+        }
     }
 
     pub(crate) async fn client_list(
@@ -170,39 +184,26 @@ impl WorkspaceRequestProcessor {
                 "workspace client displayName must not be empty",
             ));
         }
+        let requested_id = empty_to_none(params.id.clone());
+        let existing =
+            match requested_id.as_deref() {
+                Some(id) => state_db.workspace().get_client(id).await.map_err(|err| {
+                    internal_error(format!("failed to read workspace client: {err}"))
+                })?,
+                None => None,
+            };
+        let expected_version = empty_to_none(params.expected_version.clone());
+        if existing.is_some() && expected_version.is_none() {
+            return Err(invalid_request(
+                "workspace client expectedVersion is required for update",
+            ));
+        }
+        let input = client_patch::state_client_upsert(params, existing.as_ref())?;
         let client = state_db
             .workspace()
-            .upsert_client(codex_state::WorkspaceClientUpsert {
-                id: empty_to_none(params.id),
-                display_name: display_name.to_string(),
-                preferred_name: empty_to_none(params.preferred_name),
-                date_of_birth: empty_to_none(params.date_of_birth),
-                sex_or_gender: empty_to_none(params.sex_or_gender),
-                external_id: empty_to_none(params.external_id),
-                record_start_date: empty_to_none(params.record_start_date),
-                record_end_date: empty_to_none(params.record_end_date),
-                summary: params.summary,
-                primary_phone: empty_to_none(params.primary_phone),
-                secondary_phone: empty_to_none(params.secondary_phone),
-                email: empty_to_none(params.email),
-                preferred_contact_method: empty_to_none(params.preferred_contact_method),
-                emergency_contact_name: empty_to_none(params.emergency_contact_name),
-                emergency_contact_relationship: empty_to_none(
-                    params.emergency_contact_relationship,
-                ),
-                emergency_contact_phone: empty_to_none(params.emergency_contact_phone),
-                emergency_contact_email: empty_to_none(params.emergency_contact_email),
-                contact_notes: empty_to_none(params.contact_notes),
-                payer_name: empty_to_none(params.payer_name),
-                plan_name: empty_to_none(params.plan_name),
-                member_id: empty_to_none(params.member_id),
-                group_number: empty_to_none(params.group_number),
-                coverage_type: empty_to_none(params.coverage_type),
-                coverage_status: empty_to_none(params.coverage_status),
-                coverage_notes: empty_to_none(params.coverage_notes),
-            })
+            .upsert_client_checked(input, expected_version)
             .await
-            .map_err(|err| internal_error(format!("failed to save workspace client: {err}")))?;
+            .map_err(|err| invalid_request(format!("failed to save workspace client: {err}")))?;
         Ok(Some(
             WorkspaceClientUpsertResponse {
                 client: api_workspace_client_from_state(client)?,
@@ -1046,6 +1047,16 @@ impl WorkspaceRequestProcessor {
                 base_note_revision: params.base_note_revision,
                 authorized_scope_json,
                 expected_output_kind,
+                workspace_profile: params.workspace_profile.unwrap_or_default(),
+                plan_schema_version: params.plan_schema_version,
+                source_checkpoint_id: empty_to_none(params.source_checkpoint_id),
+                source_checkpoint_sha256: empty_to_none(params.source_checkpoint_sha256),
+                readiness_json: params.readiness_json.unwrap_or_default(),
+                workspace_plan_revision_id: empty_to_none(params.workspace_plan_revision_id),
+                workspace_plan_content_sha256: empty_to_none(params.workspace_plan_content_sha256),
+                workspace_plan_evidence_manifest_sha256: empty_to_none(
+                    params.workspace_plan_evidence_manifest_sha256,
+                ),
                 status: "prepared".to_string(),
                 actor: clinician_actor,
             })
@@ -1117,6 +1128,15 @@ impl WorkspaceRequestProcessor {
                 expected_context_envelope_sha256: params
                     .context_envelope_sha256
                     .unwrap_or_default(),
+                expected_workspace_plan_revision_id: empty_to_none(
+                    params.expected_workspace_plan_revision_id,
+                ),
+                expected_workspace_plan_content_sha256: empty_to_none(
+                    params.expected_workspace_plan_content_sha256,
+                ),
+                expected_workspace_plan_evidence_manifest_sha256: empty_to_none(
+                    params.expected_workspace_plan_evidence_manifest_sha256,
+                ),
                 run_kind: "agent".to_string(),
                 idempotency_key: params.idempotency_key,
                 provider: params.provider.unwrap_or_default(),
@@ -1231,32 +1251,8 @@ impl WorkspaceRequestProcessor {
                 "workspace agent run context read runId must not be empty",
             ));
         }
-        let category = params.category;
-        let category_name = match category {
-            WorkspaceAgentContextCategory::VisitHistory => "visit_history",
-            WorkspaceAgentContextCategory::ProgressNotes => "progress_notes",
-        };
-        let read = self
-            .state_db()?
-            .workspace()
-            .read_authorized_agent_context(codex_state::WorkspaceAgentContextReadRequest {
-                run_id: params.run_id,
-                category: category_name.to_string(),
-                max_records: params.limit,
-            })
-            .await
-            .map_err(|err| {
-                invalid_request(format!(
-                    "failed to read authorized workspace agent context: {err}"
-                ))
-            })?;
-        let sources = read
-            .sources
-            .into_iter()
-            .map(api_workspace_agent_run_source_from_state)
-            .collect();
-        Ok(Some(
-            WorkspaceAgentRunContextReadResponse { category, sources }.into(),
+        Err(invalid_request(
+            "workspace agent context is available only to the claimed workspaceContextOnly model turn through the workspace_context_read tool; run-id-only RPC reads are not authorized",
         ))
     }
 
@@ -1303,6 +1299,11 @@ impl WorkspaceRequestProcessor {
                 "workspace agent result body must not be empty",
             ));
         }
+        if empty_to_none(params.run_id.clone()).is_some() {
+            return Err(invalid_request(
+                "linked workspace agent results are committed by the bound model turn; workspace/agent/result/create only accepts explicit manual imports",
+            ));
+        }
         let summary = params
             .summary
             .as_deref()
@@ -1310,11 +1311,9 @@ impl WorkspaceRequestProcessor {
             .filter(|summary| !summary.is_empty())
             .map(ToString::to_string)
             .unwrap_or_else(|| compact_text(&params.body, 80));
-        let run_id = empty_to_none(params.run_id);
-        let linked_run = run_id.is_some();
         let input = codex_state::WorkspaceAgentResultCreate {
             packet_id: params.packet_id,
-            run_id,
+            run_id: None,
             source_thread_id: empty_to_none(params.source_thread_id),
             source_turn_id: empty_to_none(params.source_turn_id),
             body: params.body,
@@ -1329,27 +1328,19 @@ impl WorkspaceRequestProcessor {
                 .unwrap_or_else(|| "[]".to_string()),
             rationale_summary: params.rationale_summary.unwrap_or_default(),
             status: "review_pending".to_string(),
-            actor: if linked_run {
-                "agent harness".to_string()
-            } else {
-                "local clinician".to_string()
-            },
+            actor: "local clinician".to_string(),
             expected_client_id: empty_to_none(params.client_id),
             expected_note_id: empty_to_none(params.note_id),
             expected_context_envelope_sha256: empty_to_none(params.context_envelope_sha256)
                 .unwrap_or_default(),
         };
-        let result = if linked_run {
-            state_db
-                .workspace()
-                .complete_agent_run_with_result(input)
-                .await
-        } else {
-            state_db.workspace().create_agent_result(input).await
-        }
-        .map_err(|err| {
-            invalid_request(format!("failed to create workspace agent result: {err}"))
-        })?;
+        let result = state_db
+            .workspace()
+            .create_agent_result(input)
+            .await
+            .map_err(|err| {
+                invalid_request(format!("failed to create workspace agent result: {err}"))
+            })?;
         Ok(Some(
             WorkspaceAgentResultCreateResponse {
                 result: api_workspace_agent_result_from_state(result),
@@ -1752,17 +1743,36 @@ fn api_workspace_client_from_state(
         id: value.id,
         version,
         display_name: value.display_name,
+        legal_first_name: value.legal_first_name,
+        legal_middle_name: value.legal_middle_name,
+        legal_last_name: value.legal_last_name,
+        legal_suffix: value.legal_suffix,
         preferred_name: value.preferred_name,
+        previous_name: value.previous_name,
         date_of_birth: value.date_of_birth,
         sex_or_gender: value.sex_or_gender,
+        administrative_sex: value.administrative_sex,
+        preferred_language: value.preferred_language,
+        interpreter_required: value.interpreter_required,
         external_id: value.external_id,
         record_start_date: value.record_start_date,
         record_end_date: value.record_end_date,
         summary: value.summary,
         primary_phone: value.primary_phone,
+        primary_phone_use: value.primary_phone_use,
         secondary_phone: value.secondary_phone,
+        secondary_phone_use: value.secondary_phone_use,
         email: value.email,
+        primary_email: value.primary_email,
+        secondary_email: value.secondary_email,
         preferred_contact_method: value.preferred_contact_method,
+        address_line_1: value.address_line_1,
+        address_line_2: value.address_line_2,
+        city: value.city,
+        state_or_province: value.state_or_province,
+        postal_code: value.postal_code,
+        country: value.country,
+        address_use: value.address_use,
         emergency_contact_name: value.emergency_contact_name,
         emergency_contact_relationship: value.emergency_contact_relationship,
         emergency_contact_phone: value.emergency_contact_phone,
@@ -2158,6 +2168,14 @@ fn api_workspace_context_packet_from_state(
         base_note_revision: value.base_note_revision,
         authorized_scope_json: value.authorized_scope_json,
         expected_output_kind: value.expected_output_kind,
+        workspace_profile: value.workspace_profile,
+        plan_schema_version: value.plan_schema_version,
+        source_checkpoint_id: value.source_checkpoint_id,
+        source_checkpoint_sha256: value.source_checkpoint_sha256,
+        readiness_json: value.readiness_json,
+        workspace_plan_revision_id: value.workspace_plan_revision_id,
+        workspace_plan_content_sha256: value.workspace_plan_content_sha256,
+        workspace_plan_evidence_manifest_sha256: value.workspace_plan_evidence_manifest_sha256,
         status: value.status,
         created_at: value.created_at.timestamp(),
         sent_at: value.sent_at.timestamp(),
@@ -2184,6 +2202,14 @@ fn api_workspace_context_packet_replay_from_state(
         base_note_revision: value.base_note_revision,
         authorized_scope_json: value.authorized_scope_json,
         expected_output_kind: value.expected_output_kind,
+        workspace_profile: value.workspace_profile,
+        plan_schema_version: value.plan_schema_version,
+        source_checkpoint_id: value.source_checkpoint_id,
+        source_checkpoint_sha256: value.source_checkpoint_sha256,
+        readiness_json: value.readiness_json,
+        workspace_plan_revision_id: value.workspace_plan_revision_id,
+        workspace_plan_content_sha256: value.workspace_plan_content_sha256,
+        workspace_plan_evidence_manifest_sha256: value.workspace_plan_evidence_manifest_sha256,
         read_only_safety_constraints: AGENT_VISIBLE_PACKET_SAFETY_CONSTRAINTS
             .iter()
             .map(|line| (*line).to_string())
@@ -2209,6 +2235,9 @@ fn api_workspace_agent_run_from_state(
         note_id: value.note_id,
         base_note_revision: value.base_note_revision,
         context_envelope_sha256: value.context_envelope_sha256,
+        workspace_plan_revision_id: value.workspace_plan_revision_id,
+        workspace_plan_content_sha256: value.workspace_plan_content_sha256,
+        workspace_plan_evidence_manifest_sha256: value.workspace_plan_evidence_manifest_sha256,
         run_kind: value.run_kind,
         idempotency_key: value.idempotency_key,
         provider,
@@ -2229,6 +2258,16 @@ fn api_workspace_agent_run_from_state(
 fn api_workspace_agent_run_source_from_state(
     value: codex_state::WorkspaceAgentRunSource,
 ) -> codex_app_server_protocol::WorkspaceAgentRunSource {
+    let snapshot_json = if value.source_entity_type == "handoff_prompt" {
+        serde_json::json!({
+            "schema": "workspace-agent-run-source-redaction-v1",
+            "redacted": true,
+            "storedSnapshotSha256": &value.content_sha256,
+        })
+        .to_string()
+    } else {
+        value.snapshot_json
+    };
     codex_app_server_protocol::WorkspaceAgentRunSource {
         id: value.id,
         run_id: value.run_id,
@@ -2236,7 +2275,7 @@ fn api_workspace_agent_run_source_from_state(
         source_entity_id: value.source_entity_id,
         source_revision: value.source_revision,
         display_label: value.display_label,
-        snapshot_json: value.snapshot_json,
+        snapshot_json,
         content_sha256: value.content_sha256,
         access_purpose: value.access_purpose,
         accessed_at: value.accessed_at.timestamp(),

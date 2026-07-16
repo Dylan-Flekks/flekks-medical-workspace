@@ -2,11 +2,13 @@ use super::*;
 use codex_protocol::config_types::ModelToolMode;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::FunctionCallOutputContentItem;
+use codex_protocol::models::PermissionProfile;
 use codex_protocol::protocol::AdditionalContextEntry as CoreAdditionalContextEntry;
 use codex_protocol::protocol::AdditionalContextKind as CoreAdditionalContextKind;
 use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
+use codex_protocol::protocol::ThreadMemoryMode;
 
 use crate::image_url::REMOTE_IMAGE_URL_ERROR;
 use crate::image_url::is_remote_image_url;
@@ -449,6 +451,65 @@ impl TurnRequestProcessor {
         app_server_client_version: Option<String>,
         supports_openai_form_elicitation: bool,
     ) -> Result<TurnStartResponse, JSONRPCErrorError> {
+        let workspace_context_only =
+            params.model_tool_mode == Some(ModelToolMode::WorkspaceContextOnly);
+        if workspace_context_only {
+            if params.input.len() != 1
+                || params.input.iter().any(|item| {
+                    !matches!(
+                        item,
+                        V2UserInput::Text {
+                            text,
+                            text_elements,
+                        } if !text.trim().is_empty() && text_elements.is_empty()
+                    )
+                })
+            {
+                return Err(invalid_request(
+                    "workspaceContextOnly turns require non-empty plain text input items only",
+                ));
+            }
+            let run_id_count = params
+                .input
+                .iter()
+                .filter_map(|item| match item {
+                    V2UserInput::Text { text, .. } => Some(text.as_str()),
+                    _ => None,
+                })
+                .flat_map(str::lines)
+                .filter_map(|line| line.trim().strip_prefix("- run_id:"))
+                .map(str::trim)
+                .filter(|run_id| !run_id.is_empty())
+                .count();
+            if run_id_count != 1 {
+                return Err(invalid_request(
+                    "workspaceContextOnly requires exactly one non-empty `- run_id: ...` line in the submitted text input",
+                ));
+            }
+            if params
+                .additional_context
+                .as_ref()
+                .is_some_and(|context| !context.is_empty())
+            {
+                return Err(invalid_request(
+                    "workspaceContextOnly turns do not accept additionalContext",
+                ));
+            }
+            if params.output_schema.is_some() {
+                return Err(invalid_request(
+                    "workspaceContextOnly turns do not accept an output schema",
+                ));
+            }
+            if params
+                .responsesapi_client_metadata
+                .as_ref()
+                .is_some_and(|metadata| !metadata.is_empty())
+            {
+                return Err(invalid_request(
+                    "workspaceContextOnly turns do not accept responsesapiClientMetadata",
+                ));
+            }
+        }
         let (thread_id, thread) =
             self.load_thread(&params.thread_id)
                 .await
@@ -520,6 +581,24 @@ impl TurnRequestProcessor {
                 },
             )
             .await?;
+        let parent_permission_profile_override =
+            thread_settings.permission_profile.clone().or_else(|| {
+                thread_settings
+                    .sandbox_policy
+                    .as_ref()
+                    .map(PermissionProfile::from_legacy_sandbox_policy)
+            });
+
+        if workspace_context_only {
+            thread
+                .set_thread_memory_mode(ThreadMemoryMode::Disabled)
+                .await
+                .map_err(|err| {
+                    internal_error(format!(
+                        "failed to disable memory generation for workspaceContextOnly turn: {err}"
+                    ))
+                })?;
+        }
 
         // Start the turn by submitting the user input. Return its submission id as turn_id.
         let turn_op = Op::UserInput {
@@ -542,14 +621,17 @@ impl TurnRequestProcessor {
                 error
             })?;
 
-        if turn_has_input {
+        if turn_has_input && !workspace_context_only {
             let config_snapshot = thread.config_snapshot().await;
+            let parent_permission_profile =
+                parent_permission_profile_override.unwrap_or(config_snapshot.permission_profile);
             codex_memories_write::start_memories_startup_task(
                 Arc::clone(&self.thread_manager),
                 Arc::clone(&self.auth_manager),
                 thread_id,
                 Arc::clone(&thread),
                 thread.config().await,
+                parent_permission_profile,
                 &config_snapshot.session_source,
             );
         }
@@ -949,6 +1031,16 @@ impl TurnRequestProcessor {
                             Some(AnalyticsJsonRpcError::TurnSteer(turn_steer_error)),
                         )
                     }
+                    SteerInputError::WorkspaceContextOnlyTurn => (
+                        "cannot steer a workspaceContextOnly turn".to_string(),
+                        None,
+                        None,
+                    ),
+                    SteerInputError::WorkspacePlanningOnlyTurn => (
+                        "cannot steer a workspacePlanningOnly turn".to_string(),
+                        None,
+                        None,
+                    ),
                     SteerInputError::EmptyInput => (
                         "input must not be empty".to_string(),
                         None,

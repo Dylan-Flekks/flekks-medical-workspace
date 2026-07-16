@@ -5,4 +5,4 @@
 /**
  * Controls whether a regular model sampling turn may discover or call tools.
  */
-export type ModelToolMode = "default" | "disabled";
+export type ModelToolMode = "default" | "disabled" | "workspaceContextOnly" | "workspacePlanningOnly";

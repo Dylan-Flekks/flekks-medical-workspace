@@ -53,6 +53,7 @@ use codex_protocol::models::ActivePermissionProfile;
 use codex_protocol::openai_models::ReasoningEffort;
 
 use crate::history_cell::HistoryCell;
+use crate::workspace_draft::WorkspaceDraftGenerationToken;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ThreadGoalSetMode {
@@ -151,6 +152,16 @@ pub(crate) enum AppEvent {
     /// Open the workspace dashboard for structured notes and client data.
     OpenWorkspaceDashboard {
         profile: WorkspaceProfile,
+    },
+
+    /// Run a debounced local medical-workspace draft checkpoint outside the render path.
+    WorkspaceDraftAutosaveTick {
+        token: WorkspaceDraftGenerationToken,
+    },
+
+    /// Checkpoint changed medical-workspace input after the user moves to another major pane.
+    WorkspaceDraftFocusCheckpoint {
+        token: WorkspaceDraftGenerationToken,
     },
 
     /// Open the agent picker for switching active threads.

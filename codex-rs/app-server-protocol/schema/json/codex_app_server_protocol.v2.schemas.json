@@ -9268,11 +9268,36 @@
     },
     "ModelToolMode": {
       "description": "Controls whether a regular model sampling turn may discover or call tools.",
-      "enum": [
-        "default",
-        "disabled"
-      ],
-      "type": "string"
+      "oneOf": [
+        {
+          "description": "Use the normal tool surface configured for the thread and turn.",
+          "enum": [
+            "default"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Persistently disable every model-visible and executable tool for regular sampling.",
+          "enum": [
+            "disabled"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Restrict exactly one medical handoff turn to the submitted run's `workspace_context_read` function.\n\nThis mode is valid only as a `turn/start` override. It filters prior-turn history and extension context, suppresses hooks, rejects non-text input and every other tool, and is never restored as a persistent mode from rollout history.",
+          "enum": [
+            "workspaceContextOnly"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Restrict exactly one patient-planning turn to the submitted run's `workspace_context_read` function.\n\nThis mode is valid only as a `turn/start` override on a persisted root thread in Plan mode. It suppresses unrelated host context and tools while retaining the dedicated planning thread's own prior conversation. Clarifying questions are ordinary assistant messages answered by a new persisted planning turn, so a restart never has to recover an in-flight tool elicitation. Like [`Self::WorkspaceContextOnly`], this mode is never restored as a persistent mode from rollout history.",
+          "enum": [
+            "workspacePlanningOnly"
+          ],
+          "type": "string"
+        }
+      ]
     },
     "ModelUpgradeInfo": {
       "properties": {
@@ -19337,6 +19362,27 @@
         "updatedAt": {
           "format": "int64",
           "type": "integer"
+        },
+        "workspacePlanContentSha256": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "workspacePlanEvidenceManifestSha256": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "workspacePlanRevisionId": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
@@ -19354,7 +19400,7 @@
       "type": "object"
     },
     "WorkspaceAgentRunSource": {
-      "description": "Exact, immutable record returned to one agent run. The snapshot omits local filesystem paths and is hashed server-side for later audit replay.",
+      "description": "Audit projection of an immutable record returned to one agent run. The canonical handoff-prompt snapshot is redacted at the app-server boundary; its `content_sha256` continues to identify the exact durable source record.",
       "properties": {
         "accessPurpose": {
           "type": "string"
@@ -19587,8 +19633,42 @@
       ],
       "type": "object"
     },
+    "WorkspaceBillingReadiness": {
+      "enum": [
+        "match",
+        "mismatch",
+        "unverified",
+        "stale",
+        "incomplete"
+      ],
+      "type": "string"
+    },
     "WorkspaceClient": {
       "properties": {
+        "addressLine1": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "addressLine2": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "addressUse": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "administrativeSex": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "archivedAt": {
           "format": "int64",
           "type": [
@@ -19596,7 +19676,19 @@
             "null"
           ]
         },
+        "city": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "contactNotes": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "country": {
           "type": [
             "string",
             "null"
@@ -19678,6 +19770,34 @@
         "id": {
           "type": "string"
         },
+        "interpreterRequired": {
+          "default": false,
+          "type": "boolean"
+        },
+        "legalFirstName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "legalLastName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "legalMiddleName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "legalSuffix": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "memberId": {
           "type": [
             "string",
@@ -19696,7 +19816,19 @@
             "null"
           ]
         },
+        "postalCode": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "preferredContactMethod": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "preferredLanguage": {
           "type": [
             "string",
             "null"
@@ -19708,7 +19840,25 @@
             "null"
           ]
         },
+        "previousName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "primaryEmail": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "primaryPhone": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "primaryPhoneUse": {
           "type": [
             "string",
             "null"
@@ -19726,13 +19876,31 @@
             "null"
           ]
         },
+        "secondaryEmail": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "secondaryPhone": {
           "type": [
             "string",
             "null"
           ]
         },
+        "secondaryPhoneUse": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "sexOrGender": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "stateOrProvince": {
           "type": [
             "string",
             "null"
@@ -19969,6 +20137,15 @@
             "null"
           ]
         },
+        "planSchemaVersion": {
+          "default": 1,
+          "format": "int64",
+          "type": "integer"
+        },
+        "readinessJson": {
+          "default": "{\"version\":1,\"warnings\":[],\"acknowledgements\":[],\"legacy\":true}",
+          "type": "string"
+        },
         "selectedArtifactIdsJson": {
           "type": "string"
         },
@@ -19981,6 +20158,20 @@
         "sentAt": {
           "format": "int64",
           "type": "integer"
+        },
+        "sourceCheckpointId": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sourceCheckpointSha256": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "status": {
           "type": "string"
@@ -19995,6 +20186,31 @@
         "updatedAt": {
           "format": "int64",
           "type": "integer"
+        },
+        "workspacePlanContentSha256": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "workspacePlanEvidenceManifestSha256": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "workspacePlanRevisionId": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "workspaceProfile": {
+          "default": "medical",
+          "type": "string"
         }
       },
       "required": [
@@ -20065,15 +20281,38 @@
             "null"
           ]
         },
+        "planSchemaVersion": {
+          "default": 1,
+          "format": "int64",
+          "type": "integer"
+        },
         "readOnlySafetyConstraints": {
           "items": {
             "type": "string"
           },
           "type": "array"
         },
+        "readinessJson": {
+          "default": "{\"version\":1,\"warnings\":[],\"acknowledgements\":[],\"legacy\":true}",
+          "type": "string"
+        },
         "sentAt": {
           "format": "int64",
           "type": "integer"
+        },
+        "sourceCheckpointId": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sourceCheckpointSha256": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "status": {
           "type": "string"
@@ -20084,6 +20323,31 @@
             "integer",
             "null"
           ]
+        },
+        "workspacePlanContentSha256": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "workspacePlanEvidenceManifestSha256": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "workspacePlanRevisionId": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "workspaceProfile": {
+          "default": "medical",
+          "type": "string"
         }
       },
       "required": [
@@ -20098,6 +20362,499 @@
         "readOnlySafetyConstraints",
         "sentAt",
         "status"
+      ],
+      "type": "object"
+    },
+    "WorkspaceCoverage": {
+      "properties": {
+        "billingReadiness": {
+          "$ref": "#/definitions/WorkspaceBillingReadiness"
+        },
+        "clientId": {
+          "type": "string"
+        },
+        "coverageNotes": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "coverageStatus": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "coverageType": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "createdAt": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "effectiveDate": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "groupNumber": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "memberId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "patientRelationshipToSubscriber": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "payerName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "planName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "priority": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "subscriberAddressLine1": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "subscriberAddressLine2": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "subscriberAddressSameAsPatient": {
+          "type": "boolean"
+        },
+        "subscriberAdministrativeSex": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "subscriberCity": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "subscriberCountry": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "subscriberDateOfBirth": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "subscriberFirstName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "subscriberLastName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "subscriberMiddleName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "subscriberPostalCode": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "subscriberStateOrProvince": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "subscriberSuffix": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "terminationDate": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "updatedAt": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "billingReadiness",
+        "clientId",
+        "createdAt",
+        "id",
+        "priority",
+        "subscriberAddressSameAsPatient",
+        "updatedAt",
+        "version"
+      ],
+      "type": "object"
+    },
+    "WorkspaceCoverageMatchResult": {
+      "enum": [
+        "match",
+        "mismatch"
+      ],
+      "type": "string"
+    },
+    "WorkspaceCoverageUpsertParams": {
+      "properties": {
+        "clientId": {
+          "type": "string"
+        },
+        "coverageNotes": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "coverageStatus": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "coverageType": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "effectiveDate": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "groupNumber": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "memberId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "patientRelationshipToSubscriber": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "payerName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "planName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "priority": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "subscriberAddressLine1": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "subscriberAddressLine2": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "subscriberAddressSameAsPatient": {
+          "type": "boolean"
+        },
+        "subscriberAdministrativeSex": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "subscriberCity": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "subscriberCountry": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "subscriberDateOfBirth": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "subscriberFirstName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "subscriberLastName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "subscriberMiddleName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "subscriberPostalCode": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "subscriberStateOrProvince": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "subscriberSuffix": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "terminationDate": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "clientId",
+        "priority"
+      ],
+      "type": "object"
+    },
+    "WorkspaceCoverageVerification": {
+      "properties": {
+        "actor": {
+          "type": "string"
+        },
+        "clientId": {
+          "type": "string"
+        },
+        "comparedSubject": {
+          "$ref": "#/definitions/WorkspaceCoverageVerificationSubject"
+        },
+        "contentSha256": {
+          "type": "string"
+        },
+        "coverageId": {
+          "type": "string"
+        },
+        "coverageVersion": {
+          "type": "string"
+        },
+        "createdAt": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "id": {
+          "type": "string"
+        },
+        "isStale": {
+          "type": "boolean"
+        },
+        "matchResult": {
+          "$ref": "#/definitions/WorkspaceCoverageMatchResult"
+        },
+        "mismatchFields": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "observedFirstName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "observedLastName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "observedMemberId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "observedMiddleName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "observedSuffix": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "patientRecordVersion": {
+          "type": "string"
+        },
+        "patientVersion": {
+          "type": "string"
+        },
+        "sourceDocumentContentSha256": {
+          "type": "string"
+        },
+        "sourceDocumentId": {
+          "type": "string"
+        },
+        "sourceDocumentVersion": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "actor",
+        "clientId",
+        "comparedSubject",
+        "contentSha256",
+        "coverageId",
+        "coverageVersion",
+        "createdAt",
+        "id",
+        "isStale",
+        "matchResult",
+        "mismatchFields",
+        "patientRecordVersion",
+        "patientVersion",
+        "sourceDocumentContentSha256",
+        "sourceDocumentId",
+        "sourceDocumentVersion"
+      ],
+      "type": "object"
+    },
+    "WorkspaceCoverageVerificationSubject": {
+      "enum": [
+        "beneficiary",
+        "subscriber"
+      ],
+      "type": "string"
+    },
+    "WorkspaceDataClassification": {
+      "enum": [
+        "unclassified",
+        "synthetic"
+      ],
+      "type": "string"
+    },
+    "WorkspaceDataPolicyProvisionOutcome": {
+      "enum": [
+        "provisioned",
+        "alreadySynthetic"
+      ],
+      "type": "string"
+    },
+    "WorkspaceDataPolicyStatus": {
+      "properties": {
+        "classifiedAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "classifiedBy": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "dataClassification": {
+          "$ref": "#/definitions/WorkspaceDataClassification"
+        },
+        "schemaVersion": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "dataClassification",
+        "schemaVersion"
       ],
       "type": "object"
     },
@@ -20910,6 +21667,884 @@
         "notes",
         "updatedAt",
         "version"
+      ],
+      "type": "object"
+    },
+    "WorkspacePlanActiveRun": {
+      "properties": {
+        "claimedAt": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "contextReadCount": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "model": {
+          "type": "string"
+        },
+        "planSessionId": {
+          "type": "string"
+        },
+        "promptSha256": {
+          "type": "string"
+        },
+        "provider": {
+          "type": "string"
+        },
+        "run": {
+          "$ref": "#/definitions/WorkspacePlanGuideRun"
+        },
+        "sourceThreadId": {
+          "type": "string"
+        },
+        "sourceTurnId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "claimedAt",
+        "contextReadCount",
+        "model",
+        "planSessionId",
+        "promptSha256",
+        "provider",
+        "run",
+        "sourceThreadId",
+        "sourceTurnId"
+      ],
+      "type": "object"
+    },
+    "WorkspacePlanGuideRun": {
+      "properties": {
+        "clientId": {
+          "type": "string"
+        },
+        "createdAt": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "draftSessionId": {
+          "type": "string"
+        },
+        "encounterId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "idempotencyKey": {
+          "type": "string"
+        },
+        "isStale": {
+          "type": "boolean"
+        },
+        "model": {
+          "type": "string"
+        },
+        "noteId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider": {
+          "type": "string"
+        },
+        "replayed": {
+          "type": "boolean"
+        },
+        "requestEnvelopeSha256": {
+          "type": "string"
+        },
+        "sourceCheckpointId": {
+          "type": "string"
+        },
+        "sourceCheckpointRevision": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "sourceCheckpointSha256": {
+          "type": "string"
+        },
+        "sourceThreadId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sourceTurnId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "$ref": "#/definitions/WorkspacePlanGuideRunStatus"
+        },
+        "terminalAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "trigger": {
+          "type": "string"
+        },
+        "updatedAt": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "clientId",
+        "createdAt",
+        "draftSessionId",
+        "id",
+        "idempotencyKey",
+        "isStale",
+        "model",
+        "provider",
+        "replayed",
+        "requestEnvelopeSha256",
+        "sourceCheckpointId",
+        "sourceCheckpointRevision",
+        "sourceCheckpointSha256",
+        "status",
+        "trigger",
+        "updatedAt"
+      ],
+      "type": "object"
+    },
+    "WorkspacePlanGuideRunOutcome": {
+      "oneOf": [
+        {
+          "properties": {
+            "error_summary": {
+              "type": "string"
+            },
+            "status": {
+              "enum": [
+                "failed"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "error_summary",
+            "status"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "reason": {
+              "type": "string"
+            },
+            "status": {
+              "enum": [
+                "canceled"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "reason",
+            "status"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "WorkspacePlanGuideRunStatus": {
+      "enum": [
+        "running",
+        "completed",
+        "failed",
+        "canceled"
+      ],
+      "type": "string"
+    },
+    "WorkspacePlanMessage": {
+      "properties": {
+        "clientId": {
+          "type": "string"
+        },
+        "content": {
+          "type": "string"
+        },
+        "contentSha256": {
+          "type": "string"
+        },
+        "createdAt": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "encounterId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "guideRunId": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "idempotencyKey": {
+          "type": "string"
+        },
+        "noteId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "planSessionId": {
+          "type": "string"
+        },
+        "replayed": {
+          "type": "boolean"
+        },
+        "role": {
+          "$ref": "#/definitions/WorkspacePlanMessageRole"
+        },
+        "sequence": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "sourceCheckpointId": {
+          "type": "string"
+        },
+        "sourceCheckpointRevision": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "sourceCheckpointSha256": {
+          "type": "string"
+        },
+        "sourceThreadId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sourceTurnId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "clientId",
+        "content",
+        "contentSha256",
+        "createdAt",
+        "guideRunId",
+        "id",
+        "idempotencyKey",
+        "planSessionId",
+        "replayed",
+        "role",
+        "sequence",
+        "sourceCheckpointId",
+        "sourceCheckpointRevision",
+        "sourceCheckpointSha256"
+      ],
+      "type": "object"
+    },
+    "WorkspacePlanMessageRole": {
+      "enum": [
+        "human",
+        "assistant",
+        "question",
+        "answer",
+        "error",
+        "systemStatus"
+      ],
+      "type": "string"
+    },
+    "WorkspacePlanProposal": {
+      "properties": {
+        "clientId": {
+          "type": "string"
+        },
+        "createdAt": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "guideRunId": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "idempotencyKey": {
+          "type": "string"
+        },
+        "payload": {
+          "$ref": "#/definitions/WorkspacePlanProposalPayload"
+        },
+        "payloadSha256": {
+          "type": "string"
+        },
+        "planRevisionId": {
+          "type": "string"
+        },
+        "planSessionId": {
+          "type": "string"
+        },
+        "rationale": {
+          "type": "string"
+        },
+        "replayed": {
+          "type": "boolean"
+        },
+        "resolvedAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "resolvedBy": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sourceCheckpointId": {
+          "type": "string"
+        },
+        "sourceCheckpointRevision": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "sourceCheckpointSha256": {
+          "type": "string"
+        },
+        "sourceThreadId": {
+          "type": "string"
+        },
+        "sourceTurnId": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/definitions/WorkspacePlanProposalStatus"
+        },
+        "summary": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "clientId",
+        "createdAt",
+        "guideRunId",
+        "id",
+        "idempotencyKey",
+        "payload",
+        "payloadSha256",
+        "planRevisionId",
+        "planSessionId",
+        "rationale",
+        "replayed",
+        "sourceCheckpointId",
+        "sourceCheckpointRevision",
+        "sourceCheckpointSha256",
+        "sourceThreadId",
+        "sourceTurnId",
+        "status",
+        "summary"
+      ],
+      "type": "object"
+    },
+    "WorkspacePlanProposalPayload": {
+      "oneOf": [
+        {
+          "properties": {
+            "base_revision": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "kind": {
+              "enum": [
+                "note_revision"
+              ],
+              "type": "string"
+            },
+            "note_id": {
+              "type": "string"
+            },
+            "proposed_body": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "base_revision",
+            "kind",
+            "note_id",
+            "proposed_body"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "base_revision": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "body": {
+              "type": "string"
+            },
+            "kind": {
+              "enum": [
+                "note_addendum"
+              ],
+              "type": "string"
+            },
+            "note_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "base_revision",
+            "body",
+            "kind",
+            "note_id"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "assigned_to": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "details": {
+              "type": "string"
+            },
+            "due_date": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "enum": [
+                "task_draft"
+              ],
+              "type": "string"
+            },
+            "priority": {
+              "$ref": "#/definitions/WorkspaceTaskPriority"
+            },
+            "task_kind": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "details",
+            "kind",
+            "priority",
+            "task_kind",
+            "title"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "WorkspacePlanProposalResolution": {
+      "enum": [
+        "accept",
+        "decline"
+      ],
+      "type": "string"
+    },
+    "WorkspacePlanProposalStatus": {
+      "enum": [
+        "pending",
+        "accepted",
+        "declined",
+        "outdated"
+      ],
+      "type": "string"
+    },
+    "WorkspacePlanRecoveryState": {
+      "properties": {
+        "activeRuns": {
+          "items": {
+            "$ref": "#/definitions/WorkspacePlanActiveRun"
+          },
+          "type": "array"
+        },
+        "currentRevision": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/WorkspacePlanRevision"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "lastCompletion": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/WorkspacePlanTurnCompletionReceipt"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "pendingQuestions": {
+          "items": {
+            "$ref": "#/definitions/WorkspacePlanMessage"
+          },
+          "type": "array"
+        },
+        "session": {
+          "$ref": "#/definitions/WorkspacePlanSession"
+        }
+      },
+      "required": [
+        "activeRuns",
+        "pendingQuestions",
+        "session"
+      ],
+      "type": "object"
+    },
+    "WorkspacePlanRevision": {
+      "properties": {
+        "clientId": {
+          "type": "string"
+        },
+        "contentSha256": {
+          "type": "string"
+        },
+        "createdAt": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "decisionsJson": {
+          "type": "string"
+        },
+        "encounterId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "evidenceManifestJson": {
+          "type": "string"
+        },
+        "evidenceManifestSha256": {
+          "type": "string"
+        },
+        "evidenceReadCount": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "guideRunId": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "idempotencyKey": {
+          "type": "string"
+        },
+        "noteId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "openQuestionsJson": {
+          "type": "string"
+        },
+        "planMarkdown": {
+          "type": "string"
+        },
+        "planSessionId": {
+          "type": "string"
+        },
+        "replayed": {
+          "type": "boolean"
+        },
+        "revision": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "sourceCheckpointId": {
+          "type": "string"
+        },
+        "sourceCheckpointRevision": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "sourceCheckpointSha256": {
+          "type": "string"
+        },
+        "sourceThreadId": {
+          "type": "string"
+        },
+        "sourceTurnId": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/definitions/WorkspacePlanRevisionStatus"
+        },
+        "submittedAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "clientId",
+        "contentSha256",
+        "createdAt",
+        "decisionsJson",
+        "evidenceManifestJson",
+        "evidenceManifestSha256",
+        "evidenceReadCount",
+        "guideRunId",
+        "id",
+        "idempotencyKey",
+        "openQuestionsJson",
+        "planMarkdown",
+        "planSessionId",
+        "replayed",
+        "revision",
+        "sourceCheckpointId",
+        "sourceCheckpointRevision",
+        "sourceCheckpointSha256",
+        "sourceThreadId",
+        "sourceTurnId",
+        "status"
+      ],
+      "type": "object"
+    },
+    "WorkspacePlanRevisionStatus": {
+      "enum": [
+        "current",
+        "outdated",
+        "submitted"
+      ],
+      "type": "string"
+    },
+    "WorkspacePlanSession": {
+      "properties": {
+        "clientId": {
+          "type": "string"
+        },
+        "closedAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "createdAt": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "createdBy": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "latestRevision": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "replayed": {
+          "type": "boolean"
+        },
+        "sourceThreadId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "$ref": "#/definitions/WorkspacePlanSessionStatus"
+        },
+        "updatedAt": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "clientId",
+        "createdAt",
+        "createdBy",
+        "id",
+        "latestRevision",
+        "replayed",
+        "status",
+        "updatedAt"
+      ],
+      "type": "object"
+    },
+    "WorkspacePlanSessionStatus": {
+      "enum": [
+        "active",
+        "closed"
+      ],
+      "type": "string"
+    },
+    "WorkspacePlanSubmissionReceipt": {
+      "properties": {
+        "agentRunId": {
+          "type": "string"
+        },
+        "clientId": {
+          "type": "string"
+        },
+        "evidenceManifestSha256": {
+          "type": "string"
+        },
+        "packetId": {
+          "type": "string"
+        },
+        "planContentSha256": {
+          "type": "string"
+        },
+        "planRevisionId": {
+          "type": "string"
+        },
+        "planSessionId": {
+          "type": "string"
+        },
+        "submittedAt": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "submittedBy": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "agentRunId",
+        "clientId",
+        "evidenceManifestSha256",
+        "packetId",
+        "planContentSha256",
+        "planRevisionId",
+        "planSessionId",
+        "submittedAt",
+        "submittedBy"
+      ],
+      "type": "object"
+    },
+    "WorkspacePlanTurnCompletionReceipt": {
+      "properties": {
+        "assistantMessageId": {
+          "type": "string"
+        },
+        "clientId": {
+          "type": "string"
+        },
+        "completedAt": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "completionInputSha256": {
+          "type": "string"
+        },
+        "evidenceManifestSha256": {
+          "type": "string"
+        },
+        "evidenceReadCount": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "guideRunId": {
+          "type": "string"
+        },
+        "idempotencyKey": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "planRevisionId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "planSessionId": {
+          "type": "string"
+        },
+        "promptSha256": {
+          "type": "string"
+        },
+        "provider": {
+          "type": "string"
+        },
+        "replayed": {
+          "type": "boolean"
+        },
+        "sourceCheckpointId": {
+          "type": "string"
+        },
+        "sourceCheckpointRevision": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "sourceCheckpointSha256": {
+          "type": "string"
+        },
+        "sourceThreadId": {
+          "type": "string"
+        },
+        "sourceTurnId": {
+          "type": "string"
+        },
+        "terminalEnvelopeSha256": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "assistantMessageId",
+        "clientId",
+        "completedAt",
+        "completionInputSha256",
+        "evidenceManifestSha256",
+        "evidenceReadCount",
+        "guideRunId",
+        "idempotencyKey",
+        "model",
+        "planSessionId",
+        "promptSha256",
+        "provider",
+        "replayed",
+        "sourceCheckpointId",
+        "sourceCheckpointRevision",
+        "sourceCheckpointSha256",
+        "sourceThreadId",
+        "sourceTurnId",
+        "terminalEnvelopeSha256"
       ],
       "type": "object"
     },

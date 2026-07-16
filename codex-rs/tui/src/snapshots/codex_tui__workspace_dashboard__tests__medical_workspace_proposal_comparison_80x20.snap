@@ -2,18 +2,18 @@
 source: tui/src/workspace_dashboard.rs
 expression: "render_dashboard_lines_at(&dashboard, width, height)"
 ---
-Medical Workspace
-Zones: Explorer > [Patient Chart] > Agent Work  Focus: Center
+Medical Workspace  /workspace-medical  SYNTHETIC DATA ONLY
+Zones: Explorer > [Patient Chart] > Plan with Codex  Focus: Center
 ┌Patient Chart─────────────────────────────────────────────────────────────────┐
-│Current vs Proposed · Note Proposals · 1 pending proposals                    │
-│Review state: READY · proposal base matches current r3                        │
-│Summary: tighten wording                                                      │
-│┌Current chart · r3───────────────────┐┌Proposed edit · from r3──────────────┐│
+│Saved Canonical vs Proposed · Note Proposals · 1 pending proposals            │
+│Review state: READY · proposal base matches saved canonical r3                │
+│Summary: tighten wording · +2 proposed / -2 canonical lines                   │
+│┌Saved canonical · r3─────────────────┐┌Proposed edit · from r3──────────────┐│
+││@@ -1,2 +1,2 @@                      ││@@ -1,2 +1,2 @@                      ││
 ││-  1 Assessment: improving gait      ││+  1 Assessment: gait tolerance      ││
 ││tolerance.                           ││improved with cueing.                ││
 ││-  2 Plan: continue current program. ││+  2 Plan: progress walking intervals││
 ││                                     ││next visit.                          ││
-││                                     ││                                     ││
 ││                                     ││                                     ││
 ││                                     ││                                     ││
 ││                                     ││                                     ││

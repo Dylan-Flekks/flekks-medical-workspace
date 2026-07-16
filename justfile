@@ -17,12 +17,23 @@ codex *args:
     cargo run --bin codex -- {args}
 
 # Build and open Codex for the synthetic medical-workspace demo.
-# Once the TUI opens, enter `/workspacemedical`.
+# Once the TUI opens, enter `/workspace-medical`.
+[no-cd]
 [unix]
-medical-workspace:
-    @echo "Opening Codex. Enter /workspacemedical to open the synthetic medical dashboard."
-    stty cols 160 rows 45
-    cargo run --bin codex
+medical-workspace *args:
+    "{{ justfile_directory() }}/scripts/run_medical_workspace.sh" "$@"
+
+# Inspect the dedicated synthetic medical-workspace SQLite store without changing it.
+[no-cd]
+[unix]
+medical-workspace-store-status:
+    "{{ python }}" "{{ justfile_directory() }}/scripts/medical_workspace_store.py" status
+
+# Dry-run by default. Actual deletion requires exact --confirm and an external --receipt path.
+[no-cd]
+[unix]
+medical-workspace-store-purge *args:
+    "{{ python }}" "{{ justfile_directory() }}/scripts/medical_workspace_store.py" purge "$@"
 
 # `codex exec`
 exec *args:

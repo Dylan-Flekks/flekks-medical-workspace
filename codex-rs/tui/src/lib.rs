@@ -205,6 +205,8 @@ mod workspace_messages;
 mod workspace_actions;
 mod workspace_context_assembly;
 mod workspace_dashboard;
+mod workspace_draft;
+mod workspace_editor;
 mod wrapping;
 
 mod table_detect;
@@ -512,6 +514,17 @@ pub(crate) async fn start_embedded_app_server_for_picker(
     config: &Config,
 ) -> color_eyre::Result<AppServerSession> {
     let state_db = init_state_db_for_app_server_target(config, &AppServerTarget::Embedded).await?;
+    if let Some(state_db) = state_db.as_ref() {
+        state_db
+            .workspace()
+            .provision_synthetic_workspace("TUI embedded app-server test fixture")
+            .await
+            .map_err(|error| {
+                color_eyre::eyre::eyre!(
+                    "failed to classify embedded TUI test workspace as synthetic: {error}"
+                )
+            })?;
+    }
     start_app_server_for_picker(
         config,
         &AppServerTarget::Embedded,
@@ -1978,6 +1991,7 @@ mod tests {
     use codex_app_server_protocol::RequestId;
     use codex_app_server_protocol::ThreadStartParams;
     use codex_app_server_protocol::ThreadStartResponse;
+    use codex_app_server_protocol::WorkspaceClientUpsertParams;
     use codex_config::config_toml::ProjectConfig;
     use pretty_assertions::assert_eq;
     use serial_test::serial;
@@ -2102,6 +2116,33 @@ mod tests {
             Arc::new(EnvironmentManager::default_for_tests()),
         )
         .await
+    }
+
+    #[tokio::test]
+    async fn unconfigured_embedded_workspace_rejects_first_mutation() -> color_eyre::Result<()> {
+        let temp_dir = TempDir::new()?;
+        let config = build_config(&temp_dir).await?;
+        let mut app_server = AppServerSession::new(
+            AppServerClient::InProcess(start_test_embedded_app_server(config).await?),
+            ThreadParamsMode::Embedded,
+        );
+        let params: WorkspaceClientUpsertParams = serde_json::from_value(serde_json::json!({
+            "displayName": "Blocked synthetic fixture",
+            "summary": ""
+        }))?;
+
+        let error = app_server
+            .workspace_client_upsert(params)
+            .await
+            .expect_err("unclassified shared store must reject its first mutation");
+        assert!(
+            error
+                .to_string()
+                .contains("restart with `just medical-workspace`")
+        );
+        assert!(app_server.workspace_client_list().await?.clients.is_empty());
+        app_server.shutdown().await?;
+        Ok(())
     }
 
     #[test]

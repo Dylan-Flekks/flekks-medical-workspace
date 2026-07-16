@@ -73,6 +73,9 @@ pub(super) async fn maybe_record_current_time_reminder(
     turn_context: &TurnContext,
     window_id: &str,
 ) -> CodexResult<()> {
+    if turn_context.model_tool_mode.is_workspace_restricted() {
+        return Ok(());
+    }
     let Some(config) = turn_context.config.current_time_reminder else {
         return Ok(());
     };

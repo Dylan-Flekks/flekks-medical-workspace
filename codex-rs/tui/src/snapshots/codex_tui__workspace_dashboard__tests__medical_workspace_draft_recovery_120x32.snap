@@ -1,0 +1,36 @@
+---
+source: tui/src/workspace_dashboard.rs
+expression: rendered
+---
+Medical Workspace  /workspace-medical  SYNTHETIC DATA ONLY
+Patient: Jordan Patient  DOB: blank  MRN: blank  Contact: Missing contact  Coverage: Missing coverage  Encounter: No
+ EXPLORER                      PLAN WITH CODEX
+┌Patient Directory───────────┐┌Plan with Codex─────────────────────────────────────────────────────────────────────────┐
+│Local search: /             ││[Chat]  Context  Audit  ←/→ tabs                                                        │
+│0 active patients; local    ││                                                                                        │
+│only                        ││Plan with Codex · Jordan Patient                                                        │
+│No saved patients yet.      ││  Context  0 files · 0 text · 0 clips                                                   │
+│New patient: :patient new   ││  ● plan: blocked · recover local draft                                                 │
+│                            ││                                                                                        │
+│                            ││Recovery Required                                                                       │
+│                            ││  A recoverable local draft must be resolved before planning continues.                 │
+└────────────────────────────┘│  ● Ctrl-P → Restore local draft or Discard local draft                                 │
+┌Patient Notes───────────────┐│  Messaging, chart edits, and master handoff remain locked.                             │
+│Patient Notes               ││  Resolve draft recovery before messaging Codex or using Ctrl-G.                        │
+│  New note                  ││  Recommendations remain review-only until a clinician approves a change.               │
+│  No patient notes yet. Use ││                                                                                        │
+│:note new.                  ││                                                                                        │
+│  Medical, communication,   ││                                                                                        │
+│and admin notes appear here.││                                                                                        │
+└────────────────────────────┘│                                                                                        │
+┌Uploaded Documents──────────┐│                                                                                        │
+│Uploaded Documents          ││                                                                                        │
+│No files yet                ││                                                                                        │
+│Paste/drop JPG/PDF. S...    ││                                                                                        │
+│                            ││                                                                                        │
+│                            ││Draft Recovery Required · Ctrl-P restore/discard · messaging locked                     │
+│                            ││  Restore or discard the recoverable local draft before continuing.                     │
+│                            ││                                                                                        │
+│                            ││                                                                                        │
+└────────────────────────────┘└────────────────────────────────────────────────────────────────────────────────────────┘
+Focus: Agent | Mode: Draft recovery | Keys: Ctrl-P restore/discard  Esc close | Next: Restore or discard local draft

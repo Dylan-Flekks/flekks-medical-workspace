@@ -11,6 +11,11 @@ async fn fixture() -> (
     let runtime = StateRuntime::init(unique_temp_dir(), "test-provider".to_string())
         .await
         .expect("state db should initialize");
+    runtime
+        .workspace()
+        .provision_synthetic_workspace("state guide test fixture")
+        .await
+        .expect("test workspace should be classified synthetic");
     let client = runtime
         .workspace()
         .upsert_client(crate::WorkspaceClientUpsert {
@@ -26,14 +31,18 @@ async fn fixture() -> (
 async fn checkpoint(
     runtime: &StateRuntime,
     client: &crate::WorkspaceClient,
-    session_id: Option<String>,
+    current: Option<&crate::WorkspaceDraftCheckpoint>,
     title: &str,
 ) -> crate::WorkspaceDraftCheckpoint {
     runtime
         .workspace()
         .create_draft_checkpoint(crate::WorkspaceDraftCheckpointCreate {
-            session_id,
+            session_id: current.map(|checkpoint| checkpoint.session_id.clone()),
             client_id: client.id.clone(),
+            expected_current_checkpoint_id: current.map(|checkpoint| checkpoint.id.clone()),
+            expected_current_checkpoint_revision: current.map(|checkpoint| checkpoint.revision),
+            expected_current_checkpoint_sha256: current
+                .map(|checkpoint| checkpoint.content_sha256.clone()),
             note_id: Some("draft-note".to_string()),
             base_note_revision: Some(1),
             draft_json: format!(r#"{{"schemaVersion":1,"note":{{"title":{title:?}}}}}"#),
@@ -63,6 +72,7 @@ fn start(
         actor: "Clinician Example".to_string(),
         provider: "test-provider".to_string(),
         model: "test-model".to_string(),
+        model_tool_mode: Default::default(),
     }
 }
 
@@ -134,6 +144,7 @@ async fn workspace_guide_run_lifecycle_is_bounded_exact_stale_and_noncanonical()
     assert_eq!(envelope["sourceCheckpoint"]["id"], first.id);
     assert_eq!(envelope["sourceCheckpoint"]["revision"], 1);
     assert_eq!(envelope["safety"]["modelToolMode"], "disabled");
+    assert_eq!(envelope["safety"]["dataClassification"], "synthetic");
     assert_eq!(run.model_tool_mode, "disabled");
     assert_eq!(run.note_id.as_deref(), Some("draft-note"));
     assert_eq!(run.encounter_id, None);
@@ -184,7 +195,7 @@ async fn workspace_guide_run_lifecycle_is_bounded_exact_stale_and_noncanonical()
     let mut oversized = input;
     oversized.request_json = serde_json::json!({"text": "x".repeat(MAX_REQUEST_BYTES)}).to_string();
     assert!(begin_error(&runtime, oversized).await.contains("exceeds"));
-    let second = checkpoint(&runtime, &client, Some(first.session_id.clone()), "Second").await;
+    let second = checkpoint(&runtime, &client, Some(&first), "Second").await;
     let completion = finish(
         &run,
         crate::WorkspaceGuideRunOutcome::Completed {
@@ -336,4 +347,83 @@ async fn workspace_guide_run_lifecycle_is_bounded_exact_stale_and_noncanonical()
     .await
     .unwrap();
     assert_eq!(audit_count, 6);
+}
+
+#[tokio::test]
+async fn workspace_planning_runs_require_atomic_completion_but_allow_recovery_terminalization() {
+    let (runtime, client, checkpoint) = fixture().await;
+    let mut planning_start = start(
+        &client,
+        &checkpoint,
+        "planning-completion-boundary",
+        r#"{"planSessionId":"plan-session"}"#,
+    );
+    planning_start.model_tool_mode = crate::WorkspaceGuideModelToolMode::WorkspacePlanningOnly;
+    let run = begin(&runtime, planning_start).await;
+
+    let error = runtime
+        .workspace()
+        .finish_guide_run(finish(
+            &run,
+            crate::WorkspaceGuideRunOutcome::Completed {
+                result_json: r#"{"schemaVersion":1,"summary":"forged completion"}"#.to_string(),
+            },
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), "validation");
+    assert_eq!(
+        error.to_string(),
+        "workspace planning guide runs can be completed only through the atomic plan-turn completion path"
+    );
+    let stored = runtime
+        .workspace()
+        .list_guide_runs(crate::WorkspaceGuideRunFilter {
+            client_id: client.id.clone(),
+            session_id: Some(checkpoint.session_id.clone()),
+            ..Default::default()
+        })
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|candidate| candidate.id == run.id)
+        .expect("rejected planning run should remain stored");
+    assert_eq!(
+        (stored.status, stored.terminal_envelope_json),
+        (crate::WorkspaceGuideRunStatus::Running, None)
+    );
+
+    let mut failed = finish(
+        &run,
+        crate::WorkspaceGuideRunOutcome::Failed {
+            error_summary: "planning model failed".to_string(),
+        },
+    );
+    failed.source_thread_id = None;
+    failed.source_turn_id = None;
+    assert_eq!(
+        end(&runtime, failed).await.status,
+        crate::WorkspaceGuideRunStatus::Failed
+    );
+
+    let mut canceled_start = start(
+        &client,
+        &checkpoint,
+        "planning-cancellation-boundary",
+        r#"{"planSessionId":"plan-session"}"#,
+    );
+    canceled_start.model_tool_mode = crate::WorkspaceGuideModelToolMode::WorkspacePlanningOnly;
+    let canceled_run = begin(&runtime, canceled_start).await;
+    let mut canceled = finish(
+        &canceled_run,
+        crate::WorkspaceGuideRunOutcome::Canceled {
+            reason: "planning turn was abandoned".to_string(),
+        },
+    );
+    canceled.source_thread_id = None;
+    canceled.source_turn_id = None;
+    assert_eq!(
+        end(&runtime, canceled).await.status,
+        crate::WorkspaceGuideRunStatus::Canceled
+    );
 }

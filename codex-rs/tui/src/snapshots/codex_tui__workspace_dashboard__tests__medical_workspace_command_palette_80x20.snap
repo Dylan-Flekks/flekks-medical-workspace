@@ -14,11 +14,11 @@ expression: "render_dashboard_lines_at(&dashboard, width, height)"
 │New note                                                     :note new [n]    │
 │Save chart workspace                                        :save [Ctrl-S]    │
 │Agent bridge                                                                  │
-│Review Packet                                               :agent preview    │
-│Submit Medical Agent Plan                                      :agent send    │
+│Review Context Plan                                         :agent preview    │
+│Submit Context Plan                                            :agent send    │
+│Open full Codex run                                        :agent open run    │
 │Open returned work review                                     :agent inbox    │
 │Write agent instructions                                    :agent request    │
-│Open last scope                                            :scope last off    │
-│… 100 more                                                                    │
+│… 104 more                                                                    │
 │                                                                              │
 └──────────────────────────────────────────────────────────────────────────────┘

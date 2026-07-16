@@ -4337,6 +4337,21 @@ fn model_tool_mode_uses_camel_case_wire_values_and_is_experimental() {
         crate::experimental_api::ExperimentalApi::experimental_reason(&turn),
         Some("turn/start.modelToolMode")
     );
+
+    let restricted_turn: TurnStartParams = serde_json::from_value(json!({
+        "threadId": "thread_123",
+        "input": [{
+            "type": "text",
+            "text": "Medical workspace context packet selected.\n- run_id: run_123",
+            "text_elements": [],
+        }],
+        "modelToolMode": "workspaceContextOnly",
+    }))
+    .expect("restricted turn params should deserialize");
+    assert_eq!(
+        restricted_turn.model_tool_mode,
+        Some(ModelToolMode::WorkspaceContextOnly)
+    );
 }
 
 #[test]

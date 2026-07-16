@@ -4,6 +4,8 @@
 //! channels, submits thread-scoped operations through the app server, and replays buffered events
 //! when the visible thread changes.
 
+use super::workspace_context_turn::WorkspaceContextTurnRoute;
+use super::workspace_context_turn::workspace_context_turn_route;
 use super::*;
 use crate::session_resume::read_session_model;
 
@@ -435,6 +437,9 @@ impl App {
         thread_id: ThreadId,
         op: AppCommand,
     ) -> Result<()> {
+        let Some(op) = self.prepare_workspace_context_turn_submission(thread_id, op) else {
+            return Ok(());
+        };
         crate::session_log::log_outbound_op(&op);
 
         if self
@@ -572,72 +577,83 @@ impl App {
                 final_output_json_schema,
                 collaboration_mode,
                 personality,
+                model_tool_mode,
             } => {
-                let mut should_start_turn = true;
-                if let Some(turn_id) = self.active_turn_id_for_thread(thread_id).await {
-                    let mut steer_turn_id = turn_id;
-                    let mut retried_after_turn_mismatch = false;
-                    loop {
-                        match app_server
-                            .turn_steer(thread_id, steer_turn_id.clone(), items.to_vec())
-                            .await
-                        {
-                            Ok(_) => return Ok(true),
-                            Err(error) => {
-                                if let Some(turn_error) =
-                                    active_turn_not_steerable_turn_error(&error)
+                let active_turn_id = self.active_turn_id_for_thread(thread_id).await;
+                let should_start_turn =
+                    match workspace_context_turn_route(*model_tool_mode, active_turn_id) {
+                        WorkspaceContextTurnRoute::HoldRestricted => {
+                            self.hold_workspace_context_turn(items);
+                            return Ok(true);
+                        }
+                        WorkspaceContextTurnRoute::Start => true,
+                        WorkspaceContextTurnRoute::Steer(turn_id) => {
+                            let mut steer_turn_id = turn_id;
+                            let mut retried_after_turn_mismatch = false;
+                            loop {
+                                match app_server
+                                    .turn_steer(thread_id, steer_turn_id.clone(), items.to_vec())
+                                    .await
                                 {
-                                    if !self.chat_widget.enqueue_rejected_steer() {
-                                        self.chat_widget.add_error_message(turn_error.message);
-                                    }
-                                    return Ok(true);
-                                }
-                                match active_turn_steer_race(&error) {
-                                    Some(ActiveTurnSteerRace::Missing) => {
-                                        if let Some(channel) =
-                                            self.thread_event_channels.get(&thread_id)
+                                    Ok(_) => return Ok(true),
+                                    Err(error) => {
+                                        if let Some(turn_error) =
+                                            active_turn_not_steerable_turn_error(&error)
                                         {
-                                            let mut store = channel.store.lock().await;
-                                            store.clear_active_turn_id();
+                                            if !self.chat_widget.enqueue_rejected_steer() {
+                                                self.chat_widget
+                                                    .add_error_message(turn_error.message);
+                                            }
+                                            return Ok(true);
                                         }
-                                        should_start_turn = true;
-                                        break;
-                                    }
-                                    Some(ActiveTurnSteerRace::ExpectedTurnMismatch {
-                                        actual_turn_id,
-                                    }) if !retried_after_turn_mismatch
-                                        && actual_turn_id != steer_turn_id =>
-                                    {
-                                        // Review flows can swap the active turn before the TUI
-                                        // processes the corresponding notification. Retry once with
-                                        // the server-reported turn id so non-steerable review turns
-                                        // still fall through to the existing queueing behavior.
-                                        if let Some(channel) =
-                                            self.thread_event_channels.get(&thread_id)
-                                        {
-                                            let mut store = channel.store.lock().await;
-                                            store.active_turn_id = Some(actual_turn_id.clone());
+                                        match active_turn_steer_race(&error) {
+                                            Some(ActiveTurnSteerRace::Missing) => {
+                                                if let Some(channel) =
+                                                    self.thread_event_channels.get(&thread_id)
+                                                {
+                                                    let mut store = channel.store.lock().await;
+                                                    store.clear_active_turn_id();
+                                                }
+                                                break true;
+                                            }
+                                            Some(ActiveTurnSteerRace::ExpectedTurnMismatch {
+                                                actual_turn_id,
+                                            }) if !retried_after_turn_mismatch
+                                                && actual_turn_id != steer_turn_id =>
+                                            {
+                                                // Review flows can swap the active turn before the
+                                                // TUI processes the corresponding notification.
+                                                // Retry once with the server-reported turn id so
+                                                // non-steerable review turns still fall through to
+                                                // the existing queueing behavior.
+                                                if let Some(channel) =
+                                                    self.thread_event_channels.get(&thread_id)
+                                                {
+                                                    let mut store = channel.store.lock().await;
+                                                    store.active_turn_id =
+                                                        Some(actual_turn_id.clone());
+                                                }
+                                                steer_turn_id = actual_turn_id;
+                                                retried_after_turn_mismatch = true;
+                                            }
+                                            Some(ActiveTurnSteerRace::ExpectedTurnMismatch {
+                                                actual_turn_id,
+                                            }) => {
+                                                if let Some(channel) =
+                                                    self.thread_event_channels.get(&thread_id)
+                                                {
+                                                    let mut store = channel.store.lock().await;
+                                                    store.active_turn_id = Some(actual_turn_id);
+                                                }
+                                                return Err(error.into());
+                                            }
+                                            None => return Err(error.into()),
                                         }
-                                        steer_turn_id = actual_turn_id;
-                                        retried_after_turn_mismatch = true;
                                     }
-                                    Some(ActiveTurnSteerRace::ExpectedTurnMismatch {
-                                        actual_turn_id,
-                                    }) => {
-                                        if let Some(channel) =
-                                            self.thread_event_channels.get(&thread_id)
-                                        {
-                                            let mut store = channel.store.lock().await;
-                                            store.active_turn_id = Some(actual_turn_id);
-                                        }
-                                        return Err(error.into());
-                                    }
-                                    None => return Err(error.into()),
                                 }
                             }
                         }
-                    }
-                }
+                    };
                 if should_start_turn {
                     let config = self.chat_widget.config_ref();
                     let approvals_reviewer =
@@ -665,6 +681,7 @@ impl App {
                             collaboration_mode.clone(),
                             *personality,
                             final_output_json_schema.clone(),
+                            *model_tool_mode,
                         )
                         .await?;
                     if self.active_thread_id == Some(thread_id)
@@ -750,7 +767,7 @@ impl App {
         }
     }
 
-    fn turn_permissions_override_from_config(
+    pub(super) fn turn_permissions_override_from_config(
         config: &Config,
         active_permission_profile: Option<&ActivePermissionProfile>,
         runtime_permission_profile_override: Option<&PermissionProfile>,

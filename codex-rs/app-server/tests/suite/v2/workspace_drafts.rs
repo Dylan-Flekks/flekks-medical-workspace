@@ -43,18 +43,26 @@ async fn workspace_drafts_recover_exact_replayed_checkpoint_and_paginate() -> Re
 
     let second = create_checkpoint(
         &mut server,
-        checkpoint_params(&client_id, &first.checkpoint.session_id, draft("Second")),
+        checkpoint_params(&client_id, &first.checkpoint, draft("Second")),
     )
     .await?;
     assert_eq!(second.checkpoint.revision, 2);
 
     let replay = create_checkpoint(
         &mut server,
-        checkpoint_params(&client_id, &first.checkpoint.session_id, draft("First")),
+        checkpoint_params(&client_id, &first.checkpoint, draft("Second")),
     )
     .await?;
     assert!(replay.replayed);
-    assert_eq!(replay.checkpoint.id, first.checkpoint.id);
+    assert_eq!(replay.checkpoint.id, second.checkpoint.id);
+
+    let backward = request_error(
+        &mut server,
+        "workspace/draft/checkpoint/create",
+        checkpoint_params(&client_id, &second.checkpoint, draft("First")),
+    )
+    .await?;
+    assert!(backward.error.message.contains("cannot move"));
 
     let sessions: WorkspaceDraftSessionListResponse = request(
         &mut server,
@@ -63,9 +71,9 @@ async fn workspace_drafts_recover_exact_replayed_checkpoint_and_paginate() -> Re
     )
     .await?;
     assert_eq!(sessions.data.len(), 1);
-    assert_eq!(sessions.data[0].current_revision, 1);
-    assert_eq!(sessions.data[0].current_checkpoint.id, first.checkpoint.id);
-    assert_eq!(sessions.data[0].current_checkpoint.draft, draft("First"));
+    assert_eq!(sessions.data[0].current_revision, 2);
+    assert_eq!(sessions.data[0].current_checkpoint.id, second.checkpoint.id);
+    assert_eq!(sessions.data[0].current_checkpoint.draft, draft("Second"));
 
     let first_page: WorkspaceDraftCheckpointListResponse = request(
         &mut server,
@@ -245,7 +253,7 @@ async fn workspace_drafts_close_and_validation_are_client_scoped() -> Result<()>
         "workspace/draft/checkpoint/create",
         json!({
             "clientId": client_id,
-            "draft": {"schemaVersion": 2},
+            "draft": {"schemaVersion": 3},
             "trigger": "manual",
             "actor": "Clinician Example"
         }),
@@ -255,7 +263,7 @@ async fn workspace_drafts_close_and_validation_are_client_scoped() -> Result<()>
         invalid_schema
             .error
             .message
-            .contains("schemaVersion must be 1")
+            .contains("schemaVersion must be 1 or 2")
     );
     let negative_revision = request_error(
         &mut server,
@@ -317,6 +325,66 @@ async fn workspace_draft_close_fails_closed_for_partial_or_stale_checkpoint_prov
     )
     .await?;
 
+    let missing_append_cas = request_error(
+        &mut server,
+        "workspace/draft/checkpoint/create",
+        json!({
+            "sessionId": first.checkpoint.session_id,
+            "clientId": client_id,
+            "draft": draft("Missing append CAS"),
+            "trigger": "manual",
+            "actor": "Clinician Example"
+        }),
+    )
+    .await?;
+    assert!(
+        missing_append_cas
+            .error
+            .message
+            .contains("existing-session append requires")
+    );
+
+    let partial_append_cas = request_error(
+        &mut server,
+        "workspace/draft/checkpoint/create",
+        json!({
+            "sessionId": first.checkpoint.session_id,
+            "clientId": client_id,
+            "expectedCurrentCheckpointId": first.checkpoint.id,
+            "draft": draft("Partial append CAS"),
+            "trigger": "manual",
+            "actor": "Clinician Example"
+        }),
+    )
+    .await?;
+    assert!(
+        partial_append_cas
+            .error
+            .message
+            .contains("must be provided together")
+    );
+
+    let new_session_with_cas = request_error(
+        &mut server,
+        "workspace/draft/checkpoint/create",
+        json!({
+            "clientId": client_id,
+            "expectedCurrentCheckpointId": first.checkpoint.id,
+            "expectedCurrentCheckpointRevision": first.checkpoint.revision,
+            "expectedCurrentCheckpointSha256": first.checkpoint.content_sha256,
+            "draft": draft("Unexpected new-session CAS"),
+            "trigger": "manual",
+            "actor": "Clinician Example"
+        }),
+    )
+    .await?;
+    assert!(
+        new_session_with_cas
+            .error
+            .message
+            .contains("new-session checkpoint must omit")
+    );
+
     let partial = request_error(
         &mut server,
         "workspace/draft/session/close",
@@ -345,7 +413,7 @@ async fn workspace_draft_close_fails_closed_for_partial_or_stale_checkpoint_prov
 
     let newer = create_checkpoint(
         &mut server,
-        checkpoint_params(&client_id, &first.checkpoint.session_id, draft("Newer")),
+        checkpoint_params(&client_id, &first.checkpoint, draft("Newer")),
     )
     .await?;
     let concurrent = request_error(
@@ -434,10 +502,13 @@ async fn create_checkpoint(
     request(server, "workspace/draft/checkpoint/create", params).await
 }
 
-fn checkpoint_params(client_id: &str, session_id: &str, draft: Value) -> Value {
+fn checkpoint_params(client_id: &str, current: &WorkspaceDraftCheckpoint, draft: Value) -> Value {
     json!({
-        "sessionId": session_id,
+        "sessionId": current.session_id,
         "clientId": client_id,
+        "expectedCurrentCheckpointId": current.id,
+        "expectedCurrentCheckpointRevision": current.revision,
+        "expectedCurrentCheckpointSha256": current.content_sha256,
         "noteId": "draft-note",
         "baseNoteRevision": 1,
         "draft": draft,

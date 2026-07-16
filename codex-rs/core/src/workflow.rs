@@ -28,6 +28,9 @@ impl Session {
     }
 
     pub(crate) async fn emit_workflow_status_snapshots(&self, turn_context: &TurnContext) {
+        if turn_context.model_tool_mode.is_workspace_restricted() {
+            return;
+        }
         for snapshot in self.collect_workflow_snapshots().await {
             let msg = EventMsg::ItemCompleted(ItemCompletedEvent {
                 thread_id: self.thread_id,

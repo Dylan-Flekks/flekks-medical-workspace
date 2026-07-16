@@ -1088,6 +1088,42 @@ impl ThreadManager {
 }
 
 impl ThreadManagerState {
+    async fn workspace_planning_lock_active(&self, thread_id: ThreadId) -> CodexResult<bool> {
+        let loaded_thread = {
+            let threads = self.threads.read().await;
+            threads.get(&thread_id).cloned()
+        };
+        if let Some(thread) = loaded_thread {
+            return thread.workspace_planning_lock_active().await.map_err(|_| {
+                CodexErr::InvalidRequest(
+                    "cannot verify the workspace medical planning lock for the fork source"
+                        .to_string(),
+                )
+            });
+        }
+        let Some(local_store) = self
+            .thread_store
+            .as_any()
+            .downcast_ref::<LocalThreadStore>()
+        else {
+            return Ok(false);
+        };
+        let Some(state_db) = local_store.state_db().await else {
+            return Ok(false);
+        };
+        state_db
+            .workspace()
+            .get_active_plan_session_by_thread(&thread_id.to_string())
+            .await
+            .map(|session| session.is_some())
+            .map_err(|_| {
+                CodexErr::InvalidRequest(
+                    "cannot verify the workspace medical planning lock for the fork source"
+                        .to_string(),
+                )
+            })
+    }
+
     pub(crate) fn agent_graph_store(&self) -> Option<Arc<dyn AgentGraphStore>> {
         self.agent_graph_store.clone()
     }
@@ -1538,6 +1574,18 @@ impl ThreadManagerState {
         supports_openai_form_elicitation: bool,
         user_shell_override: Option<crate::shell::Shell>,
     ) -> CodexResult<NewThread> {
+        if matches!(&initial_history, InitialHistory::Forked(_))
+            && let Some(source_thread_id) =
+                forked_from_thread_id.or_else(|| initial_history.forked_from_id())
+            && self
+                .workspace_planning_lock_active(source_thread_id)
+                .await?
+        {
+            return Err(CodexErr::InvalidRequest(
+                "cannot fork a thread bound to an active workspace medical planning session"
+                    .to_string(),
+            ));
+        }
         let is_resumed_thread = matches!(&initial_history, InitialHistory::Resumed(_));
         if let InitialHistory::Resumed(resumed) = &initial_history {
             let mut threads = self.threads.write().await;

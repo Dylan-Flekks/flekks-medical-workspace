@@ -35,6 +35,12 @@ pub(super) async fn fetch_existing(
 ) -> Result<ExistingRecords, WorkspaceChartCommitError> {
     Ok(ExistingRecords {
         client,
+        coverage: match request.coverage.as_ref() {
+            Some(input) => {
+                super::workspace_coverage::coverage_in_tx(tx, id(&input.id, "coverage")?).await?
+            }
+            None => None,
+        },
         safety_item: match request.safety_item.as_ref() {
             Some(input) => chart_sql::safety_item(tx, id(&input.id, "safety item")?).await?,
             None => None,
@@ -70,6 +76,9 @@ pub(super) fn validate_existing_ownership(
     existing: &ExistingRecords,
     client_id: &str,
 ) -> Result<(), WorkspaceChartCommitError> {
+    if let Some(value) = existing.coverage.as_ref() {
+        validate_owner("coverage", &value.id, &value.client_id, false, client_id)?;
+    }
     if let Some(value) = existing.safety_item.as_ref() {
         validate_owner(
             "safety item",
@@ -203,6 +212,24 @@ pub(super) async fn validate_relations(
     request: &WorkspaceChartCommitRequest,
     client_id: &str,
 ) -> Result<(), WorkspaceChartCommitError> {
+    if let Some(coverage) = request.coverage.as_ref() {
+        let occupied: Option<String> = sqlx::query_scalar(
+            "SELECT id FROM workspace_coverages WHERE client_id = ? AND priority = ?",
+        )
+        .bind(client_id)
+        .bind(coverage.priority)
+        .fetch_optional(&mut **tx)
+        .await?;
+        if occupied
+            .as_deref()
+            .is_some_and(|id| Some(id) != coverage.id.as_deref())
+        {
+            return validation(format!(
+                "workspace coverage priority {} is already occupied for this patient",
+                coverage.priority
+            ));
+        }
+    }
     let commit_encounter = request
         .encounter
         .as_ref()
@@ -394,6 +421,12 @@ pub(super) async fn apply_changes(
     if has(changed, WorkspaceChartEntityKind::Client) {
         let input = requested(request.client.as_ref(), "client")?;
         chart_sql::put_client(tx, client_id, input, now_ms).await?;
+        if existing.client.is_none() && request.coverage.is_none() {
+            super::workspace_coverage::put_legacy_primary_coverage_if_present(
+                tx, client_id, input, now_ms,
+            )
+            .await?;
+        }
         audit(
             tx,
             request,
@@ -403,6 +436,26 @@ pub(super) async fn apply_changes(
                 kind: WorkspaceChartEntityKind::Client,
                 entity_id: client_id,
                 action: action(existing.client.is_some()),
+                encounter_id: None,
+                note_id: None,
+            },
+            now_ms,
+        )
+        .await?;
+    }
+    if has(changed, WorkspaceChartEntityKind::Coverage) {
+        let input = requested(request.coverage.as_ref(), "coverage")?;
+        let entity_id = id(&input.id, "coverage")?;
+        super::workspace_coverage::put_coverage(tx, entity_id, input, now_ms).await?;
+        audit(
+            tx,
+            request,
+            commit_id,
+            client_id,
+            AuditTarget {
+                kind: WorkspaceChartEntityKind::Coverage,
+                entity_id,
+                action: action(existing.coverage.is_some()),
                 encounter_id: None,
                 note_id: None,
             },
@@ -617,6 +670,7 @@ async fn audit(
             .as_ref()
             .and_then(|input| input.document_id.clone()),
         WorkspaceChartEntityKind::Client
+        | WorkspaceChartEntityKind::Coverage
         | WorkspaceChartEntityKind::SafetyItem
         | WorkspaceChartEntityKind::Encounter
         | WorkspaceChartEntityKind::Note => None,
@@ -680,6 +734,19 @@ pub(super) async fn fetch_requested_safety(
         Some(input) => Ok(Some(required(
             chart_sql::safety_item(tx, id(&input.id, "safety item")?).await?,
             "safety item",
+        )?)),
+        None => Ok(None),
+    }
+}
+
+pub(super) async fn fetch_requested_coverage(
+    tx: &mut Transaction<'_, Sqlite>,
+    request: &WorkspaceChartCommitRequest,
+) -> Result<Option<crate::WorkspaceCoverage>, WorkspaceChartCommitError> {
+    match request.coverage.as_ref() {
+        Some(input) => Ok(Some(required(
+            super::workspace_coverage::coverage_in_tx(tx, id(&input.id, "coverage")?).await?,
+            "coverage",
         )?)),
         None => Ok(None),
     }

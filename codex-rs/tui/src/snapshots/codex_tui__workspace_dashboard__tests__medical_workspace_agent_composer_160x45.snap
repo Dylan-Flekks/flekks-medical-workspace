@@ -1,0 +1,49 @@
+---
+source: tui/src/workspace_dashboard.rs
+expression: "render_dashboard_lines_at(&composer, 160, 45)"
+---
+Medical Workspace  /workspace-medical  SYNTHETIC DATA ONLY
+Patient: Jordan Patient  DOB: blank  MRN: blank  Contact: Missing contact  Coverage: Missing coverage  Encounter: No encounter
+ EXPLORER                          PATIENT CHART                                                                   PLAN WITH CODEX
+┌Patient Directory───────────────┐┌Patient Demographics──────────────────────────────────────────────────────────┐┌Plan with Codex─────────────────────────────┐
+│Local search: /                 ││Identity: Jordan Patient · preferred not set                                  ││[Chat]  Context  Audit  ←/→ tabs            │
+│0 active patients; local only   ││Legal/card: legal name missing                                                ││                                            │
+│No saved patients yet.          ││DOB: missing · admin sex: missing · MRN: missing                              ││Plan with Codex · Jordan Patient            │
+│New patient: :patient new       ││Contact: phone missing; email missing; method not set                         ││  Context  0 files · 0 text · 0 clips       │
+│                                ││Address: address missing                                                      ││  ● plan: ready to plan                     │
+│                                ││Emergency: name missing; relationship missing; phone missing                  ││                                            │
+│                                ││Coverage: P not entered; S not entered; T not entered                         ││Codex                                       │
+│                                ││Enter edits all identity/contact fields · Ctrl-P opens actions                ││  I can help connect today's note to the    │
+│                                │└──────────────────────────────────────────────────────────────────────────────┘│patient's longer-term                       │
+│                                │┌Note Title────────────────────────────────────────────────────────────────────┐│  goals, prior visits, referrals, and       │
+│                                ││Visit note                                                                    ││selected files.                             │
+│                                │└──────────────────────────────────────────────────────────────────────────────┘│                                            │
+└────────────────────────────────┘┌Note Body─────────────────────────────────────────────────────────────────────┐│  Try: What context is missing before I     │
+┌Patient Notes───────────────────┐│Fake human-entered visit note body.                                           ││finish this note?                           │
+│Patient Notes                   ││                                                                              ││  Ask Codex to publish an evidence-linked   │
+│  New note                      ││                                                                              ││plan before Ctrl-G handoff.                 │
+│  No patient notes yet. Use     ││                                                                              ││  Recommendations remain review-only until a│
+│:note new.                      ││                                                                              ││clinician approves a change.                │
+│  Medical, communication, and   ││                                                                              ││                                            │
+│admin notes appear here.        ││                                                                              ││                                            │
+│                                ││                                                                              ││                                            │
+│                                ││                                                                              ││                                            │
+│                                ││                                                                              ││                                            │
+└────────────────────────────────┘│                                                                              ││                                            │
+┌Uploaded Documents──────────────┐│                                                                              ││                                            │
+│Uploaded Documents              ││                                                                              ││                                            │
+│No files yet                    ││                                                                              ││                                            │
+│Paste/drop JPG/PDF. Space...    ││                                                                              ││                                            │
+│                                ││                                                                              ││                                            │
+│                                ││                                                                              ││                                            │
+│                                ││                                                                              ││                                            │
+│                                ││                                                                              ││                                            │
+│                                ││                                                                              ││                                            │
+│                                ││                                                                              ││Message Codex                               │
+│                                ││                                                                              ││Enter send · Shift-Enter line · Esc leave   │
+│                                ││                                                                              ││  Draft assessment                          │
+│                                ││                                                                              ││  Keep goals measurable                     │
+│                                ││                                                                              ││  Flag missing evidence                     │
+│                                ││                                                                              ││                                            │
+└────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────┘└────────────────────────────────────────────┘
+Focus: Agent | Mode: Message Codex | Keys: Enter send  Shift-Enter newline  Esc leave  Ctrl-G master handoff  Tab/⇧Tab pane  Ctrl-P commands

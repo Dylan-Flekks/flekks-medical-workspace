@@ -4,6 +4,11 @@ use super::workspace_agent_queries::workspace_agent_result_row_by_run;
 use super::workspace_agent_queries::workspace_agent_run_row_by_id;
 use super::workspace_agent_queries::workspace_agent_run_row_by_key;
 use super::workspace_agent_queries::workspace_context_packet_row_by_id;
+use super::workspace_context_plan::validate_context_plan_for_submission;
+use super::workspace_plan_binding::WorkspacePlanBindingContext;
+use super::workspace_plan_binding::normalize_plan_revision_binding;
+use super::workspace_plan_binding::require_submitted_plan_revision_receipt;
+use super::workspace_plan_binding::validate_plan_revision_binding;
 use super::*;
 use crate::model::WorkspaceAgentRunRow;
 use crate::model::WorkspaceAgentRunSourceRow;
@@ -14,6 +19,11 @@ use uuid::Uuid;
 
 use super::workspace::WorkspaceStore;
 use super::workspace::insert_audit_event;
+use super::workspace_policy::require_synthetic_workspace;
+
+const HANDOFF_PROMPT_SOURCE_TYPE: &str = "handoff_prompt";
+const HANDOFF_PROMPT_RENDERER: &str = "render_workspace_agent_handoff_prompt";
+const HANDOFF_PROMPT_RENDERER_VERSION: i64 = 1;
 
 impl WorkspaceStore {
     pub async fn prepare_context_packet(
@@ -68,6 +78,28 @@ impl WorkspaceStore {
                 packet.id,
                 packet.status
             );
+        }
+        if target_status == "submitted" {
+            validate_context_plan_for_submission(&mut tx, &packet).await?;
+            if let Some(binding) = normalize_plan_revision_binding(
+                packet.workspace_plan_revision_id.as_deref(),
+                packet.workspace_plan_content_sha256.as_deref(),
+                packet.workspace_plan_evidence_manifest_sha256.as_deref(),
+            )? {
+                validate_plan_revision_binding(
+                    &mut tx,
+                    &binding,
+                    WorkspacePlanBindingContext {
+                        client_id: &packet.client_id,
+                        encounter_id: packet.encounter_id.as_deref(),
+                        note_id: packet.note_id.as_deref(),
+                        source_checkpoint_id: packet.source_checkpoint_id.as_deref(),
+                        source_checkpoint_sha256: packet.source_checkpoint_sha256.as_deref(),
+                        context_envelope_json: &packet.context_envelope_json,
+                    },
+                )
+                .await?;
+            }
         }
 
         let actor = nonempty_or(&input.actor, &packet.clinician_actor);
@@ -134,8 +166,50 @@ impl WorkspaceStore {
         if input.idempotency_key.trim().is_empty() {
             anyhow::bail!("workspace agent run idempotency key must not be empty");
         }
+        let run_kind = nonempty_or(&input.run_kind, "agent");
+        let provider = input.provider.trim().to_string();
+        let model = input.model.trim().to_string();
+        let source_thread_id = input
+            .source_thread_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string);
+        let source_turn_id = input
+            .source_turn_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string);
+        match run_kind.as_str() {
+            "agent" => {
+                if input.source_turn_id.is_some() {
+                    anyhow::bail!(
+                        "workspace agent run source turn is server-owned and must be claimed after run start"
+                    );
+                }
+                if source_thread_id.is_none() {
+                    anyhow::bail!("workspace agent run source thread must not be empty");
+                }
+                if provider.is_empty() {
+                    anyhow::bail!("workspace agent run provider must not be empty");
+                }
+                if model.is_empty() {
+                    anyhow::bail!("workspace agent run model must not be empty");
+                }
+            }
+            "manual_import" => {
+                if source_thread_id.is_some() != source_turn_id.is_some() {
+                    anyhow::bail!(
+                        "workspace manual import source thread and source turn must be provided together"
+                    );
+                }
+            }
+            other => anyhow::bail!("unsupported workspace agent run kind `{other}`"),
+        }
         let now_ms = datetime_to_epoch_millis(Utc::now());
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let policy = require_synthetic_workspace(&mut tx).await?;
         let packet = workspace_context_packet_row_by_id(&mut tx, &input.packet_id)
             .await?
             .ok_or_else(|| {
@@ -149,6 +223,41 @@ impl WorkspaceStore {
             &input.expected_client_id,
             &input.expected_context_envelope_sha256,
         )?;
+        let packet_plan_binding = normalize_plan_revision_binding(
+            packet.workspace_plan_revision_id.as_deref(),
+            packet.workspace_plan_content_sha256.as_deref(),
+            packet.workspace_plan_evidence_manifest_sha256.as_deref(),
+        )?;
+        if let Some(binding) = packet_plan_binding.as_ref() {
+            validate_plan_revision_binding(
+                &mut tx,
+                binding,
+                WorkspacePlanBindingContext {
+                    client_id: &packet.client_id,
+                    encounter_id: packet.encounter_id.as_deref(),
+                    note_id: packet.note_id.as_deref(),
+                    source_checkpoint_id: packet.source_checkpoint_id.as_deref(),
+                    source_checkpoint_sha256: packet.source_checkpoint_sha256.as_deref(),
+                    context_envelope_json: &packet.context_envelope_json,
+                },
+            )
+            .await?;
+        }
+        let expected_plan_binding = normalize_plan_revision_binding(
+            input.expected_workspace_plan_revision_id.as_deref(),
+            input.expected_workspace_plan_content_sha256.as_deref(),
+            input
+                .expected_workspace_plan_evidence_manifest_sha256
+                .as_deref(),
+        )?;
+        if expected_plan_binding
+            .as_ref()
+            .is_some_and(|expected| Some(expected) != packet_plan_binding.as_ref())
+        {
+            anyhow::bail!(
+                "workspace agent run expected plan binding does not match its authoritative context packet"
+            );
+        }
         if packet.status == "canceled" {
             anyhow::bail!(
                 "workspace context packet `{}` was canceled and cannot start a run",
@@ -160,11 +269,13 @@ impl WorkspaceStore {
             workspace_agent_run_row_by_key(&mut tx, &packet.id, input.idempotency_key.trim())
                 .await?
         {
+            validate_run_packet_binding(&existing, &packet)?;
             tx.rollback().await?;
             return existing.try_into();
         }
 
         if packet.status == "prepared" {
+            validate_context_plan_for_submission(&mut tx, &packet).await?;
             sqlx::query(
                 "UPDATE workspace_context_packets SET status = 'submitted', submitted_at_ms = ?, updated_at_ms = ? WHERE id = ? AND status = 'prepared'",
             )
@@ -204,15 +315,16 @@ impl WorkspaceStore {
         }
 
         let id = Uuid::new_v4().to_string();
-        let run_kind = nonempty_or(&input.run_kind, "agent");
         sqlx::query(
             r#"
 INSERT INTO workspace_agent_runs (
     id, packet_id, client_id, note_id, base_note_revision,
-    context_envelope_sha256, run_kind, idempotency_key, provider, model,
+    context_envelope_sha256, workspace_plan_revision_id,
+    workspace_plan_content_sha256, workspace_plan_evidence_manifest_sha256,
+    run_kind, idempotency_key, provider, model,
     source_thread_id, source_turn_id, status, error_summary,
     started_at_ms, completed_at_ms, created_at_ms, updated_at_ms
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', '', ?, NULL, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', '', ?, NULL, ?, ?)
             "#,
         )
         .bind(&id)
@@ -221,12 +333,15 @@ INSERT INTO workspace_agent_runs (
         .bind(&packet.note_id)
         .bind(packet.base_note_revision)
         .bind(&packet.context_envelope_sha256)
+        .bind(&packet.workspace_plan_revision_id)
+        .bind(&packet.workspace_plan_content_sha256)
+        .bind(&packet.workspace_plan_evidence_manifest_sha256)
         .bind(&run_kind)
         .bind(input.idempotency_key.trim())
-        .bind(input.provider.trim())
-        .bind(input.model.trim())
-        .bind(&input.source_thread_id)
-        .bind(&input.source_turn_id)
+        .bind(&provider)
+        .bind(&model)
+        .bind(&source_thread_id)
+        .bind(&source_turn_id)
         .bind(now_ms)
         .bind(now_ms)
         .bind(now_ms)
@@ -240,6 +355,10 @@ INSERT INTO workspace_agent_runs (
             "noteId": &packet.note_id,
             "baseNoteRevision": packet.base_note_revision,
             "contextEnvelopeSha256": &packet.context_envelope_sha256,
+            "workspacePlanRevisionId": &packet.workspace_plan_revision_id,
+            "workspacePlanContentSha256": &packet.workspace_plan_content_sha256,
+            "workspacePlanEvidenceManifestSha256":
+                &packet.workspace_plan_evidence_manifest_sha256,
             "contextEnvelope": serde_json::from_str::<serde_json::Value>(
                 &packet.context_envelope_json,
             )?,
@@ -247,6 +366,9 @@ INSERT INTO workspace_agent_runs (
                 &packet.authorized_scope_json,
             )?,
             "expectedOutputKind": &packet.expected_output_kind,
+            "safety": {
+                "dataClassification": policy.data_classification.as_str(),
+            },
         })
         .to_string();
         let packet_contract_sha256 = format!(
@@ -300,8 +422,8 @@ INSERT INTO workspace_agent_run_sources (
                 client_id: Some(packet.client_id),
                 encounter_id: packet.encounter_id,
                 note_id: packet.note_id,
-                source_thread_id: input.source_thread_id,
-                source_turn_id: input.source_turn_id,
+                source_thread_id,
+                source_turn_id,
                 success: true,
                 summary: format!("{run_kind} run started"),
                 metadata_json: Some(
@@ -309,6 +431,10 @@ INSERT INTO workspace_agent_run_sources (
                         "packet_id": &packet.id,
                         "base_note_revision": packet.base_note_revision,
                         "context_envelope_sha256": &packet.context_envelope_sha256,
+                        "workspace_plan_revision_id": &packet.workspace_plan_revision_id,
+                        "workspace_plan_content_sha256": &packet.workspace_plan_content_sha256,
+                        "workspace_plan_evidence_manifest_sha256":
+                            &packet.workspace_plan_evidence_manifest_sha256,
                         "packet_contract_sha256": packet_contract_sha256,
                     })
                     .to_string(),
@@ -334,7 +460,9 @@ INSERT INTO workspace_agent_run_sources (
             r#"
 SELECT
     id, packet_id, client_id, note_id, base_note_revision,
-    context_envelope_sha256, run_kind, idempotency_key, provider, model,
+    context_envelope_sha256, workspace_plan_revision_id,
+    workspace_plan_content_sha256, workspace_plan_evidence_manifest_sha256,
+    run_kind, idempotency_key, provider, model,
     source_thread_id, source_turn_id, status, error_summary,
     started_at_ms, completed_at_ms, created_at_ms, updated_at_ms
 FROM workspace_agent_runs
@@ -369,11 +497,32 @@ LIMIT ?
             );
         }
         let now_ms = datetime_to_epoch_millis(Utc::now());
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        require_synthetic_workspace(&mut tx).await?;
         let Some(existing) = workspace_agent_run_row_by_id(&mut tx, &input.run_id).await? else {
             tx.rollback().await?;
             return Ok(None);
         };
+        let receipt_bound_unclaimed = existing.source_turn_id.is_none()
+            && sqlx::query_scalar::<_, i64>(
+                r#"
+SELECT EXISTS(
+    SELECT 1
+    FROM workspace_plan_submission_receipts
+    WHERE agent_run_id = ?
+)
+                "#,
+            )
+            .bind(&existing.id)
+            .fetch_one(&mut *tx)
+            .await?
+                == 1;
+        if receipt_bound_unclaimed {
+            anyhow::bail!(
+                "workspace agent run `{}` is bound by an immutable Plan submission receipt and must remain resumable until its master-agent turn is claimed",
+                existing.id
+            );
+        }
         if existing.status == status {
             tx.rollback().await?;
             return existing.try_into().map(Some);
@@ -431,8 +580,14 @@ LIMIT ?
         &self,
         input: crate::WorkspaceAgentRunSourceCreate,
     ) -> anyhow::Result<crate::WorkspaceAgentRunSource> {
+        if input.source_entity_type.trim() == HANDOFF_PROMPT_SOURCE_TYPE {
+            anyhow::bail!(
+                "workspace handoff prompt sources are server-owned and may only be recorded by the turn claim"
+            );
+        }
         let now_ms = datetime_to_epoch_millis(Utc::now());
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        require_synthetic_workspace(&mut tx).await?;
         let run = workspace_agent_run_row_by_id(&mut tx, &input.run_id)
             .await?
             .ok_or_else(|| {
@@ -450,9 +605,195 @@ LIMIT ?
         Ok(source)
     }
 
-    pub async fn read_authorized_agent_context(
+    /// Atomically claims one running medical agent run for one exact restricted model turn.
+    ///
+    /// The claim is the security boundary below the TUI: direct app-server clients must present
+    /// the canonical packet prompt and must execute on the thread, provider, and model recorded
+    /// when the clinician created the run. Plan-bound runs also require the exact immutable
+    /// revision, packet, and run submission receipt. Setting `source_turn_id` consumes the run
+    /// capability so it cannot be sampled a second time.
+    pub async fn claim_agent_turn(
+        &self,
+        input: crate::WorkspaceAgentTurnClaim,
+    ) -> anyhow::Result<crate::WorkspaceAgentExecutionBinding> {
+        let execution = normalized_execution_binding(input.execution)?;
+        if input.prompt.is_empty() {
+            anyhow::bail!("workspace agent turn prompt must not be empty");
+        }
+
+        let now_ms = datetime_to_epoch_millis(Utc::now());
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        require_synthetic_workspace(&mut tx).await?;
+        let run = workspace_agent_run_row_by_id(&mut tx, &execution.run_id)
+            .await?
+            .ok_or_else(|| {
+                anyhow::anyhow!("workspace agent run `{}` was not found", execution.run_id)
+            })?;
+        if run.status != "running" {
+            anyhow::bail!(
+                "workspace agent run `{}` is `{}` and cannot claim a model turn",
+                run.id,
+                run.status
+            );
+        }
+        if run.run_kind != "agent" {
+            anyhow::bail!(
+                "workspace agent run `{}` is `{}` and cannot claim a model turn",
+                run.id,
+                run.run_kind
+            );
+        }
+        validate_unclaimed_execution_identity(&run, &execution)?;
+        let packet = workspace_context_packet_row_by_id(&mut tx, &run.packet_id)
+            .await?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "workspace context packet `{}` for run `{}` was not found",
+                    run.packet_id,
+                    run.id
+                )
+            })?;
+        validate_run_packet_binding(&run, &packet)?;
+        if packet.status != "submitted" {
+            anyhow::bail!(
+                "workspace context packet `{}` is `{}` and cannot authorize a model turn",
+                packet.id,
+                packet.status
+            );
+        }
+        if let Some(binding) = normalize_plan_revision_binding(
+            packet.workspace_plan_revision_id.as_deref(),
+            packet.workspace_plan_content_sha256.as_deref(),
+            packet.workspace_plan_evidence_manifest_sha256.as_deref(),
+        )? {
+            require_submitted_plan_revision_receipt(
+                &mut tx,
+                &binding,
+                &packet.id,
+                &run.id,
+                &packet.client_id,
+            )
+            .await?;
+        }
+        let expected_prompt = crate::render_workspace_agent_handoff_prompt(
+            &crate::WorkspaceAgentHandoffPromptInput {
+                packet_id: packet.id.clone(),
+                client_id: packet.client_id.clone(),
+                encounter_id: packet.encounter_id.clone(),
+                note_id: packet.note_id.clone(),
+                human_request: packet.human_request.clone(),
+                chart_context_summary: packet.chart_context_summary.clone(),
+                context_envelope_json: packet.context_envelope_json.clone(),
+                context_envelope_sha256: packet.context_envelope_sha256.clone(),
+                authorized_scope_json: packet.authorized_scope_json.clone(),
+            },
+            Some(run.id.as_str()),
+        );
+        if input.prompt != expected_prompt {
+            anyhow::bail!(
+                "workspace agent turn prompt does not match the canonical packet handoff"
+            );
+        }
+
+        let claimed = sqlx::query(
+            "UPDATE workspace_agent_runs SET source_turn_id = ?, updated_at_ms = ? WHERE id = ? AND status = 'running' AND source_turn_id IS NULL",
+        )
+        .bind(&execution.source_turn_id)
+        .bind(now_ms)
+        .bind(&run.id)
+        .execute(&mut *tx)
+        .await?;
+        if claimed.rows_affected() != 1 {
+            anyhow::bail!(
+                "workspace agent run `{}` was already claimed or changed concurrently",
+                run.id
+            );
+        }
+
+        let prompt_sha256 = format!("{:x}", Sha256::digest(input.prompt.as_bytes()));
+        let prompt_source_id = Uuid::new_v4().to_string();
+        let prompt_snapshot_json = serde_json::json!({
+            "schema": "workspace-agent-handoff-prompt-v1",
+            "renderer": HANDOFF_PROMPT_RENDERER,
+            "rendererVersion": HANDOFF_PROMPT_RENDERER_VERSION,
+            "runId": &run.id,
+            "packetId": &run.packet_id,
+            "clientId": &run.client_id,
+            "sourceThreadId": &execution.source_thread_id,
+            "sourceTurnId": &execution.source_turn_id,
+            "prompt": &input.prompt,
+            "promptSha256": &prompt_sha256,
+        })
+        .to_string();
+        let prompt_snapshot_sha256 =
+            format!("{:x}", Sha256::digest(prompt_snapshot_json.as_bytes()));
+        sqlx::query(
+            r#"
+INSERT INTO workspace_agent_run_sources (
+    id, run_id, source_entity_type, source_entity_id, source_revision,
+    display_label, snapshot_json, content_sha256, access_purpose, accessed_at_ms
+) VALUES (?, ?, ?, ?, ?, 'Canonical agent handoff prompt', ?, ?, 'authorize one restricted model turn', ?)
+            "#,
+        )
+        .bind(&prompt_source_id)
+        .bind(&run.id)
+        .bind(HANDOFF_PROMPT_SOURCE_TYPE)
+        .bind(&execution.source_turn_id)
+        .bind(HANDOFF_PROMPT_RENDERER_VERSION)
+        .bind(&prompt_snapshot_json)
+        .bind(&prompt_snapshot_sha256)
+        .bind(now_ms)
+        .execute(&mut *tx)
+        .await?;
+        insert_audit_event(
+            &mut tx,
+            crate::WorkspaceAuditEventCreate {
+                entity_type: "agent_run".to_string(),
+                entity_id: run.id,
+                action: "turn_claimed".to_string(),
+                actor: "agent".to_string(),
+                actor_kind: "agent".to_string(),
+                source: "state".to_string(),
+                client_id: Some(run.client_id),
+                note_id: run.note_id,
+                source_thread_id: Some(execution.source_thread_id.clone()),
+                source_turn_id: Some(execution.source_turn_id.clone()),
+                success: true,
+                summary: "restricted medical context turn claimed".to_string(),
+                metadata_json: Some(
+                    serde_json::json!({
+                        "provider": &execution.provider,
+                        "model": &execution.model,
+                        "prompt_sha256": prompt_sha256,
+                        "prompt_source_id": prompt_source_id,
+                        "prompt_snapshot_sha256": prompt_snapshot_sha256,
+                        "renderer": HANDOFF_PROMPT_RENDERER,
+                        "renderer_version": HANDOFF_PROMPT_RENDERER_VERSION,
+                    })
+                    .to_string(),
+                ),
+                ..Default::default()
+            },
+            now_ms,
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(execution)
+    }
+
+    pub async fn read_authorized_agent_context_for_execution(
         &self,
         input: crate::WorkspaceAgentContextReadRequest,
+        execution: crate::WorkspaceAgentExecutionBinding,
+    ) -> anyhow::Result<crate::WorkspaceAgentContextRead> {
+        self.read_authorized_agent_context_inner(input, execution)
+            .await
+    }
+
+    async fn read_authorized_agent_context_inner(
+        &self,
+        input: crate::WorkspaceAgentContextReadRequest,
+        execution: crate::WorkspaceAgentExecutionBinding,
     ) -> anyhow::Result<crate::WorkspaceAgentContextRead> {
         let category = input.category.trim();
         if !matches!(category, "visit_history" | "progress_notes") {
@@ -460,7 +801,8 @@ LIMIT ?
         }
 
         let now_ms = datetime_to_epoch_millis(Utc::now());
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        require_synthetic_workspace(&mut tx).await?;
         let run = workspace_agent_run_row_by_id(&mut tx, input.run_id.trim())
             .await?
             .ok_or_else(|| {
@@ -473,6 +815,8 @@ LIMIT ?
                 run.status
             );
         }
+        let execution = normalized_execution_binding(execution)?;
+        validate_claimed_execution_identity(&run, &execution)?;
         let packet = workspace_context_packet_row_by_id(&mut tx, &run.packet_id)
             .await?
             .ok_or_else(|| {
@@ -551,10 +895,16 @@ ORDER BY accessed_at_ms ASC, id ASC
             .filter(|run_id| !run_id.is_empty())
             .ok_or_else(|| anyhow::anyhow!("workspace agent result run id must not be empty"))?;
         let now_ms = datetime_to_epoch_millis(Utc::now());
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        require_synthetic_workspace(&mut tx).await?;
         let mut run = workspace_agent_run_row_by_id(&mut tx, run_id)
             .await?
             .ok_or_else(|| anyhow::anyhow!("workspace agent run `{run_id}` was not found"))?;
+        if run.run_kind != "manual_import" {
+            anyhow::bail!(
+                "workspace agent run `{run_id}` is bound to model execution and must be completed by its exact model turn"
+            );
+        }
         if run.packet_id != input.packet_id {
             anyhow::bail!(
                 "workspace agent run `{run_id}` belongs to packet `{}` not `{}`",
@@ -593,6 +943,12 @@ ORDER BY accessed_at_ms ASC, id ASC
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty());
+        if run.run_kind == "manual_import" && source_thread_id.is_some() != source_turn_id.is_some()
+        {
+            anyhow::bail!(
+                "workspace manual import source thread and source turn must be provided together"
+            );
+        }
         if let (Some(existing), Some(requested)) =
             (run.source_thread_id.as_deref(), source_thread_id)
             && existing != requested
@@ -612,28 +968,65 @@ ORDER BY accessed_at_ms ASC, id ASC
         {
             anyhow::bail!("workspace agent result source turn requires a source thread");
         }
-        let bound_source_thread_id = run
-            .source_thread_id
-            .clone()
-            .or_else(|| source_thread_id.map(ToString::to_string));
-        let bound_source_turn_id = run
-            .source_turn_id
-            .clone()
-            .or_else(|| source_turn_id.map(ToString::to_string));
-        if bound_source_thread_id != run.source_thread_id
-            || bound_source_turn_id != run.source_turn_id
-        {
-            sqlx::query(
-                "UPDATE workspace_agent_runs SET source_thread_id = ?, source_turn_id = ?, updated_at_ms = ? WHERE id = ? AND status = 'running'",
+        if run.run_kind != "manual_import" {
+            if run
+                .source_thread_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .is_none()
+            {
+                anyhow::bail!(
+                    "workspace agent run `{run_id}` is missing its claimed source thread"
+                );
+            }
+            let claimed_source_turn_id = run
+                .source_turn_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "workspace agent run `{run_id}` must claim a model turn before result completion"
+                    )
+                })?;
+            let prompt_source_exists: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM workspace_agent_run_sources WHERE run_id = ? AND source_entity_type = ? AND source_entity_id = ?)",
             )
-            .bind(&bound_source_thread_id)
-            .bind(&bound_source_turn_id)
-            .bind(now_ms)
             .bind(&run.id)
-            .execute(&mut *tx)
+            .bind(HANDOFF_PROMPT_SOURCE_TYPE)
+            .bind(claimed_source_turn_id)
+            .fetch_one(&mut *tx)
             .await?;
-            run.source_thread_id = bound_source_thread_id;
-            run.source_turn_id = bound_source_turn_id;
+            if !prompt_source_exists {
+                anyhow::bail!(
+                    "workspace agent run `{run_id}` does not have a durable claimed handoff prompt"
+                );
+            }
+        } else {
+            let bound_source_thread_id = run
+                .source_thread_id
+                .clone()
+                .or_else(|| source_thread_id.map(ToString::to_string));
+            let bound_source_turn_id = run
+                .source_turn_id
+                .clone()
+                .or_else(|| source_turn_id.map(ToString::to_string));
+            if bound_source_thread_id != run.source_thread_id
+                || bound_source_turn_id != run.source_turn_id
+            {
+                sqlx::query(
+                    "UPDATE workspace_agent_runs SET source_thread_id = ?, source_turn_id = ?, updated_at_ms = ? WHERE id = ? AND status = 'running'",
+                )
+                .bind(&bound_source_thread_id)
+                .bind(&bound_source_turn_id)
+                .bind(now_ms)
+                .bind(&run.id)
+                .execute(&mut *tx)
+                .await?;
+                run.source_thread_id = bound_source_thread_id;
+                run.source_turn_id = bound_source_turn_id;
+            }
         }
 
         if let Some(existing) = workspace_agent_result_row_by_run(&mut tx, run_id).await? {
@@ -698,10 +1091,14 @@ INSERT INTO workspace_agent_results (
         if updated.rows_affected() != 1 {
             anyhow::bail!("workspace agent run `{run_id}` completion raced");
         }
-        let (result_actor_kind, result_source) = if run.run_kind == "manual_import" {
-            ("clinician", "manual_import")
+        let (result_actor, result_actor_kind, result_source) = if run.run_kind == "manual_import" {
+            (
+                nonempty_or(&input.actor, "clinician"),
+                "clinician",
+                "manual_import",
+            )
         } else {
-            ("agent", "agent_harness")
+            ("agent".to_string(), "agent", "agent_harness")
         };
         insert_audit_event(
             &mut tx,
@@ -709,7 +1106,7 @@ INSERT INTO workspace_agent_results (
                 entity_type: "agent_result".to_string(),
                 entity_id: id.clone(),
                 action: "saved".to_string(),
-                actor: nonempty_or(&input.actor, "agent"),
+                actor: result_actor.clone(),
                 actor_kind: result_actor_kind.to_string(),
                 source: result_source.to_string(),
                 client_id: Some(run.client_id.clone()),
@@ -739,7 +1136,7 @@ INSERT INTO workspace_agent_results (
                 entity_type: "agent_run".to_string(),
                 entity_id: run.id.clone(),
                 action: "completed".to_string(),
-                actor: nonempty_or(&input.actor, "agent"),
+                actor: result_actor,
                 actor_kind: result_actor_kind.to_string(),
                 source: result_source.to_string(),
                 client_id: Some(run.client_id),
@@ -770,11 +1167,93 @@ fn validate_run_packet_binding(
     if packet.client_id != run.client_id
         || packet.note_id != run.note_id
         || packet.context_envelope_sha256 != run.context_envelope_sha256
+        || packet.workspace_plan_revision_id != run.workspace_plan_revision_id
+        || packet.workspace_plan_content_sha256 != run.workspace_plan_content_sha256
+        || packet.workspace_plan_evidence_manifest_sha256
+            != run.workspace_plan_evidence_manifest_sha256
     {
         anyhow::bail!(
             "workspace agent run `{}` no longer matches its authoritative context packet `{}`",
             run.id,
             packet.id
+        );
+    }
+    Ok(())
+}
+
+fn normalized_execution_binding(
+    mut execution: crate::WorkspaceAgentExecutionBinding,
+) -> anyhow::Result<crate::WorkspaceAgentExecutionBinding> {
+    execution.run_id = execution.run_id.trim().to_string();
+    execution.source_thread_id = execution.source_thread_id.trim().to_string();
+    execution.source_turn_id = execution.source_turn_id.trim().to_string();
+    execution.provider = execution.provider.trim().to_string();
+    execution.model = execution.model.trim().to_string();
+    for (label, value) in [
+        ("run id", execution.run_id.as_str()),
+        ("source thread", execution.source_thread_id.as_str()),
+        ("source turn", execution.source_turn_id.as_str()),
+        ("provider", execution.provider.as_str()),
+        ("model", execution.model.as_str()),
+    ] {
+        if value.is_empty() {
+            anyhow::bail!("workspace agent execution {label} must not be empty");
+        }
+    }
+    Ok(execution)
+}
+
+fn validate_unclaimed_execution_identity(
+    run: &WorkspaceAgentRunRow,
+    execution: &crate::WorkspaceAgentExecutionBinding,
+) -> anyhow::Result<()> {
+    if run.id != execution.run_id {
+        anyhow::bail!("workspace agent execution run does not match the stored run");
+    }
+    let Some(source_thread_id) = run
+        .source_thread_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        anyhow::bail!("workspace agent run is missing its required source thread binding");
+    };
+    if source_thread_id != execution.source_thread_id {
+        anyhow::bail!("workspace agent execution source thread does not match the stored run");
+    }
+    let provider = run.provider.trim();
+    if provider.is_empty() {
+        anyhow::bail!("workspace agent run is missing its required provider binding");
+    }
+    if provider != execution.provider {
+        anyhow::bail!("workspace agent execution provider does not match the stored run");
+    }
+    let model = run.model.trim();
+    if model.is_empty() {
+        anyhow::bail!("workspace agent run is missing its required model binding");
+    }
+    if model != execution.model {
+        anyhow::bail!("workspace agent execution model does not match the stored run");
+    }
+    if run.source_turn_id.is_some() {
+        anyhow::bail!("workspace agent run was already claimed by a model turn");
+    }
+    Ok(())
+}
+
+fn validate_claimed_execution_identity(
+    run: &WorkspaceAgentRunRow,
+    execution: &crate::WorkspaceAgentExecutionBinding,
+) -> anyhow::Result<()> {
+    if run.id != execution.run_id
+        || run.source_thread_id.as_deref().map(str::trim)
+            != Some(execution.source_thread_id.as_str())
+        || run.source_turn_id.as_deref().map(str::trim) != Some(execution.source_turn_id.as_str())
+        || run.provider.trim() != execution.provider
+        || run.model.trim() != execution.model
+    {
+        anyhow::bail!(
+            "workspace agent context read does not match the claimed turn execution identity"
         );
     }
     Ok(())
@@ -822,11 +1301,11 @@ fn authorized_context_read_limit(
     Ok(requested_max_records.min(scope_max_records))
 }
 
-const MAX_AGENT_NOTE_BODY_BYTES: usize = 32 * 1024;
-const MAX_AGENT_CONTEXT_SNAPSHOT_BYTES: usize = 512 * 1024;
-const MAX_AGENT_DISPLAY_LABEL_BYTES: usize = 512;
+pub(super) const MAX_AGENT_NOTE_BODY_BYTES: usize = 32 * 1024;
+pub(super) const MAX_AGENT_CONTEXT_SNAPSHOT_BYTES: usize = 512 * 1024;
+pub(super) const MAX_AGENT_DISPLAY_LABEL_BYTES: usize = 512;
 
-fn truncate_utf8(value: &str, max_bytes: usize) -> (&str, bool) {
+pub(super) fn truncate_utf8(value: &str, max_bytes: usize) -> (&str, bool) {
     if value.len() <= max_bytes {
         return (value, false);
     }
@@ -856,10 +1335,10 @@ fn token_looks_like_local_path(token: &str) -> bool {
         || token.starts_with("~/")
         || token.starts_with("\\\\")
         || token.starts_with("//")
-        || (token.starts_with('/') && token != "/workspacemedical")
+        || (token.starts_with('/') && !matches!(token, "/workspace-medical" | "/workspacemedical"))
 }
 
-fn redact_local_path_tokens(value: &str) -> (String, bool) {
+pub(super) fn redact_local_path_tokens(value: &str) -> (String, bool) {
     let mut redacted = String::with_capacity(value.len());
     let mut changed = false;
     for segment in value.split_inclusive(char::is_whitespace) {

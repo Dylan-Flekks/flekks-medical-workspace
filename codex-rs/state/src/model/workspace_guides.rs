@@ -76,6 +76,7 @@ pub struct WorkspaceGuideRunStart {
     pub actor: String,
     pub provider: String,
     pub model: String,
+    pub model_tool_mode: crate::WorkspaceGuideModelToolMode,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

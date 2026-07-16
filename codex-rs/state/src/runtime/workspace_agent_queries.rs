@@ -95,7 +95,10 @@ SELECT
     selected_artifact_ids_json, selected_derivative_ids_json, selected_clip_ids_json,
     artifact_summary, derivative_summary, clip_summary, chart_context_summary,
     context_envelope_json, context_envelope_sha256, clinician_actor,
-    base_note_revision, authorized_scope_json, expected_output_kind, status,
+    base_note_revision, authorized_scope_json, expected_output_kind,
+    workspace_profile, plan_schema_version, source_checkpoint_id,
+    source_checkpoint_sha256, readiness_json, workspace_plan_revision_id,
+    workspace_plan_content_sha256, workspace_plan_evidence_manifest_sha256, status,
     created_at_ms, sent_at_ms, submitted_at_ms, canceled_at_ms, updated_at_ms
 FROM workspace_context_packets
 WHERE id = ?
@@ -116,7 +119,9 @@ pub(super) async fn workspace_agent_run_row_by_id(
         r#"
 SELECT
     id, packet_id, client_id, note_id, base_note_revision,
-    context_envelope_sha256, run_kind, idempotency_key, provider, model,
+    context_envelope_sha256, workspace_plan_revision_id,
+    workspace_plan_content_sha256, workspace_plan_evidence_manifest_sha256,
+    run_kind, idempotency_key, provider, model,
     source_thread_id, source_turn_id, status, error_summary,
     started_at_ms, completed_at_ms, created_at_ms, updated_at_ms
 FROM workspace_agent_runs
@@ -139,7 +144,9 @@ pub(super) async fn workspace_agent_run_row_by_key(
         r#"
 SELECT
     id, packet_id, client_id, note_id, base_note_revision,
-    context_envelope_sha256, run_kind, idempotency_key, provider, model,
+    context_envelope_sha256, workspace_plan_revision_id,
+    workspace_plan_content_sha256, workspace_plan_evidence_manifest_sha256,
+    run_kind, idempotency_key, provider, model,
     source_thread_id, source_turn_id, status, error_summary,
     started_at_ms, completed_at_ms, created_at_ms, updated_at_ms
 FROM workspace_agent_runs

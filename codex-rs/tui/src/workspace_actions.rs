@@ -7,6 +7,7 @@ pub(crate) enum WorkspaceActionId {
     AddendumStart,
     AgentClear,
     AgentInbox,
+    AgentOpenRun,
     AgentPacketInspect,
     AgentPreview,
     AgentRequest,
@@ -50,6 +51,7 @@ pub(crate) enum WorkspaceActionId {
     DerivativeSave,
     DerivativeSelect,
     DerivativeToggle,
+    DiscardLocalDraft,
     DocumentAttach,
     DocumentChoose,
     EncounterOpen,
@@ -63,6 +65,7 @@ pub(crate) enum WorkspaceActionId {
     FocusPatients,
     PatientSearch,
     CoverageEdit,
+    CoverageVerify,
     FocusProposals,
     FocusTimeline,
     FocusVisit,
@@ -82,6 +85,7 @@ pub(crate) enum WorkspaceActionId {
     ProposalAccept,
     ProposalDecline,
     ProposalNext,
+    RestoreLocalDraft,
     Return,
     Save,
     SafetyOpen,
@@ -142,8 +146,8 @@ impl WorkspaceActionGroup {
     pub(crate) fn title(self) -> &'static str {
         match self {
             Self::Addenda => "Addenda",
-            Self::AgentContext => "Medical Agent Plan and returned work",
-            Self::AgentHandoff => "Medical Agent Plan",
+            Self::AgentContext => "Context Plan and Agent Review",
+            Self::AgentHandoff => "Context Plan submission",
             Self::ClinicalSafety => "Clinical safety",
             Self::Documents => "Files & reviewed text",
             Self::Encounters => "Encounters",
@@ -251,6 +255,30 @@ pub(crate) const WORKSPACE_ACTIONS: &[WorkspaceActionDef] = &[
         profile: WorkspaceActionProfile::Medical,
     },
     WorkspaceActionDef {
+        id: WorkspaceActionId::CoverageVerify,
+        label: "Compare coverage card",
+        command: "coverage verify",
+        shortcut: None,
+        group: WorkspaceActionGroup::Records,
+        profile: WorkspaceActionProfile::Medical,
+    },
+    WorkspaceActionDef {
+        id: WorkspaceActionId::RestoreLocalDraft,
+        label: "Restore local draft",
+        command: "draft restore",
+        shortcut: None,
+        group: WorkspaceActionGroup::Records,
+        profile: WorkspaceActionProfile::Medical,
+    },
+    WorkspaceActionDef {
+        id: WorkspaceActionId::DiscardLocalDraft,
+        label: "Discard local draft",
+        command: "draft discard",
+        shortcut: None,
+        group: WorkspaceActionGroup::Records,
+        profile: WorkspaceActionProfile::Medical,
+    },
+    WorkspaceActionDef {
         id: WorkspaceActionId::SafetyOpen,
         label: "Open clinical safety",
         command: "safety",
@@ -332,7 +360,7 @@ pub(crate) const WORKSPACE_ACTIONS: &[WorkspaceActionDef] = &[
     },
     WorkspaceActionDef {
         id: WorkspaceActionId::ScopeAgentPacket,
-        label: "Open Medical Agent Plan",
+        label: "Open Context Plan",
         command: "agent handoff",
         shortcut: None,
         group: WorkspaceActionGroup::Scopes,
@@ -796,7 +824,7 @@ pub(crate) const WORKSPACE_ACTIONS: &[WorkspaceActionDef] = &[
     },
     WorkspaceActionDef {
         id: WorkspaceActionId::AgentPreview,
-        label: "Review Packet",
+        label: "Review Context Plan",
         command: "agent preview",
         shortcut: None,
         group: WorkspaceActionGroup::AgentContext,
@@ -811,17 +839,17 @@ pub(crate) const WORKSPACE_ACTIONS: &[WorkspaceActionDef] = &[
         profile: WorkspaceActionProfile::Medical,
     },
     WorkspaceActionDef {
-        id: WorkspaceActionId::AgentPacketInspect,
-        label: "Compare medical plan and result",
-        command: "agent handoff inspect",
+        id: WorkspaceActionId::AgentOpenRun,
+        label: "Open full Codex run",
+        command: "agent open run",
         shortcut: None,
         group: WorkspaceActionGroup::AgentContext,
         profile: WorkspaceActionProfile::Medical,
     },
     WorkspaceActionDef {
         id: WorkspaceActionId::AgentPacketInspect,
-        label: "Compare medical plan and result",
-        command: "agent context inspect",
+        label: "Compare Context Plan and result",
+        command: "agent handoff inspect",
         shortcut: None,
         group: WorkspaceActionGroup::AgentContext,
         profile: WorkspaceActionProfile::Medical,
@@ -892,7 +920,7 @@ pub(crate) const WORKSPACE_ACTIONS: &[WorkspaceActionDef] = &[
     },
     WorkspaceActionDef {
         id: WorkspaceActionId::Handoff,
-        label: "Submit Medical Agent Plan",
+        label: "Submit Context Plan",
         command: "agent send",
         shortcut: None,
         group: WorkspaceActionGroup::AgentHandoff,
@@ -956,7 +984,7 @@ pub(crate) const WORKSPACE_ACTIONS: &[WorkspaceActionDef] = &[
     },
     WorkspaceActionDef {
         id: WorkspaceActionId::Handoff,
-        label: "Submit Medical Agent Plan",
+        label: "Submit Context Plan",
         command: "handoff",
         shortcut: Some("Ctrl-G"),
         group: WorkspaceActionGroup::AgentHandoff,
@@ -1053,6 +1081,15 @@ pub(crate) fn action_for_command(
                 return Some(WorkspaceActionId::EmergencyContactEdit);
             }
             "coverage edit" | "edit coverage" => return Some(WorkspaceActionId::CoverageEdit),
+            "coverage verify" | "verify coverage" | "compare coverage card" | "card compare" => {
+                return Some(WorkspaceActionId::CoverageVerify);
+            }
+            "draft restore" | "restore draft" | "restore local draft" => {
+                return Some(WorkspaceActionId::RestoreLocalDraft);
+            }
+            "draft discard" | "discard draft" | "discard local draft" => {
+                return Some(WorkspaceActionId::DiscardLocalDraft);
+            }
             "safety" | "clinical safety" | "allergies" | "medications" | "meds" | "problems"
             | "conditions" | "precautions" => return Some(WorkspaceActionId::SafetyOpen),
             "allergy add" | "add allergy" | "new allergy" | "allergies add" => {
@@ -1302,6 +1339,9 @@ pub(crate) fn action_for_command(
             | "review codex result" => {
                 return Some(WorkspaceActionId::AgentInbox);
             }
+            "agent open run" | "open codex run" | "open agent run" => {
+                return Some(WorkspaceActionId::AgentOpenRun);
+            }
             "agent handoff inspect"
             | "agent context inspect"
             | "agent packet inspect"
@@ -1403,6 +1443,7 @@ pub(crate) fn action_for_command(
         "patient details" | "details" | "focus patient details" | "demographics" => "demographics",
         "contact" | "contact edit" => "demographics edit",
         "coverage" => "coverage edit",
+        "verify coverage" | "coverage card" | "insurance card" => "coverage verify",
         "title" | "note title" => "focus note title",
         "body" | "note body" | "write eval note" | "write first eval" => "focus note body",
         "workflow" | "practice workflow" | "clinical workspace" => "focus clinical workspace",

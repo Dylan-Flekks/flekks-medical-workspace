@@ -2,30 +2,30 @@
 source: tui/src/workspace_dashboard.rs
 expression: "render_dashboard_lines_at(&dashboard, width, height)"
 ---
-Medical Workspace
+Medical Workspace  /workspace-medical  SYNTHETIC DATA ONLY
 Patient: Jordan Patient  DOB: blank  MRN: blank  Contact: Missing contact  Coverage: Missing coverage  Encounter: No encounter
- EXPLORER                          PATIENT CHART                                                                   AGENT WORK
-┌Patient Directory───────────────┐┌Patient Demographics──────────────────────────────────────────────────────────┐┌Agent Work──────────────────────────────────┐
-│Local search: /                 ││Display: Jordan Patient                                                       ││Patient Chart: Jordan...; Accept proposal   │
-│0 active patients; local only   ││Preferred:                                                                    ││[Pending]  History  Audit  ←/→              │
-│No saved patients yet.          ││DOB:                                                                          ││                                            │
-│New patient: :patient new       ││Sex/Gender:                                                                   ││Pending Proposal Changeset                  │
-│                                ││Patient ID / MRN:                                                             ││Review state: READY · proposal base matches │
-│                                ││Chart start: 2026-01-01                                                       ││current r3                                  │
-│                                ││Chart end: 2026-06-09                                                         ││  Change: replace note note-1 body          │
-│                                ││Summary:                                                                      ││  Guard: expected canonical note r3         │
+ EXPLORER                          PATIENT CHART                                                                   PLAN WITH CODEX
+┌Patient Directory───────────────┐┌Patient Demographics──────────────────────────────────────────────────────────┐┌Plan with Codex─────────────────────────────┐
+│Local search: /                 ││Identity: Jordan Patient · preferred not set                                  ││[Chat]  Context  Audit  ←/→ tabs            │
+│0 active patients; local only   ││Legal/card: legal name missing                                                ││                                            │
+│No saved patients yet.          ││DOB: missing · admin sex: missing · MRN: missing                              ││Pending Proposal Changeset                  │
+│New patient: :patient new       ││Contact: phone missing; email missing; method not set                         ││Review state: READY · proposal base matches │
+│                                ││Address: address missing                                                      ││saved canonical r3                          │
+│                                ││Emergency: name missing; relationship missing; phone missing                  ││  Change: replace note note-1 body          │
+│                                ││Coverage: P not entered; S not entered; T not entered                         ││  Guard: proposal base r3 · saved canonical │
+│                                ││Enter edits all identity/contact fields · Ctrl-P opens actions                ││r3                                          │
 │                                │└──────────────────────────────────────────────────────────────────────────────┘│  Patient: identity only; demographics      │
 │                                │┌Note Title────────────────────────────────────────────────────────────────────┐│untouched                                   │
 └────────────────────────────────┘│Visit note                                                                    ││  Provenance: thread thread-1 · turn turn-1 │
 ┌Patient Notes───────────────────┐└──────────────────────────────────────────────────────────────────────────────┘│  Reason: tighten wording                   │
 │Patient Notes                   │┌Note Body─────────────────────────────────────────────────────────────────────┐│                                            │
-│  New note                      ││Assessment: improving gait tolerance.                                         ││  Full proposed replacement:                │
-│  No patient notes yet. Use     ││Plan: continue current program.                                               ││    + Assessment: gait tolerance improved   │
-│:note new.                      ││                                                                              ││with cueing.                                │
-│  Medical, communication, and   ││                                                                              ││    + Plan: progress walking intervals next │
-│admin notes appear here.        ││                                                                              ││visit.                                      │
+│  Medical Notes                 ││Assessment: improving gait tolerance.                                         ││  Full proposed replacement:                │
+│> daily  1970-01-01  Visit note ││Plan: continue current program.                                               ││    + Assessment: gait tolerance improved   │
+│[draft]                         ││                                                                              ││with cueing.                                │
+│                                ││                                                                              ││    + Plan: progress walking intervals next │
+│                                ││                                                                              ││visit.                                      │
 │                                ││                                                                              ││                                            │
-│                                ││                                                                              ││  Current canonical note:                   │
+│                                ││                                                                              ││  Saved canonical note (r3):                │
 └────────────────────────────────┘│                                                                              ││    - Assessment: improving gait tolerance. │
 ┌Uploaded Documents──────────────┐│                                                                              ││    - Plan: continue current program.       │
 │Uploaded Documents              ││                                                                              ││                                            │
@@ -35,10 +35,10 @@ Patient: Jordan Patient  DOB: blank  MRN: blank  Contact: Missing contact  Cover
 │                                ││                                                                              ││                                            │
 │                                ││                                                                              ││                                            │
 │                                ││                                                                              ││                                            │
-│                                ││                                                                              ││                                            │
-│                                ││                                                                              ││                                            │
-│                                ││                                                                              ││                                            │
-│                                ││                                                                              ││                                            │
+│                                ││                                                                              ││Message Codex                               │
+│                                ││                                                                              ││Enter send · Shift-Enter line · Esc leave   │
+│                                ││                                                                              ││  Ask about the patient picture, this note, │
+│                                ││                                                                              ││  or context readiness.                     │
 │                                ││                                                                              ││                                            │
 └────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────┘└────────────────────────────────────────────┘
 Focus: Center | Mode: Read-only chart | Keys: ↑/↓ scroll  PgUp/PgDn page  Tab/⇧Tab pane  Ctrl-P commands | Next: Accept proposal

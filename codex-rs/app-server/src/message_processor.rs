@@ -315,6 +315,21 @@ impl MessageProcessor {
         let workspace_settings_cache =
             Arc::new(workspace_settings::WorkspaceSettingsCache::default());
         let app_list_shutdown_token = CancellationToken::new();
+        let request_serialization_queues = RequestSerializationQueues::default();
+        let config_processor = ConfigRequestProcessor::new(
+            outgoing.clone(),
+            config_manager.clone(),
+            thread_manager.clone(),
+            analytics_events_client.clone(),
+        );
+        let on_effective_plugins_changed =
+            crate::effective_plugin_change::effective_plugins_changed_callback(
+                auth_manager.clone(),
+                Arc::clone(&thread_manager),
+                config_manager.clone(),
+                config_processor.clone(),
+                request_serialization_queues.clone(),
+            );
         let account_processor = AccountRequestProcessor::new(
             auth_manager.clone(),
             Arc::clone(&thread_manager),
@@ -384,6 +399,7 @@ impl MessageProcessor {
             analytics_events_client.clone(),
             config_manager.clone(),
             workspace_settings_cache,
+            on_effective_plugins_changed,
         );
         let remote_control_processor = RemoteControlRequestProcessor::new(remote_control_handle);
         let search_processor = SearchRequestProcessor::new(outgoing.clone());
@@ -395,7 +411,7 @@ impl MessageProcessor {
             state_db.clone(),
             Arc::clone(&goal_service),
         );
-        let workspace_processor = WorkspaceRequestProcessor::new(state_db.clone());
+        let workspace_processor = WorkspaceRequestProcessor::new(state_db.clone(), config.as_ref());
         let thread_processor = ThreadRequestProcessor::new(
             auth_manager.clone(),
             Arc::clone(&thread_manager),
@@ -440,12 +456,6 @@ impl MessageProcessor {
                     Some(on_effective_plugins_changed),
                 );
         }
-        let config_processor = ConfigRequestProcessor::new(
-            outgoing.clone(),
-            config_manager.clone(),
-            thread_manager.clone(),
-            analytics_events_client.clone(),
-        );
         let external_agent_config_processor =
             ExternalAgentConfigRequestProcessor::new(ExternalAgentConfigRequestProcessorArgs {
                 outgoing: outgoing.clone(),
@@ -496,7 +506,7 @@ impl MessageProcessor {
             turn_processor,
             windows_sandbox_processor,
             workspace_processor,
-            request_serialization_queues: RequestSerializationQueues::default(),
+            request_serialization_queues,
         }
     }
 
@@ -1100,6 +1110,19 @@ impl MessageProcessor {
             ClientRequest::WorkspaceClientArchive { params, .. } => {
                 self.workspace_processor.client_archive(params).await
             }
+            ClientRequest::WorkspaceCoverageList { params, .. } => {
+                self.workspace_processor.coverage_list(params).await
+            }
+            ClientRequest::WorkspaceCoverageVerificationList { params, .. } => {
+                self.workspace_processor
+                    .coverage_verification_list(params)
+                    .await
+            }
+            ClientRequest::WorkspaceCoverageVerificationCreate { params, .. } => {
+                self.workspace_processor
+                    .coverage_verification_create(params)
+                    .await
+            }
             ClientRequest::WorkspaceChartCommit { params, .. } => {
                 self.workspace_processor.chart_commit(params).await
             }
@@ -1177,6 +1200,12 @@ impl MessageProcessor {
             ClientRequest::WorkspaceContextGet { params, .. } => {
                 self.workspace_processor.context_get(params).await
             }
+            ClientRequest::WorkspaceDataPolicyRead { params, .. } => {
+                self.workspace_processor.data_policy_read(params).await
+            }
+            ClientRequest::WorkspaceDataPolicyProvision { params, .. } => {
+                self.workspace_processor.data_policy_provision(params).await
+            }
             ClientRequest::WorkspaceDraftCheckpointCreate { params, .. } => {
                 self.workspace_processor
                     .draft_checkpoint_create(params)
@@ -1229,6 +1258,41 @@ impl MessageProcessor {
                 self.workspace_processor
                     .agent_result_status_update(params)
                     .await
+            }
+            ClientRequest::WorkspacePlanSessionOpen { params, .. } => {
+                self.workspace_processor.plan_session_open(params).await
+            }
+            ClientRequest::WorkspacePlanSessionGet { params, .. } => {
+                self.workspace_processor.plan_session_get(params).await
+            }
+            ClientRequest::WorkspacePlanSessionBindThread { params, .. } => {
+                self.workspace_processor
+                    .plan_session_bind_thread(params)
+                    .await
+            }
+            ClientRequest::WorkspacePlanSnapshotGet { params, .. } => {
+                self.workspace_processor.plan_snapshot_get(params).await
+            }
+            ClientRequest::WorkspacePlanRecoveryGet { params, .. } => {
+                self.workspace_processor.plan_recovery_get(params).await
+            }
+            ClientRequest::WorkspacePlanGuideRunStart { params, .. } => {
+                self.workspace_processor.plan_guide_run_start(params).await
+            }
+            ClientRequest::WorkspacePlanGuideRunFinish { params, .. } => {
+                self.workspace_processor.plan_guide_run_finish(params).await
+            }
+            ClientRequest::WorkspacePlanMessageAppend { params, .. } => {
+                self.workspace_processor.plan_message_append(params).await
+            }
+            ClientRequest::WorkspacePlanRevisionOutdate { params, .. } => {
+                self.workspace_processor.plan_revision_outdate(params).await
+            }
+            ClientRequest::WorkspacePlanRevisionSubmit { params, .. } => {
+                self.workspace_processor.plan_revision_submit(params).await
+            }
+            ClientRequest::WorkspacePlanProposalResolve { params, .. } => {
+                self.workspace_processor.plan_proposal_resolve(params).await
             }
             ClientRequest::WorkspaceNoteList { params, .. } => {
                 self.workspace_processor.note_list(params).await

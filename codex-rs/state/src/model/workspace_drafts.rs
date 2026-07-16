@@ -44,6 +44,9 @@ pub struct WorkspaceDraftSessionSnapshot {
 pub struct WorkspaceDraftCheckpointCreate {
     pub session_id: Option<String>,
     pub client_id: String,
+    pub expected_current_checkpoint_id: Option<String>,
+    pub expected_current_checkpoint_revision: Option<i64>,
+    pub expected_current_checkpoint_sha256: Option<String>,
     pub encounter_id: Option<String>,
     pub note_id: Option<String>,
     pub base_note_revision: Option<i64>,

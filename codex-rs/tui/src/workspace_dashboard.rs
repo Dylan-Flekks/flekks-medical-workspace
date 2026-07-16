@@ -1,8 +1,22 @@
 mod chart_changeset;
+mod client_draft;
+mod coach;
+mod context_plan;
+mod coverage;
+mod coverage_actions;
+mod coverage_render;
 mod footer;
+mod layout;
+mod patient_admin_fields;
+mod patient_admin_input;
+mod patient_admin_metadata;
+mod patient_admin_render;
+mod plan_rail;
+mod working_draft_recovery;
 
 use crate::app_server_session::AppServerSession;
 use crate::clipboard_paste::normalize_pasted_path;
+use crate::keymap::RuntimeKeymap;
 use crate::macos_native_drop::NativeMedicalDropResult;
 use crate::macos_native_drop::NativeMedicalFileDropEvent;
 use crate::macos_native_drop::run_native_medical_file_drop_panel;
@@ -37,22 +51,43 @@ use crate::workspace_context_assembly::edi_transaction_label;
 use crate::workspace_context_assembly::edi_transaction_label_from_text;
 use crate::workspace_context_assembly::provider_file_reference_summary;
 use crate::workspace_context_assembly::provider_reviewed_text_summary;
+use crate::workspace_draft::MEDICAL_CONTEXT_PLAN_SCHEMA_VERSION;
+use crate::workspace_draft::MedicalContextPlanAuthorizedScopeV2;
+use crate::workspace_draft::MedicalContextPlanInput;
+use crate::workspace_draft::MedicalContextPlanNoteKindV2;
+use crate::workspace_draft::MedicalContextPlanWarningV2;
+use crate::workspace_draft::MedicalContextPlanWorkflowV2;
+use crate::workspace_draft::MedicalWorkspaceWorkingDraftInput;
+use crate::workspace_draft::MedicalWorkspaceWorkingDraftV1;
+use crate::workspace_draft::WorkspaceDraftCheckpointMetadata;
+use crate::workspace_draft::WorkspaceDraftError;
+use crate::workspace_editor::WorkspaceEditor;
+use crate::workspace_editor::WorkspaceEditorInput;
+use crate::workspace_editor::WorkspaceEditorPolicy;
+use crate::wrapping::word_wrap_lines;
 use chart_changeset::ChartChangesetPurpose;
 use chart_changeset::ChartChangesetReviewState;
 use chart_changeset::PendingChartChangeset;
 use chrono::DateTime;
 use chrono::Utc;
+use client_draft::ClientDraft;
+use coach::WorkspaceCoachAdvice;
+use coach::WorkspaceCoachState;
+use coach::workspace_coach_advice;
 use codex_app_server_client::TypedRequestError;
 use codex_app_server_protocol::WorkspaceAgentResult;
 use codex_app_server_protocol::WorkspaceAgentResultCreateParams;
 use codex_app_server_protocol::WorkspaceAgentResultListParams;
 use codex_app_server_protocol::WorkspaceAgentResultStatusUpdateParams;
+use codex_app_server_protocol::WorkspaceAgentRun;
+use codex_app_server_protocol::WorkspaceAgentRunListParams;
 use codex_app_server_protocol::WorkspaceArtifactDerivative;
 use codex_app_server_protocol::WorkspaceArtifactDerivativeListParams;
 use codex_app_server_protocol::WorkspaceArtifactDerivativeStatusUpdateParams;
 use codex_app_server_protocol::WorkspaceArtifactDerivativeUpsertParams;
 use codex_app_server_protocol::WorkspaceAuditEvent;
 use codex_app_server_protocol::WorkspaceAuditListParams;
+use codex_app_server_protocol::WorkspaceBillingReadiness;
 use codex_app_server_protocol::WorkspaceChartCommitErrorData;
 use codex_app_server_protocol::WorkspaceChartCommitParams;
 use codex_app_server_protocol::WorkspaceChartCommitResponse;
@@ -68,6 +103,14 @@ use codex_app_server_protocol::WorkspaceContextClipUpsertParams;
 use codex_app_server_protocol::WorkspaceContextPacket;
 use codex_app_server_protocol::WorkspaceContextPacketCreateParams;
 use codex_app_server_protocol::WorkspaceContextPacketListParams;
+use codex_app_server_protocol::WorkspaceCoverage;
+use codex_app_server_protocol::WorkspaceCoverageListParams;
+use codex_app_server_protocol::WorkspaceCoverageMatchResult;
+use codex_app_server_protocol::WorkspaceCoverageUpsertParams;
+use codex_app_server_protocol::WorkspaceCoverageVerification;
+use codex_app_server_protocol::WorkspaceCoverageVerificationCreateParams;
+use codex_app_server_protocol::WorkspaceCoverageVerificationListParams;
+use codex_app_server_protocol::WorkspaceCoverageVerificationSubject;
 use codex_app_server_protocol::WorkspaceDocument;
 use codex_app_server_protocol::WorkspaceDocumentUpsertParams;
 use codex_app_server_protocol::WorkspaceEncounter;
@@ -84,6 +127,9 @@ use codex_app_server_protocol::WorkspaceNoteSignature;
 use codex_app_server_protocol::WorkspaceNoteUpsertParams;
 use codex_app_server_protocol::WorkspacePatientSafetyItem;
 use codex_app_server_protocol::WorkspacePatientSafetyItemUpsertParams;
+use codex_app_server_protocol::WorkspacePlanRevision;
+use codex_app_server_protocol::WorkspacePlanRevisionStatus;
+use codex_app_server_protocol::WorkspacePlanSnapshotGetResponse;
 use codex_app_server_protocol::WorkspacePracticeLibraryItem;
 use codex_app_server_protocol::WorkspacePracticeLibraryListParams;
 use codex_app_server_protocol::WorkspaceTask;
@@ -92,6 +138,18 @@ use codex_app_server_protocol::WorkspaceTaskStatus;
 use codex_app_server_protocol::WorkspaceTaskStatusUpdateParams;
 use codex_app_server_protocol::WorkspaceTaskUpsertParams;
 use color_eyre::eyre::Result;
+use context_plan::ContextPlanReadiness;
+use context_plan::ContextPlanReadinessInput;
+use coverage::CARD_VERIFICATION_ENTRY_HELP;
+use coverage::CardVerificationDraft;
+use coverage::CoverageDraft;
+use coverage::CoverageField;
+use coverage::CoveragePriority;
+use coverage::billing_readiness_label;
+use coverage::billing_readiness_summary;
+use coverage::verification_subject_label;
+use coverage_actions::coverage_draft_has_input;
+use coverage_render::CardVerificationField;
 use crossterm::cursor::SetCursorStyle;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
@@ -103,6 +161,12 @@ use footer::compose_medical_footer;
 use footer::compose_mode_footer;
 use image::GenericImageView;
 use image::imageops::FilterType;
+use layout::MedicalDedicatedWorkpaneAreas;
+use patient_admin_fields::DemographicsField;
+use patient_admin_fields::PatientAdminEditMode;
+use patient_admin_fields::PatientAdminField;
+use patient_admin_metadata::patient_admin_metadata_for_client;
+use patient_admin_metadata::patient_admin_metadata_for_draft;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Constraint;
 use ratatui::layout::Direction;
@@ -132,6 +196,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 use std::time::Instant;
 use std::time::UNIX_EPOCH;
+use uuid::Uuid;
 
 // Failure/recovery invariant for the medical workspace:
 // - failed or blocked actions must not leave optimistic saved state behind
@@ -157,12 +222,39 @@ pub(crate) enum WorkspaceProfile {
     Medical,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WorkspaceProfileSpec {
+    id: &'static str,
+    command: &'static str,
+    title: &'static str,
+}
+
 impl WorkspaceProfile {
-    fn header_title(self) -> &'static str {
+    fn spec(self) -> WorkspaceProfileSpec {
         match self {
-            Self::Generic => "Workspace",
-            Self::Medical => "Medical Workspace",
+            Self::Generic => WorkspaceProfileSpec {
+                id: "generic",
+                command: "/workspace",
+                title: "Workspace",
+            },
+            Self::Medical => WorkspaceProfileSpec {
+                id: "medical",
+                command: "/workspace-medical",
+                title: "Medical Workspace",
+            },
         }
+    }
+
+    fn stable_id(self) -> &'static str {
+        self.spec().id
+    }
+
+    fn canonical_command(self) -> &'static str {
+        self.spec().command
+    }
+
+    fn header_title(self) -> &'static str {
+        self.spec().title
     }
 
     fn clients_title(self) -> &'static str {
@@ -223,6 +315,7 @@ pub(crate) enum WorkspaceDashboardAction {
         body: String,
     },
     Consumed,
+    CheckpointDraft,
     Close,
     CloseAndDiscard,
     EnsureEncounter,
@@ -243,12 +336,25 @@ pub(crate) enum WorkspaceDashboardAction {
     GenerateDocumentThumbnail {
         document_id: String,
     },
+    OpenAgentRun {
+        thread_id: String,
+        run_id: String,
+    },
     OpenDocumentFile {
         document_id: String,
     },
     SaveDroppedFileReferences(Vec<WorkspaceDocumentUpsertParams>),
+    SendPlanMessage {
+        patient_id: String,
+        note_id: Option<String>,
+        encounter_id: Option<String>,
+        content: String,
+    },
     SendContextToAgent,
+    StartNewClient,
+    StartNewNote,
     SelectClient(usize),
+    SelectCoveragePriority(i64),
     SelectNote(usize),
     SignNote,
     UpdateAgentResultStatus {
@@ -266,6 +372,9 @@ pub(crate) enum WorkspaceDashboardAction {
     ConvertAgentResultToProposal {
         result_id: String,
     },
+    CreateCoverageVerification(WorkspaceCoverageVerificationCreateParams),
+    RestoreLocalDraft,
+    DiscardLocalDraft,
     UpdateTaskStatus {
         task_id: String,
         status: WorkspaceTaskStatus,
@@ -313,7 +422,7 @@ impl MedicalZone {
         match self {
             Self::Explorer => "Explorer",
             Self::Chart => "Patient Chart",
-            Self::AgentWork => "Agent Work",
+            Self::AgentWork => "Plan with Codex",
         }
     }
 }
@@ -324,6 +433,81 @@ enum AgentRailTab {
     Pending,
     History,
     Audit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AgentWorkpaneState {
+    ContextPlan,
+    CodexRunning,
+    AgentReview,
+    Outdated,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AgentComposerState {
+    Ready,
+    DraftRecovery,
+    ChartRetry,
+    ChartConflict,
+    ChartMerge,
+    ChartDiscard,
+    UnsavedPatient,
+}
+
+impl AgentComposerState {
+    fn title(self) -> &'static str {
+        match self {
+            Self::Ready => "Message Codex",
+            Self::DraftRecovery => "Draft Recovery Required",
+            Self::ChartRetry => "Chart Save Needs Retry",
+            Self::ChartConflict => "Resolve Chart Conflict",
+            Self::ChartMerge => "Reconcile Chart Draft",
+            Self::ChartDiscard => "Discard Stale Draft",
+            Self::UnsavedPatient => "Save Patient First",
+        }
+    }
+
+    fn title_color(self) -> Color {
+        match self {
+            Self::Ready => Color::Cyan,
+            Self::ChartConflict | Self::ChartDiscard => Color::Red,
+            Self::DraftRecovery | Self::ChartRetry | Self::ChartMerge | Self::UnsavedPatient => {
+                Color::Yellow
+            }
+        }
+    }
+
+    fn hint(self, sending: bool, stacked_header: bool) -> &'static str {
+        match self {
+            Self::Ready if sending => "Sending… draft retained",
+            Self::Ready if stacked_header => "Enter send · Shift-Enter line · Esc leave",
+            Self::Ready => "Enter send · Shift-Enter newline · Esc leave",
+            Self::DraftRecovery => "Ctrl-P restore/discard · messaging locked",
+            Self::ChartRetry => "Ctrl-S retry exact save · Esc close",
+            Self::ChartConflict => "Ctrl-S refresh · Esc/Ctrl-W close",
+            Self::ChartMerge => "Edit conflicted chart field · Esc close",
+            Self::ChartDiscard => "Esc/Ctrl-W discard and reload",
+            Self::UnsavedPatient => "Ctrl-S save patient · then message Codex",
+        }
+    }
+
+    fn placeholder(self) -> &'static str {
+        match self {
+            Self::Ready => "Ask about the patient picture, this note, or context readiness.",
+            Self::DraftRecovery => {
+                "Restore or discard the recoverable local draft before continuing."
+            }
+            Self::ChartRetry => "Resolve the exact chart save before messaging Codex.",
+            Self::ChartConflict => "Refresh canonical chart data before messaging Codex.",
+            Self::ChartMerge => "Finish the required chart reconciliation before messaging Codex.",
+            Self::ChartDiscard => "Discard this stale draft and reopen canonical chart data.",
+            Self::UnsavedPatient => "Save this patient before starting a persistent Codex plan.",
+        }
+    }
+
+    fn shows_message_draft(self) -> bool {
+        matches!(self, Self::Ready | Self::UnsavedPatient)
+    }
 }
 
 impl AgentRailTab {
@@ -345,8 +529,8 @@ impl AgentRailTab {
 
     fn label(self) -> &'static str {
         match self {
-            Self::Pending => "Pending",
-            Self::History => "History",
+            Self::Pending => "Chat",
+            Self::History => "Context",
             Self::Audit => "Audit",
         }
     }
@@ -386,9 +570,9 @@ impl WorkspaceInputMode {
             Self::FileTree => "File list",
             Self::CenterReadOnly => "Read-only chart",
             Self::WorkflowEditor => "Chart editor",
-            Self::AgentRail => "Agent review",
-            Self::AgentInput => "Agent input",
-            Self::PacketReview => "Packet review",
+            Self::AgentRail => "Plan details",
+            Self::AgentInput => "Message Codex",
+            Self::PacketReview => "Context Plan review",
             Self::ReturnedWorkReview => "Returned work",
             Self::ReturnedWorkDraft => "Returned draft",
         }
@@ -465,8 +649,8 @@ impl MedicalWorkflowSection {
             Self::Safety => "Clinical Safety",
             Self::NoteStatus => "Note Status",
             Self::Documents => "Uploaded Documents",
-            Self::AgentRequest => "Ask Agent",
-            Self::ContextPacket => "Medical Agent Plan",
+            Self::AgentRequest => "Instructions",
+            Self::ContextPacket => "Context Plan",
             Self::AgentInbox => "Agent Review",
             Self::Proposals => "Note Proposals",
             Self::Addenda => "Addenda",
@@ -507,7 +691,7 @@ impl MedicalWorkflowSection {
             | Self::Jobs
             | Self::Timeline => "Patient Chart",
             Self::Documents => "Uploaded Documents",
-            Self::AgentRequest | Self::ContextPacket => "Agent Work",
+            Self::AgentRequest | Self::ContextPacket => "Context Plan",
             Self::AgentInbox => "Agent Review",
             Self::PracticeLibrary => "Practice Library",
             Self::PracticeIntelligence => "Practice Intelligence",
@@ -632,571 +816,6 @@ fn medical_scope_tab_for_section(section: MedicalWorkflowSection) -> MedicalScop
         MedicalWorkflowSection::PracticeIntelligence => MedicalScopeTab::Intelligence,
         MedicalWorkflowSection::Audit => MedicalScopeTab::Audit,
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DemographicsField {
-    DisplayName,
-    PreferredName,
-    DateOfBirth,
-    SexOrGender,
-    ExternalId,
-    RecordStartDate,
-    RecordEndDate,
-    Summary,
-}
-
-impl DemographicsField {
-    const ALL: [Self; 8] = [
-        Self::DisplayName,
-        Self::PreferredName,
-        Self::DateOfBirth,
-        Self::SexOrGender,
-        Self::ExternalId,
-        Self::RecordStartDate,
-        Self::RecordEndDate,
-        Self::Summary,
-    ];
-
-    fn index(self) -> usize {
-        Self::ALL
-            .iter()
-            .position(|field| *field == self)
-            .unwrap_or(0)
-    }
-
-    fn next(self) -> Self {
-        Self::ALL[(self.index() + 1) % Self::ALL.len()]
-    }
-
-    fn previous(self) -> Self {
-        let index = self.index();
-        Self::ALL[(index + Self::ALL.len() - 1) % Self::ALL.len()]
-    }
-
-    fn label(self, profile: WorkspaceProfile) -> &'static str {
-        match (profile, self) {
-            (_, Self::DisplayName) => "Display",
-            (_, Self::PreferredName) => "Preferred",
-            (_, Self::DateOfBirth) => "DOB",
-            (_, Self::SexOrGender) => "Sex/Gender",
-            (WorkspaceProfile::Medical, Self::ExternalId) => "Patient ID / MRN",
-            (_, Self::ExternalId) => "External ID",
-            (WorkspaceProfile::Medical, Self::RecordStartDate) => "Chart start",
-            (WorkspaceProfile::Medical, Self::RecordEndDate) => "Chart end",
-            (_, Self::RecordStartDate) => "Record start",
-            (_, Self::RecordEndDate) => "Record end",
-            (_, Self::Summary) => "Summary",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PatientAdminEditMode {
-    Contact,
-    Coverage,
-}
-
-impl PatientAdminEditMode {
-    fn title(self) -> &'static str {
-        match self {
-            Self::Contact => "Patient Demographics Editor",
-            Self::Coverage => "Coverage Editor",
-        }
-    }
-
-    fn fields(self) -> &'static [PatientAdminField] {
-        match self {
-            Self::Contact => &CONTACT_ADMIN_FIELDS,
-            Self::Coverage => &COVERAGE_ADMIN_FIELDS,
-        }
-    }
-
-    fn first_field(self) -> PatientAdminField {
-        self.fields()
-            .first()
-            .copied()
-            .unwrap_or(PatientAdminField::PrimaryPhone)
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PatientAdminField {
-    PrimaryPhone,
-    SecondaryPhone,
-    Email,
-    PreferredContactMethod,
-    EmergencyContactName,
-    EmergencyContactRelationship,
-    EmergencyContactPhone,
-    EmergencyContactEmail,
-    ContactNotes,
-    PayerName,
-    PlanName,
-    MemberId,
-    GroupNumber,
-    CoverageType,
-    CoverageStatus,
-    CoverageNotes,
-}
-
-const CONTACT_ADMIN_FIELDS: [PatientAdminField; 9] = [
-    PatientAdminField::PrimaryPhone,
-    PatientAdminField::SecondaryPhone,
-    PatientAdminField::Email,
-    PatientAdminField::PreferredContactMethod,
-    PatientAdminField::EmergencyContactName,
-    PatientAdminField::EmergencyContactRelationship,
-    PatientAdminField::EmergencyContactPhone,
-    PatientAdminField::EmergencyContactEmail,
-    PatientAdminField::ContactNotes,
-];
-
-const COVERAGE_ADMIN_FIELDS: [PatientAdminField; 7] = [
-    PatientAdminField::PayerName,
-    PatientAdminField::PlanName,
-    PatientAdminField::MemberId,
-    PatientAdminField::GroupNumber,
-    PatientAdminField::CoverageType,
-    PatientAdminField::CoverageStatus,
-    PatientAdminField::CoverageNotes,
-];
-
-impl PatientAdminField {
-    fn mode(self) -> PatientAdminEditMode {
-        match self {
-            Self::PrimaryPhone
-            | Self::SecondaryPhone
-            | Self::Email
-            | Self::PreferredContactMethod
-            | Self::EmergencyContactName
-            | Self::EmergencyContactRelationship
-            | Self::EmergencyContactPhone
-            | Self::EmergencyContactEmail
-            | Self::ContactNotes => PatientAdminEditMode::Contact,
-            Self::PayerName
-            | Self::PlanName
-            | Self::MemberId
-            | Self::GroupNumber
-            | Self::CoverageType
-            | Self::CoverageStatus
-            | Self::CoverageNotes => PatientAdminEditMode::Coverage,
-        }
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::PrimaryPhone => "Primary phone",
-            Self::SecondaryPhone => "Secondary phone",
-            Self::Email => "Email",
-            Self::PreferredContactMethod => "Preferred contact",
-            Self::EmergencyContactName => "Emergency name",
-            Self::EmergencyContactRelationship => "Emergency relation",
-            Self::EmergencyContactPhone => "Emergency phone",
-            Self::EmergencyContactEmail => "Emergency email",
-            Self::ContactNotes => "Contact notes",
-            Self::PayerName => "Payer",
-            Self::PlanName => "Plan name",
-            Self::MemberId => "Member ID / Medicare ID",
-            Self::GroupNumber => "Group number",
-            Self::CoverageType => "Coverage type",
-            Self::CoverageStatus => "Coverage status",
-            Self::CoverageNotes => "Coverage notes",
-        }
-    }
-
-    fn next_in(self, mode: PatientAdminEditMode) -> Self {
-        let fields = mode.fields();
-        let index = fields.iter().position(|field| *field == self).unwrap_or(0);
-        fields[(index + 1) % fields.len()]
-    }
-
-    fn previous_in(self, mode: PatientAdminEditMode) -> Self {
-        let fields = mode.fields();
-        let index = fields.iter().position(|field| *field == self).unwrap_or(0);
-        fields[(index + fields.len() - 1) % fields.len()]
-    }
-
-    fn placeholder(self) -> &'static str {
-        match self.mode() {
-            PatientAdminEditMode::Contact => "missing",
-            PatientAdminEditMode::Coverage => "not set",
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-struct ClientDraft {
-    id: Option<String>,
-    display_name: String,
-    preferred_name: String,
-    date_of_birth: String,
-    sex_or_gender: String,
-    external_id: String,
-    record_start_date: String,
-    record_end_date: String,
-    summary: String,
-    primary_phone: String,
-    secondary_phone: String,
-    email: String,
-    preferred_contact_method: String,
-    emergency_contact_name: String,
-    emergency_contact_relationship: String,
-    emergency_contact_phone: String,
-    emergency_contact_email: String,
-    contact_notes: String,
-    payer_name: String,
-    plan_name: String,
-    member_id: String,
-    group_number: String,
-    coverage_type: String,
-    coverage_status: String,
-    coverage_notes: String,
-}
-
-impl Default for ClientDraft {
-    fn default() -> Self {
-        Self {
-            id: None,
-            display_name: "New client".to_string(),
-            preferred_name: String::new(),
-            date_of_birth: String::new(),
-            sex_or_gender: String::new(),
-            external_id: String::new(),
-            record_start_date: String::new(),
-            record_end_date: String::new(),
-            summary: String::new(),
-            primary_phone: String::new(),
-            secondary_phone: String::new(),
-            email: String::new(),
-            preferred_contact_method: String::new(),
-            emergency_contact_name: String::new(),
-            emergency_contact_relationship: String::new(),
-            emergency_contact_phone: String::new(),
-            emergency_contact_email: String::new(),
-            contact_notes: String::new(),
-            payer_name: String::new(),
-            plan_name: String::new(),
-            member_id: String::new(),
-            group_number: String::new(),
-            coverage_type: String::new(),
-            coverage_status: String::new(),
-            coverage_notes: String::new(),
-        }
-    }
-}
-
-impl ClientDraft {
-    fn from_client(client: &WorkspaceClient) -> Self {
-        Self {
-            id: Some(client.id.clone()),
-            display_name: client.display_name.clone(),
-            preferred_name: client.preferred_name.clone().unwrap_or_default(),
-            date_of_birth: client.date_of_birth.clone().unwrap_or_default(),
-            sex_or_gender: client.sex_or_gender.clone().unwrap_or_default(),
-            external_id: client.external_id.clone().unwrap_or_default(),
-            record_start_date: client.record_start_date.clone().unwrap_or_default(),
-            record_end_date: client.record_end_date.clone().unwrap_or_default(),
-            summary: client.summary.clone(),
-            primary_phone: client.primary_phone.clone().unwrap_or_default(),
-            secondary_phone: client.secondary_phone.clone().unwrap_or_default(),
-            email: client.email.clone().unwrap_or_default(),
-            preferred_contact_method: client.preferred_contact_method.clone().unwrap_or_default(),
-            emergency_contact_name: client.emergency_contact_name.clone().unwrap_or_default(),
-            emergency_contact_relationship: client
-                .emergency_contact_relationship
-                .clone()
-                .unwrap_or_default(),
-            emergency_contact_phone: client.emergency_contact_phone.clone().unwrap_or_default(),
-            emergency_contact_email: client.emergency_contact_email.clone().unwrap_or_default(),
-            contact_notes: client.contact_notes.clone().unwrap_or_default(),
-            payer_name: client.payer_name.clone().unwrap_or_default(),
-            plan_name: client.plan_name.clone().unwrap_or_default(),
-            member_id: client.member_id.clone().unwrap_or_default(),
-            group_number: client.group_number.clone().unwrap_or_default(),
-            coverage_type: client.coverage_type.clone().unwrap_or_default(),
-            coverage_status: client.coverage_status.clone().unwrap_or_default(),
-            coverage_notes: client.coverage_notes.clone().unwrap_or_default(),
-        }
-    }
-
-    fn upsert_params(&self) -> WorkspaceClientUpsertParams {
-        WorkspaceClientUpsertParams {
-            id: self.id.clone(),
-            display_name: self.display_name.trim().to_string(),
-            preferred_name: nonempty_option(&self.preferred_name),
-            date_of_birth: nonempty_option(&self.date_of_birth),
-            sex_or_gender: nonempty_option(&self.sex_or_gender),
-            external_id: nonempty_option(&self.external_id),
-            record_start_date: nonempty_option(&self.record_start_date),
-            record_end_date: nonempty_option(&self.record_end_date),
-            summary: self.summary.clone(),
-            primary_phone: nonempty_option(&self.primary_phone),
-            secondary_phone: nonempty_option(&self.secondary_phone),
-            email: nonempty_option(&self.email),
-            preferred_contact_method: nonempty_option(&self.preferred_contact_method),
-            emergency_contact_name: nonempty_option(&self.emergency_contact_name),
-            emergency_contact_relationship: nonempty_option(&self.emergency_contact_relationship),
-            emergency_contact_phone: nonempty_option(&self.emergency_contact_phone),
-            emergency_contact_email: nonempty_option(&self.emergency_contact_email),
-            contact_notes: nonempty_option(&self.contact_notes),
-            payer_name: nonempty_option(&self.payer_name),
-            plan_name: nonempty_option(&self.plan_name),
-            member_id: nonempty_option(&self.member_id),
-            group_number: nonempty_option(&self.group_number),
-            coverage_type: nonempty_option(&self.coverage_type),
-            coverage_status: nonempty_option(&self.coverage_status),
-            coverage_notes: nonempty_option(&self.coverage_notes),
-        }
-    }
-
-    fn value_mut(&mut self, field: DemographicsField) -> &mut String {
-        match field {
-            DemographicsField::DisplayName => &mut self.display_name,
-            DemographicsField::PreferredName => &mut self.preferred_name,
-            DemographicsField::DateOfBirth => &mut self.date_of_birth,
-            DemographicsField::SexOrGender => &mut self.sex_or_gender,
-            DemographicsField::ExternalId => &mut self.external_id,
-            DemographicsField::RecordStartDate => &mut self.record_start_date,
-            DemographicsField::RecordEndDate => &mut self.record_end_date,
-            DemographicsField::Summary => &mut self.summary,
-        }
-    }
-
-    fn admin_value_mut(&mut self, field: PatientAdminField) -> &mut String {
-        match field {
-            PatientAdminField::PrimaryPhone => &mut self.primary_phone,
-            PatientAdminField::SecondaryPhone => &mut self.secondary_phone,
-            PatientAdminField::Email => &mut self.email,
-            PatientAdminField::PreferredContactMethod => &mut self.preferred_contact_method,
-            PatientAdminField::EmergencyContactName => &mut self.emergency_contact_name,
-            PatientAdminField::EmergencyContactRelationship => {
-                &mut self.emergency_contact_relationship
-            }
-            PatientAdminField::EmergencyContactPhone => &mut self.emergency_contact_phone,
-            PatientAdminField::EmergencyContactEmail => &mut self.emergency_contact_email,
-            PatientAdminField::ContactNotes => &mut self.contact_notes,
-            PatientAdminField::PayerName => &mut self.payer_name,
-            PatientAdminField::PlanName => &mut self.plan_name,
-            PatientAdminField::MemberId => &mut self.member_id,
-            PatientAdminField::GroupNumber => &mut self.group_number,
-            PatientAdminField::CoverageType => &mut self.coverage_type,
-            PatientAdminField::CoverageStatus => &mut self.coverage_status,
-            PatientAdminField::CoverageNotes => &mut self.coverage_notes,
-        }
-    }
-
-    fn value(&self, field: DemographicsField) -> &str {
-        match field {
-            DemographicsField::DisplayName => &self.display_name,
-            DemographicsField::PreferredName => &self.preferred_name,
-            DemographicsField::DateOfBirth => &self.date_of_birth,
-            DemographicsField::SexOrGender => &self.sex_or_gender,
-            DemographicsField::ExternalId => &self.external_id,
-            DemographicsField::RecordStartDate => &self.record_start_date,
-            DemographicsField::RecordEndDate => &self.record_end_date,
-            DemographicsField::Summary => &self.summary,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct PatientAdminMetadata {
-    primary_phone: String,
-    secondary_phone: String,
-    email: String,
-    preferred_contact_method: String,
-    emergency_contact_name: String,
-    emergency_contact_relationship: String,
-    emergency_contact_phone: String,
-    emergency_contact_email: String,
-    contact_notes: String,
-    payer_name: String,
-    plan_name: String,
-    member_id: String,
-    group_number: String,
-    coverage_type: String,
-    coverage_status: String,
-    coverage_notes: String,
-}
-
-impl PatientAdminMetadata {
-    fn from_client(client: &WorkspaceClient) -> Self {
-        Self {
-            primary_phone: client.primary_phone.clone().unwrap_or_default(),
-            secondary_phone: client.secondary_phone.clone().unwrap_or_default(),
-            email: client.email.clone().unwrap_or_default(),
-            preferred_contact_method: client.preferred_contact_method.clone().unwrap_or_default(),
-            emergency_contact_name: client.emergency_contact_name.clone().unwrap_or_default(),
-            emergency_contact_relationship: client
-                .emergency_contact_relationship
-                .clone()
-                .unwrap_or_default(),
-            emergency_contact_phone: client.emergency_contact_phone.clone().unwrap_or_default(),
-            emergency_contact_email: client.emergency_contact_email.clone().unwrap_or_default(),
-            contact_notes: client.contact_notes.clone().unwrap_or_default(),
-            payer_name: client.payer_name.clone().unwrap_or_default(),
-            plan_name: client.plan_name.clone().unwrap_or_default(),
-            member_id: client.member_id.clone().unwrap_or_default(),
-            group_number: client.group_number.clone().unwrap_or_default(),
-            coverage_type: client.coverage_type.clone().unwrap_or_default(),
-            coverage_status: client.coverage_status.clone().unwrap_or_default(),
-            coverage_notes: client.coverage_notes.clone().unwrap_or_default(),
-        }
-    }
-
-    fn from_draft(draft: &ClientDraft) -> Self {
-        Self {
-            primary_phone: draft.primary_phone.clone(),
-            secondary_phone: draft.secondary_phone.clone(),
-            email: draft.email.clone(),
-            preferred_contact_method: draft.preferred_contact_method.clone(),
-            emergency_contact_name: draft.emergency_contact_name.clone(),
-            emergency_contact_relationship: draft.emergency_contact_relationship.clone(),
-            emergency_contact_phone: draft.emergency_contact_phone.clone(),
-            emergency_contact_email: draft.emergency_contact_email.clone(),
-            contact_notes: draft.contact_notes.clone(),
-            payer_name: draft.payer_name.clone(),
-            plan_name: draft.plan_name.clone(),
-            member_id: draft.member_id.clone(),
-            group_number: draft.group_number.clone(),
-            coverage_type: draft.coverage_type.clone(),
-            coverage_status: draft.coverage_status.clone(),
-            coverage_notes: draft.coverage_notes.clone(),
-        }
-    }
-
-    fn has_contact(&self) -> bool {
-        [
-            self.primary_phone.as_str(),
-            self.secondary_phone.as_str(),
-            self.email.as_str(),
-        ]
-        .iter()
-        .any(|value| !value.trim().is_empty())
-    }
-
-    fn has_emergency_contact(&self) -> bool {
-        [
-            self.emergency_contact_name.as_str(),
-            self.emergency_contact_phone.as_str(),
-            self.emergency_contact_email.as_str(),
-        ]
-        .iter()
-        .any(|value| !value.trim().is_empty())
-    }
-
-    fn has_coverage(&self) -> bool {
-        [
-            self.payer_name.as_str(),
-            self.plan_name.as_str(),
-            self.member_id.as_str(),
-            self.group_number.as_str(),
-            self.coverage_type.as_str(),
-            self.coverage_status.as_str(),
-        ]
-        .iter()
-        .any(|value| !value.trim().is_empty())
-    }
-
-    fn contact_status_label(&self) -> &'static str {
-        if self.has_contact() {
-            "Contact on file"
-        } else {
-            "Missing contact"
-        }
-    }
-
-    fn emergency_status_label(&self) -> &'static str {
-        if self.has_emergency_contact() {
-            "emergency present"
-        } else {
-            "emergency missing"
-        }
-    }
-
-    fn coverage_status_label(&self) -> &'static str {
-        if self.has_coverage() {
-            "Coverage on file"
-        } else {
-            "Missing coverage"
-        }
-    }
-
-    fn contact_summary(&self) -> String {
-        let phone = nonempty_or(&self.primary_phone, "phone missing");
-        let email = nonempty_or(&self.email, "email missing");
-        let method = nonempty_or(&self.preferred_contact_method, "method not set");
-        format!("{phone}; {email}; {method}")
-    }
-
-    fn emergency_summary(&self) -> String {
-        let name = nonempty_or(&self.emergency_contact_name, "name missing");
-        let relationship =
-            nonempty_or(&self.emergency_contact_relationship, "relationship missing");
-        let phone = nonempty_or(&self.emergency_contact_phone, "phone missing");
-        format!("{name}; {relationship}; {phone}")
-    }
-
-    fn coverage_summary(&self) -> String {
-        let payer = nonempty_or(&self.payer_name, "payer missing");
-        let member = nonempty_or(&self.member_id, "member ID missing");
-        let status = nonempty_or(&self.coverage_status, "status not set");
-        format!("{payer}; {member}; {status}")
-    }
-
-    fn search_values(&self) -> Vec<String> {
-        [
-            &self.primary_phone,
-            &self.secondary_phone,
-            &self.email,
-            &self.preferred_contact_method,
-            &self.emergency_contact_name,
-            &self.emergency_contact_relationship,
-            &self.emergency_contact_phone,
-            &self.emergency_contact_email,
-            &self.contact_notes,
-            &self.payer_name,
-            &self.plan_name,
-            &self.member_id,
-            &self.group_number,
-            &self.coverage_type,
-            &self.coverage_status,
-            &self.coverage_notes,
-        ]
-        .iter()
-        .filter_map(|value| nonempty_option(value))
-        .collect()
-    }
-
-    fn value(&self, field: PatientAdminField) -> &str {
-        match field {
-            PatientAdminField::PrimaryPhone => &self.primary_phone,
-            PatientAdminField::SecondaryPhone => &self.secondary_phone,
-            PatientAdminField::Email => &self.email,
-            PatientAdminField::PreferredContactMethod => &self.preferred_contact_method,
-            PatientAdminField::EmergencyContactName => &self.emergency_contact_name,
-            PatientAdminField::EmergencyContactRelationship => &self.emergency_contact_relationship,
-            PatientAdminField::EmergencyContactPhone => &self.emergency_contact_phone,
-            PatientAdminField::EmergencyContactEmail => &self.emergency_contact_email,
-            PatientAdminField::ContactNotes => &self.contact_notes,
-            PatientAdminField::PayerName => &self.payer_name,
-            PatientAdminField::PlanName => &self.plan_name,
-            PatientAdminField::MemberId => &self.member_id,
-            PatientAdminField::GroupNumber => &self.group_number,
-            PatientAdminField::CoverageType => &self.coverage_type,
-            PatientAdminField::CoverageStatus => &self.coverage_status,
-            PatientAdminField::CoverageNotes => &self.coverage_notes,
-        }
-    }
-}
-
-fn patient_admin_metadata_for_client(client: &WorkspaceClient) -> PatientAdminMetadata {
-    PatientAdminMetadata::from_client(client)
-}
-
-fn patient_admin_metadata_for_draft(draft: &ClientDraft) -> PatientAdminMetadata {
-    PatientAdminMetadata::from_draft(draft)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1502,7 +1121,8 @@ fn patient_file_group_label(document: &WorkspaceDocument) -> &'static str {
         document.detected_kind,
         document.mime_type.as_deref().unwrap_or_default(),
     )
-    .to_ascii_lowercase();
+    .to_ascii_lowercase()
+    .replace(['_', '-'], " ");
     if haystack.contains("medicare")
         || haystack.contains("insurance card")
         || haystack.contains("payer card")
@@ -1563,6 +1183,43 @@ fn patient_file_group_label(document: &WorkspaceDocument) -> &'static str {
     } else {
         "Other Files"
     }
+}
+
+fn coverage_card_document_is_eligible(document: &WorkspaceDocument) -> bool {
+    let card_kind = |value: &str| {
+        let normalized = value
+            .trim()
+            .to_ascii_lowercase()
+            .replace(['_', '-'], " ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        matches!(
+            normalized.as_str(),
+            "insurance card" | "medicare insurance card image"
+        )
+    };
+    let source_hash = document
+        .content_sha256
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .or(document.sha256.as_deref())
+        .map(str::trim)
+        .unwrap_or_default();
+    document.archived_at.is_none()
+        && document.scope.trim().eq_ignore_ascii_case("patient")
+        && (card_kind(&document.kind) || card_kind(&document.detected_kind))
+        && document
+            .reference_kind
+            .trim()
+            .eq_ignore_ascii_case("local_reference")
+        && document
+            .existence_status
+            .trim()
+            .eq_ignore_ascii_case("present")
+        && !document.local_path.trim().is_empty()
+        && source_hash.len() == 64
+        && source_hash.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn patient_directory_row_lines(
@@ -1647,14 +1304,29 @@ impl DocumentField {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 struct NoteDraft {
     id: Option<String>,
+    working_note_id: String,
     encounter_id: Option<String>,
     title: String,
     body: String,
     status: String,
     current_revision: i64,
+}
+
+impl Default for NoteDraft {
+    fn default() -> Self {
+        Self {
+            id: None,
+            working_note_id: Uuid::new_v4().to_string(),
+            encounter_id: None,
+            title: String::new(),
+            body: String::new(),
+            status: String::new(),
+            current_revision: 0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -2318,6 +1990,7 @@ impl NoteDraft {
     fn from_note(note: &WorkspaceNote) -> Self {
         Self {
             id: Some(note.id.clone()),
+            working_note_id: note.id.clone(),
             encounter_id: note.encounter_id.clone(),
             title: note.title.clone(),
             body: note.body.clone(),
@@ -2338,6 +2011,10 @@ impl NoteDraft {
         let status = self.status.trim();
         if status.is_empty() { "draft" } else { status }
     }
+}
+
+fn workspace_note_is_locked(note: &WorkspaceNote) -> bool {
+    matches!(note.status.trim(), "signed" | "addended" | "locked")
 }
 
 #[derive(Debug, Clone, Default)]
@@ -2376,6 +2053,10 @@ impl AgentRequestDraft {
     fn clear(&mut self) {
         self.active = false;
         self.body.clear();
+    }
+
+    fn leave_input(&mut self) {
+        self.active = false;
     }
 
     fn is_active(&self) -> bool {
@@ -2444,6 +2125,8 @@ impl AgentResultDraft {
 pub(crate) struct WorkspaceDashboard {
     profile: WorkspaceProfile,
     clients: Vec<WorkspaceClient>,
+    coverages: Vec<WorkspaceCoverage>,
+    coverage_verifications: Vec<WorkspaceCoverageVerification>,
     encounters: Vec<WorkspaceEncounter>,
     notes: Vec<WorkspaceNote>,
     documents: Vec<WorkspaceDocument>,
@@ -2467,6 +2150,10 @@ pub(crate) struct WorkspaceDashboard {
     demographics_field: DemographicsField,
     patient_admin_edit_mode: Option<PatientAdminEditMode>,
     patient_admin_field: PatientAdminField,
+    coverage_draft: CoverageDraft,
+    coverage_field: CoverageField,
+    card_verification_draft: Option<CardVerificationDraft>,
+    card_verification_field: CardVerificationField,
     safety_field: SafetyField,
     document_field: DocumentField,
     derivative_field: DerivativeField,
@@ -2479,6 +2166,7 @@ pub(crate) struct WorkspaceDashboard {
     agent_rail_tab: AgentRailTab,
     draft_client: ClientDraft,
     draft_note: NoteDraft,
+    note_body_editor: WorkspaceEditor,
     draft_document: DocumentDraft,
     draft_safety: SafetyDraft,
     derivative_draft: DerivativeDraft,
@@ -2486,9 +2174,15 @@ pub(crate) struct WorkspaceDashboard {
     draft_task: TaskDraft,
     addendum_draft: AddendumDraft,
     agent_request: AgentRequestDraft,
+    agent_request_editor: WorkspaceEditor,
     agent_result: AgentResultDraft,
     context_packets: Vec<WorkspaceContextPacket>,
+    agent_runs: Vec<WorkspaceAgentRun>,
     agent_results: Vec<WorkspaceAgentResult>,
+    plan_snapshot: Option<WorkspacePlanSnapshotGetResponse>,
+    plan_streaming_status: Option<String>,
+    plan_stream_delta: String,
+    plan_message_sending: bool,
     selected_agent_result_id: Option<String>,
     agent_result_inspect: bool,
     packet_replay_inspect: bool,
@@ -2512,11 +2206,15 @@ pub(crate) struct WorkspaceDashboard {
     dirty: bool,
     status: String,
     store_description: Option<String>,
+    draft_persistence_message: Option<String>,
+    draft_recovery_available: bool,
+    source_checkpoint: Option<WorkspaceDraftCheckpointMetadata>,
 }
 
 #[derive(Debug, Clone)]
 struct ChartDraftSnapshot {
     client: ClientDraft,
+    coverage: CoverageDraft,
     note: NoteDraft,
     document: DocumentDraft,
     safety: SafetyDraft,
@@ -2530,6 +2228,7 @@ impl ChartDraftSnapshot {
     fn capture(dashboard: &WorkspaceDashboard) -> Self {
         Self {
             client: dashboard.draft_client.clone(),
+            coverage: dashboard.coverage_draft.clone(),
             note: dashboard.draft_note.clone(),
             document: dashboard.draft_document.clone(),
             safety: dashboard.draft_safety.clone(),
@@ -2556,6 +2255,7 @@ impl ChartDraftSnapshot {
         });
 
         dashboard.draft_client = self.client;
+        dashboard.coverage_draft = self.coverage;
         dashboard.draft_note = self.note;
         dashboard.draft_document = self.document;
         dashboard.draft_safety = self.safety;
@@ -2570,6 +2270,7 @@ impl ChartDraftSnapshot {
             dashboard.draft_note.current_revision = current_revision;
             dashboard.select_encounter_for_active_note();
         }
+        dashboard.note_body_editor.reset(&dashboard.draft_note.body);
     }
 }
 
@@ -2578,6 +2279,8 @@ impl Default for WorkspaceDashboard {
         Self {
             profile: WorkspaceProfile::default(),
             clients: Vec::new(),
+            coverages: Vec::new(),
+            coverage_verifications: Vec::new(),
             encounters: Vec::new(),
             notes: Vec::new(),
             documents: Vec::new(),
@@ -2601,6 +2304,10 @@ impl Default for WorkspaceDashboard {
             demographics_field: DemographicsField::DisplayName,
             patient_admin_edit_mode: None,
             patient_admin_field: PatientAdminField::PrimaryPhone,
+            coverage_draft: CoverageDraft::new(String::new(), CoveragePriority::Primary),
+            coverage_field: CoverageField::PayerName,
+            card_verification_draft: None,
+            card_verification_field: CardVerificationField::SourceDocument,
             safety_field: SafetyField::Category,
             document_field: DocumentField::Title,
             derivative_field: DerivativeField::Title,
@@ -2613,6 +2320,7 @@ impl Default for WorkspaceDashboard {
             agent_rail_tab: AgentRailTab::default(),
             draft_client: ClientDraft::default(),
             draft_note: NoteDraft::default(),
+            note_body_editor: WorkspaceEditor::with_policy(WorkspaceEditorPolicy::Document),
             draft_document: DocumentDraft::default(),
             draft_safety: SafetyDraft::default(),
             derivative_draft: DerivativeDraft::default(),
@@ -2620,9 +2328,15 @@ impl Default for WorkspaceDashboard {
             draft_task: TaskDraft::default(),
             addendum_draft: AddendumDraft::default(),
             agent_request: AgentRequestDraft::default(),
+            agent_request_editor: WorkspaceEditor::with_policy(WorkspaceEditorPolicy::Prompt),
             agent_result: AgentResultDraft::default(),
             context_packets: Vec::new(),
+            agent_runs: Vec::new(),
             agent_results: Vec::new(),
+            plan_snapshot: None,
+            plan_streaming_status: None,
+            plan_stream_delta: String::new(),
+            plan_message_sending: false,
             selected_agent_result_id: None,
             agent_result_inspect: false,
             packet_replay_inspect: false,
@@ -2646,6 +2360,9 @@ impl Default for WorkspaceDashboard {
             dirty: false,
             status: "Workspace".to_string(),
             store_description: None,
+            draft_persistence_message: None,
+            draft_recovery_available: false,
+            source_checkpoint: None,
         }
     }
 }
@@ -2675,6 +2392,10 @@ impl WorkspaceDashboard {
         self.profile
     }
 
+    pub(crate) fn focus(&self) -> WorkspaceFocus {
+        self.focus
+    }
+
     pub(crate) fn set_local_store_path(&mut self, path: impl AsRef<Path>) {
         self.set_store_description(format!("Local SQLite: {}", path.as_ref().display()));
     }
@@ -2684,6 +2405,64 @@ impl WorkspaceDashboard {
     }
 
     pub(crate) fn set_status(&mut self, status: impl Into<String>) {
+        self.status = status.into();
+    }
+
+    pub(crate) fn active_patient_id(&self) -> Option<&str> {
+        self.draft_client.id.as_deref()
+    }
+
+    pub(crate) fn active_note_id(&self) -> Option<&str> {
+        self.draft_note.id.as_deref()
+    }
+
+    pub(crate) fn active_encounter_id(&self) -> Option<&str> {
+        self.encounters
+            .get(self.encounter_index)
+            .map(|encounter| encounter.id.as_str())
+    }
+
+    pub(crate) fn set_keymap_bindings(&self, keymap: &RuntimeKeymap) {
+        self.note_body_editor.set_keymap_bindings(keymap);
+        self.agent_request_editor.set_keymap_bindings(keymap);
+    }
+
+    pub(crate) fn set_plan_snapshot(&mut self, snapshot: WorkspacePlanSnapshotGetResponse) {
+        self.plan_snapshot = Some(snapshot);
+        self.clear_plan_stream();
+        self.agent_scroll = 0;
+    }
+
+    pub(crate) fn set_plan_streaming_status(&mut self, status: Option<String>) {
+        self.plan_streaming_status = status;
+    }
+
+    pub(crate) fn append_plan_stream_delta(&mut self, delta: &str) {
+        const MAX_STREAM_BYTES: usize = 32 * 1024;
+        for character in delta.chars() {
+            if self.plan_stream_delta.len() + character.len_utf8() > MAX_STREAM_BYTES {
+                break;
+            }
+            self.plan_stream_delta.push(character);
+        }
+    }
+
+    pub(crate) fn clear_plan_stream(&mut self) {
+        self.plan_streaming_status = None;
+        self.plan_stream_delta.clear();
+    }
+
+    pub(crate) fn confirm_plan_message_sent(&mut self) {
+        self.plan_message_sending = false;
+        self.agent_request.clear();
+        self.agent_request_editor.reset("");
+        self.agent_scroll = 0;
+        self.status =
+            "Message saved; Codex is planning in the persistent patient thread.".to_string();
+    }
+
+    pub(crate) fn fail_plan_message_send(&mut self, status: impl Into<String>) {
+        self.plan_message_sending = false;
         self.status = status.into();
     }
 
@@ -2745,6 +2524,8 @@ impl WorkspaceDashboard {
             (request, purpose)
         };
 
+        let prior_note_id = self.draft_note.id.clone();
+        let prior_working_note_id = self.draft_note.working_note_id.clone();
         let response = match app_server.workspace_chart_commit(params).await {
             Ok(response) => response,
             Err(error) => {
@@ -2808,7 +2589,7 @@ impl WorkspaceDashboard {
             .encounter
             .as_ref()
             .map(|encounter| encounter.id.clone())
-            .or_else(|| self.active_encounter_id());
+            .or_else(|| self.active_encounter_id_owned());
         let preferred_task_id = response
             .task
             .as_ref()
@@ -2838,6 +2619,16 @@ impl WorkspaceDashboard {
             );
             return Err(error);
         }
+        let same_working_note = match prior_note_id.as_deref() {
+            Some(prior_note_id) => self.draft_note.id.as_deref() == Some(prior_note_id),
+            None => response
+                .note
+                .as_ref()
+                .is_some_and(|note| self.draft_note.id.as_deref() == Some(note.id.as_str())),
+        };
+        if same_working_note {
+            self.draft_note.working_note_id = prior_working_note_id;
+        }
 
         self.draft_safety.clear();
         self.derivative_draft.clear();
@@ -2853,8 +2644,7 @@ impl WorkspaceDashboard {
                     self.focus_workflow_section(MedicalWorkflowSection::Documents);
                     self.workflow_scroll = self.workflow_derivative_inspector_row();
                 }
-                "Reviewed text saved atomically and selected for the next Medical Agent Plan."
-                    .to_string()
+                "Reviewed text saved atomically and selected for the next Context Plan.".to_string()
             }
             ChartChangesetPurpose::SaveClip => {
                 if let Some(clip) = response.context_clip.as_ref() {
@@ -2863,8 +2653,7 @@ impl WorkspaceDashboard {
                     self.focus_workflow_section(MedicalWorkflowSection::Documents);
                     self.workflow_scroll = self.workflow_clip_inspector_row();
                 }
-                "Context clip saved atomically and selected for the next Medical Agent Plan."
-                    .to_string()
+                "Context clip saved atomically and selected for the next Context Plan.".to_string()
             }
             ChartChangesetPurpose::General if response.replayed => {
                 "Saved from the existing chart commit receipt.".to_string()
@@ -2883,7 +2672,7 @@ impl WorkspaceDashboard {
         let preferred_client_id = self.draft_client.id.clone();
         let preferred_note_id = self.draft_note.id.clone();
         let preferred_document_id = self.draft_document.id.clone();
-        let preferred_encounter_id = self.active_encounter_id();
+        let preferred_encounter_id = self.active_encounter_id_owned();
         let preferred_task_id = self.selected_task_id();
 
         let refresh = self
@@ -2961,6 +2750,30 @@ impl WorkspaceDashboard {
             Some(client_upsert)
         };
         let child_client_id = root_client_id.clone().unwrap_or_default();
+        let mut coverage_upsert = WorkspaceCoverageUpsertParams::from(&self.coverage_draft);
+        coverage_upsert.client_id.clone_from(&child_client_id);
+        let coverage = if let Some(coverage_id) = self.coverage_draft.id.as_deref() {
+            let canonical = self
+                .coverages
+                .iter()
+                .find(|coverage| coverage.id == coverage_id)
+                .ok_or_else(|| {
+                    "The loaded coverage version is unavailable; reload before saving.".to_string()
+                })?;
+            let canonical_upsert = WorkspaceCoverageUpsertParams::from(
+                &CoverageDraft::try_from(canonical).map_err(|error| error.to_string())?,
+            );
+            if coverage_upsert == canonical_upsert {
+                None
+            } else {
+                expected_versions.coverage = Some(canonical.version.clone());
+                Some(coverage_upsert)
+            }
+        } else if coverage_draft_has_input(&self.coverage_draft) {
+            Some(coverage_upsert)
+        } else {
+            None
+        };
 
         if self.draft_safety.is_active() && !self.draft_safety.should_save() {
             return Err("Clinical safety name is required.".to_string());
@@ -3080,7 +2893,7 @@ impl WorkspaceDashboard {
 
         let needs_encounter = self.profile == WorkspaceProfile::Medical
             && (note_changed || document_should_save || derivative_should_save || clip_should_save);
-        let existing_encounter_id = self.active_encounter_id();
+        let existing_encounter_id = self.active_encounter_id_owned();
         let encounter = (needs_encounter && existing_encounter_id.is_none()).then(|| {
             WorkspaceEncounterUpsertParams {
                 id: None,
@@ -3213,6 +3026,9 @@ impl WorkspaceDashboard {
         if client.is_some() {
             changed.push("demographics");
         }
+        if coverage.is_some() {
+            changed.push("coverage");
+        }
         if safety_item.is_some() {
             changed.push("clinical safety");
         }
@@ -3248,6 +3064,7 @@ impl WorkspaceDashboard {
             source_turn_id: None,
             client_id: root_client_id,
             client,
+            coverage,
             expected_versions,
             safety_item,
             encounter,
@@ -3265,6 +3082,14 @@ impl WorkspaceDashboard {
                 &client.id
             });
         self.draft_client = ClientDraft::from_client(&response.client);
+        if let Some(coverage) = response.coverage.clone() {
+            replace_or_push_by_id(&mut self.coverages, coverage.clone(), |coverage| {
+                &coverage.id
+            });
+            if let Ok(draft) = CoverageDraft::try_from(&coverage) {
+                self.coverage_draft = draft;
+            }
+        }
         if let Some(encounter) = response.encounter.clone() {
             self.encounter_index =
                 replace_or_push_by_id(&mut self.encounters, encounter, |encounter| &encounter.id);
@@ -3272,6 +3097,7 @@ impl WorkspaceDashboard {
         if let Some(note) = response.note.clone() {
             self.note_index = replace_or_push_by_id(&mut self.notes, note.clone(), |note| &note.id);
             self.draft_note = NoteDraft::from_note(&note);
+            self.note_body_editor.reset(&self.draft_note.body);
         }
         if let Some(document) = response.document.clone() {
             replace_or_push_by_id(&mut self.documents, document.clone(), |document| {
@@ -3323,6 +3149,7 @@ impl WorkspaceDashboard {
 
         self.note_index = index;
         self.draft_note = NoteDraft::from_note(&self.notes[self.note_index]);
+        self.note_body_editor.reset(&self.draft_note.body);
         self.select_encounter_for_active_note();
         self.addendum_draft.clear();
         self.reload_packet_history(app_server).await?;
@@ -3386,7 +3213,7 @@ impl WorkspaceDashboard {
             self.draft_client.id.clone(),
             Some(note_id),
             self.draft_document.id.clone(),
-            self.active_encounter_id(),
+            self.active_encounter_id_owned(),
             self.selected_task_id(),
         )
         .await?;
@@ -3420,7 +3247,7 @@ impl WorkspaceDashboard {
                 self.draft_client.id.clone(),
                 note_id,
                 self.draft_document.id.clone(),
-                self.active_encounter_id(),
+                self.active_encounter_id_owned(),
                 self.selected_task_id(),
             )
             .await
@@ -3482,7 +3309,7 @@ impl WorkspaceDashboard {
             self.draft_client.id.clone(),
             Some(note_id),
             self.draft_document.id.clone(),
-            self.active_encounter_id(),
+            self.active_encounter_id_owned(),
             self.selected_task_id(),
         )
         .await?;
@@ -3519,7 +3346,7 @@ impl WorkspaceDashboard {
                 Some(client_id),
                 self.draft_note.id.clone(),
                 self.draft_document.id.clone(),
-                self.active_encounter_id(),
+                self.active_encounter_id_owned(),
                 None,
             )
             .await?;
@@ -3530,7 +3357,7 @@ impl WorkspaceDashboard {
             Some(client_id),
             self.draft_note.id.clone(),
             self.draft_document.id.clone(),
-            self.active_encounter_id(),
+            self.active_encounter_id_owned(),
             Some(task.id),
         )
         .await?;
@@ -3558,6 +3385,23 @@ impl WorkspaceDashboard {
             return WorkspaceDashboardAction::Consumed;
         }
         let key_event = normalize_workspace_key_event(key_event);
+
+        if self.profile == WorkspaceProfile::Medical
+            && self.draft_recovery_available
+            && self.command_input.is_none()
+            && !workspace_command_shortcut_key(&key_event)
+            && !matches!(
+                key_event.code,
+                KeyCode::Tab | KeyCode::BackTab | KeyCode::Char('?') | KeyCode::Esc
+            )
+            && !(key_event.modifiers.contains(KeyModifiers::CONTROL)
+                && matches!(key_event.code, KeyCode::Char('p' | 'w')))
+        {
+            self.status =
+                "Resolve the recoverable local draft first: Ctrl-P → Restore local draft or Discard local draft."
+                    .to_string();
+            return WorkspaceDashboardAction::Consumed;
+        }
 
         if self.chart_changeset_input_is_frozen() {
             let close_action = if self
@@ -3651,10 +3495,21 @@ impl WorkspaceDashboard {
                     return WorkspaceDashboardAction::Consumed;
                 }
                 KeyCode::Char(c) if c.eq_ignore_ascii_case(&'s') => {
+                    if self.focus == WorkspaceFocus::Demographics
+                        && self.card_verification_draft.is_some()
+                    {
+                        return self.request_coverage_verification_create();
+                    }
                     return WorkspaceDashboardAction::Save;
                 }
                 KeyCode::Char(c) if c.eq_ignore_ascii_case(&'g') => {
-                    return WorkspaceDashboardAction::SendContextToAgent;
+                    if self.focus == WorkspaceFocus::Agent {
+                        return WorkspaceDashboardAction::SendContextToAgent;
+                    }
+                    self.status =
+                        "Master handoff is available from Plan with Codex; focus the agent pane first."
+                            .to_string();
+                    return WorkspaceDashboardAction::Consumed;
                 }
                 KeyCode::Char(c) if c.eq_ignore_ascii_case(&'w') => {
                     return WorkspaceDashboardAction::Close;
@@ -3716,7 +3571,7 @@ impl WorkspaceDashboard {
             WorkspaceFocus::Demographics => self.handle_demographics_key_event(key_event),
             WorkspaceFocus::NoteTitle => self.handle_note_title_key_event(key_event),
             WorkspaceFocus::NoteBody => self.handle_note_body_key_event(key_event),
-            WorkspaceFocus::Workflow => self.handle_workflow_key_event(key_event),
+            WorkspaceFocus::Workflow => self.handle_workflow_key_event(key_event, viewport),
             WorkspaceFocus::Agent => self.handle_agent_key_event(key_event),
             WorkspaceFocus::PatientFiles => self.handle_patient_files_key_event(key_event),
         }
@@ -3745,7 +3600,11 @@ impl WorkspaceDashboard {
                 WorkspaceDashboardAction::Consumed
             }
             WorkspaceFocus::Workflow => {
-                self.scroll_center_work_area(delta, 2);
+                if self.workflow_section == MedicalWorkflowSection::Proposals {
+                    self.scroll_proposal_comparison(delta, 2, viewport);
+                } else {
+                    self.scroll_center_work_area(delta, 2);
+                }
                 WorkspaceDashboardAction::Consumed
             }
             WorkspaceFocus::Agent => {
@@ -3772,6 +3631,20 @@ impl WorkspaceDashboard {
             return self.focus;
         };
         let point = (scroll_event.column, scroll_event.row);
+        if self.uses_medical_dedicated_workpane_layout()
+            && let Some(areas) = MedicalDedicatedWorkpaneAreas::new(area)
+        {
+            if rect_contains(areas.clients, point) {
+                return WorkspaceFocus::Clients;
+            }
+            if rect_contains(areas.notes, point) {
+                return WorkspaceFocus::Notes;
+            }
+            if rect_contains(areas.workpane, point) {
+                return WorkspaceFocus::Workflow;
+            }
+            return self.focus;
+        }
         match WorkspaceLayoutMode::for_area(area) {
             WorkspaceLayoutMode::Large => {
                 let areas = MedicalLargeAreas::new(area);
@@ -3851,13 +3724,22 @@ impl WorkspaceDashboard {
         }
     }
 
+    fn scroll_proposal_comparison(&mut self, delta: isize, amount: u16, viewport: Option<Rect>) {
+        self.scroll_center_work_area(delta, amount);
+        if let Some(max_scroll) =
+            viewport.and_then(|area| self.proposal_comparison_max_scroll_for_viewport(area))
+        {
+            self.workflow_scroll = self.workflow_scroll.min(max_scroll);
+        }
+    }
+
     fn scroll_agent_workpane(&mut self, delta: isize, amount: u16) {
         if delta.is_negative() {
             self.agent_scroll = self.agent_scroll.saturating_sub(amount);
-            self.status = "Scrolled Agent Work up.".to_string();
+            self.status = "Scrolled Context Plan up.".to_string();
         } else {
             self.agent_scroll = self.agent_scroll.saturating_add(amount);
-            self.status = "Scrolled Agent Work down.".to_string();
+            self.status = "Scrolled Context Plan down.".to_string();
         }
     }
 
@@ -4110,11 +3992,13 @@ impl WorkspaceDashboard {
             return;
         }
         if self.agent_request.is_active() {
-            self.status = "Focused local agent request draft.".to_string();
+            self.status =
+                "Focused message to Codex. Enter sends; Shift-Enter adds a line.".to_string();
             return;
         }
         self.status =
-            "Focused Agent Work. Use r or :agent request to start a local draft.".to_string();
+            "Focused Plan with Codex. Type a message, or press Enter to focus the composer."
+                .to_string();
     }
 
     fn can_focus_patient_files_sidepane(&self) -> bool {
@@ -4157,31 +4041,6 @@ impl WorkspaceDashboard {
         self.status =
             "Patient search. Type a name, DOB, Patient ID / MRN, contact, or coverage ID."
                 .to_string();
-    }
-
-    fn open_patient_admin_editor(&mut self, mode: PatientAdminEditMode, field: PatientAdminField) {
-        self.patient_search_query = None;
-        self.patient_search_selection_index = 0;
-        self.patient_search_return_focus = None;
-        self.patient_search_return_section = None;
-        self.action_overlay_visible = false;
-        self.command_input = None;
-        self.patient_admin_edit_mode = Some(mode);
-        self.patient_admin_field = if field.mode() == mode {
-            field
-        } else {
-            mode.first_field()
-        };
-        self.focus = WorkspaceFocus::Demographics;
-        self.status = match mode {
-            PatientAdminEditMode::Contact => {
-                "Editing patient demographics and emergency contact fields. Ctrl-S saves."
-                    .to_string()
-            }
-            PatientAdminEditMode::Coverage => {
-                "Editing coverage fields. Member ID stays under coverage; Ctrl-S saves.".to_string()
-            }
-        };
     }
 
     fn close_patient_search(&mut self) {
@@ -4228,6 +4087,11 @@ impl WorkspaceDashboard {
         if self.profile != WorkspaceProfile::Medical {
             return false;
         }
+        if self.card_verification_draft.take().is_some() {
+            self.status =
+                "Closed unsaved card comparison; no verification record was created.".to_string();
+            return true;
+        }
         if self.patient_admin_edit_mode.take().is_some() {
             self.focus = WorkspaceFocus::Demographics;
             self.status = "Closed admin field editor; patient chart remains open.".to_string();
@@ -4255,10 +4119,8 @@ impl WorkspaceDashboard {
             return true;
         }
         if self.focus == WorkspaceFocus::Agent && self.agent_request.is_active() {
-            self.focus = WorkspaceFocus::Workflow;
-            self.set_workflow_section(MedicalWorkflowSection::Visit);
-            self.status =
-                "Left agent input draft; request remains local until packet review.".to_string();
+            self.agent_request.leave_input();
+            self.status = "Left message input; the unsent message remains local.".to_string();
             return true;
         }
         false
@@ -4350,15 +4212,10 @@ impl WorkspaceDashboard {
                 if results.is_empty() {
                     if self.dirty || self.has_unsaved_addendum_draft() {
                         self.status = "Save before creating or switching patients.".to_string();
+                        return WorkspaceDashboardAction::Consumed;
                     } else {
-                        self.patient_search_query = None;
-                        self.patient_search_selection_index = 0;
-                        self.patient_search_return_focus = None;
-                        self.patient_search_return_section = None;
-                        self.start_new_client();
-                        self.status = "New patient draft.".to_string();
+                        return WorkspaceDashboardAction::StartNewClient;
                     }
-                    return WorkspaceDashboardAction::Consumed;
                 }
                 if self.dirty || self.has_unsaved_addendum_draft() {
                     self.status = "Save before switching patients.".to_string();
@@ -4444,6 +4301,22 @@ impl WorkspaceDashboard {
 
     pub(crate) fn execute_workspace_command(&mut self, command: &str) -> WorkspaceDashboardAction {
         let normalized = normalize_workspace_command(command);
+        if self.profile == WorkspaceProfile::Medical && self.draft_recovery_available {
+            let allowed = action_for_command(self.profile, &normalized).is_some_and(|action| {
+                matches!(
+                    action,
+                    WorkspaceActionId::Actions
+                        | WorkspaceActionId::RestoreLocalDraft
+                        | WorkspaceActionId::DiscardLocalDraft
+                )
+            });
+            if !allowed {
+                self.status =
+                    "Restore or discard the recoverable local draft before other commands."
+                        .to_string();
+                return WorkspaceDashboardAction::Consumed;
+            }
+        }
         if self.profile == WorkspaceProfile::Medical
             && matches!(normalized.as_str(), "workflow documents" | "workflow files")
         {
@@ -4490,6 +4363,7 @@ impl WorkspaceDashboard {
             }
             WorkspaceActionId::AgentClear => {
                 self.agent_request.clear();
+                self.agent_request_editor.reset(&self.agent_request.body);
                 self.focus_workflow_section(MedicalWorkflowSection::AgentRequest);
                 self.status = "Agent instructions cleared.".to_string();
                 WorkspaceDashboardAction::Consumed
@@ -4499,20 +4373,41 @@ impl WorkspaceDashboard {
                 self.focus_workflow_section(MedicalWorkflowSection::AgentInbox);
                 WorkspaceDashboardAction::Consumed
             }
+            WorkspaceActionId::AgentOpenRun => {
+                let Some(packet) = self.context_packets.first() else {
+                    self.status =
+                        "Submit a Context Plan before opening the full Codex run.".to_string();
+                    return WorkspaceDashboardAction::Consumed;
+                };
+                let Some(run) = self.latest_agent_run_for_packet(&packet.id) else {
+                    self.status = "No recorded full Codex run is available for this Context Plan."
+                        .to_string();
+                    return WorkspaceDashboardAction::Consumed;
+                };
+                let Some(thread_id) = run.source_thread_id.clone() else {
+                    self.status =
+                        "This recorded Codex run has no source thread to open.".to_string();
+                    return WorkspaceDashboardAction::Consumed;
+                };
+                WorkspaceDashboardAction::OpenAgentRun {
+                    thread_id,
+                    run_id: run.id.clone(),
+                }
+            }
             WorkspaceActionId::AgentPacketInspect => {
                 if self.packet_for_replay().is_none() {
-                    self.status = "No submitted Medical Agent Plan to inspect.".to_string();
+                    self.status = "No submitted Context Plan to inspect.".to_string();
                     self.focus_workflow_section(MedicalWorkflowSection::AgentInbox);
                     return WorkspaceDashboardAction::Consumed;
                 }
                 self.packet_replay_inspect = true;
                 self.focus_workflow_section(MedicalWorkflowSection::AgentInbox);
-                self.status = "Inspecting saved Medical Agent Plan history.".to_string();
+                self.status = "Inspecting saved Context Plan history.".to_string();
                 WorkspaceDashboardAction::Consumed
             }
             WorkspaceActionId::AgentPreview => {
                 self.focus_workflow_section(MedicalWorkflowSection::ContextPacket);
-                WorkspaceDashboardAction::Consumed
+                WorkspaceDashboardAction::CheckpointDraft
             }
             WorkspaceActionId::AgentRequest => {
                 self.start_agent_request();
@@ -4720,10 +4615,7 @@ impl WorkspaceDashboard {
                     review_status: "archived".to_string(),
                 }
             }
-            WorkspaceActionId::ClientNew => {
-                self.start_new_client();
-                WorkspaceDashboardAction::Consumed
-            }
+            WorkspaceActionId::ClientNew => WorkspaceDashboardAction::StartNewClient,
             WorkspaceActionId::ContactEdit => {
                 self.open_patient_admin_editor(
                     PatientAdminEditMode::Contact,
@@ -4738,6 +4630,16 @@ impl WorkspaceDashboard {
                 );
                 WorkspaceDashboardAction::Consumed
             }
+            WorkspaceActionId::CoverageVerify => {
+                self.open_patient_admin_editor(
+                    PatientAdminEditMode::Coverage,
+                    PatientAdminField::PayerName,
+                );
+                self.start_coverage_verification();
+                WorkspaceDashboardAction::Consumed
+            }
+            WorkspaceActionId::RestoreLocalDraft => WorkspaceDashboardAction::RestoreLocalDraft,
+            WorkspaceActionId::DiscardLocalDraft => WorkspaceDashboardAction::DiscardLocalDraft,
             WorkspaceActionId::SafetyOpen => {
                 self.focus_workflow_section(MedicalWorkflowSection::Safety);
                 WorkspaceDashboardAction::Consumed
@@ -4852,10 +4754,7 @@ impl WorkspaceDashboard {
                 self.select_next_task();
                 WorkspaceDashboardAction::Consumed
             }
-            WorkspaceActionId::NoteNew => {
-                self.start_new_note();
-                WorkspaceDashboardAction::Consumed
-            }
+            WorkspaceActionId::NoteNew => WorkspaceDashboardAction::StartNewNote,
             WorkspaceActionId::NoteSign => WorkspaceDashboardAction::SignNote,
             WorkspaceActionId::PracticeLibraryAssociate => {
                 self.request_practice_library_association()
@@ -4877,7 +4776,7 @@ impl WorkspaceDashboard {
             WorkspaceActionId::Return => WorkspaceDashboardAction::Close,
             WorkspaceActionId::ScopeAgentPacket => {
                 self.focus_workflow_section(MedicalWorkflowSection::ContextPacket);
-                WorkspaceDashboardAction::Consumed
+                WorkspaceDashboardAction::CheckpointDraft
             }
             WorkspaceActionId::ScopeAgentReview => {
                 self.focus_workflow_section(MedicalWorkflowSection::AgentInbox);
@@ -4953,7 +4852,11 @@ impl WorkspaceDashboard {
         self.focus_workspace_area(focus, &status);
         self.set_workflow_section(section);
         if focus == WorkspaceFocus::Agent {
-            self.agent_rail_tab = AgentRailTab::Pending;
+            self.agent_rail_tab = if section == MedicalWorkflowSection::ContextPacket {
+                AgentRailTab::History
+            } else {
+                AgentRailTab::Pending
+            };
             self.agent_scroll = 0;
         }
     }
@@ -5048,6 +4951,15 @@ impl WorkspaceDashboard {
     }
 
     pub(crate) fn handle_paste(&mut self, pasted: String) -> WorkspaceDashboardAction {
+        if self.profile == WorkspaceProfile::Medical
+            && self.draft_recovery_available
+            && self.command_input.is_none()
+        {
+            self.status =
+                "Resolve the recoverable local draft before pasting: Ctrl-P → Restore local draft or Discard local draft."
+                    .to_string();
+            return WorkspaceDashboardAction::Consumed;
+        }
         if self.chart_changeset_input_is_frozen() {
             self.status =
                 "Chart changeset is unresolved; use Ctrl-S for its required recovery step or close before editing."
@@ -5091,8 +5003,11 @@ impl WorkspaceDashboard {
                 WorkspaceDashboardAction::Consumed
             }
             WorkspaceFocus::NoteBody => {
-                self.draft_note.body.push_str(&pasted);
-                self.mark_dirty();
+                let edited = self.note_body_editor.paste(&self.draft_note.body, &pasted);
+                if edited != self.draft_note.body {
+                    self.draft_note.body = edited;
+                    self.mark_dirty();
+                }
                 WorkspaceDashboardAction::Consumed
             }
             WorkspaceFocus::Workflow => {
@@ -5139,12 +5054,19 @@ impl WorkspaceDashboard {
                     self.agent_result.body.push_str(&pasted);
                     self.status = "Unsaved returned work draft.".to_string();
                 } else if self.agent_request.is_active() {
-                    self.agent_request.body.push_str(&pasted);
-                    self.status = "Local agent instructions draft.".to_string();
+                    let edited = self
+                        .agent_request_editor
+                        .paste(&self.agent_request.body, &pasted);
+                    if edited != self.agent_request.body {
+                        self.agent_request.body = edited;
+                        self.status = "Unsent message to Codex.".to_string();
+                    }
                 } else {
-                    self.status =
-                        "Agent Work ready. Use :agent request before typing instructions."
-                            .to_string();
+                    self.start_agent_request();
+                    self.agent_request.body = self
+                        .agent_request_editor
+                        .paste(&self.agent_request.body, &pasted);
+                    self.status = "Unsent message to Codex.".to_string();
                 }
                 WorkspaceDashboardAction::Consumed
             }
@@ -5201,7 +5123,7 @@ impl WorkspaceDashboard {
             self.status = "Select or save a patient before adding files.".to_string();
             return Some(WorkspaceDashboardAction::Consumed);
         };
-        let encounter_id = self.active_encounter_id();
+        let encounter_id = self.active_encounter_id_owned();
         let params = intake
             .file_paths
             .iter()
@@ -5296,7 +5218,7 @@ impl WorkspaceDashboard {
             };
             return None;
         }
-        let encounter_id = self.active_encounter_id();
+        let encounter_id = self.active_encounter_id_owned();
         let intake_source = nonempty_or(&event.source, "macos_native_drop");
         let params = valid_paths
             .iter()
@@ -5395,7 +5317,7 @@ impl WorkspaceDashboard {
 
     fn medical_context_assembly(&self) -> MedicalContextAssembly {
         let encounter_id = self
-            .active_encounter_id()
+            .active_encounter_id_owned()
             .unwrap_or_else(|| "unsaved draft".to_string());
         let patient_document_ids = self.patient_document_ids();
         let selected_artifacts = self.selected_artifacts();
@@ -5469,11 +5391,109 @@ impl WorkspaceDashboard {
         })
     }
 
+    fn context_plan_readiness(&self) -> ContextPlanReadiness {
+        self.context_plan_readiness_with_request_present(self.agent_request.has_text())
+    }
+
+    fn context_plan_readiness_with_request_present(
+        &self,
+        request_present: bool,
+    ) -> ContextPlanReadiness {
+        ContextPlanReadiness::evaluate(ContextPlanReadinessInput {
+            patient_saved: self.draft_client.id.is_some(),
+            request_present,
+            recovery_pending: self.draft_recovery_available,
+            chart_changeset_pending: self.pending_chart_changeset.is_some(),
+            stale_context_selection: self.stale_context_notice.is_some(),
+            selected_context_count: self.selected_artifact_ids.len()
+                + self.selected_derivative_ids.len()
+                + self.selected_clip_ids.len(),
+            unsaved_chart_draft: self.dirty || self.draft_note.id.is_none(),
+        })
+    }
+
+    fn context_plan_note_kind(&self) -> MedicalContextPlanNoteKindV2 {
+        let title = self.effective_note_title().to_ascii_lowercase();
+        if title.contains("recert") {
+            MedicalContextPlanNoteKindV2::Recertification
+        } else if title.contains("discharge") {
+            MedicalContextPlanNoteKindV2::Discharge
+        } else if title.contains("progress") {
+            MedicalContextPlanNoteKindV2::Progress
+        } else if title.contains("evaluation") || title.contains("eval") {
+            MedicalContextPlanNoteKindV2::Evaluation
+        } else if title.contains("daily") {
+            MedicalContextPlanNoteKindV2::Daily
+        } else {
+            MedicalContextPlanNoteKindV2::Other
+        }
+    }
+
+    pub(crate) fn context_plan_input(&self) -> MedicalContextPlanInput {
+        MedicalContextPlanInput {
+            objective: self.agent_request.body.clone(),
+            expected_output_kind: "note_proposal".to_string(),
+            workflow: MedicalContextPlanWorkflowV2::ClinicalDocumentation,
+            note_kind: self.context_plan_note_kind(),
+            authorized_scope: MedicalContextPlanAuthorizedScopeV2::default(),
+            readiness_warnings: self.context_plan_readiness().warnings,
+            acknowledgements: Vec::new(),
+        }
+    }
+
+    pub(crate) fn set_source_checkpoint(
+        &mut self,
+        checkpoint: Option<WorkspaceDraftCheckpointMetadata>,
+    ) {
+        self.source_checkpoint = checkpoint;
+    }
+
+    pub(crate) fn context_plan_create_params(
+        &self,
+        checkpoint: &WorkspaceDraftCheckpointMetadata,
+        plan_revision: &WorkspacePlanRevision,
+    ) -> std::result::Result<WorkspaceContextPacketCreateParams, String> {
+        if self.draft_client.id.as_deref() != Some(checkpoint.client_id.as_str())
+            || self.draft_note.id != checkpoint.note_id
+            || self.draft_note.encounter_id != checkpoint.encounter_id
+        {
+            return Err(
+                "Context Plan checkpoint no longer matches the active patient and note. Save a new checkpoint and review again."
+                    .to_string(),
+            );
+        }
+        validate_plan_revision_for_handoff(
+            plan_revision,
+            checkpoint,
+            self.draft_client.id.as_deref(),
+            self.draft_note.id.as_deref(),
+            self.active_encounter_id(),
+        )?;
+        let readiness = self.context_plan_readiness_with_request_present(true);
+        if let Some(blocker) = readiness.blockers.first() {
+            return Err(format!("{} [{}]", blocker.message, blocker.code));
+        }
+        let readiness_value = readiness.submission_readiness_json(&checkpoint.content_sha256);
+        let readiness_json = serde_json::to_string(&readiness_value)
+            .map_err(|error| format!("Failed to encode Context Plan readiness: {error}"))?;
+        let params =
+            self.context_packet_create_params_with_metadata(Some((checkpoint, readiness_json)))?;
+        bind_plan_revision_to_context_packet(params, plan_revision)
+    }
+
+    #[cfg(test)]
     pub(crate) fn context_packet_create_params(
         &self,
     ) -> std::result::Result<WorkspaceContextPacketCreateParams, String> {
+        self.context_packet_create_params_with_metadata(None)
+    }
+
+    fn context_packet_create_params_with_metadata(
+        &self,
+        metadata: Option<(&WorkspaceDraftCheckpointMetadata, String)>,
+    ) -> std::result::Result<WorkspaceContextPacketCreateParams, String> {
         let Some(client_id) = self.draft_client.id.clone() else {
-            return Err("Save the patient before submitting a Medical Agent Plan.".to_string());
+            return Err("Save the patient before submitting a Context Plan.".to_string());
         };
         let assembly = self.medical_context_assembly();
         let authorized_scope_json = json!({
@@ -5482,7 +5502,7 @@ impl WorkspaceDashboard {
             "maxRecords": 25,
             "read": {
                 "patientId": client_id,
-                "encounterId": self.active_encounter_id(),
+                "encounterId": self.active_encounter_id_owned(),
                 "noteId": self.draft_note.id.clone(),
                 "artifactIds": self.selected_artifacts().iter().map(|document| &document.id).collect::<Vec<_>>(),
                 "reviewedTextIds": self.selected_derivatives().iter().map(|derivative| &derivative.id).collect::<Vec<_>>(),
@@ -5491,9 +5511,25 @@ impl WorkspaceDashboard {
             "write": [],
         })
         .to_string();
+        let (
+            workspace_profile,
+            plan_schema_version,
+            source_checkpoint_id,
+            source_checkpoint_sha256,
+            readiness_json,
+        ) = match metadata {
+            Some((checkpoint, readiness_json)) => (
+                Some(self.profile.stable_id().to_string()),
+                Some(MEDICAL_CONTEXT_PLAN_SCHEMA_VERSION),
+                Some(checkpoint.checkpoint_id.clone()),
+                Some(checkpoint.content_sha256.clone()),
+                Some(readiness_json),
+            ),
+            None => (None, None, None, None, None),
+        };
         Ok(WorkspaceContextPacketCreateParams {
             client_id,
-            encounter_id: self.active_encounter_id(),
+            encounter_id: self.active_encounter_id_owned(),
             note_id: self.draft_note.id.clone(),
             human_request: assembly.human_request,
             selected_artifact_ids_json: assembly.selected_artifact_ids_json,
@@ -5508,6 +5544,14 @@ impl WorkspaceDashboard {
             base_note_revision: Some(self.draft_note.current_revision),
             authorized_scope_json: Some(authorized_scope_json),
             expected_output_kind: Some("note_proposal".to_string()),
+            workspace_profile,
+            plan_schema_version,
+            source_checkpoint_id,
+            source_checkpoint_sha256,
+            readiness_json,
+            workspace_plan_revision_id: None,
+            workspace_plan_content_sha256: None,
+            workspace_plan_evidence_manifest_sha256: None,
         })
     }
 
@@ -5515,6 +5559,8 @@ impl WorkspaceDashboard {
         self.context_packets.retain(|entry| entry.id != packet.id);
         self.context_packets.insert(0, packet);
         self.agent_request.clear();
+        self.agent_request_editor.reset(&self.agent_request.body);
+        self.plan_message_sending = false;
         self.agent_result.clear();
         self.stale_context_notice = None;
         self.focus = WorkspaceFocus::Agent;
@@ -5522,8 +5568,13 @@ impl WorkspaceDashboard {
         self.set_workflow_section(MedicalWorkflowSection::AgentInbox);
         self.agent_scroll = 0;
         self.status =
-            "Medical Agent Plan opened; the matching completed response will return to Agent Work."
+            "Context Plan submitted; Codex is running in the background. Use :agent open run to inspect the full run."
                 .to_string();
+    }
+
+    pub(crate) fn mark_agent_run_started(&mut self, run: WorkspaceAgentRun) {
+        self.agent_runs.retain(|entry| entry.id != run.id);
+        self.agent_runs.insert(0, run);
     }
 
     pub(crate) async fn save_agent_result(
@@ -5581,6 +5632,23 @@ impl WorkspaceDashboard {
         Ok(())
     }
 
+    pub(crate) async fn refresh_after_agent_run_ended(
+        &mut self,
+        app_server: &mut AppServerSession,
+        status: &str,
+        error_summary: &str,
+    ) -> Result<()> {
+        self.reload_packet_history(app_server).await?;
+        self.agent_rail_tab = AgentRailTab::Pending;
+        self.focus = WorkspaceFocus::Agent;
+        self.set_workflow_section(MedicalWorkflowSection::AgentInbox);
+        self.status = format!(
+            "Codex run {status} without reviewable work: {}",
+            compact_preview(error_summary, 96)
+        );
+        Ok(())
+    }
+
     pub(crate) async fn associate_practice_library_document(
         &mut self,
         app_server: &mut AppServerSession,
@@ -5600,7 +5668,7 @@ impl WorkspaceDashboard {
             Some(client_id),
             self.draft_note.id.clone(),
             document_id,
-            self.active_encounter_id(),
+            self.active_encounter_id_owned(),
             self.selected_task_id(),
         )
         .await?;
@@ -5633,7 +5701,7 @@ impl WorkspaceDashboard {
             .map(|params| params.title.clone())
             .collect::<Vec<_>>();
         let preferred_note_id = self.draft_note.id.clone();
-        let preferred_encounter_id = self.active_encounter_id();
+        let preferred_encounter_id = self.active_encounter_id_owned();
         let preferred_task_id = self.selected_task_id();
         let dropped_from_patient_files_sidepane = self.focus == WorkspaceFocus::PatientFiles;
         let prior_workflow_section = self.workflow_section;
@@ -5772,7 +5840,7 @@ impl WorkspaceDashboard {
             self.status = "No JPG/PDF files selected.".to_string();
             return Ok(());
         }
-        let encounter_id = self.active_encounter_id();
+        let encounter_id = self.active_encounter_id_owned();
         let params = paths
             .iter()
             .filter(|path| path.is_file())
@@ -5815,7 +5883,7 @@ impl WorkspaceDashboard {
             self.status = "No JPG/PDF files selected.".to_string();
             return Ok(());
         }
-        let encounter_id = self.active_encounter_id();
+        let encounter_id = self.active_encounter_id_owned();
         let params = paths
             .iter()
             .filter(|path| path.is_file())
@@ -5906,7 +5974,7 @@ impl WorkspaceDashboard {
             Some(client_id),
             self.draft_note.id.clone(),
             document_id.clone(),
-            self.active_encounter_id(),
+            self.active_encounter_id_owned(),
             self.selected_task_id(),
         )
         .await?;
@@ -5970,7 +6038,7 @@ impl WorkspaceDashboard {
             Some(client_id),
             self.draft_note.id.clone(),
             document_id.clone(),
-            self.active_encounter_id(),
+            self.active_encounter_id_owned(),
             self.selected_task_id(),
         )
         .await?;
@@ -6040,7 +6108,7 @@ impl WorkspaceDashboard {
             self.draft_client.id.clone(),
             self.draft_note.id.clone(),
             self.draft_document.id.clone(),
-            self.active_encounter_id(),
+            self.active_encounter_id_owned(),
             self.selected_task_id(),
         )
         .await?;
@@ -6081,7 +6149,7 @@ impl WorkspaceDashboard {
             self.draft_client.id.clone(),
             self.draft_note.id.clone(),
             self.draft_document.id.clone(),
-            self.active_encounter_id(),
+            self.active_encounter_id_owned(),
             self.selected_task_id(),
         )
         .await?;
@@ -6239,7 +6307,7 @@ impl WorkspaceDashboard {
             compact_preview(&result.summary, 72)
         };
         self.draft_task.details = format!(
-            "From returned work {} for Medical Agent Plan {}.\n\n{}",
+            "From returned work {} for Context Plan {}.\n\n{}",
             compact_preview(&result.id, 8),
             compact_preview(&result.packet_id, 8),
             result.body
@@ -6386,17 +6454,18 @@ impl WorkspaceDashboard {
             .latest_packet_without_result()
             .map(|packet| packet.id.clone())
         else {
-            self.status = "Submit a Medical Agent Plan before saving returned work.".to_string();
+            self.status = "Submit a Context Plan before saving returned work.".to_string();
             self.focus_workflow_section(MedicalWorkflowSection::AgentInbox);
             return;
         };
         self.agent_request.clear();
+        self.agent_request_editor.reset(&self.agent_request.body);
         self.agent_result.start(packet_id.clone());
         self.focus = WorkspaceFocus::Agent;
         self.set_workflow_section(MedicalWorkflowSection::AgentInbox);
         self.workflow_scroll = 0;
         self.status = format!(
-            "Returned work draft ready for Medical Agent Plan {}. Paste returned work, then :agent result save.",
+            "Returned work draft ready for Context Plan {}. Paste returned work, then :agent result save.",
             compact_preview(&packet_id, 8)
         );
     }
@@ -6405,7 +6474,6 @@ impl WorkspaceDashboard {
         self.context_packets
             .iter()
             .find(|packet| !self.packet_has_result(&packet.id))
-            .or_else(|| self.context_packets.first())
     }
 
     fn packet_has_result(&self, packet_id: &str) -> bool {
@@ -6418,6 +6486,13 @@ impl WorkspaceDashboard {
         self.agent_results
             .iter()
             .find(|result| result.packet_id == packet_id)
+    }
+
+    fn latest_agent_run_for_packet(&self, packet_id: &str) -> Option<&WorkspaceAgentRun> {
+        self.agent_runs
+            .iter()
+            .filter(|run| run.packet_id == packet_id)
+            .max_by_key(|run| (run.updated_at, run.created_at))
     }
 
     fn selected_agent_result(&self) -> Option<&WorkspaceAgentResult> {
@@ -6458,7 +6533,7 @@ impl WorkspaceDashboard {
         };
         if result.client_id != active_client_id {
             return Some(
-                "Agent result plan does not match the active patient; reload the matching chart or submit a new Medical Agent Plan."
+                "Agent result does not match the active patient; reload the matching chart or submit a new Context Plan."
                     .to_string(),
             );
         }
@@ -6466,7 +6541,7 @@ impl WorkspaceDashboard {
             && result.note_id.as_deref() != Some(active_note_id)
         {
             return Some(
-                "Agent result plan does not match the active note; reload the matching chart or submit a new Medical Agent Plan."
+                "Agent result does not match the active note; reload the matching chart or submit a new Context Plan."
                     .to_string(),
             );
         }
@@ -6478,7 +6553,7 @@ impl WorkspaceDashboard {
         };
         if packet.client_id != result.client_id || packet.note_id != result.note_id {
             return Some(
-                "Agent result provenance does not match its Medical Agent Plan metadata; conversion blocked."
+                "Agent result provenance does not match its Context Plan metadata; conversion blocked."
                     .to_string(),
             );
         }
@@ -6708,7 +6783,7 @@ impl WorkspaceDashboard {
                 .find(|(_, document)| self.selected_artifact_ids.contains(&document.id))
                 .map(|(index, _)| *index)
                 .ok_or_else(|| {
-                    "No patient file references are included in the Medical Agent Plan.".to_string()
+                    "No patient file references are included in the Context Plan.".to_string()
                 }),
             ArtifactSelectionAction::Toggle => Ok(patient_documents[0].0),
             ArtifactSelectionAction::Inspect => patient_documents
@@ -6823,7 +6898,7 @@ impl WorkspaceDashboard {
                     "not included"
                 };
                 format!(
-                    "{}: {state}. Enter opens detail; Space includes for packet.",
+                    "{}: {state}. Enter opens detail; Space toggles Context Plan inclusion.",
                     compact_preview(&document.title, 40)
                 )
             }
@@ -6870,7 +6945,7 @@ impl WorkspaceDashboard {
                     self.set_workflow_section(MedicalWorkflowSection::Documents);
                     self.workflow_scroll = 0;
                     self.status = format!(
-                        "File detail: {}. Space includes it for the packet.",
+                        "File detail: {}. Space toggles Context Plan inclusion.",
                         compact_preview(&title, 40)
                     );
                 }
@@ -7043,7 +7118,7 @@ impl WorkspaceDashboard {
         WorkspaceDocumentUpsertParams {
             id: None,
             client_id,
-            encounter_id: self.active_encounter_id(),
+            encounter_id: self.active_encounter_id_owned(),
             title: nonempty_or(&document.title, "Practice library reference"),
             kind: nonempty_or(&document.kind, "file"),
             local_path: document.local_path.clone(),
@@ -7208,9 +7283,7 @@ impl WorkspaceDashboard {
                 .iter()
                 .find(|(_, derivative)| self.selected_derivative_ids.contains(&derivative.id))
                 .map(|(index, _)| *index)
-                .ok_or_else(|| {
-                    "No reviewed text is included in the Medical Agent Plan.".to_string()
-                }),
+                .ok_or_else(|| "No reviewed text is included in the Context Plan.".to_string()),
             DerivativeSelectionAction::Toggle => Ok(patient_derivatives[0].0),
             DerivativeSelectionAction::Inspect => patient_derivatives
                 .iter()
@@ -7339,7 +7412,7 @@ impl WorkspaceDashboard {
                 .iter()
                 .find(|(_, clip)| self.selected_clip_ids.contains(&clip.id))
                 .map(|(index, _)| *index)
-                .ok_or_else(|| "No clips are included in the Medical Agent Plan.".to_string()),
+                .ok_or_else(|| "No clips are included in the Context Plan.".to_string()),
             ClipSelectionAction::Toggle => Ok(patient_clips[0].0),
             ClipSelectionAction::Inspect => patient_clips
                 .iter()
@@ -7503,7 +7576,9 @@ impl WorkspaceDashboard {
             Line::from("  metadata only; original file stays in place"),
             Line::from("  no upload, OCR, transcription, EDI parsing, signing, or payer action"),
             Line::from(""),
-            Line::from("  Uploaded Documents: Space includes for packet; Enter opens detail"),
+            Line::from(
+                "  Uploaded Documents: Space toggles Context Plan inclusion; Enter opens detail",
+            ),
         ];
         if document.thumbnail_status.trim() == "ready" {
             lines.push(Line::from(""));
@@ -7626,6 +7701,15 @@ impl WorkspaceDashboard {
             }
             return;
         }
+        if self.render_medical_dedicated_workpane(area, buf) {
+            if self.action_overlay_visible {
+                self.render_action_overlay(area, buf);
+            }
+            if self.command_input.is_some() {
+                self.render_command_palette(area, buf);
+            }
+            return;
+        }
         if self.render_medical_large_chart_workspace(area, buf) {
             if self.action_overlay_visible {
                 self.render_action_overlay(area, buf);
@@ -7645,15 +7729,6 @@ impl WorkspaceDashboard {
             return;
         }
         if self.render_medical_focus_first_workspace(area, buf) {
-            if self.action_overlay_visible {
-                self.render_action_overlay(area, buf);
-            }
-            if self.command_input.is_some() {
-                self.render_command_palette(area, buf);
-            }
-            return;
-        }
-        if self.render_medical_dedicated_workpane(area, buf) {
             if self.action_overlay_visible {
                 self.render_action_overlay(area, buf);
             }
@@ -7724,7 +7799,9 @@ impl WorkspaceDashboard {
         self.render_notes(areas.notes, buf);
         self.render_patient_files_sidepane(areas.patient_files, buf);
 
-        if self.medical_chart_shows_workflow() {
+        if self.patient_admin_edit_mode.is_some() {
+            self.render_demographics(areas.active_work, buf);
+        } else if self.medical_chart_shows_workflow() {
             if self.medical_chart_can_render_active_work_detail() {
                 self.render_medical_active_work_area(areas.active_work, buf);
             } else {
@@ -7776,6 +7853,8 @@ impl WorkspaceDashboard {
 
         if self.focus == WorkspaceFocus::Agent {
             self.render_agent_workpane(areas.main, buf);
+        } else if self.patient_admin_edit_mode.is_some() {
+            self.render_demographics(areas.main, buf);
         } else if self.medical_chart_shows_workflow() {
             if self.medical_chart_can_render_active_work_detail() {
                 self.render_medical_active_work_area(areas.main, buf);
@@ -7970,30 +8049,54 @@ impl WorkspaceDashboard {
         let Some(proposal) = self.selected_pending_proposal() else {
             return;
         };
-        let rows = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(if area.height >= 10 { 3 } else { 2 }),
-                Constraint::Min(3),
-                Constraint::Length(1),
-            ])
-            .split(area);
-        Paragraph::new(vec![
+        let canonical_note = self.saved_canonical_note_for_proposal(proposal);
+        let canonical_body = canonical_note.map(|note| note.body.as_str()).unwrap_or("");
+        let comparison = proposal_comparison_lines(canonical_body, &proposal.proposed_body);
+        let draft_differs = self.proposal_note_draft_differs_from_saved(proposal);
+        let mut header_lines = vec![
             Line::from(format!(
-                "Current vs Proposed · Note Proposals · {} pending proposals",
+                "Saved Canonical vs Proposed · Note Proposals · {} pending proposals",
                 self.pending_proposal_count()
             )),
             self.proposal_review_state_line(proposal),
             Line::from(format!(
-                "Summary: {}",
-                compact_preview(&proposal.summary, area.width.saturating_sub(9) as usize)
+                "Summary: {} · +{} proposed / -{} canonical lines",
+                compact_preview(&proposal.summary, area.width.saturating_sub(40) as usize),
+                comparison.additions,
+                comparison.deletions,
             )),
-        ])
-        .wrap(Wrap { trim: true })
-        .render(rows[0], buf);
+        ];
+        if draft_differs {
+            header_lines.push(Line::from(vec![
+                Span::styled(
+                    "Unsaved human draft (not canonical): ",
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(compact_preview(
+                    &self.draft_note.body,
+                    area.width.saturating_sub(37) as usize,
+                )),
+            ]));
+        }
+        let comparison_layout = ProposalComparisonLayout::new(area, header_lines.len());
+        Paragraph::new(header_lines)
+            .wrap(Wrap { trim: true })
+            .render(comparison_layout.header, buf);
 
-        let current_title = format!("Current chart · r{}", self.draft_note.current_revision);
+        let current_title = canonical_note
+            .map(|note| format!("Saved canonical · r{}", note.current_revision))
+            .unwrap_or_else(|| "Saved canonical unavailable".to_string());
         let proposed_title = format!("Proposed edit · from r{}", proposal.base_revision);
+        let wrapped_comparison = wrap_proposal_comparison_lines(
+            &comparison,
+            comparison_layout.current_inner().width,
+            comparison_layout.proposed_inner().width,
+        );
+        let scroll = self
+            .workflow_scroll
+            .min(comparison_layout.max_scroll(wrapped_comparison.current.len()));
         let render_comparison_pane =
             |pane: Rect, title: String, lines: Vec<Line<'static>>, pane_buf: &mut Buffer| {
                 let block = Block::default()
@@ -8003,86 +8106,181 @@ impl WorkspaceDashboard {
                 let inner = block.inner(pane);
                 block.render(pane, pane_buf);
                 Paragraph::new(lines)
-                    .wrap(Wrap { trim: false })
-                    .scroll((self.workflow_scroll, 0))
+                    .scroll((scroll, 0))
                     .render(inner, pane_buf);
             };
-        let current_lines = proposal_comparison_body_lines(&self.draft_note.body, '-');
-        let proposed_lines = proposal_comparison_body_lines(&proposal.proposed_body, '+');
-        if rows[1].width >= 72 {
-            let columns = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-                .split(rows[1]);
-            render_comparison_pane(columns[0], current_title, current_lines, buf);
-            render_comparison_pane(columns[1], proposed_title, proposed_lines, buf);
-        } else {
-            let panes = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-                .split(rows[1]);
-            render_comparison_pane(panes[0], current_title, current_lines, buf);
-            render_comparison_pane(panes[1], proposed_title, proposed_lines, buf);
-        }
+        render_comparison_pane(
+            comparison_layout.current,
+            current_title,
+            wrapped_comparison.current,
+            buf,
+        );
+        render_comparison_pane(
+            comparison_layout.proposed,
+            proposed_title,
+            wrapped_comparison.proposed,
+            buf,
+        );
         Paragraph::new(Line::from(
             ":proposal accept | :proposal decline | :proposal next  · read-only comparison",
         ))
-        .render(rows[2], buf);
+        .render(comparison_layout.footer, buf);
+    }
+
+    fn proposal_comparison_max_scroll_for_viewport(&self, viewport: Rect) -> Option<u16> {
+        if self.profile != WorkspaceProfile::Medical
+            || self.focus != WorkspaceFocus::Workflow
+            || self.workflow_section != MedicalWorkflowSection::Proposals
+        {
+            return None;
+        }
+        let comparison_area = match WorkspaceLayoutMode::for_area(viewport) {
+            WorkspaceLayoutMode::Compact => inner_rect(MedicalCompactAreas::new(viewport).body),
+            WorkspaceLayoutMode::Large
+            | WorkspaceLayoutMode::Medium
+            | WorkspaceLayoutMode::Tiny => return None,
+        };
+        let proposal = self.selected_pending_proposal()?;
+        let canonical_body = self
+            .saved_canonical_note_for_proposal(proposal)
+            .map(|note| note.body.as_str())
+            .unwrap_or("");
+        let comparison = proposal_comparison_lines(canonical_body, &proposal.proposed_body);
+        let header_line_count =
+            3 + usize::from(self.proposal_note_draft_differs_from_saved(proposal));
+        let comparison_layout = ProposalComparisonLayout::new(comparison_area, header_line_count);
+        let wrapped_comparison = wrap_proposal_comparison_lines(
+            &comparison,
+            comparison_layout.current_inner().width,
+            comparison_layout.proposed_inner().width,
+        );
+        Some(comparison_layout.max_scroll(wrapped_comparison.current.len()))
     }
 
     fn proposal_review_state_line(&self, proposal: &WorkspaceNoteProposal) -> Line<'static> {
-        let stale = proposal.base_revision != self.draft_note.current_revision;
         let mut spans = vec![Span::styled(
             "Review state: ",
             Style::default().fg(Color::DarkGray),
         )];
-        if self.draft_note.is_locked() {
-            let label = if stale {
-                "SIGNED · STALE · READ ONLY"
-            } else {
-                "SIGNED · READ ONLY"
-            };
+        let Some(canonical_note) = self.saved_canonical_note_for_proposal(proposal) else {
             spans.push(Span::styled(
-                label,
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ));
-        } else if stale {
-            spans.push(Span::styled(
-                "STALE",
+                "CANONICAL UNAVAILABLE · ACCEPT BLOCKED",
                 Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
             ));
-        } else if self.dirty {
             spans.push(Span::styled(
-                "UNSAVED · ACCEPT BLOCKED",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
+                " · reload the saved note before reviewing",
+                Style::default().fg(Color::DarkGray),
             ));
+            return Line::from(spans);
+        };
+
+        let stale = proposal.base_revision != canonical_note.current_revision;
+        let unsaved = self.proposal_has_unsaved_work(proposal);
+        let locked = workspace_note_is_locked(canonical_note);
+        let label = if locked {
+            match (stale, unsaved) {
+                (true, true) => "SIGNED · STALE · UNSAVED · READ ONLY",
+                (true, false) => "SIGNED · STALE · READ ONLY",
+                (false, true) => "SIGNED · UNSAVED · READ ONLY",
+                (false, false) => "SIGNED · READ ONLY",
+            }
+        } else if stale && unsaved {
+            "STALE · UNSAVED · ACCEPT BLOCKED"
+        } else if stale {
+            "STALE · ACCEPT BLOCKED"
+        } else if unsaved {
+            "UNSAVED · ACCEPT BLOCKED"
         } else {
-            spans.push(Span::styled(
-                "READY",
-                Style::default()
-                    .fg(Color::Green)
-                    .add_modifier(Modifier::BOLD),
-            ));
-        }
-        let detail = if stale {
+            "READY"
+        };
+        let state_color = if locked {
+            Color::Cyan
+        } else if stale {
+            Color::Red
+        } else if unsaved {
+            Color::Cyan
+        } else {
+            Color::Green
+        };
+        spans.push(Span::styled(
+            label,
+            Style::default()
+                .fg(state_color)
+                .add_modifier(Modifier::BOLD),
+        ));
+
+        let detail = if locked {
             format!(
-                " · current pane is live r{}; proposal was prepared from r{}",
-                self.draft_note.current_revision, proposal.base_revision
+                " · saved canonical r{} is signed; use an addendum",
+                canonical_note.current_revision
             )
-        } else if self.draft_note.is_locked() {
-            " · use an addendum; replacement accept is blocked".to_string()
+        } else if stale && unsaved {
+            format!(
+                " · saved canonical is r{}; proposal is from r{}; unsaved human draft is separate",
+                canonical_note.current_revision, proposal.base_revision
+            )
+        } else if stale {
+            format!(
+                " · saved canonical is r{}; proposal was prepared from r{}",
+                canonical_note.current_revision, proposal.base_revision
+            )
+        } else if unsaved {
+            format!(
+                " · saved canonical r{} is compared; save or discard the human draft",
+                canonical_note.current_revision
+            )
         } else {
             format!(
-                " · proposal base matches current r{}",
-                proposal.base_revision
+                " · proposal base matches saved canonical r{}",
+                canonical_note.current_revision
             )
         };
         spans.push(Span::styled(detail, Style::default().fg(Color::DarkGray)));
         Line::from(spans)
+    }
+
+    fn saved_canonical_note_for_proposal(
+        &self,
+        proposal: &WorkspaceNoteProposal,
+    ) -> Option<&WorkspaceNote> {
+        let active_note_id = self.draft_note.id.as_deref()?;
+        if active_note_id != proposal.note_id {
+            return None;
+        }
+        self.notes.iter().find(|note| note.id == active_note_id)
+    }
+
+    fn proposal_note_draft_differs_from_saved(&self, proposal: &WorkspaceNoteProposal) -> bool {
+        let Some(canonical_note) = self.saved_canonical_note_for_proposal(proposal) else {
+            return self.draft_note.should_save();
+        };
+        canonical_note.title != self.effective_note_title()
+            || canonical_note.body != self.draft_note.body
+            || canonical_note.status != self.draft_note.status_label()
+            || canonical_note.encounter_id != self.draft_note.encounter_id
+    }
+
+    fn proposal_has_unsaved_work(&self, proposal: &WorkspaceNoteProposal) -> bool {
+        self.dirty || self.proposal_note_draft_differs_from_saved(proposal)
+    }
+
+    fn proposal_accept_disabled_reason(
+        &self,
+        proposal: &WorkspaceNoteProposal,
+    ) -> Option<&'static str> {
+        let Some(canonical_note) = self.saved_canonical_note_for_proposal(proposal) else {
+            return Some("Saved canonical note is unavailable; reload before accepting.");
+        };
+        if workspace_note_is_locked(canonical_note) {
+            return Some("Signed notes require addenda; replacement proposals cannot be accepted.");
+        }
+        if self.proposal_has_unsaved_work(proposal) {
+            return Some("Save or discard draft changes before accepting a proposal.");
+        }
+        if proposal.base_revision != canonical_note.current_revision {
+            return Some("Proposal is stale; ask the agent for a fresh proposal.");
+        }
+        None
     }
 
     fn workflow_section_uses_agent_workpane(&self) -> bool {
@@ -8098,49 +8296,30 @@ impl WorkspaceDashboard {
         if !self.uses_medical_dedicated_workpane_layout() {
             return false;
         }
-        let mode = WorkspaceLayoutMode::for_area(area);
-        if mode == WorkspaceLayoutMode::Tiny {
+        let Some(areas) = MedicalDedicatedWorkpaneAreas::new(area) else {
             return false;
-        }
-        let vertical = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(if mode == WorkspaceLayoutMode::Compact {
-                    1
-                } else {
-                    2
-                }),
-                Constraint::Min(3),
-                Constraint::Length(1),
-            ])
-            .split(area);
+        };
         Paragraph::new(self.header_lines())
             .wrap(Wrap { trim: true })
-            .render(vertical[0], buf);
+            .render(areas.header, buf);
 
-        if mode == WorkspaceLayoutMode::Compact {
-            self.render_workflow(vertical[1], buf);
-        } else {
-            let columns = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([Constraint::Length(32), Constraint::Min(40)])
-                .split(vertical[1]);
-            let left = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
-                .split(columns[0]);
-            self.render_clients(left[0], buf);
-            self.render_notes(left[1], buf);
-            self.render_workflow(columns[1], buf);
+        if areas.clients.width > 0 && areas.clients.height > 0 {
+            self.render_clients(areas.clients, buf);
+            self.render_notes(areas.notes, buf);
         }
+        self.render_workflow(areas.workpane, buf);
 
-        Paragraph::new(self.status_line(vertical[2].width)).render(vertical[2], buf);
+        Paragraph::new(self.status_line(areas.status.width)).render(areas.status, buf);
         true
     }
 
     fn uses_medical_dedicated_workpane_layout(&self) -> bool {
         self.profile == WorkspaceProfile::Medical
             && matches!(self.workflow_section, MedicalWorkflowSection::Documents)
+            && !matches!(
+                self.focus,
+                WorkspaceFocus::Agent | WorkspaceFocus::PatientFiles
+            )
             && (self.workflow_section_has_active_editor()
                 || self.inspected_artifact_id.is_some()
                 || self.inspected_derivative_id.is_some()
@@ -8216,6 +8395,9 @@ impl WorkspaceDashboard {
             ));
         }
         if self.profile == WorkspaceProfile::Medical {
+            if self.uses_medical_dedicated_workpane_layout() {
+                return self.cursor_pos_medical_dedicated(area);
+            }
             match WorkspaceLayoutMode::for_area(area) {
                 WorkspaceLayoutMode::Large => return self.cursor_pos_medical_large(area),
                 WorkspaceLayoutMode::Medium => return self.cursor_pos_medical_medium(area),
@@ -8250,14 +8432,8 @@ impl WorkspaceDashboard {
             }
             WorkspaceFocus::NoteBody => {
                 let inner = inner_rect(areas.note_body);
-                if inner.width == 0 || inner.height == 0 {
-                    return None;
-                }
-                let lines: Vec<&str> = self.draft_note.body.lines().collect();
-                let line_count = lines.len().max(1);
-                let row = (line_count - 1).min(inner.height.saturating_sub(1) as usize) as u16;
-                let text = lines.last().copied().unwrap_or("");
-                Some(cursor_at_text_end(inner, row, 0, text))
+                self.note_body_editor
+                    .cursor_pos(&self.draft_note.body, inner)
             }
             WorkspaceFocus::Workflow => {
                 if self.profile != WorkspaceProfile::Medical {
@@ -8283,25 +8459,23 @@ impl WorkspaceDashboard {
         }
     }
 
+    fn cursor_pos_medical_dedicated(&self, area: Rect) -> Option<(u16, u16)> {
+        if self.focus != WorkspaceFocus::Workflow {
+            return None;
+        }
+        let inner = inner_rect(MedicalDedicatedWorkpaneAreas::new(area)?.workpane);
+        if inner.width == 0 || inner.height == 0 {
+            return None;
+        }
+        self.cursor_pos_in_workflow_inner(inner)
+    }
+
     fn cursor_pos_medical_large(&self, area: Rect) -> Option<(u16, u16)> {
         let areas = MedicalLargeAreas::new(area);
         match self.focus {
             WorkspaceFocus::Demographics => {
-                let inner = inner_rect(areas.demographics);
-                if inner.width == 0 || inner.height == 0 {
-                    return None;
-                }
-                let row = self.demographics_field.index() as u16;
-                if row >= inner.height {
-                    return None;
-                }
-                let label_len = self.demographics_field.label(self.profile).len() + 2;
-                Some(cursor_at_text_end(
-                    inner,
-                    row,
-                    label_len,
-                    self.draft_client.value(self.demographics_field),
-                ))
+                let mode = self.patient_admin_edit_mode?;
+                self.cursor_pos_in_patient_admin_inner(inner_rect(areas.active_work), mode)
             }
             WorkspaceFocus::NoteTitle => {
                 let inner = inner_rect(areas.note_title);
@@ -8312,14 +8486,8 @@ impl WorkspaceDashboard {
             }
             WorkspaceFocus::NoteBody => {
                 let inner = inner_rect(areas.note_body);
-                if inner.width == 0 || inner.height == 0 {
-                    return None;
-                }
-                let lines: Vec<&str> = self.draft_note.body.lines().collect();
-                let line_count = lines.len().max(1);
-                let row = (line_count - 1).min(inner.height.saturating_sub(1) as usize) as u16;
-                let text = lines.last().copied().unwrap_or("");
-                Some(cursor_at_text_end(inner, row, 0, text))
+                self.note_body_editor
+                    .cursor_pos(&self.draft_note.body, inner)
             }
             WorkspaceFocus::Workflow => {
                 let inner = inner_rect(areas.active_work);
@@ -8343,21 +8511,8 @@ impl WorkspaceDashboard {
         let areas = MedicalMediumAreas::new(area);
         match self.focus {
             WorkspaceFocus::Demographics => {
-                let inner = inner_rect(areas.demographics);
-                if inner.width == 0 || inner.height == 0 {
-                    return None;
-                }
-                let row = self.demographics_field.index() as u16;
-                if row >= inner.height {
-                    return None;
-                }
-                let label_len = self.demographics_field.label(self.profile).len() + 2;
-                Some(cursor_at_text_end(
-                    inner,
-                    row,
-                    label_len,
-                    self.draft_client.value(self.demographics_field),
-                ))
+                let mode = self.patient_admin_edit_mode?;
+                self.cursor_pos_in_patient_admin_inner(inner_rect(areas.main), mode)
             }
             WorkspaceFocus::NoteTitle => {
                 let inner = inner_rect(areas.note_title);
@@ -8368,21 +8523,8 @@ impl WorkspaceDashboard {
             }
             WorkspaceFocus::NoteBody => {
                 let inner = inner_rect(areas.note_body);
-                if inner.width == 0 || inner.height == 0 {
-                    return None;
-                }
-                let lines = self.draft_note.body.lines().collect::<Vec<_>>();
-                let row = lines
-                    .len()
-                    .max(1)
-                    .saturating_sub(1)
-                    .min(inner.height.saturating_sub(1) as usize) as u16;
-                Some(cursor_at_text_end(
-                    inner,
-                    row,
-                    0,
-                    lines.last().copied().unwrap_or(""),
-                ))
+                self.note_body_editor
+                    .cursor_pos(&self.draft_note.body, inner)
             }
             WorkspaceFocus::Workflow => {
                 let workflow = if self.medical_chart_shows_workflow() {
@@ -8414,35 +8556,15 @@ impl WorkspaceDashboard {
         }
         match self.focus {
             WorkspaceFocus::Demographics => {
-                let row = self.demographics_field.index() as u16;
-                if row >= inner.height {
-                    return None;
-                }
-                let label_len = self.demographics_field.label(self.profile).len() + 2;
-                Some(cursor_at_text_end(
-                    inner,
-                    row,
-                    label_len,
-                    self.draft_client.value(self.demographics_field),
-                ))
+                let mode = self.patient_admin_edit_mode?;
+                self.cursor_pos_in_patient_admin_inner(inner, mode)
             }
             WorkspaceFocus::NoteTitle => {
                 Some(cursor_at_text_end(inner, 0, 0, &self.draft_note.title))
             }
-            WorkspaceFocus::NoteBody => {
-                let lines = self.draft_note.body.lines().collect::<Vec<_>>();
-                let row = lines
-                    .len()
-                    .max(1)
-                    .saturating_sub(1)
-                    .min(inner.height.saturating_sub(1) as usize) as u16;
-                Some(cursor_at_text_end(
-                    inner,
-                    row,
-                    0,
-                    lines.last().copied().unwrap_or(""),
-                ))
-            }
+            WorkspaceFocus::NoteBody => self
+                .note_body_editor
+                .cursor_pos(&self.draft_note.body, inner),
             WorkspaceFocus::Workflow => self.cursor_pos_in_workflow_inner(inner),
             WorkspaceFocus::Agent => self.cursor_pos_in_agent_workpane_inner(inner),
             WorkspaceFocus::Clients | WorkspaceFocus::Notes | WorkspaceFocus::PatientFiles => None,
@@ -8450,18 +8572,12 @@ impl WorkspaceDashboard {
     }
 
     fn cursor_pos_in_agent_workpane_inner(&self, inner: Rect) -> Option<(u16, u16)> {
-        if self.agent_request.is_active() {
-            let lines = self.agent_workpane_active_lines();
-            let (logical_row, label_len) = agent_request_cursor_row_and_label_len(&lines)?;
-            let text = text_after_last_newline(&self.agent_request.body);
-            return cursor_at_wrapped_line_text_end(
-                inner,
-                &lines,
-                logical_row,
-                self.agent_scroll as usize,
-                label_len,
-                text,
-            );
+        if self.agent_request.is_active() && self.agent_composer_state().shows_message_draft() {
+            let (_, _, editor_rect) = self
+                .agent_request_composer_rects(inner, /*compact_summary*/ inner.height <= 1)?;
+            return self
+                .agent_request_editor
+                .cursor_pos(&self.agent_request.body, editor_rect);
         }
         if self.agent_result.is_active() {
             let lines = self.agent_workpane_active_lines();
@@ -8572,6 +8688,10 @@ impl WorkspaceDashboard {
         preferred_encounter_id: Option<String>,
         preferred_task_id: Option<String>,
     ) -> Result<()> {
+        let prior_client_id = self.draft_client.id.clone();
+        let prior_note_id = self.draft_note.id.clone();
+        let prior_encounter_id = self.draft_note.encounter_id.clone();
+        let prior_working_note_id = self.draft_note.working_note_id.clone();
         self.clients = app_server.workspace_client_list().await?.clients;
         if self.clients.is_empty() {
             self.start_new_client();
@@ -8586,6 +8706,19 @@ impl WorkspaceDashboard {
         self.draft_client = ClientDraft::from_client(&self.clients[self.client_index]);
 
         let client_id = self.clients[self.client_index].id.clone();
+        let coverage_priority = self.coverage_draft.priority;
+        self.coverages = app_server
+            .workspace_coverage_list(WorkspaceCoverageListParams {
+                client_id: client_id.clone(),
+                cursor: None,
+                limit: Some(3),
+            })
+            .await?
+            .data;
+        self.coverages.sort_by_key(|coverage| coverage.priority);
+        self.load_coverage_draft(coverage_priority);
+        self.reload_coverage_verification_history(app_server)
+            .await?;
         self.notes = app_server.workspace_note_list(client_id).await?.notes;
         self.note_index = preferred_note_id
             .as_deref()
@@ -8596,6 +8729,13 @@ impl WorkspaceDashboard {
             .get(self.note_index)
             .map(NoteDraft::from_note)
             .unwrap_or_default();
+        if self.draft_client.id == prior_client_id
+            && self.draft_note.id == prior_note_id
+            && self.draft_note.encounter_id == prior_encounter_id
+        {
+            self.draft_note.working_note_id = prior_working_note_id;
+        }
+        self.note_body_editor.reset(&self.draft_note.body);
         let client_id = self.clients[self.client_index].id.clone();
         self.encounters = app_server
             .workspace_encounter_list(client_id.clone())
@@ -8603,7 +8743,7 @@ impl WorkspaceDashboard {
             .encounters;
         let selected_encounter_id = preferred_encounter_id
             .or_else(|| self.draft_note.encounter_id.clone())
-            .or_else(|| self.active_encounter_id());
+            .or_else(|| self.active_encounter_id_owned());
         self.encounter_index = selected_encounter_id
             .as_deref()
             .and_then(|id| {
@@ -8773,6 +8913,7 @@ impl WorkspaceDashboard {
     async fn reload_packet_history(&mut self, app_server: &mut AppServerSession) -> Result<()> {
         let Some(client_id) = self.draft_client.id.clone() else {
             self.context_packets.clear();
+            self.agent_runs.clear();
             self.agent_results.clear();
             self.selected_agent_result_id = None;
             self.packet_replay_inspect = false;
@@ -8788,6 +8929,15 @@ impl WorkspaceDashboard {
             })
             .await?
             .packets;
+        self.agent_runs = app_server
+            .workspace_agent_run_list(WorkspaceAgentRunListParams {
+                client_id: client_id.clone(),
+                note_id: note_id.clone(),
+                packet_id: None,
+                limit: Some(16),
+            })
+            .await?
+            .runs;
         self.agent_results = app_server
             .workspace_agent_result_list(WorkspaceAgentResultListParams {
                 client_id,
@@ -8814,7 +8964,7 @@ impl WorkspaceDashboard {
         app_server: &mut AppServerSession,
         client_id: &str,
     ) -> Result<Option<String>> {
-        if let Some(encounter_id) = self.active_encounter_id() {
+        if let Some(encounter_id) = self.active_encounter_id_owned() {
             return Ok(Some(encounter_id));
         }
         let title = if self.draft_note.title.trim().is_empty() {
@@ -8888,19 +9038,19 @@ impl WorkspaceDashboard {
         }
     }
 
-    fn active_encounter_id(&self) -> Option<String> {
-        self.encounters
-            .get(self.encounter_index)
-            .map(|encounter| encounter.id.clone())
+    fn active_encounter_id_owned(&self) -> Option<String> {
+        self.active_encounter_id().map(str::to_string)
     }
 
-    fn start_new_client(&mut self) {
+    pub(crate) fn start_new_client(&mut self) {
         self.patient_search_query = None;
         self.patient_search_selection_index = 0;
         self.patient_search_return_focus = None;
         self.patient_search_return_section = None;
         self.client_index = self.clients.len();
         self.encounters.clear();
+        self.coverages.clear();
+        self.coverage_verifications.clear();
         self.notes.clear();
         self.documents.clear();
         self.patient_safety_items.clear();
@@ -8917,7 +9067,10 @@ impl WorkspaceDashboard {
         self.task_index = 0;
         self.draft_client = ClientDraft::default();
         self.apply_profile_default_client_label();
+        self.coverage_draft = CoverageDraft::new(String::new(), CoveragePriority::Primary);
+        self.card_verification_draft = None;
         self.draft_note = NoteDraft::default();
+        self.note_body_editor.reset(&self.draft_note.body);
         self.draft_document = DocumentDraft::default();
         self.draft_safety.clear();
         self.derivative_draft.clear();
@@ -8925,6 +9078,10 @@ impl WorkspaceDashboard {
         self.draft_task.clear();
         self.addendum_draft.clear();
         self.agent_request.clear();
+        self.agent_request_editor.reset(&self.agent_request.body);
+        self.plan_snapshot = None;
+        self.clear_plan_stream();
+        self.plan_message_sending = false;
         self.agent_result.clear();
         self.context_packets.clear();
         self.agent_results.clear();
@@ -8942,9 +9099,10 @@ impl WorkspaceDashboard {
         self.focus = WorkspaceFocus::Demographics;
     }
 
-    fn start_new_note(&mut self) {
+    pub(crate) fn start_new_note(&mut self) {
         self.note_index = self.notes.len();
         self.draft_note = NoteDraft::default();
+        self.note_body_editor.reset(&self.draft_note.body);
         self.signatures.clear();
         self.addenda.clear();
         self.proposals.clear();
@@ -8957,6 +9115,7 @@ impl WorkspaceDashboard {
         self.derivative_draft.clear();
         self.clip_draft.clear();
         self.agent_request.clear();
+        self.agent_request_editor.reset(&self.agent_request.body);
         self.agent_result.clear();
         self.context_packets.clear();
         self.agent_results.clear();
@@ -9006,12 +9165,13 @@ impl WorkspaceDashboard {
     fn start_agent_request(&mut self) {
         self.agent_result.clear();
         self.agent_request.start();
+        self.agent_request_editor.reset(&self.agent_request.body);
         self.focus = WorkspaceFocus::Agent;
         self.agent_rail_tab = AgentRailTab::Pending;
         self.set_workflow_section(MedicalWorkflowSection::AgentRequest);
         self.workflow_scroll = 0;
         self.status =
-            "Agent input ready. Typing is local until Medical Agent Plan review.".to_string();
+            "Message Codex. Enter sends; Shift-Enter adds a line; Esc leaves input.".to_string();
     }
 
     fn start_addendum_draft(&mut self) {
@@ -9058,25 +9218,13 @@ impl WorkspaceDashboard {
             self.status = "No pending proposal selected.".to_string();
             return WorkspaceDashboardAction::Consumed;
         };
-        if accept {
-            if self.draft_note.is_locked() {
-                self.status =
-                    "Signed notes require addenda; replacement proposals cannot be accepted."
-                        .to_string();
-                return WorkspaceDashboardAction::Consumed;
-            }
-            if self.dirty {
-                self.status =
-                    "Save or discard draft changes before accepting a proposal.".to_string();
-                return WorkspaceDashboardAction::Consumed;
-            }
-            if proposal.base_revision != self.draft_note.current_revision {
-                self.status = "Proposal is stale; ask the agent for a fresh proposal.".to_string();
-                return WorkspaceDashboardAction::Consumed;
-            }
+        let proposal_id = proposal.id.clone();
+        if accept && let Some(reason) = self.proposal_accept_disabled_reason(proposal) {
+            self.status = reason.to_string();
+            return WorkspaceDashboardAction::Consumed;
         }
         WorkspaceDashboardAction::ResolveProposal {
-            proposal_id: proposal.id.clone(),
+            proposal_id,
             accept,
         }
     }
@@ -9164,6 +9312,17 @@ impl WorkspaceDashboard {
     }
 
     fn action_disabled_reason(&self, action_id: WorkspaceActionId) -> Option<&'static str> {
+        if self.profile == WorkspaceProfile::Medical
+            && self.draft_recovery_available
+            && !matches!(
+                action_id,
+                WorkspaceActionId::Actions
+                    | WorkspaceActionId::RestoreLocalDraft
+                    | WorkspaceActionId::DiscardLocalDraft
+            )
+        {
+            return Some("Restore or discard the recoverable local draft before other actions.");
+        }
         match action_id {
             WorkspaceActionId::AddendumSave => {
                 if self.draft_note.id.is_none() {
@@ -9202,7 +9361,7 @@ impl WorkspaceDashboard {
             }
             WorkspaceActionId::AgentResult => {
                 if self.latest_packet_without_result().is_none() {
-                    Some("Submit a Medical Agent Plan before saving returned work.")
+                    Some("Submit a Context Plan before saving returned work.")
                 } else {
                     None
                 }
@@ -9265,7 +9424,7 @@ impl WorkspaceDashboard {
             }
             WorkspaceActionId::AgentPacketInspect => {
                 if self.context_packets.is_empty() {
-                    Some("No submitted Medical Agent Plan to inspect.")
+                    Some("No submitted Context Plan to inspect.")
                 } else {
                     None
                 }
@@ -9486,17 +9645,7 @@ impl WorkspaceDashboard {
             }
             WorkspaceActionId::ProposalAccept => {
                 if let Some(proposal) = self.selected_pending_proposal() {
-                    if self.draft_note.is_locked() {
-                        Some(
-                            "Signed notes require addenda; replacement proposals cannot be accepted.",
-                        )
-                    } else if self.dirty {
-                        Some("Save or discard draft changes before accepting a proposal.")
-                    } else if proposal.base_revision != self.draft_note.current_revision {
-                        Some("Proposal is stale; ask the agent for a fresh proposal.")
-                    } else {
-                        None
-                    }
+                    self.proposal_accept_disabled_reason(proposal)
                 } else {
                     Some("No pending proposals for the active note.")
                 }
@@ -9508,9 +9657,34 @@ impl WorkspaceDashboard {
                     None
                 }
             }
+            WorkspaceActionId::RestoreLocalDraft | WorkspaceActionId::DiscardLocalDraft => {
+                if self.draft_recovery_available {
+                    None
+                } else {
+                    Some("No recoverable local draft for the active patient and note.")
+                }
+            }
+            WorkspaceActionId::CoverageVerify => {
+                if self.dirty {
+                    Some("Save patient and coverage changes before comparing the card.")
+                } else if self.coverage_draft.id.is_none() {
+                    Some("Save this coverage before comparing the card.")
+                } else if !self
+                    .documents
+                    .iter()
+                    .any(coverage_card_document_is_eligible)
+                {
+                    Some(
+                        "Add a present, hashed local insurance-card reference before comparing it.",
+                    )
+                } else {
+                    None
+                }
+            }
             WorkspaceActionId::Actions
             | WorkspaceActionId::AgentClear
             | WorkspaceActionId::AgentInbox
+            | WorkspaceActionId::AgentOpenRun
             | WorkspaceActionId::AgentPreview
             | WorkspaceActionId::AgentResultClear
             | WorkspaceActionId::ClientNew
@@ -9556,10 +9730,10 @@ impl WorkspaceDashboard {
             KeyCode::Char('c') => {
                 if self.dirty || self.has_unsaved_addendum_draft() {
                     self.status = "Save before switching workspace records.".to_string();
+                    WorkspaceDashboardAction::Consumed
                 } else {
-                    self.start_new_client();
+                    WorkspaceDashboardAction::StartNewClient
                 }
-                WorkspaceDashboardAction::Consumed
             }
             KeyCode::Enter => {
                 if self.profile == WorkspaceProfile::Medical {
@@ -9623,10 +9797,10 @@ impl WorkspaceDashboard {
             KeyCode::Char('n') => {
                 if self.dirty || self.has_unsaved_addendum_draft() {
                     self.status = "Save before switching notes.".to_string();
+                    WorkspaceDashboardAction::Consumed
                 } else {
-                    self.start_new_note();
+                    WorkspaceDashboardAction::StartNewNote
                 }
-                WorkspaceDashboardAction::Consumed
             }
             KeyCode::Enter => {
                 self.set_workflow_section(MedicalWorkflowSection::Visit);
@@ -9657,67 +9831,6 @@ impl WorkspaceDashboard {
         } else {
             WorkspaceDashboardAction::SelectNote(next)
         }
-    }
-
-    fn handle_demographics_key_event(&mut self, key_event: KeyEvent) -> WorkspaceDashboardAction {
-        if self.profile == WorkspaceProfile::Medical
-            && let Some(mode) = self.patient_admin_edit_mode
-        {
-            return self.handle_patient_admin_key_event(mode, key_event);
-        }
-        match key_event.code {
-            KeyCode::Up => self.demographics_field = self.demographics_field.previous(),
-            KeyCode::Down | KeyCode::Enter => {
-                self.demographics_field = self.demographics_field.next()
-            }
-            KeyCode::Backspace => {
-                self.draft_client.value_mut(self.demographics_field).pop();
-                self.mark_dirty();
-            }
-            KeyCode::Char(c) => {
-                self.draft_client.value_mut(self.demographics_field).push(c);
-                self.mark_dirty();
-            }
-            _ if text_cursor_navigation_key(&key_event) => {
-                self.status =
-                    "Text fields are end-anchored: type appends, Backspace deletes, Up/Down changes field."
-                        .to_string();
-            }
-            _ => {}
-        }
-        WorkspaceDashboardAction::Consumed
-    }
-
-    fn handle_patient_admin_key_event(
-        &mut self,
-        mode: PatientAdminEditMode,
-        key_event: KeyEvent,
-    ) -> WorkspaceDashboardAction {
-        match key_event.code {
-            KeyCode::Up => self.patient_admin_field = self.patient_admin_field.previous_in(mode),
-            KeyCode::Down | KeyCode::Enter => {
-                self.patient_admin_field = self.patient_admin_field.next_in(mode)
-            }
-            KeyCode::Backspace => {
-                self.draft_client
-                    .admin_value_mut(self.patient_admin_field)
-                    .pop();
-                self.mark_dirty();
-            }
-            KeyCode::Char(c) => {
-                self.draft_client
-                    .admin_value_mut(self.patient_admin_field)
-                    .push(c);
-                self.mark_dirty();
-            }
-            _ if text_cursor_navigation_key(&key_event) => {
-                self.status =
-                    "Text fields are end-anchored: type appends, Backspace deletes, Up/Down changes field."
-                        .to_string();
-            }
-            _ => {}
-        }
-        WorkspaceDashboardAction::Consumed
     }
 
     fn handle_note_title_key_event(&mut self, key_event: KeyEvent) -> WorkspaceDashboardAction {
@@ -9760,34 +9873,20 @@ impl WorkspaceDashboard {
             self.status = self.locked_note_read_only_status();
             return WorkspaceDashboardAction::Consumed;
         }
-        match key_event.code {
-            KeyCode::Up
-                if self.profile != WorkspaceProfile::Medical && self.draft_note.body.is_empty() =>
-            {
-                self.focus = WorkspaceFocus::NoteTitle;
-            }
-            KeyCode::Up | KeyCode::Down if self.profile == WorkspaceProfile::Medical => {
-                self.status =
-                    "Note Body stays focused. This editor is end-anchored; Tab/Shift-Tab changes pane."
-                        .to_string();
-            }
-            KeyCode::Backspace => {
-                self.draft_note.body.pop();
-                self.mark_dirty();
-            }
-            KeyCode::Enter => {
-                self.draft_note.body.push('\n');
-                self.mark_dirty();
-            }
-            KeyCode::Char(c) => {
-                self.draft_note.body.push(c);
-                self.mark_dirty();
-            }
-            _ if text_cursor_navigation_key(&key_event) => {
-                self.status =
-                    "Note body is end-anchored: type appends and Backspace deletes.".to_string();
-            }
-            _ => {}
+        if key_event.code == KeyCode::Up
+            && self.profile != WorkspaceProfile::Medical
+            && self.draft_note.body.is_empty()
+        {
+            self.focus = WorkspaceFocus::NoteTitle;
+            return WorkspaceDashboardAction::Consumed;
+        }
+        let edited = self
+            .note_body_editor
+            .handle_input(&self.draft_note.body, key_event)
+            .into_text();
+        if edited != self.draft_note.body {
+            self.draft_note.body = edited;
+            self.mark_dirty();
         }
         WorkspaceDashboardAction::Consumed
     }
@@ -9821,6 +9920,12 @@ impl WorkspaceDashboard {
         if self.profile != WorkspaceProfile::Medical {
             return WorkspaceDashboardAction::Consumed;
         }
+        if self.plan_message_sending {
+            self.status =
+                "Message is still sending; the exact draft is retained until confirmation."
+                    .to_string();
+            return WorkspaceDashboardAction::Consumed;
+        }
         if self.agent_result.is_active() {
             match key_event.code {
                 KeyCode::Backspace => {
@@ -9852,30 +9957,48 @@ impl WorkspaceDashboard {
         }
         if self.agent_request.is_active() {
             match key_event.code {
-                KeyCode::Backspace => {
-                    self.agent_request.body.pop();
-                    self.status = "Local agent instructions draft.".to_string();
-                }
-                KeyCode::Enter => {
-                    self.agent_request.body.push('\n');
-                    self.status = "Local agent instructions draft.".to_string();
-                }
                 KeyCode::PageUp => {
                     self.scroll_agent_workpane(-1, 8);
                 }
                 KeyCode::PageDown => {
                     self.scroll_agent_workpane(1, 8);
                 }
-                _ if text_cursor_navigation_key(&key_event) => {
-                    self.status =
-                        "Agent input is end-anchored: type appends and Backspace deletes."
-                            .to_string();
+                _ => {
+                    match self
+                        .agent_request_editor
+                        .handle_input(&self.agent_request.body, key_event)
+                    {
+                        WorkspaceEditorInput::Editing(edited) => {
+                            if edited != self.agent_request.body {
+                                self.agent_request.body = edited;
+                                self.status = "Unsent message to Codex.".to_string();
+                            }
+                        }
+                        WorkspaceEditorInput::Submit(content) => {
+                            return self.submit_plan_message(content);
+                        }
+                    }
                 }
-                KeyCode::Char(c) => {
-                    self.agent_request.body.push(c);
-                    self.status = "Local agent instructions draft.".to_string();
-                }
-                _ => {}
+            }
+            return WorkspaceDashboardAction::Consumed;
+        }
+        if self.agent_rail_tab == AgentRailTab::Pending
+            && !key_event
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER)
+            && matches!(key_event.code, KeyCode::Char(_) | KeyCode::Enter)
+        {
+            self.start_agent_request();
+            if key_event.code == KeyCode::Enter {
+                return WorkspaceDashboardAction::Consumed;
+            }
+            if let WorkspaceEditorInput::Editing(edited) = self
+                .agent_request_editor
+                .handle_input(&self.agent_request.body, key_event)
+                && edited != self.agent_request.body
+            {
+                self.agent_request.body = edited;
+                self.status = "Unsent message to Codex.".to_string();
             }
             return WorkspaceDashboardAction::Consumed;
         }
@@ -9883,12 +10006,12 @@ impl WorkspaceDashboard {
             KeyCode::Left => {
                 self.agent_rail_tab = self.agent_rail_tab.previous();
                 self.agent_scroll = 0;
-                self.status = format!("Agent Work: {}.", self.agent_rail_tab.label());
+                self.status = format!("Plan with Codex: {}.", self.agent_rail_tab.label());
             }
             KeyCode::Right => {
                 self.agent_rail_tab = self.agent_rail_tab.next();
                 self.agent_scroll = 0;
-                self.status = format!("Agent Work: {}.", self.agent_rail_tab.label());
+                self.status = format!("Plan with Codex: {}.", self.agent_rail_tab.label());
             }
             KeyCode::Up | KeyCode::PageUp => {
                 self.scroll_agent_workpane(-1, 4);
@@ -9898,16 +10021,17 @@ impl WorkspaceDashboard {
             }
             KeyCode::Home => {
                 self.agent_scroll = 0;
-                self.status = "Agent Work top.".to_string();
+                self.status = "Context Plan top.".to_string();
             }
             KeyCode::Char('r') => {
                 self.start_agent_request();
             }
             KeyCode::Char('p') => {
-                self.agent_rail_tab = AgentRailTab::Pending;
+                self.agent_rail_tab = AgentRailTab::History;
                 self.set_workflow_section(MedicalWorkflowSection::ContextPacket);
                 self.agent_scroll = 0;
-                self.status = "Focused Medical Agent Plan review.".to_string();
+                self.status = "Focused Context Plan review.".to_string();
+                return WorkspaceDashboardAction::CheckpointDraft;
             }
             KeyCode::Char('i') => {
                 self.agent_rail_tab = AgentRailTab::Pending;
@@ -9920,7 +10044,32 @@ impl WorkspaceDashboard {
         WorkspaceDashboardAction::Consumed
     }
 
-    fn handle_workflow_key_event(&mut self, key_event: KeyEvent) -> WorkspaceDashboardAction {
+    fn submit_plan_message(&mut self, content: String) -> WorkspaceDashboardAction {
+        if content.trim().is_empty() {
+            self.status = "Type a message before sending it to Codex.".to_string();
+            return WorkspaceDashboardAction::Consumed;
+        }
+        let Some(patient_id) = self.draft_client.id.clone() else {
+            self.status = "Save the patient before messaging Codex.".to_string();
+            return WorkspaceDashboardAction::Consumed;
+        };
+        let note_id = self.draft_note.id.clone();
+        let encounter_id = self.active_encounter_id_owned();
+        self.plan_message_sending = true;
+        self.status = "Sending message to the patient Plan with Codex thread...".to_string();
+        WorkspaceDashboardAction::SendPlanMessage {
+            patient_id,
+            note_id,
+            encounter_id,
+            content,
+        }
+    }
+
+    fn handle_workflow_key_event(
+        &mut self,
+        key_event: KeyEvent,
+        viewport: Option<Rect>,
+    ) -> WorkspaceDashboardAction {
         if self.profile != WorkspaceProfile::Medical {
             return WorkspaceDashboardAction::Consumed;
         }
@@ -10075,13 +10224,17 @@ impl WorkspaceDashboard {
             && !self.draft_document.is_active()
         {
             match key_event.code {
-                KeyCode::Up => self.scroll_center_work_area(/*delta*/ -1, /*amount*/ 1),
-                KeyCode::Down => self.scroll_center_work_area(/*delta*/ 1, /*amount*/ 1),
+                KeyCode::Up => {
+                    self.scroll_proposal_comparison(/*delta*/ -1, /*amount*/ 1, viewport)
+                }
+                KeyCode::Down => {
+                    self.scroll_proposal_comparison(/*delta*/ 1, /*amount*/ 1, viewport)
+                }
                 KeyCode::PageUp => {
-                    self.scroll_center_work_area(/*delta*/ -1, /*amount*/ 8)
+                    self.scroll_proposal_comparison(/*delta*/ -1, /*amount*/ 8, viewport)
                 }
                 KeyCode::PageDown => {
-                    self.scroll_center_work_area(/*delta*/ 1, /*amount*/ 8)
+                    self.scroll_proposal_comparison(/*delta*/ 1, /*amount*/ 8, viewport)
                 }
                 KeyCode::Home => {
                     self.workflow_scroll = 0;
@@ -10214,6 +10367,10 @@ impl WorkspaceDashboard {
             .and_then(PendingChartChangeset::merge_target);
         match target {
             Some(WorkspaceChartEntityKind::Client) => self.focus == WorkspaceFocus::Demographics,
+            Some(WorkspaceChartEntityKind::Coverage) => {
+                self.focus == WorkspaceFocus::Demographics
+                    && self.patient_admin_edit_mode == Some(PatientAdminEditMode::Coverage)
+            }
             Some(WorkspaceChartEntityKind::SafetyItem) => {
                 self.focus == WorkspaceFocus::Workflow && self.draft_safety.is_active()
             }
@@ -10243,6 +10400,10 @@ impl WorkspaceDashboard {
     fn focus_chart_merge_target(&mut self, target: Option<WorkspaceChartEntityKind>) {
         match target {
             Some(WorkspaceChartEntityKind::Client) => self.focus = WorkspaceFocus::Demographics,
+            Some(WorkspaceChartEntityKind::Coverage) => {
+                self.focus = WorkspaceFocus::Demographics;
+                self.patient_admin_edit_mode = Some(PatientAdminEditMode::Coverage);
+            }
             Some(WorkspaceChartEntityKind::SafetyItem) => {
                 self.focus = WorkspaceFocus::Workflow;
                 self.set_workflow_section(MedicalWorkflowSection::Safety);
@@ -10280,7 +10441,7 @@ impl WorkspaceDashboard {
     }
 
     fn header_lines(&self) -> Vec<Line<'static>> {
-        let mut lines = vec![Line::from(vec![
+        let mut title_spans = vec![
             Span::styled(
                 self.profile.header_title(),
                 Style::default()
@@ -10288,7 +10449,20 @@ impl WorkspaceDashboard {
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw(status_suffix(self.dirty)),
-        ])];
+        ];
+        if self.profile == WorkspaceProfile::Medical {
+            title_spans.push(Span::styled(
+                format!("  {}", self.profile.canonical_command()),
+                Style::default().fg(Color::DarkGray),
+            ));
+            title_spans.push(Span::styled(
+                "  SYNTHETIC DATA ONLY",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
+        let mut lines = vec![Line::from(title_spans)];
         if self.profile == WorkspaceProfile::Medical {
             let admin = patient_admin_metadata_for_draft(&self.draft_client);
             let patient = self.draft_client.display_name.trim();
@@ -10316,7 +10490,7 @@ impl WorkspaceDashboard {
                 Span::styled("  Contact: ", Style::default().fg(Color::DarkGray)),
                 Span::raw(admin.contact_status_label()),
                 Span::styled("  Coverage: ", Style::default().fg(Color::DarkGray)),
-                Span::raw(admin.coverage_status_label()),
+                Span::raw(self.coverage_header_status()),
                 Span::styled("  Encounter: ", Style::default().fg(Color::DarkGray)),
                 Span::raw(compact_preview(encounter, 14)),
             ]));
@@ -10325,9 +10499,14 @@ impl WorkspaceDashboard {
     }
 
     fn render_tiny(&self, area: Rect, buf: &mut Buffer) {
+        let title = if self.profile == WorkspaceProfile::Medical {
+            format!("{}  SYNTHETIC DATA ONLY", self.profile.header_title())
+        } else {
+            self.profile.header_title().to_string()
+        };
         Paragraph::new(vec![
             Line::from(Span::styled(
-                self.profile.header_title(),
+                title,
                 Style::default()
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),
@@ -10395,6 +10574,31 @@ impl WorkspaceDashboard {
     }
 
     fn medical_footer_text(&self, width: u16) -> String {
+        let composer_state = self.agent_composer_state();
+        if composer_state == AgentComposerState::DraftRecovery {
+            return compose_legacy_footer(
+                &[
+                    format!("Focus: {}", self.medical_focus_footer_label()),
+                    "Mode: Draft recovery".to_string(),
+                    "Keys: Ctrl-P restore/discard  Esc close".to_string(),
+                    "Next: Restore or discard local draft".to_string(),
+                ],
+                width,
+            );
+        }
+        if composer_state == AgentComposerState::UnsavedPatient
+            && self.focus == WorkspaceFocus::Agent
+        {
+            return compose_legacy_footer(
+                &[
+                    "Focus: Agent".to_string(),
+                    "Mode: Save patient first".to_string(),
+                    "Keys: Ctrl-S save patient  Tab/⇧Tab pane  Ctrl-P commands".to_string(),
+                    "Next: Save patient before messaging Codex".to_string(),
+                ],
+                width,
+            );
+        }
         let input_mode = self.medical_input_mode();
         compose_medical_footer(
             self.medical_focus_footer_label(),
@@ -10456,7 +10660,13 @@ impl WorkspaceDashboard {
                 | WorkspaceFocus::PatientFiles => MedicalKeyContext::CenterSections,
             },
             WorkspaceInputMode::PatientField | WorkspaceInputMode::PatientAdminField => {
-                MedicalKeyContext::PatientField
+                if self.card_verification_draft.is_some() {
+                    MedicalKeyContext::CardVerification
+                } else if self.patient_admin_edit_mode == Some(PatientAdminEditMode::Coverage) {
+                    MedicalKeyContext::CoverageEditor
+                } else {
+                    MedicalKeyContext::PatientField
+                }
             }
             WorkspaceInputMode::NoteTitle => MedicalKeyContext::NoteTitle,
             WorkspaceInputMode::NoteBody => MedicalKeyContext::NoteBody,
@@ -10556,7 +10766,11 @@ impl WorkspaceDashboard {
                 }
             }
             WorkspaceFocus::Demographics => {
-                if self.patient_admin_edit_mode.is_some() {
+                if self.card_verification_draft.is_some() {
+                    "Enter exact printed card values".to_string()
+                } else if self.patient_admin_edit_mode == Some(PatientAdminEditMode::Coverage) {
+                    "Edit coverage or compare card".to_string()
+                } else if self.patient_admin_edit_mode.is_some() {
                     "Type patient admin field".to_string()
                 } else {
                     "Edit patient data".to_string()
@@ -10571,17 +10785,15 @@ impl WorkspaceDashboard {
             WorkspaceFocus::NoteTitle => "Type note title".to_string(),
             WorkspaceFocus::NoteBody => "Type note body".to_string(),
             WorkspaceFocus::Agent if self.agent_rail_tab == AgentRailTab::History => {
-                "Review immutable handoff/result history".to_string()
+                "Review selected context and prior handoffs".to_string()
             }
             WorkspaceFocus::Agent if self.agent_rail_tab == AgentRailTab::Audit => {
                 "Review agent provenance events".to_string()
             }
-            WorkspaceFocus::Agent => match self.workflow_section {
-                MedicalWorkflowSection::AgentRequest => "type local instructions".to_string(),
-                MedicalWorkflowSection::ContextPacket => "Ctrl-G sends packet".to_string(),
-                MedicalWorkflowSection::AgentInbox => "Open Agent Review".to_string(),
-                _ => "r input | p packet | i returned".to_string(),
-            },
+            WorkspaceFocus::Agent if self.agent_request.is_active() => {
+                "Enter sends | Shift-Enter adds a line".to_string()
+            }
+            WorkspaceFocus::Agent => "Ask Codex about this patient".to_string(),
             WorkspaceFocus::Workflow => {
                 let next_label = self.workflow_single_line_next_action_label();
                 next_label
@@ -10593,6 +10805,12 @@ impl WorkspaceDashboard {
     }
 
     fn medical_focus_footer_label(&self) -> &'static str {
+        if self.card_verification_draft.is_some() {
+            return "Card Verify";
+        }
+        if self.patient_admin_edit_mode == Some(PatientAdminEditMode::Coverage) {
+            return "Coverage";
+        }
         match self.current_medical_pane_slot() {
             MedicalPaneSlot::PatientDirectory => "Directory",
             MedicalPaneSlot::ChartTree => "Patient Notes",
@@ -10917,6 +11135,7 @@ impl WorkspaceDashboard {
             let bridge_actions = [
                 WorkspaceActionId::AgentPreview,
                 WorkspaceActionId::Handoff,
+                WorkspaceActionId::AgentOpenRun,
                 WorkspaceActionId::AgentInbox,
                 WorkspaceActionId::AgentRequest,
                 WorkspaceActionId::ScopeLast,
@@ -10992,6 +11211,7 @@ impl WorkspaceDashboard {
                 WorkspaceActionId::ContactEdit,
                 WorkspaceActionId::EmergencyContactEdit,
                 WorkspaceActionId::CoverageEdit,
+                WorkspaceActionId::CoverageVerify,
                 WorkspaceActionId::FocusNoteTitle,
             ],
             WorkspaceFocus::NoteTitle => vec![
@@ -11015,6 +11235,7 @@ impl WorkspaceDashboard {
                 MedicalWorkflowSection::AgentInbox => vec![
                     WorkspaceActionId::AgentResultInspect,
                     WorkspaceActionId::AgentResultNext,
+                    WorkspaceActionId::AgentOpenRun,
                     WorkspaceActionId::AgentRequest,
                     WorkspaceActionId::ScopeAgentPacket,
                 ],
@@ -11371,125 +11592,6 @@ impl WorkspaceDashboard {
         })
     }
 
-    fn patient_admin_editor_lines(&self, mode: PatientAdminEditMode) -> Vec<Line<'static>> {
-        let admin = patient_admin_metadata_for_draft(&self.draft_client);
-        let mut lines = vec![
-            Line::from(format!(
-                "Patient: {}",
-                nonempty_or(&self.draft_client.display_name, "unsaved patient")
-            )),
-            Line::from(format!(
-                "DOB: {}; Patient ID / MRN: {}",
-                nonempty_or(&self.draft_client.date_of_birth, "blank"),
-                nonempty_or(&self.draft_client.external_id, "blank")
-            )),
-            Line::from(Span::styled(
-                mode.title(),
-                Style::default().add_modifier(Modifier::BOLD),
-            )),
-        ];
-        if mode == PatientAdminEditMode::Contact {
-            lines.push(Line::from(format!(
-                "Contact info: {}",
-                admin.contact_summary()
-            )));
-            lines.push(Line::from(format!(
-                "Emergency contact: {}",
-                admin.emergency_summary()
-            )));
-        } else {
-            lines.push(Line::from(Span::styled(
-                "Coverage/member ID is separate from Patient ID / MRN.",
-                Style::default().fg(Color::DarkGray),
-            )));
-        }
-        for field in mode.fields() {
-            if mode == PatientAdminEditMode::Contact
-                && *field == PatientAdminField::EmergencyContactName
-            {
-                lines.push(Line::from(Span::styled(
-                    "Emergency Contact",
-                    Style::default().fg(Color::Gray),
-                )));
-            }
-            let active =
-                self.focus == WorkspaceFocus::Demographics && self.patient_admin_field == *field;
-            lines.push(patient_admin_editor_field_line(
-                field.label(),
-                admin.value(*field),
-                active,
-                field.placeholder(),
-            ));
-        }
-        lines.push(Line::from(""));
-        match mode {
-            PatientAdminEditMode::Contact => {
-                lines.push(Line::from(Span::styled(
-                    "Local fake demographics metadata only; Ctrl-S saves the patient.",
-                    Style::default().fg(Color::DarkGray),
-                )));
-            }
-            PatientAdminEditMode::Coverage => {
-                lines.push(Line::from(Span::styled(
-                    "No eligibility checks, payer messages, claims, or submissions.",
-                    Style::default().fg(Color::DarkGray),
-                )));
-            }
-        }
-        lines
-    }
-
-    fn render_demographics(&self, area: Rect, buf: &mut Buffer) {
-        if self.profile == WorkspaceProfile::Medical
-            && let Some(mode) = self.patient_admin_edit_mode
-        {
-            render_pane(
-                mode.title(),
-                area,
-                self.focus == WorkspaceFocus::Demographics,
-                Paragraph::new(self.patient_admin_editor_lines(mode)).wrap(Wrap { trim: false }),
-                buf,
-            );
-            return;
-        }
-        let mut lines = DemographicsField::ALL
-            .iter()
-            .map(|field| {
-                let active =
-                    self.focus == WorkspaceFocus::Demographics && *field == self.demographics_field;
-                field_line(
-                    field.label(self.profile),
-                    self.draft_client.value(*field),
-                    active,
-                )
-            })
-            .collect::<Vec<_>>();
-        if self.profile == WorkspaceProfile::Medical {
-            let admin = patient_admin_metadata_for_draft(&self.draft_client);
-            lines.extend([
-                Line::from(""),
-                Line::from(Span::styled(
-                    "Patient Demographics",
-                    Style::default().add_modifier(Modifier::BOLD),
-                )),
-                Line::from(format!("Contact info: {}", admin.contact_summary())),
-                Line::from(format!("Emergency contact: {}", admin.emergency_summary())),
-                Line::from(format!("Coverage: {}", admin.coverage_summary())),
-                Line::from(Span::styled(
-                    "Local fake metadata only; no eligibility checks or payer communication.",
-                    Style::default().fg(Color::DarkGray),
-                )),
-            ]);
-        }
-        render_pane(
-            self.profile.demographics_title(),
-            area,
-            self.focus == WorkspaceFocus::Demographics,
-            Paragraph::new(lines).wrap(Wrap { trim: false }),
-            buf,
-        );
-    }
-
     fn render_note_title(&self, area: Rect, buf: &mut Buffer) {
         let title_text = nonempty_or(&self.draft_note.title, UNTITLED_NOTE_TITLE);
         let title = if self.profile == WorkspaceProfile::Medical && self.draft_note.is_locked() {
@@ -11575,13 +11677,15 @@ impl WorkspaceDashboard {
             );
             return;
         }
-        render_pane(
+        Clear.render(area, buf);
+        let block = pane_block(
             self.profile.note_body_label(),
-            area,
             self.focus == WorkspaceFocus::NoteBody,
-            Paragraph::new(self.draft_note.body.clone()).wrap(Wrap { trim: false }),
-            buf,
         );
+        let inner = block.inner(area);
+        block.render(area, buf);
+        self.note_body_editor
+            .render(&self.draft_note.body, inner, buf);
     }
 
     fn render_workflow(&self, area: Rect, buf: &mut Buffer) {
@@ -11790,7 +11894,7 @@ impl WorkspaceDashboard {
 
     fn render_agent_workpane(&self, area: Rect, buf: &mut Buffer) {
         let active = self.focus == WorkspaceFocus::Agent;
-        let block = pane_block("Agent Work", active);
+        let block = pane_block(self.agent_workpane_title(), active);
         let inner = block.inner(area);
         block.render(area, buf);
         if inner.width == 0 || inner.height == 0 {
@@ -11802,7 +11906,12 @@ impl WorkspaceDashboard {
         } else {
             self.agent_workpane_active_lines()
         };
-        let max_scroll = lines.len().saturating_sub(inner.height as usize) as u16;
+        let composer = self.agent_request_composer_rects(inner, compact_summary);
+        let guidance_rect = composer.map(|(guidance, _, _)| guidance).unwrap_or(inner);
+        let visual_line_count = workflow_visual_line_count(&lines, guidance_rect.width);
+        let max_scroll = visual_line_count
+            .saturating_sub(guidance_rect.height as usize)
+            .min(u16::MAX as usize) as u16;
         let scroll = if active && !compact_summary {
             self.agent_scroll.min(max_scroll)
         } else {
@@ -11811,7 +11920,160 @@ impl WorkspaceDashboard {
         Paragraph::new(lines)
             .wrap(Wrap { trim: false })
             .scroll((scroll, 0))
-            .render(inner, buf);
+            .render(guidance_rect, buf);
+        if let Some((_, composer_header, editor_rect)) = composer {
+            let composer_state = self.agent_composer_state();
+            Clear.render(composer_header, buf);
+            let title = Span::styled(
+                composer_state.title(),
+                Style::default()
+                    .fg(composer_state.title_color())
+                    .add_modifier(Modifier::BOLD),
+            );
+            let hint = composer_state.hint(self.plan_message_sending, composer_header.height > 1);
+            let hint = Span::styled(
+                hint,
+                Style::default().fg(
+                    if self.plan_message_sending && composer_state == AgentComposerState::Ready {
+                        Color::Yellow
+                    } else {
+                        Color::DarkGray
+                    },
+                ),
+            );
+            let header_lines = if composer_header.height > 1 {
+                vec![Line::from(title), Line::from(hint)]
+            } else {
+                vec![Line::from(vec![title, Span::raw(" · "), hint])]
+            };
+            Paragraph::new(header_lines).render(composer_header, buf);
+            Clear.render(editor_rect, buf);
+            if composer_state.shows_message_draft() && self.agent_request.has_text() {
+                self.agent_request_editor
+                    .render(&self.agent_request.body, editor_rect, buf);
+            } else {
+                Paragraph::new(Span::styled(
+                    composer_state.placeholder(),
+                    Style::default().fg(Color::DarkGray),
+                ))
+                .wrap(Wrap { trim: false })
+                .render(editor_rect, buf);
+            }
+        }
+    }
+
+    fn agent_workpane_title(&self) -> &'static str {
+        match self.agent_rail_tab {
+            AgentRailTab::History => "Plan Context",
+            AgentRailTab::Audit => "Plan Audit",
+            AgentRailTab::Pending => "Plan with Codex",
+        }
+    }
+
+    fn agent_workpane_state(&self) -> AgentWorkpaneState {
+        if self.context_packet_is_outdated() {
+            AgentWorkpaneState::Outdated
+        } else if self.pending_chart_changeset.is_some()
+            || self.selected_agent_result().is_some()
+            || matches!(self.workflow_section, MedicalWorkflowSection::Proposals)
+        {
+            AgentWorkpaneState::AgentReview
+        } else if let Some(packet) = self.latest_packet_without_result()
+            && !self.agent_request.has_text()
+            && self
+                .latest_agent_run_for_packet(&packet.id)
+                .is_none_or(|run| run.status == "running")
+        {
+            AgentWorkpaneState::CodexRunning
+        } else {
+            AgentWorkpaneState::ContextPlan
+        }
+    }
+
+    fn agent_composer_state(&self) -> AgentComposerState {
+        if self.draft_recovery_available {
+            return AgentComposerState::DraftRecovery;
+        }
+        if let Some(changeset) = self.pending_chart_changeset.as_ref() {
+            return match changeset.review_state() {
+                ChartChangesetReviewState::RetryableFailure { .. } => {
+                    AgentComposerState::ChartRetry
+                }
+                ChartChangesetReviewState::Conflict { .. } => AgentComposerState::ChartConflict,
+                ChartChangesetReviewState::MergeRequired { .. } => AgentComposerState::ChartMerge,
+                ChartChangesetReviewState::Blocked { .. } => AgentComposerState::ChartDiscard,
+                ChartChangesetReviewState::Ready => AgentComposerState::Ready,
+            };
+        }
+        if self.draft_client.id.is_none() {
+            AgentComposerState::UnsavedPatient
+        } else {
+            AgentComposerState::Ready
+        }
+    }
+
+    fn context_packet_is_outdated(&self) -> bool {
+        let Some(packet) = self.context_packets.first() else {
+            return false;
+        };
+        let Some(packet_sha256) = packet.source_checkpoint_sha256.as_deref() else {
+            return false;
+        };
+        self.source_checkpoint.as_ref().is_some_and(|checkpoint| {
+            checkpoint.client_id == packet.client_id
+                && checkpoint.note_id == packet.note_id
+                && checkpoint.content_sha256 != packet_sha256
+        })
+    }
+
+    fn agent_request_composer_rects(
+        &self,
+        inner: Rect,
+        compact_summary: bool,
+    ) -> Option<(Rect, Rect, Rect)> {
+        if compact_summary
+            || self.agent_rail_tab != AgentRailTab::Pending
+            || self.agent_result.is_active()
+            || inner.width <= 2
+            || inner.height <= 1
+        {
+            return None;
+        }
+
+        let logical_lines = text_field_display_lines(&self.agent_request.body)
+            .len()
+            .max(1);
+        let header_height = if inner.width < 64 { 2 } else { 1 };
+        let desired_editor_height = logical_lines.saturating_add(1).clamp(3, 8) as u16;
+        let editor_height = if inner.height >= 8 {
+            desired_editor_height.min(
+                inner
+                    .height
+                    .saturating_sub(4_u16.saturating_add(header_height)),
+            )
+        } else {
+            inner
+                .height
+                .saturating_sub(header_height.saturating_add(1))
+                .max(1)
+        };
+        let header_y = inner
+            .bottom()
+            .saturating_sub(editor_height.saturating_add(header_height));
+        let guidance = Rect::new(
+            inner.x,
+            inner.y,
+            inner.width,
+            header_y.saturating_sub(inner.y),
+        );
+        let header = Rect::new(inner.x, header_y, inner.width, header_height);
+        let editor = Rect::new(
+            inner.x.saturating_add(2),
+            header_y.saturating_add(header_height),
+            inner.width.saturating_sub(2),
+            editor_height,
+        );
+        Some((guidance, header, editor))
     }
 
     fn render_medical_agent_changeset_summary(&self, area: Rect, buf: &mut Buffer) {
@@ -11869,22 +12131,35 @@ impl WorkspaceDashboard {
                 Line::from("  Human draft remains in the chart center until commit success."),
             ]
         } else if let Some(proposal) = self.selected_pending_proposal() {
-            vec![
+            let canonical_revision = self
+                .saved_canonical_note_for_proposal(proposal)
+                .map(|note| format!("r{}", note.current_revision))
+                .unwrap_or_else(|| "unavailable".to_string());
+            let mut lines = vec![
                 workflow_header_line("Pending Proposal Changeset", WorkflowTone::Review),
                 self.proposal_review_state_line(proposal),
                 Line::from(format!(
-                    "  Guard: note r{} · Reason: {}",
-                    proposal.base_revision,
-                    compact_preview(&proposal.summary, 46)
+                    "  Guard: proposal base r{} · saved canonical {}",
+                    proposal.base_revision, canonical_revision,
                 )),
                 Line::from(format!(
                     "  Proposed: {}",
                     compact_preview(&proposal.proposed_body, 68)
                 )),
                 workflow_action_hint_line(
-                    "Tab to Agent Work for full text · :proposal accept | :proposal decline",
+                    "Tab to Agent Review for full text · :proposal accept | :proposal decline",
                 ),
-            ]
+            ];
+            if self.proposal_note_draft_differs_from_saved(proposal) && inner.height >= 6 {
+                lines.insert(
+                    3,
+                    Line::from(format!(
+                        "  Draft (not canonical): {}",
+                        compact_preview(&self.draft_note.body, 54)
+                    )),
+                );
+            }
+            lines
         } else if self.workflow_section == MedicalWorkflowSection::Proposals {
             vec![
                 workflow_header_line("Note Proposals", WorkflowTone::Review),
@@ -11901,32 +12176,99 @@ impl WorkspaceDashboard {
     }
 
     fn agent_workpane_active_lines(&self) -> Vec<Line<'static>> {
-        let mut lines = vec![
-            Line::from(self.workflow_single_line_chart_context()),
-            self.agent_workpane_tabs_line(),
-            Line::from(""),
-        ];
+        let mut lines = vec![self.agent_workpane_tabs_line(), Line::from("")];
         lines.extend(match self.agent_rail_tab {
-            AgentRailTab::Pending => {
-                if self.pending_chart_changeset.is_some() {
-                    self.agent_workpane_chart_changeset_lines()
-                } else if self.workflow_section == MedicalWorkflowSection::Proposals {
-                    self.agent_workpane_proposal_changeset_lines()
-                } else {
-                    match self.workflow_section {
-                        MedicalWorkflowSection::AgentRequest => self.agent_workpane_request_lines(),
-                        MedicalWorkflowSection::ContextPacket => {
-                            self.agent_workpane_handoff_lines()
-                        }
-                        MedicalWorkflowSection::AgentInbox => self.agent_workpane_review_lines(),
-                        _ => self.agent_workpane_summary_lines(),
-                    }
-                }
+            AgentRailTab::Pending if self.pending_chart_changeset.is_some() => {
+                self.agent_workpane_chart_changeset_lines()
             }
-            AgentRailTab::History => self.agent_workpane_history_lines(),
+            AgentRailTab::Pending
+                if self.workflow_section == MedicalWorkflowSection::Proposals
+                    || self.selected_pending_proposal().is_some() =>
+            {
+                self.agent_workpane_proposal_changeset_lines()
+            }
+            AgentRailTab::Pending
+                if self.workflow_section == MedicalWorkflowSection::AgentInbox
+                    || self.agent_result.is_active()
+                    || self.selected_agent_result().is_some() =>
+            {
+                self.agent_workpane_review_lines()
+            }
+            AgentRailTab::Pending => self.agent_workpane_chat_lines(),
+            AgentRailTab::History => self.agent_workpane_context_lines(),
             AgentRailTab::Audit => self.agent_workpane_audit_lines(),
         });
         lines
+    }
+
+    #[cfg(test)]
+    #[allow(dead_code)]
+    fn agent_workpane_outdated_lines(&self) -> Vec<Line<'static>> {
+        let mut lines = vec![
+            workflow_header_line("Context Changed", WorkflowTone::Attention),
+            workflow_context_signal_line(
+                WorkflowTone::Attention,
+                "state",
+                "the living workspace changed after this Context Plan was frozen",
+            ),
+        ];
+        if let Some(packet) = self.context_packets.first() {
+            lines.push(workflow_context_signal_line(
+                WorkflowTone::Agent,
+                "submitted",
+                format!(
+                    "{} · checkpoint {}",
+                    compact_preview(&packet.id, 12),
+                    packet
+                        .source_checkpoint_sha256
+                        .as_deref()
+                        .map(|hash| compact_preview(hash, 10))
+                        .unwrap_or_else(|| "legacy".to_string())
+                ),
+            ));
+        }
+        if let Some(checkpoint) = self.source_checkpoint.as_ref() {
+            lines.push(workflow_context_signal_line(
+                WorkflowTone::Ready,
+                "current",
+                format!(
+                    "checkpoint r{} · {}",
+                    checkpoint.revision,
+                    compact_preview(&checkpoint.content_sha256, 10)
+                ),
+            ));
+        }
+        lines.extend([
+            workflow_header_line("Safe Actions", WorkflowTone::Ready),
+            workflow_action_hint_line("review changes, then submit a new Context Plan with Ctrl-G"),
+            workflow_action_hint_line("inspect prior run: :agent open run"),
+            Line::from(
+                "  Prior output stays review-only and never updates the chart automatically.",
+            ),
+        ]);
+        lines
+    }
+
+    fn agent_workpane_bridge_line(&self) -> Line<'static> {
+        let state = match self.agent_workpane_state() {
+            AgentWorkpaneState::ContextPlan => "building",
+            AgentWorkpaneState::CodexRunning => "working",
+            AgentWorkpaneState::AgentReview => "review",
+            AgentWorkpaneState::Outdated => "outdated",
+        };
+        Line::from(vec![
+            Span::styled("Codex bridge: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                state,
+                Style::default()
+                    .fg(if state == "outdated" {
+                        Color::Yellow
+                    } else {
+                        Color::Cyan
+                    })
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ])
     }
 
     fn agent_workpane_tabs_line(&self) -> Line<'static> {
@@ -11948,7 +12290,7 @@ impl WorkspaceDashboard {
             tab(AgentRailTab::History),
             Span::styled("  ", Style::default().fg(Color::DarkGray)),
             tab(AgentRailTab::Audit),
-            Span::styled("  ←/→", Style::default().fg(Color::DarkGray)),
+            Span::styled("  ←/→ tabs", Style::default().fg(Color::DarkGray)),
         ])
     }
 
@@ -12093,8 +12435,11 @@ impl WorkspaceDashboard {
                 compact_preview(&proposal.note_id, 14)
             )),
             Line::from(format!(
-                "  Guard: expected canonical note r{}",
-                proposal.base_revision
+                "  Guard: proposal base r{} · saved canonical {}",
+                proposal.base_revision,
+                self.saved_canonical_note_for_proposal(proposal)
+                    .map(|note| format!("r{}", note.current_revision))
+                    .unwrap_or_else(|| "unavailable".to_string())
             )),
             Line::from("  Patient: identity only; demographics untouched"),
             Line::from(format!("  Provenance: {provenance}")),
@@ -12120,29 +12465,55 @@ impl WorkspaceDashboard {
         }
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
-            "  Current canonical note:",
+            self.saved_canonical_note_for_proposal(proposal)
+                .map(|note| format!("  Saved canonical note (r{}):", note.current_revision))
+                .unwrap_or_else(|| "  Saved canonical note unavailable:".to_string()),
             Style::default().add_modifier(Modifier::BOLD),
         )));
-        if self.draft_note.body.is_empty() {
-            lines.push(Line::from("    (empty)"));
-        } else {
-            lines.extend(
-                self.draft_note
-                    .body
+        match self.saved_canonical_note_for_proposal(proposal) {
+            Some(note) if note.body.is_empty() => lines.push(Line::from("    (empty)")),
+            Some(note) => lines.extend(
+                note.body
                     .lines()
                     .map(|line| Line::from(format!("    - {line}"))),
-            );
+            ),
+            None => lines.push(Line::from("    (reload required before acceptance)")),
         }
+        if self.proposal_note_draft_differs_from_saved(proposal) {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "  Unsaved human draft (not canonical; accept blocked):",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            )));
+            if self.draft_note.body.is_empty() {
+                lines.push(Line::from("    ! (empty)"));
+            } else {
+                lines.extend(
+                    self.draft_note
+                        .body
+                        .lines()
+                        .map(|line| Line::from(format!("    ! {line}"))),
+                );
+            }
+        }
+        let action_hint = if self.proposal_has_unsaved_work(proposal) {
+            "Save/discard human draft before :proposal accept · :proposal decline is available"
+        } else {
+            self.proposal_accept_disabled_reason(proposal)
+                .unwrap_or(":proposal accept | :proposal decline")
+        };
         lines.extend([
             Line::from(""),
-            workflow_action_hint_line(":proposal accept | :proposal decline"),
+            workflow_action_hint_line(action_hint),
             Line::from("  Acceptance is explicit; no agent output auto-applies."),
         ]);
         lines
     }
 
     fn agent_workpane_history_lines(&self) -> Vec<Line<'static>> {
-        let mut lines = vec![workflow_header_line("Agent History", WorkflowTone::Review)];
+        let mut lines = vec![workflow_header_line("Prior Handoffs", WorkflowTone::Review)];
         lines.extend(self.agent_workpane_note_history_lines(/*limit*/ 8));
         if !self.agent_results.is_empty() {
             lines.push(Line::from(""));
@@ -12167,6 +12538,61 @@ impl WorkspaceDashboard {
             workflow_header_line("Agent Audit", WorkflowTone::Review),
             Line::from("  Read-only provenance for the active chart."),
         ];
+        let plan_audit = self.agent_workpane_plan_audit_lines();
+        if !plan_audit.is_empty() {
+            lines.push(Line::from(""));
+            lines.extend(plan_audit);
+        }
+        if let Some(packet) = self
+            .context_packets
+            .iter()
+            .find(|packet| packet.workspace_plan_revision_id.is_some())
+        {
+            lines.push(workflow_header_line(
+                "Master Handoff Binding",
+                WorkflowTone::Review,
+            ));
+            lines.push(Line::from(format!(
+                "  Packet {} · plan {}",
+                compact_preview(&packet.id, 16),
+                compact_preview(
+                    packet
+                        .workspace_plan_revision_id
+                        .as_deref()
+                        .unwrap_or("missing"),
+                    16,
+                )
+            )));
+            lines.push(Line::from(format!(
+                "  Content {} · evidence {}",
+                compact_preview(
+                    packet
+                        .workspace_plan_content_sha256
+                        .as_deref()
+                        .unwrap_or("missing"),
+                    14,
+                ),
+                compact_preview(
+                    packet
+                        .workspace_plan_evidence_manifest_sha256
+                        .as_deref()
+                        .unwrap_or("missing"),
+                    14,
+                )
+            )));
+            if let Some(run) = self
+                .agent_runs
+                .iter()
+                .find(|run| run.packet_id == packet.id)
+            {
+                lines.push(Line::from(format!(
+                    "  Run {} · {}",
+                    compact_preview(&run.id, 16),
+                    compact_preview(&run.status, 18)
+                )));
+            }
+            lines.push(Line::from(""));
+        }
         if self.audit_events.is_empty() {
             lines.push(Line::from("  No audit events for the active note yet."));
         } else {
@@ -12225,9 +12651,31 @@ impl WorkspaceDashboard {
         } else {
             WorkflowTone::Ready
         };
+        let readiness = self.context_plan_readiness();
+        let (readiness_tone, readiness_summary, action_hint) = if readiness.is_blocked() {
+            (
+                WorkflowTone::Attention,
+                format!("blocked · {} hard gate(s)", readiness.blockers.len()),
+                "resolve the listed hard gates before Ctrl-G",
+            )
+        } else if readiness.requires_acknowledgement() {
+            (
+                WorkflowTone::Caution,
+                format!("review · {} warning(s)", readiness.warnings.len()),
+                "review: :agent preview · Ctrl-G acknowledges warnings and submits",
+            )
+        } else {
+            (
+                WorkflowTone::Ready,
+                "ready for clinician submit".to_string(),
+                "review: :agent preview, then Ctrl-G",
+            )
+        };
 
-        vec![
-            self.agent_workpane_mode_line("Input"),
+        let mut lines = self.agent_workpane_coach_lines();
+        lines.extend([
+            Line::from(""),
+            self.agent_workpane_mode_line("Build"),
             workflow_context_signal_line(WorkflowTone::Agent, "draft", request),
             workflow_context_signal_line(
                 context_tone,
@@ -12238,33 +12686,109 @@ impl WorkspaceDashboard {
             ),
             workflow_context_signal_line(WorkflowTone::Agent, "plan", plan),
             workflow_context_signal_line(WorkflowTone::Review, "returned", returned),
+            workflow_context_signal_line(readiness_tone, "readiness", readiness_summary),
             Line::from(""),
-            workflow_action_hint_line("review: :agent preview, then Ctrl-G"),
+            workflow_action_hint_line(action_hint),
             Line::from("  No upload/OCR/payer action/auto-apply."),
-        ]
+        ]);
+        for blocker in readiness.blockers.iter().take(3) {
+            lines.push(workflow_context_signal_line(
+                WorkflowTone::Attention,
+                blocker.code,
+                blocker.message,
+            ));
+        }
+        for warning in readiness.warnings.iter().take(3) {
+            lines.push(workflow_context_signal_line(
+                WorkflowTone::Caution,
+                "warning",
+                format!("{} · {}", warning.code, warning.message),
+            ));
+        }
+        lines
     }
 
+    #[cfg(test)]
     fn agent_workpane_request_lines(&self) -> Vec<Line<'static>> {
-        let mut lines = vec![
-            self.agent_workpane_mode_line("Input"),
-            workflow_action_hint_line("request: type local instructions"),
-        ];
-        lines.extend(agent_request_input_lines(&self.agent_request.body, true, 8));
-        if self.agent_request.body.trim().is_empty() {
-            lines.push(Line::from("  Nothing is sent until Packet review."));
-        }
-        lines.push(Line::from("  Local only; preview packet before Ctrl-G."));
+        let mut lines = self.agent_workpane_coach_lines();
+        lines.extend([
+            Line::from(""),
+            self.agent_workpane_mode_line("Build"),
+            workflow_action_hint_line("request: write a patient-scoped message below"),
+            Line::from("  Enter starts an audited Plan turn; Shift-Enter adds a line."),
+            Line::from("  Ctrl-G stays locked until Codex publishes a reviewed Plan."),
+        ]);
         lines.push(Line::from(""));
         lines.extend(self.agent_workpane_selected_context_lines());
         lines.extend(self.agent_workpane_note_history_lines(1));
         lines
     }
 
+    fn workspace_coach_advice(&self) -> WorkspaceCoachAdvice {
+        let request_has_text = self.agent_request.has_text();
+        let current_request_has_packet = !request_has_text && !self.context_packets.is_empty();
+        let packet_waiting_for_result = !request_has_text
+            && self
+                .context_packets
+                .iter()
+                .any(|packet| !self.packet_has_result(&packet.id));
+        workspace_coach_advice(WorkspaceCoachState {
+            patient_saved: self.draft_client.id.is_some(),
+            note_saved: self.draft_note.id.is_some(),
+            note_has_title: !self.draft_note.title.trim().is_empty(),
+            note_has_body: !self.draft_note.body.trim().is_empty(),
+            chart_has_unsaved_changes: self.dirty,
+            selected_file_count: self.selected_artifacts().len(),
+            selected_text_count: self.selected_derivatives().len(),
+            selected_clip_count: self.selected_clips().len(),
+            request_has_text,
+            packet_review_open: self.workflow_section == MedicalWorkflowSection::ContextPacket,
+            packet_submitted: current_request_has_packet,
+            packet_waiting_for_result,
+            returned_work_available: !request_has_text && !self.agent_results.is_empty(),
+        })
+    }
+
+    fn agent_workpane_coach_lines(&self) -> Vec<Line<'static>> {
+        let advice = self.workspace_coach_advice();
+        let mut lines = Vec::new();
+        if let Some(message) = self.draft_persistence_message.as_deref() {
+            lines.push(workflow_context_signal_line(
+                if self.draft_recovery_available {
+                    WorkflowTone::Caution
+                } else {
+                    WorkflowTone::Review
+                },
+                if self.draft_recovery_available {
+                    "recovery"
+                } else {
+                    "local draft"
+                },
+                message,
+            ));
+            lines.push(Line::from(""));
+        }
+        lines.extend([
+            workflow_header_line("Workspace Planner", WorkflowTone::Ready),
+            Line::from(vec![Span::styled(
+                format!("  {}", advice.title),
+                Style::default().add_modifier(Modifier::BOLD),
+            )]),
+            Line::from(format!("  {}", advice.detail)),
+            workflow_action_hint_line(format!("next: {}", advice.next)),
+            Line::from(Span::styled(
+                "  Guidance only; no model call and no chart mutation.",
+                Style::default().fg(Color::DarkGray),
+            )),
+        ]);
+        lines
+    }
+
     fn agent_workpane_handoff_lines(&self) -> Vec<Line<'static>> {
-        let mut lines = vec![self.agent_workpane_mode_line("Packet")];
+        let mut lines = vec![self.agent_workpane_mode_line("Review")];
         lines.extend(self.workflow_active_action_lines(MedicalWorkflowSection::ContextPacket));
         lines.push(Line::from(Span::styled(
-            "Review Packet",
+            "Review Context Plan",
             Style::default().add_modifier(Modifier::BOLD),
         )));
         for line in self.context_packet_preview_lines().into_iter().take(10) {
@@ -12272,7 +12796,7 @@ impl WorkspaceDashboard {
         }
         lines.push(Line::from(""));
         lines.push(selected_line(
-            "Ctrl-G sends reviewed packet to Codex harness.",
+            "Ctrl-G sends the reviewed Context Plan to the Codex harness.",
             true,
         ));
         lines.push(Line::from("  :agent request returns to Input."));
@@ -12319,7 +12843,10 @@ impl WorkspaceDashboard {
     }
 
     fn agent_workpane_review_lines(&self) -> Vec<Line<'static>> {
-        let mut lines = vec![self.agent_workpane_mode_line("Returned")];
+        let mut lines = vec![
+            Line::from(self.workflow_single_line_chart_context()),
+            workflow_header_line("Agent Review", WorkflowTone::Review),
+        ];
         lines.extend(self.workflow_active_action_lines(MedicalWorkflowSection::AgentInbox));
         lines.extend(self.workflow_agent_review_workbench_lines());
         lines
@@ -12360,9 +12887,9 @@ impl WorkspaceDashboard {
         };
         Line::from(vec![
             Span::styled("Mode: ", Style::default().fg(Color::DarkGray)),
-            mode_style("Input"),
+            mode_style("Build"),
             Span::styled(" | ", Style::default().fg(Color::DarkGray)),
-            mode_style("Packet"),
+            mode_style("Review"),
             Span::styled(" | ", Style::default().fg(Color::DarkGray)),
             mode_style("Returned"),
         ])
@@ -12413,7 +12940,10 @@ impl WorkspaceDashboard {
         lines.extend([
             Line::from(compact_preview(&file_summary, line_width)),
             Line::from(Span::styled(
-                compact_preview("Paste/drop JPG/PDF. Space includes for packet.", line_width),
+                compact_preview(
+                    "Paste/drop JPG/PDF. Space toggles Context Plan inclusion.",
+                    line_width,
+                ),
                 Style::default().fg(Color::DarkGray),
             )),
             Line::from(""),
@@ -12470,7 +13000,7 @@ impl WorkspaceDashboard {
             MedicalWorkflowSection::Documents => "Patient File Detail",
             MedicalWorkflowSection::AgentRequest
             | MedicalWorkflowSection::ContextPacket
-            | MedicalWorkflowSection::AgentInbox => "Agent Work",
+            | MedicalWorkflowSection::AgentInbox => "Agent Review",
             MedicalWorkflowSection::PracticeLibrary => "Practice Library",
             MedicalWorkflowSection::PracticeIntelligence => "Practice Intelligence",
             MedicalWorkflowSection::Audit => "Audit Trail",
@@ -12632,7 +13162,7 @@ impl WorkspaceDashboard {
         ));
         lines.push(workflow_action_hint_line(":file drop/add/open/preview"));
         lines.push(Line::from(
-            "  List: arrows move; Enter opens detail; Space includes for packet.",
+            "  List: arrows move; Enter opens detail; Space toggles Context Plan inclusion.",
         ));
         if patient_file_count == 0 {
             lines.push(Line::from(""));
@@ -13165,7 +13695,20 @@ impl WorkspaceDashboard {
             return "Next: Paste returned work".to_string();
         }
         if self.agent_request.has_text() {
-            return "Next: Review Packet".to_string();
+            return "Next: Send message to Codex".to_string();
+        }
+        if let Some(revision) = self.active_plan_revision_for_handoff() {
+            return match revision.status {
+                WorkspacePlanRevisionStatus::Current => {
+                    "Next: Review Codex plan, then Ctrl-G".to_string()
+                }
+                WorkspacePlanRevisionStatus::Submitted => {
+                    "Next: Review submitted plan and Agent Review".to_string()
+                }
+                WorkspacePlanRevisionStatus::Outdated => {
+                    "Next: Ask Codex to refresh the plan".to_string()
+                }
+            };
         }
         if self.patient_file_count() == 0 {
             return "Next: Add files or ask agent".to_string();
@@ -13176,8 +13719,8 @@ impl WorkspaceDashboard {
         {
             return "Next: Choose agent context".to_string();
         }
-        if !self.agent_request.has_text() && self.context_packets.is_empty() {
-            return "Next: Ask Agent about eval".to_string();
+        if self.context_packets.is_empty() {
+            return "Next: Message Codex about the patient picture".to_string();
         }
         "Next: Return to chart work".to_string()
     }
@@ -13400,18 +13943,36 @@ impl WorkspaceDashboard {
         match self.workflow_section {
             MedicalWorkflowSection::AgentRequest => {
                 if self.agent_request.has_text() {
-                    "Next: preview".to_string()
+                    "Next: Enter sends".to_string()
+                } else if let Some(revision) = self.active_plan_revision_for_handoff() {
+                    match revision.status {
+                        WorkspacePlanRevisionStatus::Current => "Next: review plan".to_string(),
+                        WorkspacePlanRevisionStatus::Submitted => {
+                            "Next: review submitted plan".to_string()
+                        }
+                        WorkspacePlanRevisionStatus::Outdated => "Next: refresh plan".to_string(),
+                    }
                 } else {
-                    "Next: type instructions".to_string()
+                    "Next: message Codex".to_string()
                 }
             }
             MedicalWorkflowSection::ContextPacket => {
-                if !self.agent_request.has_text() {
-                    "Blocked: ask agent".to_string()
-                } else if self.draft_client.id.is_none() {
+                if self.draft_client.id.is_none() {
                     "Blocked: save".to_string()
+                } else if let Some(revision) = self.active_plan_revision_for_handoff() {
+                    match revision.status {
+                        WorkspacePlanRevisionStatus::Current => {
+                            "Next: Ctrl-G submits plan".to_string()
+                        }
+                        WorkspacePlanRevisionStatus::Submitted => {
+                            "Next: review submitted plan".to_string()
+                        }
+                        WorkspacePlanRevisionStatus::Outdated => {
+                            "Blocked: refresh plan".to_string()
+                        }
+                    }
                 } else {
-                    "Next: Ctrl-G opens agent".to_string()
+                    "Blocked: publish Codex plan".to_string()
                 }
             }
             MedicalWorkflowSection::AgentInbox => {
@@ -13604,18 +14165,45 @@ impl WorkspaceDashboard {
         match self.workflow_section {
             MedicalWorkflowSection::AgentRequest => {
                 if self.agent_request.has_text() {
-                    return "Next: Review Packet".to_string();
+                    return "Next: Press Enter to send this message to Codex".to_string();
                 }
-                return "Next: type instructions".to_string();
+                if let Some(revision) = self.active_plan_revision_for_handoff() {
+                    return match revision.status {
+                        WorkspacePlanRevisionStatus::Current => {
+                            "Next: Review the evidence-linked Codex plan, then press Ctrl-G"
+                                .to_string()
+                        }
+                        WorkspacePlanRevisionStatus::Submitted => {
+                            "Next: Review the submitted plan and returned Agent Review".to_string()
+                        }
+                        WorkspacePlanRevisionStatus::Outdated => {
+                            "Blocked: Ask Codex to refresh the plan for current chart data"
+                                .to_string()
+                        }
+                    };
+                }
+                return "Next: Message Codex about the patient picture".to_string();
             }
             MedicalWorkflowSection::ContextPacket => {
-                if !self.agent_request.has_text() {
-                    return "Blocked: Ask Agent".to_string();
-                }
                 if self.draft_client.id.is_none() {
                     return "Blocked: Save workspace".to_string();
                 }
-                return "Next: Ctrl-G opens agent".to_string();
+                if let Some(revision) = self.active_plan_revision_for_handoff() {
+                    return match revision.status {
+                        WorkspacePlanRevisionStatus::Current => {
+                            "Next: Ctrl-G submits the reviewed Codex plan to the master agent"
+                                .to_string()
+                        }
+                        WorkspacePlanRevisionStatus::Submitted => {
+                            "Next: Review the submitted Plan receipt and Agent Review".to_string()
+                        }
+                        WorkspacePlanRevisionStatus::Outdated => {
+                            "Blocked: Ask Codex to refresh the plan before master handoff"
+                                .to_string()
+                        }
+                    };
+                }
+                return "Blocked: Ask Codex to publish an evidence-linked plan".to_string();
             }
             MedicalWorkflowSection::AgentInbox => {
                 if self.agent_result.is_active() {
@@ -13630,7 +14218,7 @@ impl WorkspaceDashboard {
                 if self.latest_packet_without_result().is_some() {
                     return "Next: Paste result".to_string();
                 }
-                return "Blocked: Submit Packet first".to_string();
+                return "Blocked: Submit Context Plan first".to_string();
             }
             MedicalWorkflowSection::Documents => {
                 if self.draft_document.is_new_unsaved_draft() {
@@ -13699,27 +14287,31 @@ impl WorkspaceDashboard {
             MedicalWorkflowSection::AgentRequest => {
                 if self.agent_request.has_text() {
                     lines.push(workflow_action_hint_line(
-                        "next: Review Packet, then Ctrl-G",
+                        "next: Enter sends · Shift-Enter adds a line",
+                    ));
+                } else if self.active_plan_revision_for_handoff().is_some() {
+                    lines.push(workflow_action_hint_line(
+                        "next: Review the Codex plan and its evidence before Ctrl-G",
                     ));
                 } else {
                     lines.push(workflow_action_hint_line(
-                        "blocked: Type agent instructions first",
+                        "next: Ask Codex what context is missing",
                     ));
                 }
                 Some(lines)
             }
             MedicalWorkflowSection::ContextPacket => {
-                if !self.agent_request.has_text() {
-                    lines.push(workflow_action_hint_line(
-                        "blocked: Type agent instructions first",
-                    ));
-                } else if self.draft_client.id.is_none() {
+                if self.draft_client.id.is_none() {
                     lines.push(workflow_action_hint_line(
                         "blocked: Save workspace - Save patient first",
                     ));
+                } else if self.active_plan_revision_for_handoff().is_none() {
+                    lines.push(workflow_action_hint_line(
+                        "blocked: Ask Codex to publish an evidence-linked plan",
+                    ));
                 } else {
                     lines.push(workflow_action_hint_line(
-                        "next: Review agent work  :scope review",
+                        "next: Review the Plan receipt and evidence  :scope review",
                     ));
                 }
                 Some(lines)
@@ -13761,7 +14353,7 @@ impl WorkspaceDashboard {
             MedicalWorkflowSection::AgentInbox => {
                 if self.context_packets.is_empty() {
                     vec![workflow_action_hint_line(
-                        "safety: submit a Medical Agent Plan before returned work review",
+                        "safety: submit a Context Plan before returned work review",
                     )]
                 } else if self.agent_result.is_active() || self.selected_agent_result().is_some() {
                     vec![workflow_action_hint_line(
@@ -13769,7 +14361,7 @@ impl WorkspaceDashboard {
                     )]
                 } else {
                     vec![workflow_action_hint_line(
-                        "safety: paste returned work only after matching Medical Agent Plan",
+                        "safety: returned work must match its immutable Context Plan",
                     )]
                 }
             }
@@ -13796,45 +14388,97 @@ impl WorkspaceDashboard {
             lines.push(workflow_context_signal_line(
                 WorkflowTone::Muted,
                 "state",
-                "no Medical Agent Plan history recorded for this note",
+                "no Context Plan history recorded for this note",
             ));
             lines.push(workflow_header_line(
                 "Safe Actions",
                 WorkflowTone::Attention,
             ));
             lines.push(workflow_action_hint_line(
-                "blocked: Submit Medical Agent Plan first",
+                "blocked: submit a Context Plan first",
             ));
         } else if let Some(result) = self.selected_agent_result() {
             lines.extend(self.workflow_agent_result_workbench_lines(result));
-        } else {
-            lines.push(workflow_header_line("Returned Work", WorkflowTone::Caution));
-            lines.push(workflow_context_signal_line(
-                WorkflowTone::Caution,
-                "state",
-                "Medical Agent Plan submitted; no returned work saved",
-            ));
-            lines.push(workflow_header_line(
-                "Medical Plan History",
-                WorkflowTone::Agent,
-            ));
-            for packet in self.context_packets.iter().take(2) {
-                lines.extend(self.workflow_agent_packet_waiting_lines(packet));
+        } else if let Some(packet) = self.latest_packet_without_result() {
+            if let Some(run) = self
+                .latest_agent_run_for_packet(&packet.id)
+                .filter(|run| run.status != "running")
+            {
+                let (title, tone, summary) = match run.status.as_str() {
+                    "failed" => (
+                        "Codex Run Failed",
+                        WorkflowTone::Attention,
+                        "the full Codex run failed before reviewable work was captured",
+                    ),
+                    "canceled" => (
+                        "Codex Run Canceled",
+                        WorkflowTone::Caution,
+                        "the full Codex run was canceled before reviewable work was captured",
+                    ),
+                    _ => (
+                        "Codex Run Needs Attention",
+                        WorkflowTone::Caution,
+                        "the full Codex run ended without reviewable work",
+                    ),
+                };
+                lines.push(workflow_header_line(title, tone));
+                lines.push(workflow_context_signal_line(tone, "state", summary));
+                lines.push(workflow_context_signal_line(
+                    WorkflowTone::Agent,
+                    "run",
+                    format!(
+                        "{} [{}] · Context Plan {}",
+                        compact_preview(&run.id, 12),
+                        run.status,
+                        compact_preview(&packet.id, 10)
+                    ),
+                ));
+                if let Some(error_summary) = run.error_summary.as_deref() {
+                    lines.push(workflow_context_signal_line(
+                        tone,
+                        "detail",
+                        compact_preview(error_summary, 72),
+                    ));
+                }
+                lines.push(workflow_header_line("Safe Actions", WorkflowTone::Ready));
+                lines.push(workflow_action_hint_line(
+                    "inspect full transcript: :agent open run",
+                ));
+                lines.push(workflow_action_hint_line(
+                    "revise the living plan, then submit a new Context Plan",
+                ));
+                lines.push(Line::from(
+                    "  The ended run cannot change the chart and remains in audit history.",
+                ));
+            } else {
+                lines.push(workflow_header_line("Codex Running", WorkflowTone::Agent));
+                lines.push(workflow_context_signal_line(
+                    WorkflowTone::Agent,
+                    "state",
+                    "Context Plan submitted; full Codex analysis is running in the background",
+                ));
+                lines.push(workflow_header_line(
+                    "Context Plan History",
+                    WorkflowTone::Agent,
+                ));
+                for packet in self.context_packets.iter().take(2) {
+                    lines.extend(self.workflow_agent_packet_waiting_lines(packet));
+                }
+                lines.push(workflow_header_line("Safe Actions", WorkflowTone::Ready));
+                lines.push(workflow_action_hint_line(
+                    "inspect full transcript: :agent open run",
+                ));
+                lines.push(workflow_action_hint_line(
+                    "stay here while Codex works; the chart remains human-controlled",
+                ));
             }
-            lines.push(workflow_header_line("Safe Actions", WorkflowTone::Ready));
-            lines.push(workflow_action_hint_line(
-                "next: Paste returned agent work  :agent result",
-            ));
-            lines.push(workflow_action_hint_line(
-                "safety: paste only after matching the Medical Agent Plan",
-            ));
         }
 
         if self.packet_replay_inspect
             && let Some(packet) = self.packet_for_replay()
         {
             lines.push(workflow_header_line(
-                "Medical Plan Replay",
+                "Context Plan Replay",
                 WorkflowTone::Agent,
             ));
             lines.extend(packet_replay_lines(packet));
@@ -13911,8 +14555,21 @@ impl WorkspaceDashboard {
             compact_preview(&result.summary, 76)
         )));
 
+        lines.push(workflow_header_line("Review Status", result_tone));
+        lines.push(workflow_context_signal_line(
+            WorkflowTone::Review,
+            "safety",
+            "human approval required; no chart changes",
+        ));
+
+        // Put the clinician's available decisions before the longer provenance record. The
+        // evidence remains scrollable below, while the default viewport immediately answers
+        // "what can I safely do with this returned work?".
+        lines.push(workflow_header_line("Safe Actions", WorkflowTone::Ready));
+        lines.extend(self.workflow_agent_result_conversion_lines(result));
+
         lines.push(workflow_header_line(
-            "Medical Plan History",
+            "Context Plan History",
             WorkflowTone::Agent,
         ));
         if let Some(packet) = self.packet_for_agent_result(result) {
@@ -13988,16 +14645,6 @@ impl WorkspaceDashboard {
                 lines.push(Line::from(format!("  > {line}")));
             }
         }
-
-        lines.push(workflow_header_line("Safe Actions", WorkflowTone::Ready));
-        lines.extend(self.workflow_agent_result_conversion_lines(result));
-
-        lines.push(workflow_header_line("Review Status", result_tone));
-        lines.push(workflow_context_signal_line(
-            WorkflowTone::Review,
-            "safety",
-            "no chart changes until a human accepts or saves a converted draft",
-        ));
 
         lines
     }
@@ -14341,7 +14988,9 @@ impl WorkspaceDashboard {
             Line::from(format!(
                 "  {patient_file_count} refs, {patient_derivative_count} text, {patient_clip_count} clips"
             )),
-            Line::from(format!("  Packet: {selected_file_count} included")),
+            Line::from(format!(
+                "  Context Plan: {selected_file_count} files included"
+            )),
             Line::from("  :files opens Uploaded Documents"),
         ]
     }
@@ -14727,7 +15376,9 @@ impl WorkspaceDashboard {
             }
             if files_expanded {
                 lines.extend([
-                    Line::from("  :file drop/add/open/preview; Space includes for packet"),
+                    Line::from(
+                        "  :file drop/add/open/preview; Space toggles Context Plan inclusion",
+                    ),
                     Line::from("  metadata only; no copy/upload/OCR/transcribe/parse"),
                 ]);
             }
@@ -14745,9 +15396,13 @@ impl WorkspaceDashboard {
         if self.agent_request.is_active() {
             lines.extend(agent_request_input_lines(&self.agent_request.body, true, 4));
             if self.agent_request.body.trim().is_empty() {
-                lines.push(Line::from("  Nothing is sent until Packet review."));
+                lines.push(Line::from(
+                    "  Type a question or request; Enter starts an audited Plan turn.",
+                ));
             }
-            lines.push(Line::from("  Local only; preview packet before Ctrl-G."));
+            lines.push(Line::from(
+                "  Shift-Enter adds a line; Ctrl-G submits only a published Plan.",
+            ));
         } else if self.agent_request.has_text()
             && self.workflow_section != MedicalWorkflowSection::ContextPacket
         {
@@ -15050,9 +15705,9 @@ impl WorkspaceDashboard {
                 "  Notes: Medical Notes | Communication Notes | Administrative Notes | Addenda",
             ),
             Line::from(
-                "  Files: Uploaded Documents list with detail inspector and packet inclusion",
+                "  Files: Uploaded Documents list with detail inspector and Context Plan inclusion",
             ),
-            Line::from("  Tasks | Ask Agent | Returned Work | Audit"),
+            Line::from("  Tasks | Context Plan | Agent Review | Audit"),
         ]
     }
 
@@ -15292,6 +15947,7 @@ impl WorkspaceDashboard {
 
 fn workspace_chart_expected_versions_is_empty(versions: &WorkspaceChartExpectedVersions) -> bool {
     versions.client.is_none()
+        && versions.coverage.is_none()
         && versions.safety_item.is_none()
         && versions.encounter.is_none()
         && versions.document.is_none()
@@ -15387,6 +16043,7 @@ fn chart_commit_failure_from_typed_error(typed: &TypedRequestError) -> Option<Ch
 fn workspace_chart_entity_kind_label(kind: WorkspaceChartEntityKind) -> &'static str {
     match kind {
         WorkspaceChartEntityKind::Client => "patient",
+        WorkspaceChartEntityKind::Coverage => "coverage",
         WorkspaceChartEntityKind::SafetyItem => "clinical safety item",
         WorkspaceChartEntityKind::Encounter => "encounter",
         WorkspaceChartEntityKind::Note => "note",
@@ -15433,6 +16090,13 @@ impl WorkspaceDashboard {
         self.draft_client.display_name = display_name.to_string();
         self.draft_note.title = note_title.to_string();
         self.draft_note.body = note_body.to_string();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_agent_request_for_tests(&mut self, request: &str) {
+        self.agent_request.body = request.to_string();
+        self.agent_request.active = !request.trim().is_empty();
+        self.agent_request_editor.reset(&self.agent_request.body);
     }
 
     pub(crate) fn set_record_dates_for_tests(&mut self, start: &str, end: &str) {
@@ -15927,30 +16591,253 @@ fn selected_line(text: &str, selected: bool) -> Line<'static> {
     ])
 }
 
-fn proposal_comparison_body_lines(body: &str, marker: char) -> Vec<Line<'static>> {
-    let marker_style = if marker == '+' {
-        Style::default().fg(Color::Green)
-    } else {
-        Style::default().fg(Color::Red)
-    };
-    let body_lines = if body.is_empty() {
-        vec![""]
-    } else {
-        body.lines().collect::<Vec<_>>()
-    };
-    body_lines
-        .into_iter()
-        .enumerate()
-        .map(|(index, text)| {
-            Line::from(vec![
-                Span::styled(
-                    format!("{marker}{:>3} ", index + 1),
-                    marker_style.add_modifier(Modifier::BOLD),
-                ),
-                Span::raw(text.to_string()),
+struct ProposalComparisonLines {
+    current: Vec<Line<'static>>,
+    proposed: Vec<Line<'static>>,
+    additions: usize,
+    deletions: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ProposalComparisonLayout {
+    header: Rect,
+    current: Rect,
+    proposed: Rect,
+    footer: Rect,
+}
+
+impl ProposalComparisonLayout {
+    fn new(area: Rect, header_line_count: usize) -> Self {
+        let full_header_height = header_line_count.min(u16::MAX as usize) as u16;
+        let header_height = if area.height >= 10 {
+            full_header_height
+        } else {
+            full_header_height.min(2)
+        };
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(header_height),
+                Constraint::Min(3),
+                Constraint::Length(1),
             ])
-        })
-        .collect()
+            .split(area);
+        let panes = if rows[1].width >= 72 {
+            Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+                .split(rows[1])
+        } else {
+            Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+                .split(rows[1])
+        };
+        Self {
+            header: rows[0],
+            current: panes[0],
+            proposed: panes[1],
+            footer: rows[2],
+        }
+    }
+
+    fn current_inner(self) -> Rect {
+        inner_rect(self.current)
+    }
+
+    fn proposed_inner(self) -> Rect {
+        inner_rect(self.proposed)
+    }
+
+    fn max_scroll(self, visual_line_count: usize) -> u16 {
+        let visible_height = self
+            .current_inner()
+            .height
+            .min(self.proposed_inner().height) as usize;
+        if visible_height == 0 {
+            return 0;
+        }
+        visual_line_count
+            .saturating_sub(visible_height)
+            .min(u16::MAX as usize) as u16
+    }
+}
+
+fn wrap_proposal_comparison_lines(
+    comparison: &ProposalComparisonLines,
+    current_width: u16,
+    proposed_width: u16,
+) -> ProposalComparisonLines {
+    let row_count = comparison.current.len().max(comparison.proposed.len());
+    let mut current = Vec::new();
+    let mut proposed = Vec::new();
+    for row in 0..row_count {
+        let current_row = comparison
+            .current
+            .get(row)
+            .cloned()
+            .unwrap_or_else(|| Line::from(""));
+        let proposed_row = comparison
+            .proposed
+            .get(row)
+            .cloned()
+            .unwrap_or_else(|| Line::from(""));
+        let mut wrapped_current = word_wrap_lines(
+            std::iter::once(current_row),
+            current_width.max(/*other*/ 1) as usize,
+        );
+        let mut wrapped_proposed = word_wrap_lines(
+            std::iter::once(proposed_row),
+            proposed_width.max(/*other*/ 1) as usize,
+        );
+        let shared_height = wrapped_current.len().max(wrapped_proposed.len()).max(1);
+        wrapped_current.resize_with(shared_height, || Line::from(""));
+        wrapped_proposed.resize_with(shared_height, || Line::from(""));
+        current.extend(wrapped_current);
+        proposed.extend(wrapped_proposed);
+    }
+    ProposalComparisonLines {
+        current,
+        proposed,
+        additions: comparison.additions,
+        deletions: comparison.deletions,
+    }
+}
+
+fn proposal_comparison_lines(current_body: &str, proposed_body: &str) -> ProposalComparisonLines {
+    let patch = diffy::create_patch(current_body, proposed_body);
+    let mut current = Vec::new();
+    let mut proposed = Vec::new();
+    let mut additions = 0;
+    let mut deletions = 0;
+
+    for hunk in patch.hunks() {
+        let old_range = hunk.old_range();
+        let new_range = hunk.new_range();
+        let hunk_label = format!(
+            "@@ -{},{} +{},{} @@",
+            old_range.start(),
+            old_range.len(),
+            new_range.start(),
+            new_range.len()
+        );
+        let separator = Line::from(Span::styled(
+            hunk_label,
+            Style::default().fg(Color::DarkGray),
+        ));
+        current.push(separator.clone());
+        proposed.push(separator);
+
+        let mut old_line = old_range.start();
+        let mut new_line = new_range.start();
+        let mut pending_deletions = Vec::new();
+        let mut pending_insertions = Vec::new();
+        for line in hunk.lines() {
+            match line {
+                diffy::Line::Context(text) => {
+                    append_proposal_change_rows(
+                        &mut current,
+                        &mut proposed,
+                        &mut pending_deletions,
+                        &mut pending_insertions,
+                    );
+                    current.push(proposal_comparison_line(' ', old_line, text, None));
+                    proposed.push(proposal_comparison_line(' ', new_line, text, None));
+                    old_line += 1;
+                    new_line += 1;
+                }
+                diffy::Line::Delete(text) => {
+                    pending_deletions.push((old_line, text.to_string()));
+                    old_line += 1;
+                    deletions += 1;
+                }
+                diffy::Line::Insert(text) => {
+                    pending_insertions.push((new_line, text.to_string()));
+                    new_line += 1;
+                    additions += 1;
+                }
+            }
+        }
+        append_proposal_change_rows(
+            &mut current,
+            &mut proposed,
+            &mut pending_deletions,
+            &mut pending_insertions,
+        );
+    }
+
+    if current.is_empty() {
+        let body_lines = if current_body.is_empty() {
+            vec![""]
+        } else {
+            current_body.lines().collect::<Vec<_>>()
+        };
+        for (index, text) in body_lines.into_iter().enumerate() {
+            current.push(proposal_comparison_line(' ', index + 1, text, None));
+            proposed.push(proposal_comparison_line(' ', index + 1, text, None));
+        }
+    }
+
+    ProposalComparisonLines {
+        current,
+        proposed,
+        additions,
+        deletions,
+    }
+}
+
+fn append_proposal_change_rows(
+    current: &mut Vec<Line<'static>>,
+    proposed: &mut Vec<Line<'static>>,
+    deletions: &mut Vec<(usize, String)>,
+    insertions: &mut Vec<(usize, String)>,
+) {
+    let row_count = deletions.len().max(insertions.len());
+    for row in 0..row_count {
+        current.push(
+            deletions
+                .get(row)
+                .map(|(line_number, text)| {
+                    proposal_comparison_line('-', *line_number, text, Some(Color::Red))
+                })
+                .unwrap_or_else(proposal_comparison_placeholder),
+        );
+        proposed.push(
+            insertions
+                .get(row)
+                .map(|(line_number, text)| {
+                    proposal_comparison_line('+', *line_number, text, Some(Color::Green))
+                })
+                .unwrap_or_else(proposal_comparison_placeholder),
+        );
+    }
+    deletions.clear();
+    insertions.clear();
+}
+
+fn proposal_comparison_line(
+    marker: char,
+    line_number: usize,
+    text: &str,
+    color: Option<Color>,
+) -> Line<'static> {
+    let marker_style = color
+        .map(|color| Style::default().fg(color).add_modifier(Modifier::BOLD))
+        .unwrap_or_else(|| Style::default().fg(Color::DarkGray));
+    let body_style = color
+        .map(|color| Style::default().fg(color))
+        .unwrap_or_default();
+    Line::from(vec![
+        Span::styled(format!("{marker}{line_number:>3} "), marker_style),
+        Span::styled(
+            text.trim_end_matches(&['\r', '\n'][..]).to_string(),
+            body_style,
+        ),
+    ])
+}
+
+fn proposal_comparison_placeholder() -> Line<'static> {
+    Line::from(Span::styled("     ", Style::default().fg(Color::DarkGray)))
 }
 
 fn text_field_display_lines(text: &str) -> Vec<&str> {
@@ -16020,33 +16907,6 @@ fn field_line(label: &str, value: &str, active: bool) -> Line<'static> {
     Line::from(vec![
         Span::styled(format!("{label}: "), style),
         Span::raw(value.to_string()),
-    ])
-}
-
-fn patient_admin_editor_field_line(
-    label: &str,
-    value: &str,
-    active: bool,
-    placeholder: &str,
-) -> Line<'static> {
-    let label_style = if active {
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(Color::Gray)
-    };
-    let value_span = if value.trim().is_empty() {
-        Span::styled(
-            placeholder.to_string(),
-            Style::default().fg(Color::DarkGray),
-        )
-    } else {
-        Span::raw(value.to_string())
-    };
-    Line::from(vec![
-        Span::styled(format!("{label}: "), label_style),
-        value_span,
     ])
 }
 
@@ -16292,9 +17152,10 @@ fn workflow_action_rail_label(
         WorkspaceActionId::ArtifactToggle => "Include file",
         WorkspaceActionId::DerivativeToggle => "Select reviewed text",
         WorkspaceActionId::ClipToggle => "Select clip",
-        WorkspaceActionId::AgentRequest => "Ask Agent",
-        WorkspaceActionId::AgentPreview => "Review Packet",
+        WorkspaceActionId::AgentRequest => "Instructions",
+        WorkspaceActionId::AgentPreview => "Review Context Plan",
         WorkspaceActionId::AgentInbox => "Returned work review",
+        WorkspaceActionId::AgentOpenRun => "Open Codex run",
         WorkspaceActionId::AgentResult => "Paste agent work",
         WorkspaceActionId::AgentResultSave => "Save agent work",
         WorkspaceActionId::AgentResultInspect => "Inspect agent result",
@@ -16489,6 +17350,13 @@ fn nonempty_option(value: &str) -> Option<String> {
     (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
+fn affirmative_text(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "y" | "required"
+    )
+}
+
 fn associated_practice_document_notes(document: &WorkspaceDocument) -> String {
     let base = document.notes.trim();
     let association_note = "Associated from Practice Library as patient reference metadata only; original file unchanged.";
@@ -16570,6 +17438,175 @@ fn workspace_task_status_is_active(status: WorkspaceTaskStatus) -> bool {
     )
 }
 
+fn validate_plan_revision_for_handoff(
+    revision: &WorkspacePlanRevision,
+    checkpoint: &WorkspaceDraftCheckpointMetadata,
+    patient_id: Option<&str>,
+    note_id: Option<&str>,
+    encounter_id: Option<&str>,
+) -> std::result::Result<(), String> {
+    if !matches!(
+        revision.status,
+        WorkspacePlanRevisionStatus::Current | WorkspacePlanRevisionStatus::Submitted
+    ) {
+        return Err(
+            "The selected Codex plan is outdated. Ask Codex to publish a current plan before master handoff."
+                .to_string(),
+        );
+    }
+    if Some(revision.client_id.as_str()) != patient_id
+        || revision.note_id.as_deref() != note_id
+        || revision.encounter_id.as_deref() != encounter_id
+    {
+        return Err(
+            "The reviewed Codex plan belongs to a different patient, encounter, or note."
+                .to_string(),
+        );
+    }
+    if revision.source_checkpoint_id != checkpoint.checkpoint_id
+        || revision.source_checkpoint_revision != checkpoint.revision
+        || revision.source_checkpoint_sha256 != checkpoint.content_sha256
+    {
+        return Err(
+            "Patient context changed after this Codex plan was published. Ask Codex to refresh the plan before master handoff."
+                .to_string(),
+        );
+    }
+    let decisions = serde_json::from_str::<serde_json::Value>(&revision.decisions_json)
+        .map_err(|_| "The Codex plan decisions receipt could not be decoded.".to_string())?;
+    let open_questions = serde_json::from_str::<serde_json::Value>(&revision.open_questions_json)
+        .map_err(|_| {
+        "The Codex plan open-question receipt could not be decoded.".to_string()
+    })?;
+    if !decisions.is_array() || !open_questions.is_array() {
+        return Err("The Codex plan decision receipts must be JSON arrays.".to_string());
+    }
+    if open_questions
+        .as_array()
+        .is_some_and(|questions| !questions.is_empty())
+    {
+        return Err(
+            "The reviewed Codex plan still has open questions. Resolve them with Codex before master handoff."
+                .to_string(),
+        );
+    }
+    let content_json = serde_json::to_string(&json!({
+        "planMarkdown": revision.plan_markdown,
+        "decisions": decisions,
+        "openQuestions": open_questions,
+    }))
+    .map_err(|_| "The Codex plan content receipt could not be encoded.".to_string())?;
+    if revision.plan_markdown.trim().is_empty()
+        || format!("{:x}", Sha256::digest(content_json.as_bytes())) != revision.content_sha256
+    {
+        return Err("The reviewed Codex plan failed its content-integrity check.".to_string());
+    }
+    if format!(
+        "{:x}",
+        Sha256::digest(revision.evidence_manifest_json.as_bytes())
+    ) != revision.evidence_manifest_sha256
+    {
+        return Err("The Codex plan evidence receipt failed its integrity check.".to_string());
+    }
+    let evidence = serde_json::from_str::<Vec<serde_json::Value>>(&revision.evidence_manifest_json)
+        .map_err(|_| "The Codex plan evidence receipt could not be decoded.".to_string())?;
+    if evidence.len() != revision.evidence_read_count as usize {
+        return Err("The Codex plan evidence receipt count does not match.".to_string());
+    }
+    let categories = evidence
+        .iter()
+        .filter_map(|item| item.get("category").and_then(serde_json::Value::as_str))
+        .collect::<BTreeSet<_>>();
+    if !categories.contains("patient_chart") || !categories.contains("selected_context") {
+        return Err(
+            "The Codex plan is missing required patient-chart or selected-context evidence. Ask Codex to review both before publishing."
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn workspace_plan_revision_receipt_json(revision: &WorkspacePlanRevision) -> serde_json::Value {
+    json!({
+        "schemaVersion": 1,
+        "id": revision.id,
+        "planSessionId": revision.plan_session_id,
+        "guideRunId": revision.guide_run_id,
+        "revision": revision.revision,
+        "statusAtPacketCreation": match revision.status {
+            WorkspacePlanRevisionStatus::Current => "current",
+            WorkspacePlanRevisionStatus::Outdated => "outdated",
+            WorkspacePlanRevisionStatus::Submitted => "submitted",
+        },
+        "contentSha256": revision.content_sha256,
+        "evidenceManifestSha256": revision.evidence_manifest_sha256,
+        "evidenceReadCount": revision.evidence_read_count,
+        "sourceCheckpointId": revision.source_checkpoint_id,
+        "sourceCheckpointRevision": revision.source_checkpoint_revision,
+        "sourceCheckpointSha256": revision.source_checkpoint_sha256,
+        "sourceThreadId": revision.source_thread_id,
+        "sourceTurnId": revision.source_turn_id,
+    })
+}
+
+fn bind_plan_revision_to_context_packet(
+    mut params: WorkspaceContextPacketCreateParams,
+    revision: &WorkspacePlanRevision,
+) -> std::result::Result<WorkspaceContextPacketCreateParams, String> {
+    params.workspace_plan_revision_id = Some(revision.id.clone());
+    params.workspace_plan_content_sha256 = Some(revision.content_sha256.clone());
+    params.workspace_plan_evidence_manifest_sha256 =
+        Some(revision.evidence_manifest_sha256.clone());
+    let receipt = workspace_plan_revision_receipt_json(revision);
+    let original_request = params.human_request.trim();
+    params.human_request = if original_request.is_empty() {
+        format!(
+            "Execute against reviewed persistent medical plan revision r{} (human approval remains required):\n\n{}",
+            revision.revision, revision.plan_markdown
+        )
+    } else {
+        format!(
+            "Execute against reviewed persistent medical plan revision r{} (human approval remains required):\n\n{}\n\nClinician handoff request:\n{}",
+            revision.revision, revision.plan_markdown, original_request
+        )
+    };
+
+    let mut envelope = serde_json::from_str::<serde_json::Value>(&params.context_envelope_json)
+        .map_err(|error| format!("Failed to decode Context Plan envelope: {error}"))?;
+    let object = envelope
+        .as_object_mut()
+        .ok_or_else(|| "Context Plan envelope must be a JSON object.".to_string())?;
+    object.insert(
+        "sourceMode".to_string(),
+        serde_json::Value::String("persistent_plan_master_handoff".to_string()),
+    );
+    object.insert(
+        "humanRequest".to_string(),
+        serde_json::Value::String(params.human_request.clone()),
+    );
+    object.insert("workspacePlanRevision".to_string(), receipt);
+    object.insert(
+        "workspacePlanMarkdown".to_string(),
+        serde_json::Value::String(revision.plan_markdown.clone()),
+    );
+    if let Some(prompt) = object
+        .get("promptSnapshot")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+    {
+        object.insert(
+            "promptSnapshot".to_string(),
+            serde_json::Value::String(format!(
+                "{prompt}\n\nReviewed persistent medical plan r{}:\n{}",
+                revision.revision, revision.plan_markdown
+            )),
+        );
+    }
+    params.context_envelope_json = serde_json::to_string(&envelope)
+        .map_err(|error| format!("Failed to encode Context Plan envelope: {error}"))?;
+    Ok(params)
+}
+
 fn workspace_task_status_label(status: WorkspaceTaskStatus) -> &'static str {
     match status {
         WorkspaceTaskStatus::Open => "open",
@@ -16614,14 +17651,14 @@ fn workflow_packet_replay_summary(packet: &WorkspaceContextPacket) -> String {
             packet_hash_prefix(packet)
         )
     } else {
-        "older Medical Agent Plan trace only".to_string()
+        "older Context Plan trace only".to_string()
     }
 }
 
 fn packet_replay_lines(packet: &WorkspaceContextPacket) -> Vec<Line<'static>> {
     if !packet_replay_available(packet) {
         return vec![Line::from(
-            "  Plan history: unavailable for older Medical Agent Plan trace",
+            "  Plan history: unavailable for older Context Plan trace",
         )];
     }
     let Ok(envelope) = serde_json::from_str::<serde_json::Value>(&packet.context_envelope_json)
@@ -17856,7 +18893,7 @@ fn dropped_file_kind(path: &Path) -> &'static str {
                 || name.contains("payer")
                 || name.contains("coverage")
             {
-                "medicare insurance card image"
+                "insurance_card"
             } else if name.contains("id")
                 || name.contains("license")
                 || name.contains("driver")
@@ -17868,7 +18905,13 @@ fn dropped_file_kind(path: &Path) -> &'static str {
             }
         }
         "pdf" => {
-            if name.contains("referral") {
+            if name.contains("medicare")
+                || name.contains("insurance")
+                || name.contains("payer")
+                || name.contains("coverage")
+            {
+                "insurance_card"
+            } else if name.contains("referral") {
                 "referral pdf"
             } else {
                 "pdf"
@@ -18009,6 +19052,15 @@ fn command_aliases(command: &str) -> &'static [&'static str] {
         ],
         "emergency contact edit" => &["edit emergency contact", "emergency contact"],
         "coverage edit" => &["edit coverage", "coverage", "member id", "insurance"],
+        "coverage verify" => &[
+            "verify coverage",
+            "compare coverage card",
+            "coverage card",
+            "insurance card",
+            "medicare card",
+        ],
+        "draft restore" => &["restore draft", "restore local draft"],
+        "draft discard" => &["discard draft", "discard local draft"],
         "agent result" => &[
             "returned work",
             "paste returned work",
@@ -18173,7 +19225,7 @@ fn stale_context_recovery_notice(
         return None;
     }
     Some(format!(
-        "Recovery: stale packet selections removed ({}); retry is safe.",
+        "Recovery: stale Context Plan selections removed ({}); retry is safe.",
         parts.join(", ")
     ))
 }
@@ -18458,12 +19510,15 @@ mod tests {
         assert!(!rendered.contains("Chart Sections"));
         assert!(rendered.contains("Note Title"));
         assert!(rendered.contains("Note Body"));
-        assert!(rendered.contains("Patient ID / MRN"));
-        assert!(rendered.contains("Chart start"));
-        assert!(rendered.contains("Chart end"));
-        assert!(rendered.contains("Agent Work"));
-        assert!(rendered.contains("Mode:"));
-        assert!(rendered.contains("No upload/OCR/payer action/auto-apply"));
+        assert!(rendered.contains("MRN:"));
+        assert!(rendered.contains("Legal/card:"));
+        assert!(rendered.contains("Contact:"));
+        assert!(rendered.contains("Address:"));
+        assert!(rendered.contains("Emergency:"));
+        assert!(rendered.contains("Coverage: P not entered; S not entered; T not entered"));
+        assert!(rendered.contains("Plan with Codex"));
+        assert!(rendered.contains("[Chat]  Context  Audit"));
+        assert!(rendered.contains("Recommendations remain review-only"));
         assert!(rendered.contains("Uploaded Documents"));
         assert!(rendered.contains("files"));
         assert!(!rendered.contains("Practice Workflow"));
@@ -18682,8 +19737,9 @@ mod tests {
 
         assert_eq!(
             dashboard.execute_workspace_command(":patient new"),
-            WorkspaceDashboardAction::Consumed
+            WorkspaceDashboardAction::StartNewClient
         );
+        dashboard.start_new_client();
         assert_eq!(dashboard.focus, WorkspaceFocus::Demographics);
         let directory_rendered = dashboard
             .patient_directory_lines()
@@ -18700,8 +19756,9 @@ mod tests {
         dashboard.draft_client.id = Some("client-new".to_string());
         assert_eq!(
             dashboard.execute_workspace_command(":note new daily"),
-            WorkspaceDashboardAction::Consumed
+            WorkspaceDashboardAction::StartNewNote
         );
+        dashboard.start_new_note();
         assert_eq!(dashboard.focus, WorkspaceFocus::NoteBody);
         for c in "SOAP fake sample note: patient tolerated exercise.".chars() {
             dashboard.handle_key_event(KeyEvent::from(KeyCode::Char(c)));
@@ -18764,26 +19821,36 @@ mod tests {
             dashboard.handle_key_event(KeyEvent::from(KeyCode::Char(c)));
         }
         dashboard.handle_key_event(KeyEvent::from(KeyCode::Down));
+        type_text(&mut dashboard, "mobile");
+        dashboard.handle_key_event(KeyEvent::from(KeyCode::Down));
         for c in "555-0102".chars() {
             dashboard.handle_key_event(KeyEvent::from(KeyCode::Char(c)));
         }
         dashboard.handle_key_event(KeyEvent::from(KeyCode::Down));
+        type_text(&mut dashboard, "home");
+        dashboard.handle_key_event(KeyEvent::from(KeyCode::Down));
         for c in "jordan.fake@example.test".chars() {
             dashboard.handle_key_event(KeyEvent::from(KeyCode::Char(c)));
         }
-        let rendered = render_dashboard_lines_at(&dashboard, 160, 45);
+        let editor = dashboard
+            .patient_admin_editor_lines(PatientAdminEditMode::Contact)
+            .iter()
+            .map(line_plain_text)
+            .collect::<Vec<_>>()
+            .join("\n");
 
-        assert!(rendered.contains("Patient Demographics Editor"));
-        assert!(rendered.contains("Primary phone: 555-0101"));
-        assert!(rendered.contains("Secondary phone: 555-0102"));
-        assert!(rendered.contains("Email: jordan.fake@example.test"));
-        assert!(
-            rendered
-                .contains("Emergency contact: name missing; relationship missing; phone missing")
-        );
+        assert!(editor.contains("Patient Demographics Editor"));
+        assert!(editor.contains("Primary phone: 555-0101"));
+        assert!(editor.contains("Primary phone type: mobile"));
+        assert!(editor.contains("Secondary phone: 555-0102"));
+        assert!(editor.contains("Secondary phone type: home"));
+        assert!(editor.contains("Primary email: jordan.fake@example.test"));
+        assert!(editor.contains("Emergency Contact"));
         assert!(dashboard.dirty);
         assert_eq!(dashboard.draft_client.primary_phone, "555-0101");
+        assert_eq!(dashboard.draft_client.primary_phone_use, "mobile");
         assert_eq!(dashboard.draft_client.secondary_phone, "555-0102");
+        assert_eq!(dashboard.draft_client.secondary_phone_use, "home");
         assert_eq!(dashboard.draft_client.email, "jordan.fake@example.test");
 
         dashboard.clients[0].primary_phone = Some(dashboard.draft_client.primary_phone.clone());
@@ -18862,15 +19929,15 @@ mod tests {
 
         assert!(rendered.contains("Coverage Editor"));
         assert!(rendered.contains("Patient ID / MRN: MRN-123"));
-        assert!(rendered.contains("Member ID / Medicare ID: MED-777"));
+        assert!(rendered.contains("Member ID: MED-777"));
         assert!(rendered.contains("Coverage/member ID is separate from Patient ID / MRN."));
         assert!(!rendered.contains("External ID"));
-        assert_eq!(dashboard.draft_client.payer_name, "Fake Medicare");
-        assert_eq!(dashboard.draft_client.plan_name, "Plan A");
-        assert_eq!(dashboard.draft_client.member_id, "MED-777");
-        assert_eq!(dashboard.draft_client.group_number, "GRP-1");
-        assert_eq!(dashboard.draft_client.coverage_type, "Medicare");
-        assert_eq!(dashboard.draft_client.coverage_status, "active");
+        assert_eq!(dashboard.coverage_draft.payer_name, "Fake Medicare");
+        assert_eq!(dashboard.coverage_draft.plan_name, "Plan A");
+        assert_eq!(dashboard.coverage_draft.member_id, "MED-777");
+        assert_eq!(dashboard.coverage_draft.group_number, "GRP-1");
+        assert_eq!(dashboard.coverage_draft.coverage_type, "Medicare");
+        assert_eq!(dashboard.coverage_draft.coverage_status, "active");
         assert_eq!(
             dashboard.draft_client.emergency_contact_name,
             "Maya Contact"
@@ -18891,22 +19958,467 @@ mod tests {
         );
         dashboard.clients[0].emergency_contact_phone =
             Some(dashboard.draft_client.emergency_contact_phone.clone());
-        dashboard.clients[0].payer_name = Some(dashboard.draft_client.payer_name.clone());
-        dashboard.clients[0].plan_name = Some(dashboard.draft_client.plan_name.clone());
-        dashboard.clients[0].member_id = Some(dashboard.draft_client.member_id.clone());
-        dashboard.clients[0].group_number = Some(dashboard.draft_client.group_number.clone());
-        dashboard.clients[0].coverage_type = Some(dashboard.draft_client.coverage_type.clone());
-        dashboard.clients[0].coverage_status = Some(dashboard.draft_client.coverage_status.clone());
+        assert!(dashboard.draft_client.payer_name.is_empty());
+        assert!(dashboard.draft_client.plan_name.is_empty());
+        assert!(dashboard.draft_client.member_id.is_empty());
         dashboard.patient_search_query = Some("Maya Contact".to_string());
         assert_eq!(dashboard.patient_search_result_indices(), vec![0]);
         dashboard.patient_search_query = Some("5550199".to_string());
-        assert_eq!(dashboard.patient_search_result_indices(), vec![0]);
-        dashboard.patient_search_query = Some("MED-777".to_string());
         assert_eq!(dashboard.patient_search_result_indices(), vec![0]);
         dashboard.patient_search_query = Some("SEARCH_UI_ONLY_SENTINEL".to_string());
         let prompt = dashboard.agent_context_prompt();
         assert!(prompt.contains("Jordan Patient"));
         assert!(!prompt.contains("SEARCH_UI_ONLY_SENTINEL"));
+    }
+
+    #[test]
+    fn medical_demographics_summary_and_editor_keep_identity_contact_and_cursor_visible() {
+        let mut dashboard = medical_recursive_base_dashboard();
+        dashboard.draft_client.legal_first_name = "Jordan".to_string();
+        dashboard.draft_client.legal_middle_name = "Q".to_string();
+        dashboard.draft_client.legal_last_name = "Patient".to_string();
+        dashboard.draft_client.primary_phone = "555-0101".to_string();
+        dashboard.draft_client.email = "jordan.fake@example.test".to_string();
+        dashboard.draft_client.address_line_1 = "10 Example Street".to_string();
+        dashboard.draft_client.city = "Exampleville".to_string();
+        dashboard.draft_client.state_or_province = "IL".to_string();
+        dashboard.draft_client.postal_code = "60000".to_string();
+        dashboard.draft_client.emergency_contact_name = "Maya Contact".to_string();
+        dashboard.draft_client.emergency_contact_phone = "555-0199".to_string();
+        dashboard.focus = WorkspaceFocus::Demographics;
+
+        let summary = render_dashboard_lines_at(&dashboard, 160, 40);
+        for expected in [
+            "Legal/card: Jordan Q Patient",
+            "555-0101",
+            "jordan.fake@example.test",
+            "10 Example Street",
+            "Exampleville",
+            "Maya Contact",
+            "555-0199",
+            "Coverage: P not entered; S not entered; T not entered",
+        ] {
+            assert!(
+                summary.contains(expected),
+                "missing {expected:?} from compact demographics summary:\n{summary}"
+            );
+        }
+
+        press_consumed(&mut dashboard, KeyCode::Enter);
+        assert_eq!(
+            dashboard.patient_admin_edit_mode,
+            Some(PatientAdminEditMode::Contact)
+        );
+        assert_eq!(
+            dashboard.patient_admin_field,
+            PatientAdminField::DisplayName
+        );
+
+        dashboard.patient_admin_field = PatientAdminField::ContactNotes;
+        dashboard.draft_client.contact_notes =
+            "Call the fake emergency contact before scheduling.".to_string();
+        for viewport in [Rect::new(0, 0, 80, 20), Rect::new(0, 0, 120, 32)] {
+            let rendered = render_dashboard_lines_at(&dashboard, viewport.width, viewport.height);
+            assert!(
+                rendered.contains("> Contact notes:"),
+                "selected long-form field should be scrolled into view at {viewport:?}:\n{rendered}"
+            );
+            let cursor = dashboard
+                .cursor_pos(viewport)
+                .expect("selected contact field should expose a cursor");
+            let editor = match WorkspaceLayoutMode::for_area(viewport) {
+                WorkspaceLayoutMode::Medium => inner_rect(MedicalMediumAreas::new(viewport).main),
+                WorkspaceLayoutMode::Compact => inner_rect(MedicalCompactAreas::new(viewport).body),
+                mode => panic!("unexpected test layout {mode:?}"),
+            };
+            assert!(rect_contains(editor, cursor));
+        }
+    }
+
+    #[test]
+    fn normalized_coverage_editor_routes_priority_toggle_and_advisory_mismatch() {
+        let mut dashboard = medical_recursive_base_dashboard();
+        assert_eq!(
+            dashboard.execute_workspace_command(":coverage edit"),
+            WorkspaceDashboardAction::Consumed
+        );
+
+        type_text(&mut dashboard, "Fake Payer");
+        press_consumed(&mut dashboard, KeyCode::Down);
+        type_text(&mut dashboard, "Fake Plan");
+        assert_eq!(dashboard.coverage_draft.payer_name, "Fake Payer");
+        assert_eq!(dashboard.coverage_draft.plan_name, "Fake Plan");
+        assert!(dashboard.draft_client.payer_name.is_empty());
+        assert!(dashboard.draft_client.plan_name.is_empty());
+
+        assert_eq!(
+            press_key(&mut dashboard, KeyCode::Right),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert!(dashboard.status.contains("Save the current coverage"));
+        assert_eq!(dashboard.coverage_draft.priority, CoveragePriority::Primary);
+
+        dashboard.dirty = false;
+        assert_eq!(
+            press_key(&mut dashboard, KeyCode::Right),
+            WorkspaceDashboardAction::SelectCoveragePriority(2)
+        );
+        assert_eq!(dashboard.coverage_draft.priority, CoveragePriority::Primary);
+        assert_eq!(
+            press_key(&mut dashboard, KeyCode::Left),
+            WorkspaceDashboardAction::SelectCoveragePriority(3)
+        );
+
+        dashboard.coverage_field = CoverageField::SubscriberAddressSameAsPatient;
+        assert!(!dashboard.coverage_draft.subscriber_address_same_as_patient);
+        press_consumed(&mut dashboard, KeyCode::Char(' '));
+        assert!(dashboard.coverage_draft.subscriber_address_same_as_patient);
+        assert!(dashboard.dirty);
+
+        dashboard.dirty = false;
+        dashboard.coverage_draft.billing_readiness = WorkspaceBillingReadiness::Mismatch;
+        let editor = dashboard
+            .coverage_editor_lines()
+            .iter()
+            .map(line_plain_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(editor.contains("MISMATCH · billing/export blocked"));
+        assert!(editor.contains("clinical chart saves remain available"));
+        assert_eq!(
+            press_key_event(
+                &mut dashboard,
+                KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL),
+            ),
+            WorkspaceDashboardAction::Save,
+            "billing mismatch must remain advisory for ordinary clinical chart saves"
+        );
+
+        let mut primary = test_coverage(
+            "coverage-primary",
+            "client-1",
+            CoveragePriority::Primary,
+            WorkspaceBillingReadiness::Mismatch,
+        );
+        primary.payer_name = Some("Fake Primary".to_string());
+        let mut secondary = test_coverage(
+            "coverage-secondary",
+            "client-1",
+            CoveragePriority::Secondary,
+            WorkspaceBillingReadiness::Match,
+        );
+        secondary.payer_name = Some("Fake Secondary".to_string());
+        let mut tertiary = test_coverage(
+            "coverage-tertiary",
+            "client-1",
+            CoveragePriority::Tertiary,
+            WorkspaceBillingReadiness::Incomplete,
+        );
+        tertiary.payer_name = Some("Fake Tertiary".to_string());
+        dashboard.coverages = vec![primary, secondary, tertiary];
+        dashboard.coverage_draft = CoverageDraft::new("client-1", CoveragePriority::Primary);
+        dashboard.patient_admin_edit_mode = None;
+        dashboard.focus = WorkspaceFocus::Demographics;
+        let summary = render_dashboard_lines_at(&dashboard, 220, 40);
+        assert!(summary.contains("P Fake Primary [mismatch]"));
+        assert!(summary.contains("S Fake Secondary [match]"));
+        assert!(summary.contains("T Fake Tertiary [incomplete]"));
+    }
+
+    #[test]
+    fn human_card_comparison_renders_boundaries_and_builds_exact_create_action() {
+        let coverage = test_coverage(
+            "coverage-primary",
+            "client-1",
+            CoveragePriority::Primary,
+            WorkspaceBillingReadiness::Unverified,
+        );
+        let client = test_client("client-1", "Jordan Patient");
+        let mut dashboard = medical_recursive_base_dashboard();
+        dashboard.clients = vec![client.clone()];
+        dashboard.draft_client = ClientDraft::from_client(&client);
+        dashboard.coverages = vec![coverage.clone()];
+        dashboard.coverage_draft = CoverageDraft::try_from(&coverage).expect("coverage draft");
+
+        assert_eq!(
+            dashboard.execute_workspace_command(":coverage card"),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert!(
+            dashboard
+                .status
+                .contains("present, hashed local insurance-card reference")
+        );
+        assert!(dashboard.card_verification_draft.is_none());
+
+        let mut card_document = patient_file(
+            "document-card",
+            "Fake Medicare card front",
+            "insurance_card",
+            "/tmp/fake-card.jpg",
+        );
+        card_document.sha256 = Some("a".repeat(64));
+        card_document.content_sha256 = Some("a".repeat(64));
+        card_document.existence_status = "present".to_string();
+        dashboard.documents = vec![card_document];
+        assert_eq!(
+            dashboard.execute_workspace_command(":coverage card"),
+            WorkspaceDashboardAction::Consumed
+        );
+        let rendered = dashboard
+            .card_verification_editor_lines()
+            .iter()
+            .map(line_plain_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(rendered.contains("Human Coverage Card Comparison"));
+        assert!(rendered.contains("Type the identity exactly as printed on the card"));
+        assert!(rendered.contains("No OCR or model inference"));
+        assert!(rendered.contains("No OCR/model extraction, eligibility check, payer message"));
+
+        let draft = dashboard
+            .card_verification_draft
+            .as_mut()
+            .expect("card comparison draft");
+        draft.observed_first_name = "Jordan".to_string();
+        draft.observed_middle_name = "Q".to_string();
+        draft.observed_last_name = "Patient".to_string();
+        draft.observed_suffix = "Jr".to_string();
+        draft.observed_member_id = "1EG4TE5MK73".to_string();
+        draft.actor = "Taylor PT".to_string();
+
+        assert_eq!(
+            press_key_event(
+                &mut dashboard,
+                KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL),
+            ),
+            WorkspaceDashboardAction::CreateCoverageVerification(
+                WorkspaceCoverageVerificationCreateParams {
+                    coverage_id: "coverage-primary".to_string(),
+                    source_document_id: "document-card".to_string(),
+                    expected_patient_version: "version-client-1".to_string(),
+                    expected_coverage_version: "version-coverage-primary".to_string(),
+                    expected_document_version: "version-document-card".to_string(),
+                    compared_subject: WorkspaceCoverageVerificationSubject::Beneficiary,
+                    observed_first_name: Some("Jordan".to_string()),
+                    observed_middle_name: Some("Q".to_string()),
+                    observed_last_name: Some("Patient".to_string()),
+                    observed_suffix: Some("Jr".to_string()),
+                    observed_member_id: Some("1EG4TE5MK73".to_string()),
+                    actor: "Taylor PT".to_string(),
+                }
+            )
+        );
+    }
+
+    #[test]
+    fn local_draft_recovery_gates_chart_edits_but_keeps_recovery_controls_available() {
+        let mut dashboard = medical_recursive_base_dashboard();
+        dashboard.focus = WorkspaceFocus::NoteBody;
+        dashboard.set_draft_recovery_available(true);
+        let original_body = dashboard.draft_note.body.clone();
+
+        press_consumed(&mut dashboard, KeyCode::Char('x'));
+        assert_eq!(dashboard.draft_note.body, original_body);
+        assert!(
+            dashboard
+                .status
+                .contains("Resolve the recoverable local draft")
+        );
+
+        press_consumed(&mut dashboard, KeyCode::Tab);
+        assert_eq!(dashboard.focus, WorkspaceFocus::Workflow);
+
+        let mut escape = medical_recursive_base_dashboard();
+        escape.set_draft_recovery_available(true);
+        assert_eq!(
+            press_key(&mut escape, KeyCode::Esc),
+            WorkspaceDashboardAction::Close
+        );
+
+        let mut commands = medical_recursive_base_dashboard();
+        commands.set_draft_recovery_available(true);
+        assert_eq!(
+            press_key_event(
+                &mut commands,
+                KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
+            ),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert_eq!(commands.command_input.as_deref(), Some(""));
+
+        for command in [":draft restore", ":restore draft", ":restore local draft"] {
+            let mut restore = medical_recursive_base_dashboard();
+            restore.set_draft_recovery_available(true);
+            assert_eq!(
+                restore.execute_workspace_command(command),
+                WorkspaceDashboardAction::RestoreLocalDraft
+            );
+        }
+        for command in [":draft discard", ":discard draft", ":discard local draft"] {
+            let mut discard = medical_recursive_base_dashboard();
+            discard.set_draft_recovery_available(true);
+            assert_eq!(
+                discard.execute_workspace_command(command),
+                WorkspaceDashboardAction::DiscardLocalDraft
+            );
+        }
+    }
+
+    #[test]
+    fn local_draft_recovery_blocks_paste_and_command_palette_chart_mutations() {
+        let mut note = medical_recursive_base_dashboard();
+        note.focus = WorkspaceFocus::NoteBody;
+        note.set_draft_recovery_available(true);
+        let original_body = note.draft_note.body.clone();
+        assert_eq!(
+            note.handle_paste("PASTE_MUTATION_SENTINEL".to_string()),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert_eq!(note.draft_note.body, original_body);
+        assert!(note.status.contains("Resolve the recoverable local draft"));
+
+        let mut files = medical_recursive_files_dashboard();
+        files.focus_patient_files_tree();
+        files.set_draft_recovery_available(true);
+        let document_count = files.documents.len();
+        assert_eq!(
+            files.handle_paste("/tmp/recovery-blocked-card.pdf".to_string()),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert_eq!(files.documents.len(), document_count);
+        assert!(files.status.contains("Resolve the recoverable local draft"));
+
+        let mut patient_action = medical_recursive_base_dashboard();
+        patient_action.set_draft_recovery_available(true);
+        let patient_before = patient_action.draft_client.display_name.clone();
+        patient_action.open_command_palette();
+        type_text(&mut patient_action, "patient new");
+        press_consumed(&mut patient_action, KeyCode::Enter);
+        assert_eq!(patient_action.draft_client.display_name, patient_before);
+        assert!(patient_action.status.contains("Restore or discard"));
+
+        let mut selector_action = medical_recursive_files_dashboard();
+        selector_action.set_draft_recovery_available(true);
+        selector_action.open_command_palette();
+        type_text(&mut selector_action, "artifact toggle 1");
+        press_consumed(&mut selector_action, KeyCode::Enter);
+        assert!(selector_action.selected_artifact_ids.is_empty());
+        assert!(selector_action.status.contains("Restore or discard"));
+    }
+
+    #[test]
+    fn local_draft_recovery_rejects_a_different_encounter_for_an_unsaved_note() {
+        let mut dashboard = medical_recursive_base_dashboard();
+        dashboard.draft_note.id = None;
+        dashboard.draft_note.current_revision = 0;
+        dashboard.draft_note.encounter_id = Some("encounter-current".to_string());
+        dashboard.draft_note.title = "Current unsaved note".to_string();
+        dashboard.draft_note.body = "Current unsaved body".to_string();
+        let working_note_id = dashboard.draft_note.working_note_id.clone();
+        let recovered = MedicalWorkspaceWorkingDraftV1::new(MedicalWorkspaceWorkingDraftInput {
+            client_id: "client-1".to_string(),
+            note_id: None,
+            working_note_id,
+            encounter_id: Some("encounter-other".to_string()),
+            base_note_revision: None,
+            note_title: "Wrong encounter title".to_string(),
+            note_body: "Wrong encounter body".to_string(),
+            agent_request_body: String::new(),
+            selected_file_ids: Vec::new(),
+            selected_reviewed_text_ids: Vec::new(),
+            selected_clip_ids: Vec::new(),
+        })
+        .expect("valid unsaved recovery fixture");
+
+        let error = dashboard
+            .apply_recovered_medical_working_draft(recovered)
+            .expect_err("different encounter must reject recovery");
+        assert!(matches!(
+            error,
+            WorkspaceDraftError::InvalidRecovery(ref message)
+                if message.contains("different encounter")
+        ));
+        assert_eq!(dashboard.draft_note.title, "Current unsaved note");
+        assert_eq!(dashboard.draft_note.body, "Current unsaved body");
+    }
+
+    #[test]
+    fn local_draft_recovery_rejects_a_different_working_note_in_the_same_encounter() {
+        let mut dashboard = medical_recursive_base_dashboard();
+        dashboard.draft_note.id = None;
+        dashboard.draft_note.current_revision = 0;
+        dashboard.draft_note.working_note_id = "working-note-current".to_string();
+        dashboard.draft_note.encounter_id = Some("encounter-current".to_string());
+        dashboard.draft_note.title = "Current unsaved note".to_string();
+        dashboard.draft_note.body = "Current unsaved body".to_string();
+        let recovered = MedicalWorkspaceWorkingDraftV1::new(MedicalWorkspaceWorkingDraftInput {
+            client_id: "client-1".to_string(),
+            note_id: None,
+            working_note_id: "working-note-prior".to_string(),
+            encounter_id: Some("encounter-current".to_string()),
+            base_note_revision: None,
+            note_title: "Prior unsaved title".to_string(),
+            note_body: "Prior unsaved body".to_string(),
+            agent_request_body: String::new(),
+            selected_file_ids: Vec::new(),
+            selected_reviewed_text_ids: Vec::new(),
+            selected_clip_ids: Vec::new(),
+        })
+        .expect("valid unsaved recovery fixture");
+
+        let error = dashboard
+            .apply_recovered_medical_working_draft(recovered)
+            .expect_err("different working note must reject recovery");
+        assert!(matches!(
+            error,
+            WorkspaceDraftError::InvalidRecovery(ref message)
+                if message.contains("different working note")
+        ));
+        assert_eq!(dashboard.draft_note.working_note_id, "working-note-current");
+        assert_eq!(dashboard.draft_note.title, "Current unsaved note");
+        assert_eq!(dashboard.draft_note.body, "Current unsaved body");
+    }
+
+    #[test]
+    fn cold_start_recovery_binding_changes_only_the_internal_working_note_identity() {
+        let mut dashboard = medical_recursive_base_dashboard();
+        dashboard.draft_note.id = None;
+        dashboard.draft_note.current_revision = 0;
+        dashboard.draft_note.working_note_id = "working-note-fresh-start".to_string();
+        dashboard.draft_note.encounter_id = Some("encounter-current".to_string());
+        dashboard.draft_note.title = "Current unsaved note".to_string();
+        dashboard.draft_note.body = "Current unsaved body".to_string();
+        let recovered = MedicalWorkspaceWorkingDraftV1::new(MedicalWorkspaceWorkingDraftInput {
+            client_id: "client-1".to_string(),
+            note_id: None,
+            working_note_id: "working-note-recoverable".to_string(),
+            encounter_id: Some("encounter-current".to_string()),
+            base_note_revision: None,
+            note_title: "Recovered title".to_string(),
+            note_body: "Recovered body".to_string(),
+            agent_request_body: String::new(),
+            selected_file_ids: Vec::new(),
+            selected_reviewed_text_ids: Vec::new(),
+            selected_clip_ids: Vec::new(),
+        })
+        .expect("valid cold-start recovery fixture");
+
+        dashboard
+            .bind_cold_start_recovery_identity(&recovered)
+            .expect("unique same-scope fallback should bind its internal identity");
+        assert_eq!(
+            dashboard.draft_note.working_note_id,
+            "working-note-recoverable"
+        );
+        assert_eq!(dashboard.draft_note.title, "Current unsaved note");
+        assert_eq!(dashboard.draft_note.body, "Current unsaved body");
+
+        dashboard
+            .apply_recovered_medical_working_draft(recovered)
+            .expect("explicit restore should now validate the rebound identity");
+        assert_eq!(dashboard.draft_note.title, "Recovered title");
+        assert_eq!(dashboard.draft_note.body, "Recovered body");
     }
 
     #[test]
@@ -19015,7 +20527,7 @@ mod tests {
 
         let rendered = render_dashboard_lines_at(&dashboard, 180, 60);
 
-        assert!(rendered.contains("Patient ID / MRN"));
+        assert!(rendered.contains("MRN: MRN-123"));
         assert!(!rendered.contains("External ID"));
     }
 
@@ -19152,7 +20664,7 @@ mod tests {
         let chart_rendered = render_dashboard_lines_at(&dashboard, 120, 32);
 
         assert!(
-            !chart_rendered.contains("Agent Work"),
+            !chart_rendered.contains("Context Plan"),
             "120-column chart render should use the two-zone layout and hide the right agent pane:\n{chart_rendered}"
         );
         assert!(chart_rendered.contains("Uploaded Documents"));
@@ -19332,7 +20844,7 @@ mod tests {
         assert_eq!(dashboard.focus, WorkspaceFocus::Workflow);
         assert!(
             dashboard.status.contains("Focused Today's Visit"),
-            "Note Body should tab to the center chart work area before Agent Work: {}",
+            "Note Body should tab to the center chart work area before Context Plan: {}",
             dashboard.status
         );
         assert_eq!(
@@ -19342,14 +20854,10 @@ mod tests {
         assert_eq!(dashboard.focus, WorkspaceFocus::Agent);
         assert_eq!(dashboard.workflow_section, MedicalWorkflowSection::Visit);
         assert!(!dashboard.agent_request.is_active());
-        assert_eq!(
-            dashboard.handle_key_event(KeyEvent::from(KeyCode::Char('r'))),
-            WorkspaceDashboardAction::Consumed
-        );
-        assert!(dashboard.agent_request.is_active());
         for c in "Use eval template".chars() {
             dashboard.handle_key_event(KeyEvent::from(KeyCode::Char(c)));
         }
+        assert!(dashboard.agent_request.is_active());
         assert_eq!(dashboard.agent_request.body, "Use eval template");
         assert_eq!(
             dashboard.handle_key_event(KeyEvent::from(KeyCode::Tab)),
@@ -19465,7 +20973,6 @@ mod tests {
         press_consumed(&mut dashboard, KeyCode::Tab);
         assert_eq!(dashboard.focus, WorkspaceFocus::Agent);
         assert_eq!(dashboard.workflow_section, MedicalWorkflowSection::Visit);
-        press_consumed(&mut dashboard, KeyCode::Char('r'));
         type_text(&mut dashboard, "Use eval template");
         assert_eq!(dashboard.agent_request.body, "Use eval template");
 
@@ -19577,7 +21084,6 @@ mod tests {
             dashboard.draft_note.body = "Existing note body.".to_string();
             if focus == WorkspaceFocus::Agent {
                 dashboard.focus_medical_agent_workpane();
-                press_consumed(&mut dashboard, KeyCode::Char('r'));
                 type_text(&mut dashboard, "Use eval template");
             }
             let before_agent = dashboard.agent_request.body.clone();
@@ -19623,13 +21129,11 @@ mod tests {
         assert_eq!(dashboard.focus, WorkspaceFocus::Agent);
         assert_eq!(dashboard.workflow_section, MedicalWorkflowSection::Visit);
         assert!(!dashboard.agent_request.is_active());
-        press_consumed(&mut dashboard, KeyCode::Char('r'));
-        assert!(dashboard.agent_request.is_active());
-
         type_text(
             &mut dashboard,
             "Use eval template\nDraft assessment from objective measures",
         );
+        assert!(dashboard.agent_request.is_active());
         assert!(
             dashboard
                 .agent_request
@@ -19701,7 +21205,6 @@ mod tests {
         assert_eq!(dashboard.focus, WorkspaceFocus::Workflow);
         press_consumed(&mut dashboard, KeyCode::Tab);
         assert_eq!(dashboard.focus, WorkspaceFocus::Agent);
-        press_consumed(&mut dashboard, KeyCode::Char('r'));
         type_text(&mut dashboard, "Use concise plan");
         let agent_body = dashboard.agent_request.body.clone();
 
@@ -19772,7 +21275,7 @@ mod tests {
         assert_eq!(
             center.agent_scroll_for_tests(),
             0,
-            "center scroll must not mutate Agent Work scroll"
+            "center scroll must not mutate Context Plan scroll"
         );
 
         let mut agent = center.clone();
@@ -19782,7 +21285,7 @@ mod tests {
         assert_eq!(
             agent.workflow_scroll_for_tests(),
             center_scroll_before,
-            "Agent Work scroll must not mutate center scroll"
+            "Context Plan scroll must not mutate center scroll"
         );
         assert!(agent.agent_scroll_for_tests() > 0);
 
@@ -19799,7 +21302,7 @@ mod tests {
         assert_eq!(
             mouse_agent.workflow_scroll_for_tests(),
             center_scroll_before,
-            "mouse scroll in Agent Work must not mutate center scroll"
+            "mouse scroll in Context Plan must not mutate center scroll"
         );
 
         let mut note_body = medical_recursive_base_dashboard();
@@ -19844,7 +21347,7 @@ mod tests {
         assert_eq!(
             dashboard.agent_scroll_for_tests(),
             agent_scroll_before,
-            "trackpad scroll over Uploaded Documents must not scroll the focused Agent Work"
+            "trackpad scroll over Uploaded Documents must not scroll the focused Context Plan"
         );
         assert_ne!(
             dashboard.patient_files_tree_index, file_index_before,
@@ -19903,11 +21406,88 @@ mod tests {
         assert_eq!(
             medium.agent_scroll_for_tests(),
             medium_agent_scroll_before,
-            "medium pointer scroll over Uploaded Documents must not scroll Agent Work"
+            "medium pointer scroll over Uploaded Documents must not scroll Context Plan"
         );
         assert_ne!(
             medium.patient_files_tree_index, medium_file_index_before,
             "medium pointer scroll over Uploaded Documents should move file selection"
+        );
+    }
+
+    #[test]
+    fn medical_dedicated_document_workpane_shares_render_cursor_and_mouse_geometry() {
+        let mut dashboard = medical_recursive_base_dashboard();
+        dashboard.set_document_draft_for_tests(
+            "patient pdf",
+            &"x".repeat(140),
+            "/tmp/fake-referral.pdf",
+            "Fake local file reference only.",
+        );
+        dashboard.set_workflow_section(MedicalWorkflowSection::Documents);
+        dashboard.document_field = DocumentField::Title;
+
+        for viewport in [
+            Rect::new(0, 0, 80, 20),
+            Rect::new(0, 0, 120, 32),
+            Rect::new(0, 0, 160, 45),
+        ] {
+            let areas = MedicalDedicatedWorkpaneAreas::new(viewport).expect("dedicated geometry");
+            let mut buf = Buffer::empty(viewport);
+            dashboard.render(viewport, &mut buf);
+            assert!(buffer_text(&buf, areas.workpane).contains("Patient File Detail"));
+            if areas.clients.width > 0 {
+                assert!(buffer_text(&buf, areas.clients).contains("Patient Directory"));
+                assert!(buffer_text(&buf, areas.notes).contains("Patient Notes"));
+                assert_eq!(
+                    dashboard.mouse_scroll_target(
+                        MouseScrollEvent {
+                            direction: MouseScrollDirection::Down,
+                            column: areas.clients.x + 1,
+                            row: areas.clients.y + 1,
+                        },
+                        Some(viewport),
+                    ),
+                    WorkspaceFocus::Clients
+                );
+                assert_eq!(
+                    dashboard.mouse_scroll_target(
+                        MouseScrollEvent {
+                            direction: MouseScrollDirection::Down,
+                            column: areas.notes.x + 1,
+                            row: areas.notes.y + 1,
+                        },
+                        Some(viewport),
+                    ),
+                    WorkspaceFocus::Notes
+                );
+            }
+
+            let cursor = dashboard
+                .cursor_pos(viewport)
+                .expect("active document field should expose a cursor");
+            assert!(rect_contains(inner_rect(areas.workpane), cursor));
+            assert_eq!(
+                dashboard.mouse_scroll_target(
+                    MouseScrollEvent {
+                        direction: MouseScrollDirection::Down,
+                        column: areas.workpane.x + 1,
+                        row: areas.workpane.y + 2,
+                    },
+                    Some(viewport),
+                ),
+                WorkspaceFocus::Workflow,
+                "pointer inside the visible workpane must not hit standard pane geometry"
+            );
+        }
+
+        let large_viewport = Rect::new(0, 0, 160, 45);
+        let standard_areas = MedicalLargeAreas::new(large_viewport);
+        let cursor = dashboard
+            .cursor_pos(large_viewport)
+            .expect("large document editor cursor");
+        assert!(
+            !rect_contains(inner_rect(standard_areas.active_work), cursor),
+            "long document title should use the visible dedicated workpane width: {cursor:?}"
         );
     }
 
@@ -20019,12 +21599,12 @@ mod tests {
         }
 
         dashboard.focus_medical_agent_workpane();
-        press_consumed(&mut dashboard, KeyCode::Char('r'));
         type_text(&mut dashboard, "Use eval template");
         let agent_status = status_line_text(&dashboard);
         assert!(agent_status.contains("Focus: Agent"));
-        assert!(agent_status.contains("Mode: Agent input"));
-        assert!(agent_status.contains("Keys: Type request"));
+        assert!(agent_status.contains("Mode: Message Codex"));
+        assert!(agent_status.contains("Keys: Enter send"));
+        assert!(agent_status.contains("Shift-Enter newline"));
         assert!(agent_status.contains("Tab/⇧Tab pane"));
         assert!(!agent_status.contains("Work:"));
 
@@ -20056,11 +21636,11 @@ mod tests {
             (WorkspaceFocus::Clients, "↑/↓ patient"),
             (WorkspaceFocus::Notes, "↑/↓ note"),
             (WorkspaceFocus::PatientFiles, "←/→ fold"),
-            (WorkspaceFocus::Demographics, "↑/↓ field"),
+            (WorkspaceFocus::Demographics, "Enter"),
             (WorkspaceFocus::NoteTitle, "↑/↓ stay"),
-            (WorkspaceFocus::NoteBody, "↑/↓ stay"),
+            (WorkspaceFocus::NoteBody, "↑/↓ line"),
             (WorkspaceFocus::Workflow, "↑/↓ section"),
-            (WorkspaceFocus::Agent, "←/→ Agent tab"),
+            (WorkspaceFocus::Agent, "←"),
         ] {
             let mut dashboard = medical_recursive_files_dashboard();
             dashboard.focus = focus;
@@ -20081,11 +21661,11 @@ mod tests {
                     "expected {expected_hint:?} for {focus:?} at width {width}: {footer}"
                 );
                 assert!(
-                    footer.contains("Tab/⇧Tab pane"),
+                    footer.contains("Tab/⇧Tab pane") || footer.contains("Tab pane"),
                     "pane navigation missing for {focus:?} at width {width}: {footer}"
                 );
                 assert!(
-                    footer.contains("Ctrl-P commands"),
+                    footer.contains("Ctrl-P commands") || footer.contains("Ctrl-P actions"),
                     "global Commands shortcut missing for {focus:?} at width {width}: {footer}"
                 );
             }
@@ -20145,17 +21725,170 @@ mod tests {
     fn medical_agent_workpane_escape_is_predictable_and_preserves_local_draft() {
         let mut dashboard = medical_recursive_base_dashboard();
         dashboard.focus_medical_agent_workpane();
-        press_consumed(&mut dashboard, KeyCode::Char('r'));
         type_text(&mut dashboard, "Use eval template");
 
         assert_eq!(
             press_key(&mut dashboard, KeyCode::Esc),
             WorkspaceDashboardAction::Consumed
         );
-        assert_eq!(dashboard.focus, WorkspaceFocus::Workflow);
-        assert_eq!(dashboard.workflow_section, MedicalWorkflowSection::Visit);
+        assert_eq!(dashboard.focus, WorkspaceFocus::Agent);
+        assert_eq!(
+            dashboard.workflow_section,
+            MedicalWorkflowSection::AgentRequest
+        );
+        assert!(!dashboard.agent_request.is_active());
         assert_eq!(dashboard.agent_request.body, "Use eval template");
         assert!(dashboard.context_packets.is_empty());
+
+        assert_eq!(
+            press_key(&mut dashboard, KeyCode::Enter),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert!(dashboard.agent_request.is_active());
+        assert_eq!(dashboard.agent_request.body, "Use eval template");
+    }
+
+    #[test]
+    fn medical_agent_first_printable_starts_a_bottom_pinned_multiline_composer() {
+        let mut dashboard = medical_recursive_base_dashboard();
+        dashboard.focus_medical_agent_workpane();
+
+        press_consumed(&mut dashboard, KeyCode::Char('D'));
+        assert!(dashboard.agent_request.is_active());
+        assert_eq!(dashboard.agent_request.body, "D");
+        assert_eq!(
+            dashboard.workflow_section,
+            MedicalWorkflowSection::AgentRequest
+        );
+        let medium_viewport = Rect::new(0, 0, 120, 32);
+        let medium_inner = inner_rect(MedicalMediumAreas::new(medium_viewport).main);
+        let one_line_medium_editor = dashboard
+            .agent_request_composer_rects(medium_inner, false)
+            .expect("one-line medium composer")
+            .2;
+        let large_viewport = Rect::new(0, 0, 160, 45);
+        let large_inner = inner_rect(MedicalLargeAreas::new(large_viewport).agent);
+        let one_line_large_editor = dashboard
+            .agent_request_composer_rects(large_inner, false)
+            .expect("one-line large composer")
+            .2;
+        type_text(
+            &mut dashboard,
+            "raft assessment\nKeep goals measurable\nFlag missing evidence",
+        );
+        assert_eq!(
+            dashboard.agent_request.body,
+            "Draft assessment\nKeep goals measurable\nFlag missing evidence"
+        );
+
+        for (viewport, one_line_editor) in [
+            (medium_viewport, one_line_medium_editor),
+            (large_viewport, one_line_large_editor),
+        ] {
+            let inner = match WorkspaceLayoutMode::for_area(viewport) {
+                WorkspaceLayoutMode::Medium => inner_rect(MedicalMediumAreas::new(viewport).main),
+                WorkspaceLayoutMode::Large => inner_rect(MedicalLargeAreas::new(viewport).agent),
+                mode => panic!("unexpected test layout {mode:?}"),
+            };
+            let (guidance, header, editor) = dashboard
+                .agent_request_composer_rects(inner, false)
+                .expect("active request should expose pinned composer geometry");
+            assert_eq!(editor.bottom(), inner.bottom());
+            assert_eq!(editor.bottom(), one_line_editor.bottom());
+            assert!(editor.y <= one_line_editor.y);
+            assert!(editor.height >= one_line_editor.height);
+            assert_eq!(guidance.bottom(), header.y);
+            assert_eq!(header.bottom(), editor.y);
+
+            let cursor = dashboard
+                .cursor_pos(viewport)
+                .expect("active request should expose a cursor");
+            assert!(
+                rect_contains(editor, cursor),
+                "cursor {cursor:?} should stay inside {editor:?} at {viewport:?}"
+            );
+
+            let rendered = render_dashboard_lines_at(&dashboard, viewport.width, viewport.height);
+            let plan_row = rendered
+                .lines()
+                .position(|line| line.contains("Plan with Codex"))
+                .expect("conversation header should render above the composer");
+            let composer_row = rendered
+                .lines()
+                .position(|line| line.contains("Message Codex"))
+                .expect("Message Codex header should render");
+            assert!(plan_row < composer_row);
+            assert!(rendered.contains("Flag missing evidence"));
+        }
+    }
+
+    #[test]
+    fn medical_agent_enter_focuses_then_sends_and_shift_enter_adds_a_line() {
+        let mut dashboard = medical_recursive_base_dashboard();
+        dashboard.focus_medical_agent_workpane();
+
+        assert_eq!(
+            press_key(&mut dashboard, KeyCode::Enter),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert!(dashboard.agent_request.is_active());
+        assert!(dashboard.agent_request.body.is_empty());
+
+        type_text(&mut dashboard, "Compare today with the referral");
+        assert_eq!(
+            press_key_event(
+                &mut dashboard,
+                KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT)
+            ),
+            WorkspaceDashboardAction::Consumed
+        );
+        type_text(&mut dashboard, "and prior goals.");
+        assert_eq!(
+            press_key(&mut dashboard, KeyCode::Enter),
+            WorkspaceDashboardAction::SendPlanMessage {
+                patient_id: "client-1".to_string(),
+                note_id: Some("note-1".to_string()),
+                encounter_id: None,
+                content: "Compare today with the referral\nand prior goals.".to_string(),
+            }
+        );
+        assert!(dashboard.agent_request.is_active());
+        assert_eq!(
+            dashboard.agent_request.body,
+            "Compare today with the referral\nand prior goals."
+        );
+        assert!(render_dashboard_lines_at(&dashboard, 160, 45).contains("Sending… draft retained"));
+        assert_eq!(
+            press_key(&mut dashboard, KeyCode::Enter),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert!(dashboard.status.contains("still sending"));
+        dashboard.confirm_plan_message_sent();
+        assert!(!dashboard.agent_request.is_active());
+        assert!(dashboard.agent_request.body.is_empty());
+        assert!(dashboard.context_packets.is_empty());
+    }
+
+    #[test]
+    fn medical_plan_send_failure_retains_exact_composer_for_retry() {
+        let mut dashboard = medical_recursive_base_dashboard();
+        dashboard.focus_medical_agent_workpane();
+        press_consumed(&mut dashboard, KeyCode::Enter);
+        type_text(&mut dashboard, "Keep this exact retry draft");
+
+        assert!(matches!(
+            press_key(&mut dashboard, KeyCode::Enter),
+            WorkspaceDashboardAction::SendPlanMessage { .. }
+        ));
+        dashboard.fail_plan_message_send("Plan message failed before turn start; retry is safe.");
+
+        assert!(dashboard.agent_request.is_active());
+        assert_eq!(dashboard.agent_request.body, "Keep this exact retry draft");
+        assert!(matches!(
+            press_key(&mut dashboard, KeyCode::Enter),
+            WorkspaceDashboardAction::SendPlanMessage { content, .. }
+                if content == "Keep this exact retry draft"
+        ));
     }
 
     #[test]
@@ -20166,6 +21899,9 @@ mod tests {
             ("contact", ":demographics edit"),
             ("demographics", ":demographics"),
             ("coverage", ":coverage edit"),
+            ("coverage card", ":coverage verify"),
+            ("restore draft", ":draft restore"),
+            ("discard draft", ":draft discard"),
             ("note new daily", ":note new"),
             ("file add", ":file add"),
             ("agent handoff", ":agent handoff"),
@@ -20441,7 +22177,7 @@ mod tests {
         assert_eq!(
             dashboard.agent_scroll_for_tests(),
             agent_scroll_before,
-            "palette scroll must not move Agent Work"
+            "palette scroll must not move Context Plan"
         );
         assert_eq!(
             dashboard.patient_files_tree_index, file_index_before,
@@ -20520,64 +22256,89 @@ mod tests {
     fn workspace_focus_commands_jump_to_major_medical_panes() {
         let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
 
-        for (command, focus, status) in [
-            (":patients", WorkspaceFocus::Clients, "Patient directory."),
+        for (command, expected_action, focus, status) in [
+            (
+                ":patients",
+                WorkspaceDashboardAction::Consumed,
+                WorkspaceFocus::Clients,
+                "Patient directory.",
+            ),
             (
                 ":demographics",
+                WorkspaceDashboardAction::Consumed,
                 WorkspaceFocus::Demographics,
                 "Focused patient demographics. Use :demographics edit or :coverage edit for admin fields.",
             ),
             (
                 ":demographics edit",
+                WorkspaceDashboardAction::Consumed,
                 WorkspaceFocus::Demographics,
                 "Editing patient demographics and emergency contact fields. Ctrl-S saves.",
             ),
             (
                 ":coverage edit",
+                WorkspaceDashboardAction::Consumed,
                 WorkspaceFocus::Demographics,
                 "Editing coverage fields. Member ID stays under coverage; Ctrl-S saves.",
             ),
             (
                 ":note title",
+                WorkspaceDashboardAction::Consumed,
                 WorkspaceFocus::NoteTitle,
                 "Focused note title.",
             ),
-            (":note body", WorkspaceFocus::NoteBody, "Focused note body."),
+            (
+                ":note body",
+                WorkspaceDashboardAction::Consumed,
+                WorkspaceFocus::NoteBody,
+                "Focused note body.",
+            ),
             (
                 ":documents",
+                WorkspaceDashboardAction::Consumed,
                 WorkspaceFocus::PatientFiles,
                 "Uploaded Documents focused. Paste/drop a JPG/PDF path.",
             ),
             (
                 ":patient files",
+                WorkspaceDashboardAction::Consumed,
                 WorkspaceFocus::PatientFiles,
                 "Uploaded Documents focused. Paste/drop a JPG/PDF path.",
             ),
             (
                 ":agent request",
+                WorkspaceDashboardAction::Consumed,
                 WorkspaceFocus::Agent,
-                "Agent input ready. Typing is local until Medical Agent Plan review.",
+                "Message Codex. Enter sends; Shift-Enter adds a line; Esc leaves input.",
             ),
             (
                 ":agent preview",
+                WorkspaceDashboardAction::CheckpointDraft,
                 WorkspaceFocus::Agent,
-                "Focused Agent Work.",
+                "Focused Context Plan.",
             ),
             (
                 ":agent inbox",
+                WorkspaceDashboardAction::Consumed,
                 WorkspaceFocus::Agent,
                 "Focused Agent Review.",
             ),
-            (":jobs", WorkspaceFocus::Workflow, "Focused jobs workflow."),
+            (
+                ":jobs",
+                WorkspaceDashboardAction::Consumed,
+                WorkspaceFocus::Workflow,
+                "Focused jobs workflow.",
+            ),
             (
                 ":addenda",
+                WorkspaceDashboardAction::Consumed,
                 WorkspaceFocus::Workflow,
                 "Focused addenda workflow.",
             ),
         ] {
             assert_eq!(
                 dashboard.execute_workspace_command(command),
-                WorkspaceDashboardAction::Consumed
+                expected_action
             );
             assert_eq!(dashboard.focus, focus);
             assert_eq!(dashboard.status, status);
@@ -20612,63 +22373,73 @@ mod tests {
             ),
         ];
 
-        for (command, section, focus, marker) in [
+        for (command, expected_action, section, focus, marker) in [
             (
                 ":workflow visit",
+                WorkspaceDashboardAction::Consumed,
                 MedicalWorkflowSection::Visit,
                 WorkspaceFocus::Workflow,
                 "Today's Visit",
             ),
             (
                 ":workflow proposals",
+                WorkspaceDashboardAction::Consumed,
                 MedicalWorkflowSection::Proposals,
                 WorkspaceFocus::Workflow,
                 "Note Proposals",
             ),
             (
                 ":workflow documents",
+                WorkspaceDashboardAction::Consumed,
                 MedicalWorkflowSection::Documents,
                 WorkspaceFocus::Workflow,
                 "> Uploaded Documents",
             ),
             (
                 ":agent preview",
+                WorkspaceDashboardAction::CheckpointDraft,
                 MedicalWorkflowSection::ContextPacket,
                 WorkspaceFocus::Agent,
-                "Review Packet",
+                "Review Context Plan",
             ),
             (
                 ":agent inbox",
+                WorkspaceDashboardAction::Consumed,
                 MedicalWorkflowSection::AgentInbox,
                 WorkspaceFocus::Agent,
                 "Agent Review",
             ),
             (
                 ":workflow jobs",
+                WorkspaceDashboardAction::Consumed,
                 MedicalWorkflowSection::Jobs,
                 WorkspaceFocus::Workflow,
                 "> Jobs",
             ),
             (
                 ":workflow timeline",
+                WorkspaceDashboardAction::Consumed,
                 MedicalWorkflowSection::Timeline,
                 WorkspaceFocus::Workflow,
                 "> Timeline",
             ),
             (
                 ":scope practice",
+                WorkspaceDashboardAction::Consumed,
                 MedicalWorkflowSection::PracticeLibrary,
                 WorkspaceFocus::Workflow,
                 "> Practice Library",
             ),
             (
                 ":scope intelligence",
+                WorkspaceDashboardAction::Consumed,
                 MedicalWorkflowSection::PracticeIntelligence,
                 WorkspaceFocus::Workflow,
                 "> Practice Intelligence",
             ),
             (
                 ":workflow audit",
+                WorkspaceDashboardAction::Consumed,
                 MedicalWorkflowSection::Audit,
                 WorkspaceFocus::Workflow,
                 "> Audit Trail",
@@ -20676,7 +22447,7 @@ mod tests {
         ] {
             assert_eq!(
                 dashboard.execute_workspace_command(command),
-                WorkspaceDashboardAction::Consumed
+                expected_action
             );
             assert_eq!(dashboard.focus, focus);
             assert_eq!(dashboard.workflow_section, section);
@@ -20808,7 +22579,7 @@ mod tests {
     }
 
     #[test]
-    fn note_editor_arrows_stay_local_and_enter_opens_the_body() {
+    fn note_editor_arrows_edit_locally_and_enter_opens_the_body() {
         let mut dashboard = WorkspaceDashboard {
             focus: WorkspaceFocus::NoteTitle,
             ..WorkspaceDashboard::new(WorkspaceProfile::Medical)
@@ -20829,14 +22600,16 @@ mod tests {
         );
         assert_eq!(dashboard.focus, WorkspaceFocus::NoteBody);
 
+        let original_body = dashboard.draft_note.body.clone();
         for code in [KeyCode::Up, KeyCode::Down] {
             assert_eq!(
                 dashboard.handle_key_event(KeyEvent::from(code)),
                 WorkspaceDashboardAction::Consumed
             );
             assert_eq!(dashboard.focus, WorkspaceFocus::NoteBody);
-            assert!(dashboard.status.contains("Note Body stays focused"));
+            assert_eq!(dashboard.draft_note.body, original_body);
         }
+        assert!(status_line_text(&dashboard).contains("Keys: ↑/↓ line"));
     }
 
     #[test]
@@ -21017,6 +22790,19 @@ mod tests {
             WorkspaceDashboardAction::Consumed
         );
         assert_eq!(dashboard.status, "Save the patient before creating a job.");
+
+        let coverage = medical_command_palette_filter_dashboard("coverage card");
+        let coverage_rendered = render_dashboard_lines_at(&coverage, 160, 40);
+        assert!(coverage_rendered.contains(":coverage verify off"));
+        assert!(coverage_rendered.contains("Save this coverage before comparing the card."));
+
+        let restore = medical_command_palette_filter_dashboard("restore draft");
+        let restore_rendered = render_dashboard_lines_at(&restore, 160, 40);
+        assert!(
+            restore_rendered.contains(":draft restore off"),
+            "restore command should render disabled:\n{restore_rendered}"
+        );
+        assert!(restore_rendered.contains("No recoverable local draft"));
     }
 
     #[test]
@@ -21576,7 +23362,7 @@ mod tests {
 
         assert_eq!(params.len(), 1);
         assert_eq!(params[0].client_id, "client-1");
-        assert_eq!(params[0].kind, "medicare insurance card image");
+        assert_eq!(params[0].kind, "insurance_card");
         assert_eq!(params[0].reference_kind, "local_reference");
         assert_eq!(params[0].intake_source, "drop_or_paste_path");
         assert_eq!(params[0].source_label, "drop/paste local path");
@@ -21612,15 +23398,11 @@ mod tests {
         assert_eq!(dashboard.focus, WorkspaceFocus::Agent);
         assert_eq!(dashboard.workflow_section, MedicalWorkflowSection::Visit);
         assert!(!dashboard.agent_request.is_active());
-        assert!(dashboard.status.contains("Focused Agent Work"));
-        assert_eq!(
-            dashboard.handle_key_event(KeyEvent::from(KeyCode::Char('r'))),
-            WorkspaceDashboardAction::Consumed
-        );
-        assert!(dashboard.agent_request.is_active());
+        assert!(dashboard.status.contains("Focused Plan with Codex"));
         for c in "Use eval template".chars() {
             dashboard.handle_key_event(KeyEvent::from(KeyCode::Char(c)));
         }
+        assert!(dashboard.agent_request.is_active());
         assert_eq!(dashboard.agent_request.body, "Use eval template");
         assert_eq!(
             dashboard.handle_key_event(KeyEvent::from(KeyCode::Tab)),
@@ -21717,7 +23499,12 @@ mod tests {
             WorkspaceDashboardAction::Consumed
         );
         assert_eq!(dashboard.focus, WorkspaceFocus::Demographics);
-        dashboard.demographics_field = DemographicsField::PreferredName;
+        press_consumed(&mut dashboard, KeyCode::Enter);
+        assert_eq!(
+            dashboard.patient_admin_field,
+            PatientAdminField::DisplayName
+        );
+        press_consumed(&mut dashboard, KeyCode::Down);
         type_text(&mut dashboard, "Trackpad Test");
         assert!(
             dashboard
@@ -21725,6 +23512,8 @@ mod tests {
                 .preferred_name
                 .contains("Trackpad Test")
         );
+        press_consumed(&mut dashboard, KeyCode::Esc);
+        assert!(dashboard.patient_admin_edit_mode.is_none());
         assert_eq!(
             dashboard.handle_key_event(KeyEvent::from(KeyCode::BackTab)),
             WorkspaceDashboardAction::Consumed
@@ -21909,7 +23698,6 @@ mod tests {
 
         let selected_before = dashboard.highlighted_patient_file_document_id();
         dashboard.focus_medical_agent_workpane();
-        press_consumed(&mut dashboard, KeyCode::Char('r'));
         for c in "template".chars() {
             dashboard.handle_key_event(KeyEvent::from(KeyCode::Char(c)));
         }
@@ -22116,7 +23904,12 @@ mod tests {
 
         let mut demographics = medical_recursive_base_dashboard();
         demographics.focus = WorkspaceFocus::Demographics;
-        demographics.demographics_field = DemographicsField::PreferredName;
+        press_consumed(&mut demographics, KeyCode::Enter);
+        assert_eq!(
+            demographics.patient_admin_field,
+            PatientAdminField::DisplayName
+        );
+        press_consumed(&mut demographics, KeyCode::Down);
         type_text(&mut demographics, "Tester");
         assert!(demographics.dirty);
         assert!(demographics.draft_client.preferred_name.contains("Tester"));
@@ -22125,6 +23918,8 @@ mod tests {
         let mut contact = medical_recursive_base_dashboard();
         contact.execute_workspace_command(":contact edit");
         type_text(&mut contact, "555-1212");
+        press_consumed(&mut contact, KeyCode::Down);
+        type_text(&mut contact, "mobile");
         press_consumed(&mut contact, KeyCode::Down);
         type_text(&mut contact, "555-3434");
         assert!(contact.draft_client.primary_phone.contains("555-1212"));
@@ -22136,8 +23931,10 @@ mod tests {
         type_text(&mut coverage, "Fake Payer");
         press_consumed(&mut coverage, KeyCode::Down);
         type_text(&mut coverage, "Fake Plan");
-        assert!(coverage.draft_client.payer_name.contains("Fake Payer"));
-        assert!(coverage.draft_client.plan_name.contains("Fake Plan"));
+        assert!(coverage.coverage_draft.payer_name.contains("Fake Payer"));
+        assert!(coverage.coverage_draft.plan_name.contains("Fake Plan"));
+        assert!(coverage.draft_client.payer_name.is_empty());
+        assert!(coverage.draft_client.plan_name.is_empty());
         record(&mut workflows, "coverage editor typing", &coverage);
 
         let mut chart_tree = medical_recursive_base_dashboard();
@@ -22257,7 +24054,6 @@ mod tests {
 
         let mut agent = medical_recursive_base_dashboard();
         agent.focus_medical_agent_workpane();
-        press_consumed(&mut agent, KeyCode::Char('r'));
         type_text(&mut agent, "Use eval template.");
         assert_eq!(agent.agent_request.body, "Use eval template.");
         press_consumed(&mut agent, KeyCode::Tab);
@@ -22575,7 +24371,7 @@ mod tests {
         assert_eq!(params.client_id, "client-1");
         assert_eq!(params.encounter_id.as_deref(), Some("encounter-1"));
         assert_eq!(params.scope, "patient");
-        assert_eq!(params.kind, "medicare insurance card image");
+        assert_eq!(params.kind, "insurance_card");
         assert_eq!(params.detected_kind, "image");
         assert_eq!(params.mime_type.as_deref(), Some("image/jpeg"));
         assert_eq!(params.source_label, "macOS file chooser");
@@ -22844,6 +24640,78 @@ mod tests {
     }
 
     #[test]
+    fn medical_note_body_edits_and_pastes_at_the_cursor() {
+        let mut dashboard = WorkspaceDashboard {
+            focus: WorkspaceFocus::NoteBody,
+            ..WorkspaceDashboard::new(WorkspaceProfile::Medical)
+        };
+        dashboard.draft_note.body = "alpha\nbeta".to_string();
+
+        press_consumed(&mut dashboard, KeyCode::Up);
+        press_consumed(&mut dashboard, KeyCode::Left);
+        press_consumed(&mut dashboard, KeyCode::Char('X'));
+        assert_eq!(dashboard.draft_note.body, "alpXha\nbeta");
+
+        assert_eq!(
+            dashboard.handle_paste("中\n".to_string()),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert_eq!(dashboard.draft_note.body, "alpX中\nha\nbeta");
+    }
+
+    #[test]
+    fn medical_note_body_arrows_follow_visual_wrapping() {
+        let mut dashboard = WorkspaceDashboard {
+            focus: WorkspaceFocus::NoteBody,
+            ..WorkspaceDashboard::new(WorkspaceProfile::Medical)
+        };
+        dashboard.draft_note.body = "a".repeat(90);
+
+        let _ = render_dashboard_lines_at(&dashboard, 80, 20);
+        press_consumed(&mut dashboard, KeyCode::Up);
+        press_consumed(&mut dashboard, KeyCode::Char('X'));
+
+        assert_eq!(
+            dashboard.draft_note.body,
+            format!("{}X{}", "a".repeat(12), "a".repeat(78))
+        );
+        insta::assert_snapshot!(
+            "medical_workspace_multiline_note_editor_80x20",
+            render_dashboard_lines_at(&dashboard, 80, 20)
+        );
+    }
+
+    #[test]
+    fn medical_agent_request_edits_and_pastes_at_the_cursor() {
+        let mut dashboard = medical_recursive_base_dashboard();
+        dashboard.start_agent_request();
+        type_text(&mut dashboard, "first");
+        assert_eq!(
+            press_key_event(
+                &mut dashboard,
+                KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT)
+            ),
+            WorkspaceDashboardAction::Consumed
+        );
+        type_text(&mut dashboard, "second");
+
+        press_consumed(&mut dashboard, KeyCode::Up);
+        press_consumed(&mut dashboard, KeyCode::Left);
+        press_consumed(&mut dashboard, KeyCode::Char('X'));
+        assert_eq!(dashboard.agent_request.body, "firsXt\nsecond");
+
+        assert_eq!(
+            dashboard.handle_paste("中".to_string()),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert_eq!(dashboard.agent_request.body, "firsX中t\nsecond");
+        let footer = line_plain_text(&dashboard.status_line(160));
+        assert!(footer.contains("Enter send"));
+        assert!(footer.contains("Shift-Enter newline"));
+        assert!(footer.contains("Esc leave"));
+    }
+
+    #[test]
     fn unknown_workspace_command_has_no_side_effect() {
         let mut dashboard = WorkspaceDashboard::default();
 
@@ -22898,7 +24766,7 @@ mod tests {
         dashboard.set_record_dates_for_tests("2026-01-01", "2026-06-09");
 
         for (width, height, expected) in [
-            (160, 40, "Agent Work"),
+            (160, 40, "Plan with Codex"),
             (120, 32, "Uploaded Documents"),
             (110, 42, "Uploaded Documents"),
             (105, 55, "Today's Visit"),
@@ -22921,7 +24789,7 @@ mod tests {
             );
             if width == 105 || width == 120 {
                 assert!(
-                    !rendered.contains("Agent Work"),
+                    !rendered.contains("Plan with Codex"),
                     "{width}-column fallback should hide the right agent pane:\n{rendered}"
                 );
             }
@@ -22963,9 +24831,19 @@ mod tests {
         assert!(narrow_rendered.contains("Next:"));
 
         let rendered = render_dashboard_lines_at(&dashboard, 160, 40);
-        assert!(rendered.contains("Agent Work"));
-        assert!(rendered.contains("Mode:"));
-        assert!(rendered.contains("No upload/OCR/payer action/auto-apply"));
+        assert!(rendered.contains("Agent Review"));
+        assert!(rendered.contains("Review Status"));
+        let review_guidance = dashboard
+            .workflow_agent_result_workbench_lines(
+                dashboard
+                    .selected_agent_result()
+                    .expect("returned work should remain selected"),
+            )
+            .iter()
+            .map(line_plain_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(review_guidance.contains("human approval required; no chart changes"));
         assert!(rendered.contains("Uploaded Documents"));
         assert!(!rendered.contains("Communication History"));
         assert!(
@@ -22990,25 +24868,26 @@ mod tests {
         }
         let ask_agent_render = render_dashboard_lines_at(&dashboard, 80, 20);
         assert!(
-            ask_agent_render.contains("Agent: Jordan...; preview"),
-            "compact chart context should keep agent scope, patient, and action visible:\n{ask_agent_render}"
+            ask_agent_render.contains("Plan with Codex · Jordan Patient"),
+            "compact chat should keep the patient-scoped planning thread visible:\n{ask_agent_render}"
         );
         assert!(
-            ask_agent_render.contains("preview"),
-            "compact chart context should expose the next bridge action:\n{ask_agent_render}"
+            ask_agent_render.contains("Draft a follow-up plan."),
+            "compact chat should keep the current composer draft visible:\n{ask_agent_render}"
         );
 
         assert_eq!(
             dashboard.execute_workspace_command(":context packet"),
-            WorkspaceDashboardAction::Consumed
+            WorkspaceDashboardAction::CheckpointDraft
         );
+        dashboard.set_plan_snapshot(test_plan_snapshot());
         let packet_render = render_dashboard_lines_at(&dashboard, 80, 20);
         assert!(
-            packet_render.contains("Agent: Jordan...; Ctrl-G opens agent"),
+            packet_render.contains("Agent: Jordan...; Ctrl-G submits plan"),
             "packet preview should keep chart origin visible in compact chart context:\n{packet_render}"
         );
         assert!(
-            packet_render.contains("Ctrl-G opens"),
+            packet_render.contains("Ctrl-G submits"),
             "packet preview should expose compact handoff action:\n{packet_render}"
         );
         assert!(
@@ -23078,33 +24957,60 @@ mod tests {
     #[test]
     fn medical_wayfinding_keeps_primary_context_visible() {
         let mut dashboard = medical_recursive_base_dashboard();
-        for (command, scope, visible_scope, expected_action) in [
-            (":scope patient", "Today's Visit", "Today's Visit", "Next:"),
+        for (command, expected_result, scope, visible_scope, expected_action) in [
+            (
+                ":scope patient",
+                WorkspaceDashboardAction::Consumed,
+                "Today's Visit",
+                "Today's Visit",
+                "Next:",
+            ),
             (
                 ":scope files",
+                WorkspaceDashboardAction::Consumed,
                 "Uploaded Documents",
                 "Documents",
                 "Paste/drop JPG/PDF",
             ),
-            (":scope packet", "Agent Work", "Agent Work", "Blocked:"),
-            (":scope review", "Agent Review", "Returned", "Blocked:"),
+            (
+                ":scope packet",
+                WorkspaceDashboardAction::CheckpointDraft,
+                "Context Plan",
+                "Context Plan",
+                "Blocked:",
+            ),
+            (
+                ":scope review",
+                WorkspaceDashboardAction::Consumed,
+                "Agent Review",
+                "Returned",
+                "Blocked:",
+            ),
             (
                 ":scope practice",
+                WorkspaceDashboardAction::Consumed,
                 "Practice Library",
                 "Practice Lib",
                 "Next:",
             ),
             (
                 ":scope intelligence",
+                WorkspaceDashboardAction::Consumed,
                 "Practice Intelligence",
                 "Practice Int",
                 "Read-only",
             ),
-            (":scope audit", "Audit Trail", "Audit Trail", "Read-only"),
+            (
+                ":scope audit",
+                WorkspaceDashboardAction::Consumed,
+                "Audit Trail",
+                "Audit Trail",
+                "Read-only",
+            ),
         ] {
             assert_eq!(
                 dashboard.execute_workspace_command(command),
-                WorkspaceDashboardAction::Consumed,
+                expected_result,
                 "{command} should route to a scope"
             );
             let compact = render_dashboard_lines_at(&dashboard, 80, 20);
@@ -23126,7 +25032,7 @@ mod tests {
                     || matches!(
                         scope,
                         "Uploaded Documents"
-                            | "Agent Work"
+                            | "Context Plan"
                             | "Agent Review"
                             | "Practice Intelligence"
                             | "Audit Trail"
@@ -23149,8 +25055,8 @@ mod tests {
             ("add patient file", "Add file reference"),
             ("ask codex about eval", "Write agent instructions"),
             ("review codex result", "Open returned work review"),
-            ("preview codex packet", "Review Packet"),
-            ("compare packet", "Compare medical plan and result"),
+            ("preview codex packet", "Review Context Plan"),
+            ("compare packet", "Compare Context Plan and result"),
             ("returned work", "Open returned work review"),
             ("open last scope", "Open last scope"),
             ("return to patient chart", "Open Patient Chart"),
@@ -23179,7 +25085,7 @@ mod tests {
         );
         let unsaved_render = render_dashboard_lines_at(&unsaved, 160, 45);
         assert!(unsaved_render.contains("Patient Demographics"));
-        assert!(unsaved_render.contains("Agent Work"));
+        assert!(unsaved_render.contains("Plan with Codex"));
         assert!(unsaved_render.contains("HPI:"));
         assert!(unsaved_render.contains("Assessment:"));
 
@@ -23190,7 +25096,7 @@ mod tests {
                 .contains("Open encounter")
         );
         let no_encounter_render = render_dashboard_lines_at(&no_encounter, 120, 32);
-        assert!(!no_encounter_render.contains("Agent Work"));
+        assert!(!no_encounter_render.contains("Plan with Codex"));
         assert!(no_encounter_render.contains("Uploaded Documents"));
         assert_eq!(
             no_encounter.execute_workspace_command(":first eval"),
@@ -23211,7 +25117,7 @@ mod tests {
                 .contains("Write eval note")
         );
         let empty_note_render = render_dashboard_lines_at(&empty_note, 160, 45);
-        assert!(empty_note_render.contains("Agent Work"));
+        assert!(empty_note_render.contains("Plan with Codex"));
         assert!(empty_note_render.contains("HPI:"));
         assert!(empty_note_render.contains("Plan:"));
 
@@ -23226,16 +25132,16 @@ mod tests {
             .selected_artifact_ids
             .insert("document-1".to_string());
         let selected_file_render = render_dashboard_lines_at(&selected_file, 160, 45);
-        assert!(selected_file_render.contains("Agent Work"));
-        assert!(selected_file_render.contains("context: 1 files"));
+        assert!(selected_file_render.contains("Plan with Codex"));
+        assert!(selected_file_render.contains("Context  1 files"));
         assert!(selected_file_render.contains("Uploaded Documents"));
 
         let mut packet_ready = selected_file.clone();
         packet_ready.agent_request.body =
             "Review this first eval and selected referral metadata.".to_string();
         let packet_ready_render = render_dashboard_lines_at(&packet_ready, 160, 45);
-        assert!(packet_ready_render.contains("Agent Work"));
-        assert!(packet_ready_render.contains("draft: Review this first eval"));
+        assert!(packet_ready_render.contains("Plan with Codex"));
+        assert!(packet_ready_render.contains("Review this first eval"));
 
         let mut packet_sent = selected_file;
         packet_sent.push_context_packet_for_tests(test_context_packet(
@@ -23246,8 +25152,8 @@ mod tests {
             "1 selected artifact",
         ));
         let packet_sent_render = render_dashboard_lines_at(&packet_sent, 160, 45);
-        assert!(packet_sent_render.contains("Agent Work"));
-        assert!(packet_sent_render.contains("Mode:"));
+        assert!(packet_sent_render.contains("Codex is working"));
+        assert!(packet_sent_render.contains("Conversation"));
         assert!(!packet_sent_render.contains("Communication History"));
     }
 
@@ -23263,49 +25169,70 @@ mod tests {
             WorkspaceDashboardAction::Consumed
         );
         let request_empty = render_dashboard_lines_at(&dashboard, 160, 45);
-        assert!(request_empty.contains("> Request:"));
-        assert!(request_empty.contains("request: type local instructions"));
-        let cursor = dashboard
-            .cursor_pos(Rect::new(0, 0, 160, 45))
-            .expect("Request row should expose a cursor when it is the active typing target");
-        let request_row = request_empty
+        assert!(request_empty.contains("Plan with Codex"));
+        assert!(request_empty.contains("Message Codex"));
+        assert!(request_empty.contains("Ask about the patient picture"));
+        let plan_row = request_empty
             .lines()
-            .position(|line| line.contains("> Request:"))
-            .expect("request input row should render");
-        assert_eq!(
-            usize::from(cursor.1),
-            request_row,
-            "cursor should land on the rendered Request row:\n{request_empty}"
+            .position(|line| line.contains("Plan with Codex"))
+            .expect("patient plan header should render");
+        let composer_row = request_empty
+            .lines()
+            .position(|line| line.contains("Message Codex"))
+            .expect("pinned Message Codex composer should render");
+        assert!(
+            plan_row < composer_row,
+            "conversation should precede the composer"
+        );
+        let viewport = Rect::new(0, 0, 160, 45);
+        let agent_inner = inner_rect(MedicalLargeAreas::new(viewport).agent);
+        let (_, _, editor_rect) = dashboard
+            .agent_request_composer_rects(agent_inner, false)
+            .expect("active request should have a pinned editor");
+        let cursor = dashboard
+            .cursor_pos(viewport)
+            .expect("Message Codex editor should expose a cursor");
+        assert!(
+            rect_contains(editor_rect, cursor),
+            "cursor should stay inside the pinned editor {editor_rect:?}, got {cursor:?}\n{request_empty}"
         );
 
         for c in "Draft a follow-up plan.".chars() {
             dashboard.handle_key_event(KeyEvent::from(KeyCode::Char(c)));
         }
         let request_ready = render_dashboard_lines_at(&dashboard, 160, 45);
-        assert!(
-            request_ready.contains("review: :agent preview"),
-            "expected agent request next action:\n{request_ready}"
-        );
+        assert!(request_ready.contains("Draft a follow-up plan."));
+        assert!(request_ready.contains("Enter send"));
+
+        dashboard.set_plan_snapshot(test_plan_snapshot());
 
         assert_eq!(
             dashboard.execute_workspace_command(":context packet"),
-            WorkspaceDashboardAction::Consumed
+            WorkspaceDashboardAction::CheckpointDraft
         );
         let packet_ready = render_dashboard_lines_at(&dashboard, 160, 45);
-        assert!(packet_ready.contains("Agent Work"));
-        assert!(packet_ready.contains("Review Packet"));
-        assert!(packet_ready.contains("Next: Ctrl-G opens agent"));
-        assert!(packet_ready.contains("Agent sees"));
-        assert!(packet_ready.contains("Agent cannot"));
-        assert!(packet_ready.contains("return: /workspacemedical"));
-        assert!(packet_ready.contains("boundary: selected-only"));
+        assert!(packet_ready.contains("Context Plan"));
+        let packet_guidance = dashboard
+            .agent_workpane_handoff_lines()
+            .iter()
+            .map(line_plain_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(packet_guidance.contains("Ctrl-G submits the reviewed Codex plan"));
+        assert!(packet_guidance.contains("Codex sees"));
+        assert!(packet_guidance.contains("Codex cannot"));
+        assert!(packet_guidance.contains("return: /workspace-medical"));
+        assert!(packet_guidance.contains("boundary: selected-only"));
 
         let mut missing_request = WorkspaceDashboard::new(WorkspaceProfile::Medical);
         missing_request.set_context_for_tests("Jordan Patient", "Visit note", "Draft plan.");
         missing_request.draft_client.id = Some("client-1".to_string());
         missing_request.execute_workspace_command(":context packet");
-        let missing_request_render = render_dashboard_lines_at(&missing_request, 160, 45);
-        assert!(missing_request_render.contains("blocked: Type agent instructions first"));
+        assert!(
+            missing_request
+                .workflow_primary_next_action_text()
+                .contains("Ask Codex to publish an evidence-linked plan")
+        );
 
         let mut unsaved_patient = WorkspaceDashboard::new(WorkspaceProfile::Medical);
         unsaved_patient.set_context_for_tests("Jordan Patient", "Visit note", "Draft plan.");
@@ -23314,12 +25241,14 @@ mod tests {
             unsaved_patient.handle_key_event(KeyEvent::from(KeyCode::Char(c)));
         }
         unsaved_patient.execute_workspace_command(":context packet");
-        let unsaved_patient_render = render_dashboard_lines_at(&unsaved_patient, 160, 45);
-        assert!(unsaved_patient_render.contains("blocked: Save workspace"));
+        assert_eq!(
+            unsaved_patient.workflow_primary_next_action_text(),
+            "Blocked: Save workspace"
+        );
     }
 
     #[test]
-    fn medical_agent_instructions_are_local_until_plan_review() {
+    fn medical_agent_messages_are_audited_before_master_handoff() {
         let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
         dashboard.set_context_for_tests("Jordan Patient", "Visit note", "Objective measures only.");
         dashboard.draft_client.id = Some("client-1".to_string());
@@ -23344,26 +25273,48 @@ mod tests {
         assert_eq!(
             dashboard.context_packet_count_for_tests(),
             0,
-            "typing agent instructions should not create or send a Medical Agent Plan"
+            "typing agent instructions should not create or send a Context Plan"
         );
 
         let request_render = render_dashboard_lines_at(&dashboard, 160, 45);
-        assert!(request_render.contains("Mode:"));
-        assert!(request_render.contains("> Request: Use my eval template"));
-        assert!(request_render.contains("Local only; preview packet before Ctrl-G"));
+        assert!(request_render.contains("Plan with Codex"));
+        assert!(request_render.contains("Message Codex"));
+        assert!(request_render.contains("Use my eval template"));
+        let chat_guidance = dashboard
+            .agent_workpane_chat_lines()
+            .iter()
+            .map(line_plain_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(chat_guidance.contains("Ask Codex to publish an evidence-linked plan"));
+        assert!(chat_guidance.contains("before Ctrl-G handoff"));
+        let request_guidance = dashboard
+            .agent_workpane_request_lines()
+            .iter()
+            .map(line_plain_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(request_guidance.contains("Enter starts an audited Plan turn"));
+        assert!(request_guidance.contains("Ctrl-G stays locked until Codex publishes"));
 
         assert_eq!(
             dashboard.execute_workspace_command(":agent preview"),
-            WorkspaceDashboardAction::Consumed
+            WorkspaceDashboardAction::CheckpointDraft
         );
         let preview_render = render_dashboard_lines_at(&dashboard, 160, 45);
-        assert!(preview_render.contains("Review Packet"));
-        assert!(preview_render.contains("Search state is not included."));
+        assert!(preview_render.contains("Review Context Plan"));
         assert!(preview_render.contains("Use my eval template"));
+        let preview_guidance = dashboard
+            .agent_workpane_handoff_lines()
+            .iter()
+            .map(line_plain_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(preview_guidance.contains("Search state is not included."));
         assert_eq!(
             dashboard.context_packet_count_for_tests(),
             0,
-            "previewing the Medical Agent Plan should not persist/send by itself"
+            "previewing the Context Plan should not persist/send by itself"
         );
     }
 
@@ -23407,7 +25358,7 @@ mod tests {
         assert!(
             dashboard
                 .status
-                .contains("Recovery: stale packet selections removed")
+                .contains("Recovery: stale Context Plan selections removed")
         );
         assert!(dashboard.status.contains("1 file"));
         assert!(dashboard.status.contains("1 text"));
@@ -23436,7 +25387,7 @@ mod tests {
         }
         assert_eq!(
             dashboard.execute_workspace_command(":context packet"),
-            WorkspaceDashboardAction::Consumed
+            WorkspaceDashboardAction::CheckpointDraft
         );
         let preview = dashboard.context_packet_preview_lines().join("\n");
         assert!(preview.contains("retry is safe"));
@@ -23481,10 +25432,9 @@ mod tests {
         empty.set_context_for_tests("Jordan Patient", "Visit note", "Draft plan.");
         empty.execute_workspace_command(":agent inbox");
         let empty_render = render_dashboard_lines_at(&empty, 160, 45);
-        assert!(empty_render.contains("Agent Work"));
         assert!(empty_render.contains("Agent Review"));
-        assert!(empty_render.contains("no Medical Agent Plan history"));
-        assert!(empty_render.contains("Submit Medical Agent Plan first"));
+        assert!(empty_render.contains("no Context Plan history"));
+        assert!(empty_render.contains("submit a Context Plan first"));
 
         let mut packet_only = WorkspaceDashboard::new(WorkspaceProfile::Medical);
         packet_only.set_context_for_tests("Jordan Patient", "Visit note", "Draft plan.");
@@ -23512,7 +25462,7 @@ mod tests {
         let result_render = render_dashboard_lines_at(&packet_only, 160, 45);
         assert!(result_render.contains("next: Inspect result (review pending)"));
         assert!(result_render.contains("Returned Work"));
-        assert!(result_render.contains("Medical Plan History"));
+        assert!(result_render.contains("Context Plan History"));
         assert!(result_render.contains("What Agent Saw"));
         assert!(result_render.contains("Safe Actions"));
         assert!(result_render.contains("Review Status"));
@@ -23546,6 +25496,81 @@ mod tests {
         assert!(signed_render.contains("Make job"));
         assert!(signed_render.contains("Make note proposal"));
         assert!(signed_render.contains("requires addendum"));
+    }
+
+    #[test]
+    fn medical_agent_open_run_requires_a_submitted_context_plan() {
+        let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+
+        assert_eq!(
+            dashboard.execute_workspace_command(":agent open run"),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert_eq!(
+            dashboard.status,
+            "Submit a Context Plan before opening the full Codex run."
+        );
+
+        dashboard.push_context_packet_for_tests(test_context_packet(
+            "packet-1",
+            "client-1",
+            Some("note-1"),
+            "Analyze the longitudinal context.",
+            "0 selected artifacts",
+        ));
+
+        assert_eq!(
+            dashboard.execute_workspace_command(":agent open run"),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert_eq!(
+            dashboard.status,
+            "No recorded full Codex run is available for this Context Plan."
+        );
+
+        dashboard.agent_runs = vec![test_agent_run("run-1", "packet-1", "running")];
+        assert_eq!(
+            dashboard.execute_workspace_command(":agent open run"),
+            WorkspaceDashboardAction::OpenAgentRun {
+                thread_id: "thread-1".to_string(),
+                run_id: "run-1".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn medical_agent_failed_run_is_not_presented_as_still_running() {
+        let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
+        dashboard.push_context_packet_for_tests(test_context_packet(
+            "packet-1",
+            "client-1",
+            Some("note-1"),
+            "Analyze the longitudinal context.",
+            "0 selected artifacts",
+        ));
+        dashboard.agent_runs = vec![test_agent_run("run-1", "packet-1", "failed")];
+        dashboard.focus_workflow_section(MedicalWorkflowSection::AgentInbox);
+
+        assert_ne!(dashboard.agent_workpane_title(), "Codex Running");
+        assert_eq!(
+            dashboard.execute_workspace_command(":agent open run"),
+            WorkspaceDashboardAction::OpenAgentRun {
+                thread_id: "thread-1".to_string(),
+                run_id: "run-1".to_string(),
+            }
+        );
+
+        let rendered = dashboard
+            .workflow_agent_review_workbench_lines()
+            .iter()
+            .map(line_plain_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("Codex Run Failed"));
+        assert!(rendered.contains("Synthetic model failure."));
+        assert!(rendered.contains("submit a new Context Plan"));
+        assert!(!rendered.contains("full Codex analysis is running in the background"));
     }
 
     #[test]
@@ -23662,19 +25687,19 @@ mod tests {
 
         let scenarios = medical_recursive_render_scenarios();
         let mut manifest = String::from(
-            "# /workspacemedical deterministic readability harness\n\n\
+            "# /workspace-medical deterministic readability harness\n\n\
              This harness is repo-native and does not drive Terminal.app. It writes exact text renders \
              for fixed terminal sizes plus review metadata for the main clinical loop.\n\n",
         );
         let mut html = String::from(
-            "<!doctype html><meta charset=\"utf-8\"><title>/workspacemedical readability harness</title>\
+            "<!doctype html><meta charset=\"utf-8\"><title>/workspace-medical readability harness</title>\
              <style>body{font-family:-apple-system,BlinkMacSystemFont,\"Segoe UI\",sans-serif;margin:24px;background:#f7f7f4;color:#1f2933}\
              h1{margin-bottom:4px}h2{margin-top:28px;border-top:1px solid #d8d6ce;padding-top:16px}\
              details{margin:12px 0;padding:12px;background:white;border:1px solid #d8d6ce;border-radius:6px}\
              summary{font-weight:700;cursor:pointer}pre{overflow:auto;background:#111827;color:#e5e7eb;padding:12px;border-radius:4px;font:12px/1.25 Menlo,Consolas,monospace}\
              a{color:#075985}.purpose{color:#4b5563}.files{font-size:13px}</style>\
-             <h1>/workspacemedical readability harness</h1>\
-             <p>Deterministic render review for Patient Chart, Uploaded Documents, Medical Agent Plan, returned work, practice scopes, audit, and command search.</p>",
+             <h1>/workspace-medical readability harness</h1>\
+             <p>Deterministic render review for Patient Chart, Uploaded Documents, Context Plan, Agent Review, practice scopes, audit, and command search.</p>",
         );
         let mut scenario_json = Vec::new();
         let mut current_group = "";
@@ -23738,7 +25763,7 @@ mod tests {
         std::fs::write(
             output_dir.join("manifest.json"),
             serde_json::to_string_pretty(&json!({
-                "harness": "workspacemedical deterministic readability harness",
+                "harness": "workspace-medical deterministic readability harness",
                 "sizes": MEDICAL_RECURSIVE_RENDER_SIZES
                     .iter()
                     .map(|(width, height)| json!({"width": width, "height": height}))
@@ -23778,7 +25803,7 @@ mod tests {
         assert!(manifest.contains("dropped-jpg-file-tree"));
         assert!(manifest.contains("scanned-card-referral-files"));
         assert!(json_manifest.contains("\"group\": \"Patient Chart\""));
-        assert!(json_manifest.contains("\"group\": \"Medical Agent Plan\""));
+        assert!(json_manifest.contains("\"group\": \"Context Plan\""));
         assert!(index.contains("120x32 primary review"));
         assert!(index.contains("100x28 compact review"));
 
@@ -23822,7 +25847,7 @@ mod tests {
             | "packet-preview-file-reference"
             | "packet-preview-reviewed-text"
             | "packet-preview-clip"
-            | "stale-packet-selection" => "Medical Agent Plan",
+            | "stale-packet-selection" => "Context Plan",
             "agent-inbox-empty"
             | "returned-work-draft"
             | "agent-inbox-result"
@@ -23966,20 +25991,22 @@ mod tests {
                 "Saved clip selection: agent inclusion state should be readable."
             }
             "packet-preview-file-reference" => {
-                "Medical Agent Plan preview from file metadata: selected-only boundary should be clear."
+                "Context Plan preview from file metadata: selected-only boundary should be clear."
             }
             "packet-preview-reviewed-text" => {
-                "Medical Agent Plan preview from reviewed text: selected-only text boundary should be clear."
+                "Context Plan preview from reviewed text: selected-only text boundary should be clear."
             }
             "packet-preview-clip" => {
-                "Medical Agent Plan preview from a clip: excerpt-only boundary should be clear."
+                "Context Plan preview from a clip: excerpt-only boundary should be clear."
             }
             "stale-packet-selection" => {
                 "Recovered agent selection: stale selections are pruned and retry is safe."
             }
-            "agent-request" => "Ask Agent draft: request entry should not imply prompt submission.",
+            "agent-request" => {
+                "Instructions for Codex draft: request entry should not imply prompt submission."
+            }
             "context-packet-preview" => {
-                "Medical Agent Plan checklist: what the agent sees and cannot do should be obvious."
+                "Context Plan checklist: what Codex sees and cannot do should be obvious."
             }
             "agent-inbox-empty" => {
                 "Agent Review with no handoff: blocked next action should say how to unlock it."
@@ -24035,11 +26062,315 @@ mod tests {
         );
 
         for (width, height) in [(160, 40), (120, 32), (100, 28), (80, 20), (50, 10)] {
+            let rendered = render_dashboard_lines_at(&dashboard, width, height);
+            if width == 160 {
+                assert!(rendered.contains("Save Patient First"));
+                assert!(rendered.contains("blocked · save patient first"));
+                assert!(!rendered.contains("ready to plan"));
+                assert!(!rendered.contains("Enter send"));
+            }
             insta::assert_snapshot!(
                 format!("medical_workspace_dashboard_{width}x{height}"),
-                render_dashboard_lines_at(&dashboard, width, height)
+                rendered
             );
         }
+
+        dashboard.focus_medical_agent_workpane();
+        let unsaved_agent = render_dashboard_lines_at(&dashboard, 160, 40);
+        assert!(unsaved_agent.contains("Mode: Save patient first"));
+        assert!(unsaved_agent.contains("Ctrl-S save patient"));
+        assert!(!unsaved_agent.contains("Enter send"));
+    }
+
+    fn medical_demographics_snapshot_dashboard() -> WorkspaceDashboard {
+        let mut summary = medical_recursive_base_dashboard();
+        summary.draft_client.legal_first_name = "Jordan".to_string();
+        summary.draft_client.legal_middle_name = "Q".to_string();
+        summary.draft_client.legal_last_name = "Patient".to_string();
+        summary.draft_client.primary_phone = "555-0101".to_string();
+        summary.draft_client.email = "jordan.fake@example.test".to_string();
+        summary.draft_client.address_line_1 = "10 Example Street".to_string();
+        summary.draft_client.city = "Exampleville".to_string();
+        summary.draft_client.state_or_province = "IL".to_string();
+        summary.draft_client.postal_code = "60000".to_string();
+        summary.draft_client.emergency_contact_name = "Maya Contact".to_string();
+        summary.draft_client.emergency_contact_phone = "555-0199".to_string();
+        summary.focus = WorkspaceFocus::Demographics;
+        summary.status = "Focused patient demographics.".to_string();
+        summary
+    }
+
+    #[test]
+    fn medical_demographics_summary_render_snapshot() {
+        let summary = medical_demographics_snapshot_dashboard();
+        insta::assert_snapshot!(
+            "medical_workspace_demographics_summary_160x40",
+            render_dashboard_lines_at(&summary, 160, 40)
+        );
+    }
+
+    #[test]
+    fn medical_demographics_editor_render_snapshot() {
+        let mut summary = medical_demographics_snapshot_dashboard();
+        summary.open_patient_admin_editor(
+            PatientAdminEditMode::Contact,
+            PatientAdminField::DisplayName,
+        );
+        summary.patient_admin_field = PatientAdminField::ContactNotes;
+        summary.draft_client.contact_notes =
+            "Call the fake emergency contact before scheduling.".to_string();
+        insta::assert_snapshot!(
+            "medical_workspace_demographics_editor_120x32",
+            render_dashboard_lines_at(&summary, 120, 32)
+        );
+    }
+
+    fn medical_coverage_snapshot_dashboard() -> WorkspaceDashboard {
+        let coverage = test_coverage(
+            "coverage-primary",
+            "client-1",
+            CoveragePriority::Primary,
+            WorkspaceBillingReadiness::Mismatch,
+        );
+        let client = test_client("client-1", "Jordan Patient");
+        let mut coverage_editor = medical_recursive_base_dashboard();
+        coverage_editor.clients = vec![client.clone()];
+        coverage_editor.draft_client = ClientDraft::from_client(&client);
+        coverage_editor.coverages = vec![coverage.clone()];
+        coverage_editor.coverage_draft =
+            CoverageDraft::try_from(&coverage).expect("coverage draft");
+        coverage_editor.execute_workspace_command(":coverage edit");
+        coverage_editor
+    }
+
+    #[test]
+    fn medical_coverage_editor_render_snapshot() {
+        let coverage_editor = medical_coverage_snapshot_dashboard();
+        insta::assert_snapshot!(
+            "medical_workspace_coverage_editor_120x32",
+            render_dashboard_lines_at(&coverage_editor, 120, 32)
+        );
+    }
+
+    #[test]
+    fn medical_card_comparison_render_snapshot() {
+        let mut coverage_editor = medical_coverage_snapshot_dashboard();
+        let mut card_document = patient_file(
+            "document-card",
+            "Fake Medicare card front",
+            "insurance_card",
+            "/tmp/fake-card.jpg",
+        );
+        card_document.sha256 = Some("a".repeat(64));
+        card_document.content_sha256 = Some("a".repeat(64));
+        card_document.existence_status = "present".to_string();
+        coverage_editor.documents = vec![card_document];
+        coverage_editor.execute_workspace_command(":coverage card");
+        insta::assert_snapshot!(
+            "medical_workspace_card_comparison_120x32",
+            render_dashboard_lines_at(&coverage_editor, 120, 32)
+        );
+    }
+
+    #[test]
+    fn medical_agent_composer_render_snapshot() {
+        let mut composer = medical_recursive_base_dashboard();
+        composer.focus_medical_agent_workpane();
+        type_text(
+            &mut composer,
+            "Draft assessment\nKeep goals measurable\nFlag missing evidence",
+        );
+        let rendered = render_dashboard_lines_at(&composer, 160, 45);
+        assert!(rendered.contains("Message Codex"));
+        assert!(rendered.contains("Enter send"));
+        insta::assert_snapshot!("medical_workspace_agent_composer_160x45", rendered);
+    }
+
+    #[test]
+    fn medical_persistent_plan_conversation_render_snapshot() {
+        let mut dashboard = medical_recursive_base_dashboard();
+        dashboard.focus_medical_agent_workpane();
+        dashboard.set_plan_snapshot(test_plan_snapshot());
+        dashboard.set_plan_streaming_status(Some("checking prior goals".to_string()));
+        dashboard.append_plan_stream_delta(
+            "I am comparing the most recent gait observations with the referral.",
+        );
+
+        let rendered = render_dashboard_lines_at(&dashboard, 160, 45);
+        assert!(rendered.contains("plan: checking prior goals"));
+        assert!(rendered.contains("Codex · question"));
+        assert!(rendered.contains("You · answer"));
+        assert!(rendered.contains("Context refreshed from checkpoint r4."));
+        assert!(rendered.contains("I am comparing the most recent gait"));
+        assert!(!rendered.contains("Workspace Planner"));
+        insta::assert_snapshot!(
+            "medical_workspace_persistent_plan_conversation_160x45",
+            rendered
+        );
+
+        dashboard.clear_plan_stream();
+        dashboard
+            .plan_snapshot
+            .as_mut()
+            .expect("plan snapshot")
+            .revisions[0]
+            .status = codex_app_server_protocol::WorkspacePlanRevisionStatus::Outdated;
+        let outdated = render_dashboard_lines_at(&dashboard, 160, 45);
+        assert!(outdated.contains("Refresh needed"));
+    }
+
+    #[test]
+    fn medical_persistent_plan_conversation_never_crosses_patient_scope() {
+        let mut dashboard = medical_recursive_base_dashboard();
+        dashboard.focus_medical_agent_workpane();
+        let mut snapshot = test_plan_snapshot();
+        snapshot.session.as_mut().expect("plan session").client_id = "another-patient".to_string();
+        dashboard.set_plan_snapshot(snapshot);
+        dashboard.set_plan_streaming_status(Some("analyzing another patient".to_string()));
+        dashboard.append_plan_stream_delta("private cross-patient response");
+
+        let rendered = render_dashboard_lines_at(&dashboard, 160, 45);
+        assert!(!rendered.contains("community mobility"));
+        assert!(!rendered.contains("analyzing another patient"));
+        assert!(!rendered.contains("private cross-patient response"));
+    }
+
+    #[test]
+    fn medical_plan_rail_prefers_current_or_submitted_scope_over_outdated_history() {
+        let mut dashboard = medical_recursive_base_dashboard();
+        dashboard.focus_medical_agent_workpane();
+        let mut snapshot = test_plan_snapshot();
+        snapshot.revisions[0].status = WorkspacePlanRevisionStatus::Submitted;
+        let mut outdated = snapshot.revisions[0].clone();
+        outdated.id = "plan-revision-3".to_string();
+        outdated.revision = 3;
+        outdated.status = WorkspacePlanRevisionStatus::Outdated;
+        snapshot.revisions.push(outdated);
+        dashboard.set_plan_snapshot(snapshot);
+
+        let rail_text = dashboard
+            .agent_workpane_chat_lines()
+            .iter()
+            .map(line_plain_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let rendered = render_dashboard_lines_at(&dashboard, 160, 45);
+        assert!(rendered.contains("plan r2 submitted to master"));
+        assert!(rail_text.contains("Ctrl-G retries only its exact audited handoff"));
+        assert!(!rendered.contains("plan r3 outdated"));
+    }
+
+    #[test]
+    fn medical_handoff_selects_the_active_note_before_revision_status() {
+        let mut dashboard = medical_recursive_base_dashboard();
+        let mut snapshot = test_plan_snapshot();
+        snapshot.revisions[0].status = WorkspacePlanRevisionStatus::Submitted;
+        let submitted_id = snapshot.revisions[0].id.clone();
+        let mut other_note_current = snapshot.revisions[0].clone();
+        other_note_current.id = "plan-revision-other-note".to_string();
+        other_note_current.revision = 3;
+        other_note_current.status = WorkspacePlanRevisionStatus::Current;
+        other_note_current.note_id = Some("note-2".to_string());
+        snapshot.revisions.push(other_note_current);
+        dashboard.set_plan_snapshot(snapshot);
+
+        let selected = dashboard
+            .active_plan_revision_for_handoff()
+            .expect("active note should retain its submitted handoff revision");
+        assert_eq!(selected.id, submitted_id);
+        assert_eq!(selected.note_id.as_deref(), Some("note-1"));
+        assert_eq!(selected.status, WorkspacePlanRevisionStatus::Submitted);
+    }
+
+    #[test]
+    fn medical_master_handoff_requires_decision_complete_evidence_linked_plan() {
+        let mut revision = test_plan_snapshot().revisions.remove(0);
+        let evidence_manifest = serde_json::to_string(&json!([
+            {"category": "patient_chart"},
+            {"category": "selected_context"}
+        ]))
+        .expect("evidence manifest");
+        revision.evidence_manifest_sha256 =
+            format!("{:x}", Sha256::digest(evidence_manifest.as_bytes()));
+        revision.evidence_manifest_json = evidence_manifest;
+        revision.evidence_read_count = 2;
+        let decisions =
+            serde_json::from_str::<serde_json::Value>(&revision.decisions_json).expect("decisions");
+        let open_questions =
+            serde_json::from_str::<serde_json::Value>(&revision.open_questions_json)
+                .expect("open questions");
+        let content_json = serde_json::to_string(&json!({
+            "planMarkdown": revision.plan_markdown,
+            "decisions": decisions,
+            "openQuestions": open_questions,
+        }))
+        .expect("plan content");
+        revision.content_sha256 = format!("{:x}", Sha256::digest(content_json.as_bytes()));
+        let checkpoint = WorkspaceDraftCheckpointMetadata {
+            checkpoint_id: revision.source_checkpoint_id.clone(),
+            session_id: "draft-session-1".to_string(),
+            client_id: revision.client_id.clone(),
+            encounter_id: revision.encounter_id.clone(),
+            note_id: revision.note_id.clone(),
+            base_note_revision: Some(0),
+            revision: revision.source_checkpoint_revision,
+            content_sha256: revision.source_checkpoint_sha256.clone(),
+            trigger: "agent_handoff".to_string(),
+            created_at: 1,
+        };
+
+        validate_plan_revision_for_handoff(
+            &revision,
+            &checkpoint,
+            Some("client-1"),
+            Some("note-1"),
+            None,
+        )
+        .expect("decision-complete plan should be eligible");
+
+        revision.open_questions_json = r#"[{"question":"Which device was used?"}]"#.to_string();
+        let error = validate_plan_revision_for_handoff(
+            &revision,
+            &checkpoint,
+            Some("client-1"),
+            Some("note-1"),
+            None,
+        )
+        .expect_err("open questions must block master handoff");
+        assert!(error.contains("still has open questions"));
+    }
+
+    #[test]
+    fn medical_dedicated_document_workpane_render_snapshot() {
+        let mut dashboard = medical_recursive_base_dashboard();
+        dashboard.set_document_draft_for_tests(
+            "patient pdf",
+            "Outside referral PDF",
+            "/tmp/fake-outside-referral.pdf",
+            "Fake local file reference only; no parsing or upload.",
+        );
+        dashboard.set_workflow_section(MedicalWorkflowSection::Documents);
+
+        insta::assert_snapshot!(
+            "medical_workspace_dedicated_document_workpane_160x45",
+            render_dashboard_lines_at(&dashboard, 160, 45)
+        );
+    }
+
+    #[test]
+    fn medical_draft_recovery_render_snapshot() {
+        let mut recovery = medical_recursive_base_dashboard();
+        recovery.set_draft_recovery_available(true);
+        recovery.focus_medical_agent_workpane();
+        let rendered = render_dashboard_lines_at(&recovery, 120, 32);
+        assert!(rendered.contains("Recovery Required"));
+        assert!(rendered.contains("Restore local draft or Discard local draft"));
+        assert!(rendered.contains("Draft Recovery Required"));
+        assert!(rendered.contains("Mode: Draft recovery"));
+        assert!(rendered.contains("Ctrl-P restore/discard"));
+        assert!(!rendered.contains("ready to plan"));
+        assert!(!rendered.contains("Message Codex"));
+        insta::assert_snapshot!("medical_workspace_draft_recovery_120x32", rendered);
     }
 
     #[test]
@@ -24047,6 +26378,13 @@ mod tests {
         let dashboard = WorkspaceDashboard {
             focus: WorkspaceFocus::Workflow,
             workflow_section: MedicalWorkflowSection::Proposals,
+            notes: vec![test_saved_note(
+                "note-1",
+                "Visit note",
+                "Assessment: improving gait tolerance.\nPlan: continue current program.",
+                "draft",
+                3,
+            )],
             draft_note: NoteDraft {
                 id: Some("note-1".to_string()),
                 title: "Visit note".to_string(),
@@ -24079,8 +26417,16 @@ mod tests {
         let proposed_body = format!("{}\n{sentinel}", "Proposed detail. ".repeat(12));
         let dashboard = WorkspaceDashboard {
             workflow_section: MedicalWorkflowSection::Proposals,
+            notes: vec![test_saved_note(
+                "note-1",
+                "Visit note",
+                "Canonical note body.",
+                "draft",
+                3,
+            )],
             draft_note: NoteDraft {
                 id: Some("note-1".to_string()),
+                title: "Visit note".to_string(),
                 body: "Canonical note body.".to_string(),
                 current_revision: 3,
                 ..NoteDraft::default()
@@ -24098,7 +26444,7 @@ mod tests {
 
         assert!(rendered.contains(sentinel));
         assert!(rendered.contains("Full proposed replacement:"));
-        assert!(rendered.contains("Current canonical note:"));
+        assert!(rendered.contains("Saved canonical note (r3):"));
     }
 
     #[test]
@@ -24245,6 +26591,49 @@ mod tests {
             Some("version-client-1")
         );
         assert!(params.note.is_none());
+    }
+
+    #[test]
+    fn chart_changeset_builder_includes_only_changed_normalized_coverage_with_version() {
+        let client = test_client("client-1", "Jordan Patient");
+        let coverage = test_coverage(
+            "coverage-primary",
+            "client-1",
+            CoveragePriority::Primary,
+            WorkspaceBillingReadiness::Unverified,
+        );
+        let mut dashboard = WorkspaceDashboard {
+            clients: vec![client.clone()],
+            coverages: vec![coverage.clone()],
+            draft_client: ClientDraft::from_client(&client),
+            coverage_draft: CoverageDraft::try_from(&coverage).expect("coverage draft"),
+            ..WorkspaceDashboard::new(WorkspaceProfile::Medical)
+        };
+
+        assert_eq!(
+            dashboard
+                .build_chart_changeset_params()
+                .expect("unchanged coverage should compare"),
+            None
+        );
+
+        dashboard.coverage_draft.plan_name = "Updated Fake Plan".to_string();
+        let expected_coverage = WorkspaceCoverageUpsertParams::from(&dashboard.coverage_draft);
+        let params = dashboard
+            .build_chart_changeset_params()
+            .expect("coverage changeset should build")
+            .expect("changed coverage should create a changeset");
+
+        assert_eq!(params.coverage, Some(expected_coverage));
+        assert!(params.client.is_none());
+        assert!(params.note.is_none());
+        assert_eq!(
+            params
+                .expected_versions
+                .as_ref()
+                .and_then(|versions| versions.coverage.as_deref()),
+            Some("version-coverage-primary")
+        );
     }
 
     #[test]
@@ -24458,10 +26847,7 @@ mod tests {
             dashboard.draft_note.encounter_id.as_deref(),
             Some("encounter-2")
         );
-        assert_eq!(
-            dashboard.active_encounter_id().as_deref(),
-            Some("encounter-2")
-        );
+        assert_eq!(dashboard.active_encounter_id(), Some("encounter-2"));
         assert!(
             dashboard
                 .pending_chart_changeset
@@ -24546,9 +26932,14 @@ mod tests {
         assert!(!footer.contains("Tab/⇧Tab pane"));
 
         dashboard.focus = WorkspaceFocus::Agent;
+        let rendered = render_dashboard_lines_at(&dashboard, 160, 40);
+        assert!(rendered.contains("Discard Stale Draft"));
+        assert!(rendered.contains("Esc/Ctrl-W discard and reload"));
+        assert!(!rendered.contains("Message Codex"));
+        assert!(!rendered.contains("Enter send"));
         insta::assert_snapshot!(
             "medical_workspace_chart_changeset_discard_required_160x40",
-            render_dashboard_lines_at(&dashboard, 160, 40)
+            rendered
         );
         assert_eq!(
             dashboard.handle_key_event(KeyEvent::from(KeyCode::Esc)),
@@ -24587,9 +26978,14 @@ mod tests {
         assert!(footer.contains("Next: Refresh canonical chart"));
         assert!(!footer.contains("Tab/⇧Tab pane"));
 
+        let rendered = render_dashboard_lines_at(&dashboard, 160, 40);
+        assert!(rendered.contains("Resolve Chart Conflict"));
+        assert!(rendered.contains("Ctrl-S refresh"));
+        assert!(!rendered.contains("Message Codex"));
+        assert!(!rendered.contains("Enter send"));
         insta::assert_snapshot!(
             "medical_workspace_chart_changeset_conflict_160x40",
-            render_dashboard_lines_at(&dashboard, 160, 40)
+            rendered
         );
 
         dashboard.focus = WorkspaceFocus::NoteBody;
@@ -24814,6 +27210,13 @@ mod tests {
     #[test]
     fn pending_proposals_render_and_route_accept_decline() {
         let mut dashboard = WorkspaceDashboard {
+            notes: vec![test_saved_note(
+                "note-1",
+                "Draft note",
+                "Human body",
+                "draft",
+                3,
+            )],
             draft_note: NoteDraft {
                 id: Some("note-1".to_string()),
                 title: "Draft note".to_string(),
@@ -24828,11 +27231,17 @@ mod tests {
 
         let rendered = render_dashboard_lines_at(&dashboard, 160, 45);
         assert!(rendered.contains("Pending Proposal Changeset"));
-        assert!(rendered.contains("Guard: expected canonical note r3"));
         assert!(rendered.contains("READY"));
         assert!(rendered.contains("tighten wording"));
         assert!(rendered.contains("Proposed body"));
         assert!(rendered.contains("Human body"));
+        let workpane = dashboard
+            .agent_workpane_proposal_changeset_lines()
+            .iter()
+            .map(line_plain_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(workpane.contains("Guard: proposal base r3 · saved canonical r3"));
 
         assert_eq!(
             dashboard.execute_workspace_command(":proposal accept"),
@@ -24848,6 +27257,183 @@ mod tests {
                 accept: false,
             }
         );
+    }
+
+    #[test]
+    fn proposal_comparison_marks_only_changed_lines_and_keeps_panes_aligned() {
+        let comparison = proposal_comparison_lines(
+            "Subjective: walking farther.\nAssessment: needs cueing.\nTolerance: 5 minutes.\nPlan: continue.\n",
+            "Subjective: walking farther.\nAssessment: improved with cueing.\nTolerance: 8 minutes.\nPlan: continue.\n",
+        );
+
+        assert_eq!(comparison.additions, 2);
+        assert_eq!(comparison.deletions, 2);
+        assert_eq!(comparison.current.len(), comparison.proposed.len());
+        let current = comparison
+            .current
+            .iter()
+            .map(line_plain_text)
+            .collect::<Vec<_>>();
+        let proposed = comparison
+            .proposed
+            .iter()
+            .map(line_plain_text)
+            .collect::<Vec<_>>();
+        let assessment_row = current
+            .iter()
+            .position(|line| line == "-  2 Assessment: needs cueing.")
+            .expect("deleted assessment row");
+        let tolerance_row = current
+            .iter()
+            .position(|line| line == "-  3 Tolerance: 5 minutes.")
+            .expect("deleted tolerance row");
+        assert_eq!(
+            proposed[assessment_row],
+            "+  2 Assessment: improved with cueing."
+        );
+        assert_eq!(proposed[tolerance_row], "+  3 Tolerance: 8 minutes.");
+        assert!(current.contains(&"   1 Subjective: walking farther.".to_string()));
+        assert!(proposed.contains(&"   4 Plan: continue.".to_string()));
+        let context_row = current
+            .iter()
+            .position(|line| line == "   1 Subjective: walking farther.")
+            .expect("neutral context row");
+        for span in &comparison.current[context_row].spans {
+            assert!(!matches!(span.style.fg, Some(Color::Red | Color::Green)));
+        }
+
+        let unchanged = proposal_comparison_lines("No change", "No change");
+        assert_eq!(unchanged.additions, 0);
+        assert_eq!(unchanged.deletions, 0);
+        assert_eq!(line_plain_text(&unchanged.current[0]), "   1 No change");
+        assert_eq!(line_plain_text(&unchanged.proposed[0]), "   1 No change");
+    }
+
+    #[test]
+    fn narrow_proposal_comparison_aligns_wrapped_pairs_and_clamps_page_down() {
+        let viewport = Rect::new(0, 0, 80, 20);
+        let sentinel = "TRAILING-CONTEXT-SENTINEL";
+        let canonical_body = format!("Assessment: {}\n{sentinel}", "canonical detail ".repeat(5));
+        let proposed_body = format!(
+            "Assessment: {}\n{sentinel}",
+            "substantially longer proposed detail ".repeat(18)
+        );
+        let comparison = proposal_comparison_lines(&canonical_body, &proposed_body);
+        let comparison_area = inner_rect(MedicalCompactAreas::new(viewport).body);
+        let comparison_layout = ProposalComparisonLayout::new(comparison_area, 3);
+        let wrapped = wrap_proposal_comparison_lines(
+            &comparison,
+            comparison_layout.current_inner().width,
+            comparison_layout.proposed_inner().width,
+        );
+        let current_sentinel_row = wrapped
+            .current
+            .iter()
+            .position(|line| line_plain_text(line).contains(sentinel))
+            .expect("current trailing context sentinel");
+        let proposed_sentinel_row = wrapped
+            .proposed
+            .iter()
+            .position(|line| line_plain_text(line).contains(sentinel))
+            .expect("proposed trailing context sentinel");
+        assert_eq!(current_sentinel_row, proposed_sentinel_row);
+        assert_eq!(wrapped.current.len(), wrapped.proposed.len());
+
+        let mut dashboard = WorkspaceDashboard {
+            focus: WorkspaceFocus::Workflow,
+            workflow_section: MedicalWorkflowSection::Proposals,
+            notes: vec![test_saved_note(
+                "note-1",
+                "Visit note",
+                &canonical_body,
+                "draft",
+                3,
+            )],
+            draft_note: NoteDraft {
+                id: Some("note-1".to_string()),
+                title: "Visit note".to_string(),
+                body: canonical_body,
+                current_revision: 3,
+                ..NoteDraft::default()
+            },
+            proposals: vec![test_proposal("proposal-1", "note-1", 3, &proposed_body)],
+            ..medical_recursive_base_dashboard()
+        };
+        for _ in 0..32 {
+            assert_eq!(
+                dashboard.handle_key_event_for_viewport(
+                    KeyEvent::from(KeyCode::PageDown),
+                    Some(viewport),
+                ),
+                WorkspaceDashboardAction::Consumed
+            );
+        }
+        let max_scroll = dashboard
+            .proposal_comparison_max_scroll_for_viewport(viewport)
+            .expect("proposal comparison max scroll");
+        assert!(max_scroll > 0);
+        assert_eq!(dashboard.workflow_scroll, max_scroll);
+
+        let rendered = render_dashboard_lines_at(&dashboard, viewport.width, viewport.height);
+        assert_eq!(rendered.matches(sentinel).count(), 2, "{rendered}");
+    }
+
+    #[test]
+    fn dirty_proposal_review_uses_saved_canonical_and_blocks_accept() {
+        let canonical_body = "Saved canonical body.";
+        let draft_body = "Unsaved human draft.";
+        let mut dashboard = WorkspaceDashboard {
+            focus: WorkspaceFocus::Workflow,
+            workflow_section: MedicalWorkflowSection::Proposals,
+            notes: vec![test_saved_note(
+                "note-1",
+                "Visit note",
+                canonical_body,
+                "draft",
+                3,
+            )],
+            draft_note: NoteDraft {
+                id: Some("note-1".to_string()),
+                title: "Visit note".to_string(),
+                body: draft_body.to_string(),
+                current_revision: 99,
+                ..NoteDraft::default()
+            },
+            dirty: true,
+            proposals: vec![test_proposal(
+                "proposal-1",
+                "note-1",
+                3,
+                "Proposed replacement.",
+            )],
+            ..WorkspaceDashboard::new(WorkspaceProfile::Medical)
+        };
+
+        let comparison_area = Rect::new(0, 0, 120, 24);
+        let mut comparison_buffer = Buffer::empty(comparison_area);
+        dashboard.render_medical_proposal_comparison(comparison_area, &mut comparison_buffer);
+        let rendered = buffer_text(&comparison_buffer, comparison_area);
+        assert!(rendered.contains("UNSAVED · ACCEPT BLOCKED"));
+        assert!(rendered.contains("Saved canonical · r3"));
+        assert!(rendered.contains("Saved canonical body."));
+        assert!(rendered.contains("Unsaved human draft (not canonical):"));
+
+        let workpane = dashboard
+            .agent_workpane_proposal_changeset_lines()
+            .iter()
+            .map(line_plain_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(workpane.contains("Saved canonical note (r3):"));
+        assert!(workpane.contains("    - Saved canonical body."));
+        assert!(workpane.contains("Unsaved human draft (not canonical; accept blocked):"));
+        assert!(workpane.contains("    ! Unsaved human draft."));
+
+        assert_eq!(
+            dashboard.execute_workspace_command(":proposal accept"),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert!(dashboard.status.contains("Save or discard draft changes"));
     }
 
     #[test]
@@ -24893,8 +27479,8 @@ mod tests {
         assert!(!dashboard.agent_request.is_active());
         assert_eq!(dashboard.draft_note.body, "Clinician-authored chart text.");
         let pending = render_dashboard_lines_at(&dashboard, 160, 40);
-        assert!(pending.contains("[Pending]"));
-        assert!(pending.contains("History"));
+        assert!(pending.contains("[Chat]"));
+        assert!(pending.contains("Context"));
         assert!(pending.contains("Audit"));
 
         press_consumed(&mut dashboard, KeyCode::Right);
@@ -24906,7 +27492,7 @@ mod tests {
             .map(line_plain_text)
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(history.contains("Agent History"));
+        assert!(history.contains("Prior Handoffs"));
         assert!(history.contains("context packet submitted by Taylor PT on 2026-01-01"));
 
         press_consumed(&mut dashboard, KeyCode::Right);
@@ -24935,7 +27521,7 @@ mod tests {
         let large = render_dashboard_lines_at(&dashboard, 160, 40);
         assert!(large.contains("EXPLORER"));
         assert!(large.contains("PATIENT CHART"));
-        assert!(large.contains("AGENT WORK"));
+        assert!(large.contains("PLAN WITH CODEX"));
 
         let medium_chart = render_dashboard_lines_at(&dashboard, 120, 32);
         assert!(medium_chart.contains("EXPLORER"));
@@ -24945,12 +27531,12 @@ mod tests {
         dashboard.focus_medical_agent_workpane();
         let medium_agent = render_dashboard_lines_at(&dashboard, 120, 32);
         assert!(medium_agent.contains("EXPLORER"));
-        assert!(medium_agent.contains("AGENT WORK"));
+        assert!(medium_agent.contains("PLAN WITH CODEX"));
         assert!(!medium_agent.contains("Patient Demographics"));
 
         dashboard.focus = WorkspaceFocus::PatientFiles;
         let compact = render_dashboard_lines_at(&dashboard, 80, 20);
-        assert!(compact.contains("Zones: [Explorer] > Patient Chart > Agent Work"));
+        assert!(compact.contains("Zones: [Explorer] > Patient Chart > Plan with Codex"));
         assert!(compact.contains("Focus: Documents"));
         assert!(compact.contains("Uploaded Documents"));
     }
@@ -24983,6 +27569,13 @@ mod tests {
         let ready = WorkspaceDashboard {
             focus: WorkspaceFocus::Workflow,
             workflow_section: MedicalWorkflowSection::Proposals,
+            notes: vec![test_saved_note(
+                "note-1",
+                "Draft note",
+                "Current clinician text",
+                "draft",
+                3,
+            )],
             draft_note: NoteDraft {
                 id: Some("note-1".to_string()),
                 title: "Draft note".to_string(),
@@ -25001,23 +27594,30 @@ mod tests {
         let ready_render = render_dashboard_lines_at(&ready, 160, 40);
         assert!(ready_render.contains("READY"));
         assert!(ready_render.contains("Pending Proposal Changeset"));
-        assert!(ready_render.contains("Guard: expected canonical note r3"));
         assert!(ready_render.contains("Proposed agent text"));
         assert!(ready_render.contains("Current clinician text"));
+        let ready_workpane = ready
+            .agent_workpane_proposal_changeset_lines()
+            .iter()
+            .map(line_plain_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(ready_workpane.contains("Guard: proposal base r3 · saved canonical r3"));
 
         let mut stale = ready.clone();
         stale.proposals[0].base_revision = 2;
         let stale_render = render_dashboard_lines_at(&stale, 160, 40);
         assert!(stale_render.contains("STALE"));
-        assert!(stale_render.contains("current pane is live"));
-        assert!(stale_render.contains("r3; proposal was"));
-        assert!(stale_render.contains("prepared from r2"));
+        let stale_state = line_plain_text(&stale.proposal_review_state_line(&stale.proposals[0]));
+        assert!(stale_state.contains("saved canonical is r3; proposal was prepared from r2"));
         assert!(!stale_render.contains("Current historical base"));
 
         let mut signed = ready.clone();
         signed.draft_note.status = "signed".to_string();
-        let signed_render = render_dashboard_lines_at(&signed, 160, 40);
-        assert!(signed_render.contains("SIGNED · READ ONLY"));
+        signed.notes[0].status = "signed".to_string();
+        let signed_state =
+            line_plain_text(&signed.proposal_review_state_line(&signed.proposals[0]));
+        assert!(signed_state.contains("SIGNED · READ ONLY"));
 
         let mut read_only = ready;
         press_consumed(&mut read_only, KeyCode::Char('d'));
@@ -25029,8 +27629,17 @@ mod tests {
     #[test]
     fn stale_and_signed_proposals_are_not_accepted_from_dashboard() {
         let mut stale = WorkspaceDashboard {
+            notes: vec![test_saved_note(
+                "note-1",
+                "Visit note",
+                "Saved body",
+                "draft",
+                3,
+            )],
             draft_note: NoteDraft {
                 id: Some("note-1".to_string()),
+                title: "Visit note".to_string(),
+                body: "Saved body".to_string(),
                 current_revision: 3,
                 ..NoteDraft::default()
             },
@@ -25044,8 +27653,17 @@ mod tests {
         assert!(stale.status.contains("stale"));
 
         let mut signed = WorkspaceDashboard {
+            notes: vec![test_saved_note(
+                "note-1",
+                "Visit note",
+                "Signed saved body",
+                "signed",
+                3,
+            )],
             draft_note: NoteDraft {
                 id: Some("note-1".to_string()),
+                title: "Visit note".to_string(),
+                body: "Signed saved body".to_string(),
                 status: "signed".to_string(),
                 current_revision: 3,
                 ..NoteDraft::default()
@@ -25195,10 +27813,13 @@ mod tests {
         assert!(!dashboard.dirty);
 
         let preview = dashboard.context_packet_preview_lines().join("\n");
-        assert!(preview.contains("plan: Ctrl-G opens agent"));
-        assert!(preview.contains("Agent sees: this patient/note"));
-        assert!(preview.contains("Agent cannot: read unselected records"));
-        assert!(preview.contains("return: /workspacemedical"));
+        assert!(
+            preview
+                .contains("plan: Ctrl-G acknowledges warnings and submits the frozen Context Plan")
+        );
+        assert!(preview.contains("Codex sees: this patient/note"));
+        assert!(preview.contains("Codex cannot: read unselected records"));
+        assert!(preview.contains("return: /workspace-medical"));
 
         let params = dashboard.context_packet_create_params().unwrap();
         assert_eq!(params.client_id, "client-1");
@@ -25240,7 +27861,7 @@ mod tests {
         assert!(handoff_prompt.contains("- patient: Jordan Patient"));
         assert!(handoff_prompt.contains("- note: Visit note [draft r0]"));
         assert!(handoff_prompt.contains("- request: Review the gait clip"));
-        assert!(handoff_prompt.contains("- return: reopen /workspacemedical"));
+        assert!(handoff_prompt.contains("- return: reopen /workspace-medical"));
         assert!(handoff_prompt.contains("cannot change the chart without explicit human review"));
         assert!(handoff_prompt.contains("workspace_context_read"));
         assert!(handoff_prompt.contains("visit_history or progress_notes"));
@@ -25254,14 +27875,19 @@ mod tests {
             dashboard.workflow_section,
             MedicalWorkflowSection::AgentInbox
         );
-        assert!(dashboard.status.contains("matching completed response"));
+        assert!(
+            dashboard
+                .status
+                .contains("Codex is running in the background")
+        );
+        assert!(dashboard.status.contains(":agent open run"));
         assert_eq!(dashboard.context_packet_count_for_tests(), 1);
         assert_eq!(
             dashboard.first_context_packet_for_tests().unwrap().status,
             "sent"
         );
         let rendered = render_dashboard_lines_at(&dashboard, 180, 50);
-        assert!(rendered.contains("Medical Agent Plan submitted"));
+        assert!(rendered.contains("Context Plan submitted"));
         assert!(rendered.contains("Review the gait clip"));
         assert!(rendered.contains("0 selected file references"));
     }
@@ -25806,6 +28432,15 @@ mod tests {
             base_note_revision: Some(0),
             authorized_scope_json: "{}".to_string(),
             expected_output_kind: "note_proposal".to_string(),
+            workspace_profile: "medical".to_string(),
+            plan_schema_version: 1,
+            source_checkpoint_id: None,
+            source_checkpoint_sha256: None,
+            readiness_json: r#"{"version":1,"warnings":[],"acknowledgements":[],"legacy":true}"#
+                .to_string(),
+            workspace_plan_revision_id: None,
+            workspace_plan_content_sha256: None,
+            workspace_plan_evidence_manifest_sha256: None,
             status: "sent".to_string(),
             created_at: 1,
             sent_at: 1,
@@ -25974,6 +28609,15 @@ mod tests {
             base_note_revision: Some(0),
             authorized_scope_json: "{}".to_string(),
             expected_output_kind: "note_proposal".to_string(),
+            workspace_profile: "medical".to_string(),
+            plan_schema_version: 1,
+            source_checkpoint_id: None,
+            source_checkpoint_sha256: None,
+            readiness_json: r#"{"version":1,"warnings":[],"acknowledgements":[],"legacy":true}"#
+                .to_string(),
+            workspace_plan_revision_id: None,
+            workspace_plan_content_sha256: None,
+            workspace_plan_evidence_manifest_sha256: None,
             status: "sent".to_string(),
             created_at: 1,
             sent_at: 1,
@@ -26052,7 +28696,7 @@ mod tests {
         );
         let rendered = render_dashboard_lines_at(&dashboard, 180, 50);
         assert!(rendered.contains("Returned Work"));
-        assert!(rendered.contains("Medical Plan History"));
+        assert!(rendered.contains("Context Plan History"));
         assert!(rendered.contains("What Agent Saw"));
         assert!(rendered.contains("Safe Actions"));
         assert!(rendered.contains("result-1 [review pending]"));
@@ -26088,13 +28732,22 @@ mod tests {
             dashboard.execute_workspace_command(":agent result inspect"),
             WorkspaceDashboardAction::Consumed
         );
-        let rendered = render_dashboard_lines_at(&dashboard, 180, 50);
-        assert!(rendered.contains("Result Inspect"));
-        assert!(rendered.contains("Medical Plan History"));
-        assert!(rendered.contains("What Agent Saw"));
-        assert!(rendered.contains("Returned Body"));
-        assert!(rendered.contains("Safe Actions"));
-        assert!(rendered.contains("> Returned proposal body."));
+        let result_guidance = dashboard
+            .workflow_agent_result_workbench_lines(
+                dashboard
+                    .selected_agent_result()
+                    .expect("returned work should remain selected"),
+            )
+            .iter()
+            .map(line_plain_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(result_guidance.contains("Result Inspect"));
+        assert!(result_guidance.contains("Context Plan History"));
+        assert!(result_guidance.contains("What Agent Saw"));
+        assert!(result_guidance.contains("Returned Body"));
+        assert!(result_guidance.contains("Safe Actions"));
+        assert!(result_guidance.contains("> Returned proposal body."));
 
         assert_eq!(
             dashboard.execute_workspace_command(":agent result reviewed"),
@@ -26296,9 +28949,16 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_g_requests_context_bridge_to_agent_mode() {
-        let mut dashboard = WorkspaceDashboard::default();
+    fn ctrl_g_only_requests_master_handoff_from_the_agent_pane() {
+        let mut dashboard = WorkspaceDashboard::new(WorkspaceProfile::Medical);
 
+        assert_eq!(
+            dashboard.handle_key_event(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL)),
+            WorkspaceDashboardAction::Consumed
+        );
+        assert!(dashboard.status.contains("focus the agent pane first"));
+
+        dashboard.focus_medical_agent_workpane();
         assert_eq!(
             dashboard.handle_key_event(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL)),
             WorkspaceDashboardAction::SendContextToAgent
@@ -26324,17 +28984,36 @@ mod tests {
             id: id.to_string(),
             version: format!("version-{id}"),
             display_name: display_name.to_string(),
+            legal_first_name: None,
+            legal_middle_name: None,
+            legal_last_name: None,
+            legal_suffix: None,
             preferred_name: None,
+            previous_name: None,
             date_of_birth: None,
             sex_or_gender: None,
+            administrative_sex: None,
+            preferred_language: None,
+            interpreter_required: false,
             external_id: None,
             record_start_date: None,
             record_end_date: None,
             summary: String::new(),
             primary_phone: None,
+            primary_phone_use: None,
             secondary_phone: None,
+            secondary_phone_use: None,
             email: None,
+            primary_email: None,
+            secondary_email: None,
             preferred_contact_method: None,
+            address_line_1: None,
+            address_line_2: None,
+            city: None,
+            state_or_province: None,
+            postal_code: None,
+            country: None,
+            address_use: None,
             emergency_contact_name: None,
             emergency_contact_relationship: None,
             emergency_contact_phone: None,
@@ -26350,6 +29029,46 @@ mod tests {
             archived_at: None,
             created_at: 0,
             updated_at: 0,
+        }
+    }
+
+    fn test_coverage(
+        id: &str,
+        client_id: &str,
+        priority: CoveragePriority,
+        billing_readiness: WorkspaceBillingReadiness,
+    ) -> WorkspaceCoverage {
+        WorkspaceCoverage {
+            id: id.to_string(),
+            version: format!("version-{id}"),
+            client_id: client_id.to_string(),
+            priority: priority.number(),
+            payer_name: Some("Fake Medicare".to_string()),
+            plan_name: Some("Fake Plan A".to_string()),
+            member_id: Some("1EG4TE5MK73".to_string()),
+            group_number: Some("GRP-1".to_string()),
+            coverage_type: Some("Medicare".to_string()),
+            coverage_status: Some("active".to_string()),
+            effective_date: Some("2026-01-01".to_string()),
+            termination_date: None,
+            patient_relationship_to_subscriber: Some("self".to_string()),
+            subscriber_first_name: Some("Jordan".to_string()),
+            subscriber_middle_name: Some("Q".to_string()),
+            subscriber_last_name: Some("Patient".to_string()),
+            subscriber_suffix: None,
+            subscriber_date_of_birth: Some("1980-01-02".to_string()),
+            subscriber_administrative_sex: Some("X".to_string()),
+            subscriber_address_same_as_patient: true,
+            subscriber_address_line_1: None,
+            subscriber_address_line_2: None,
+            subscriber_city: None,
+            subscriber_state_or_province: None,
+            subscriber_postal_code: None,
+            subscriber_country: None,
+            coverage_notes: Some("Synthetic coverage for local tests.".to_string()),
+            billing_readiness,
+            created_at: 1,
+            updated_at: 1,
         }
     }
 
@@ -26373,6 +29092,20 @@ mod tests {
             created_at,
             updated_at: created_at,
         }
+    }
+
+    fn test_saved_note(
+        id: &str,
+        title: &str,
+        body: &str,
+        status: &str,
+        current_revision: i64,
+    ) -> WorkspaceNote {
+        let mut note = test_note(id, title, "daily", status, 1);
+        note.encounter_id = None;
+        note.body = body.to_string();
+        note.current_revision = current_revision;
+        note
     }
 
     fn test_task(id: &str, title: &str, status: WorkspaceTaskStatus) -> WorkspaceTask {
@@ -26574,6 +29307,15 @@ mod tests {
             base_note_revision: Some(0),
             authorized_scope_json: "{}".to_string(),
             expected_output_kind: "note_proposal".to_string(),
+            workspace_profile: "medical".to_string(),
+            plan_schema_version: 1,
+            source_checkpoint_id: None,
+            source_checkpoint_sha256: None,
+            readiness_json: r#"{"version":1,"warnings":[],"acknowledgements":[],"legacy":true}"#
+                .to_string(),
+            workspace_plan_revision_id: None,
+            workspace_plan_content_sha256: None,
+            workspace_plan_evidence_manifest_sha256: None,
             status: "sent".to_string(),
             created_at: 1,
             sent_at: 1,
@@ -26615,12 +29357,53 @@ mod tests {
                 .expected_output_kind
                 .clone()
                 .unwrap_or_else(|| "note_proposal".to_string()),
+            workspace_profile: params
+                .workspace_profile
+                .clone()
+                .unwrap_or_else(|| "medical".to_string()),
+            plan_schema_version: params.plan_schema_version.unwrap_or(1),
+            source_checkpoint_id: params.source_checkpoint_id.clone(),
+            source_checkpoint_sha256: params.source_checkpoint_sha256.clone(),
+            readiness_json: params.readiness_json.clone().unwrap_or_else(|| {
+                r#"{"version":1,"warnings":[],"acknowledgements":[],"legacy":true}"#.to_string()
+            }),
+            workspace_plan_revision_id: params.workspace_plan_revision_id.clone(),
+            workspace_plan_content_sha256: params.workspace_plan_content_sha256.clone(),
+            workspace_plan_evidence_manifest_sha256: params
+                .workspace_plan_evidence_manifest_sha256
+                .clone(),
             status: "sent".to_string(),
             created_at: 1,
             sent_at: 1,
             submitted_at: Some(1),
             canceled_at: None,
             updated_at: 1,
+        }
+    }
+
+    fn test_agent_run(id: &str, packet_id: &str, status: &str) -> WorkspaceAgentRun {
+        WorkspaceAgentRun {
+            id: id.to_string(),
+            packet_id: packet_id.to_string(),
+            client_id: "client-1".to_string(),
+            note_id: Some("note-1".to_string()),
+            base_note_revision: Some(0),
+            context_envelope_sha256: "packet-hash".to_string(),
+            workspace_plan_revision_id: None,
+            workspace_plan_content_sha256: None,
+            workspace_plan_evidence_manifest_sha256: None,
+            run_kind: "medical_context_plan".to_string(),
+            idempotency_key: format!("test-{id}"),
+            provider: Some("test-provider".to_string()),
+            model: Some("test-model".to_string()),
+            source_thread_id: Some("thread-1".to_string()),
+            source_turn_id: None,
+            status: status.to_string(),
+            error_summary: (status == "failed").then(|| "Synthetic model failure.".to_string()),
+            started_at: 1,
+            completed_at: (status != "running").then_some(2),
+            created_at: 1,
+            updated_at: 2,
         }
     }
 
@@ -26718,6 +29501,108 @@ mod tests {
             status: "review_pending".to_string(),
             created_at: 1,
             updated_at: 1,
+        }
+    }
+
+    fn test_plan_snapshot() -> WorkspacePlanSnapshotGetResponse {
+        let message =
+            |id: &str,
+             sequence: i64,
+             role: codex_app_server_protocol::WorkspacePlanMessageRole,
+             content: &str| codex_app_server_protocol::WorkspacePlanMessage {
+                id: id.to_string(),
+                plan_session_id: "plan-session-1".to_string(),
+                client_id: "client-1".to_string(),
+                guide_run_id: format!("guide-{sequence}"),
+                sequence,
+                role,
+                content: content.to_string(),
+                content_sha256: format!("message-hash-{sequence}"),
+                idempotency_key: format!("message-key-{sequence}"),
+                source_checkpoint_id: "checkpoint-1".to_string(),
+                source_checkpoint_revision: 4,
+                source_checkpoint_sha256: "checkpoint-hash-1".to_string(),
+                encounter_id: None,
+                note_id: Some("note-1".to_string()),
+                source_thread_id: Some("thread-1".to_string()),
+                source_turn_id: Some(format!("turn-{sequence}")),
+                created_at: sequence,
+                replayed: false,
+            };
+        WorkspacePlanSnapshotGetResponse {
+            session: Some(codex_app_server_protocol::WorkspacePlanSession {
+                id: "plan-session-1".to_string(),
+                client_id: "client-1".to_string(),
+                source_thread_id: Some("thread-1".to_string()),
+                status: codex_app_server_protocol::WorkspacePlanSessionStatus::Active,
+                latest_revision: 2,
+                created_by: "local clinician".to_string(),
+                created_at: 1,
+                updated_at: 6,
+                closed_at: None,
+                replayed: false,
+            }),
+            messages: vec![
+                message(
+                    "message-1",
+                    1,
+                    codex_app_server_protocol::WorkspacePlanMessageRole::Human,
+                    "How does today's gait note fit the referral goals?",
+                ),
+                message(
+                    "message-2",
+                    2,
+                    codex_app_server_protocol::WorkspacePlanMessageRole::Assistant,
+                    "The referral emphasizes safe community mobility across the episode of care.",
+                ),
+                message(
+                    "message-3",
+                    3,
+                    codex_app_server_protocol::WorkspacePlanMessageRole::Question,
+                    "Was the gait video recorded with the usual assistive device?",
+                ),
+                message(
+                    "message-4",
+                    4,
+                    codex_app_server_protocol::WorkspacePlanMessageRole::Answer,
+                    "Yes, the patient used the rolling walker.",
+                ),
+                message(
+                    "message-5",
+                    5,
+                    codex_app_server_protocol::WorkspacePlanMessageRole::SystemStatus,
+                    "Context refreshed from checkpoint r4.",
+                ),
+            ],
+            revisions: vec![codex_app_server_protocol::WorkspacePlanRevision {
+                id: "plan-revision-2".to_string(),
+                plan_session_id: "plan-session-1".to_string(),
+                client_id: "client-1".to_string(),
+                guide_run_id: "guide-2".to_string(),
+                revision: 2,
+                plan_markdown: "## Current plan\n- Compare gait video to referral goals."
+                    .to_string(),
+                decisions_json: "[]".to_string(),
+                open_questions_json: "[]".to_string(),
+                content_sha256: "plan-hash-2".to_string(),
+                evidence_manifest_json: "[]".to_string(),
+                evidence_manifest_sha256: "evidence-hash-2".to_string(),
+                evidence_read_count: 2,
+                idempotency_key: "plan-revision-key-2".to_string(),
+                status: codex_app_server_protocol::WorkspacePlanRevisionStatus::Current,
+                source_checkpoint_id: "checkpoint-1".to_string(),
+                source_checkpoint_revision: 4,
+                source_checkpoint_sha256: "checkpoint-hash-1".to_string(),
+                encounter_id: None,
+                note_id: Some("note-1".to_string()),
+                source_thread_id: "thread-1".to_string(),
+                source_turn_id: "turn-5".to_string(),
+                created_at: 5,
+                submitted_at: None,
+                replayed: false,
+            }],
+            submission_receipts: Vec::new(),
+            proposals: Vec::new(),
         }
     }
 
@@ -26831,17 +29716,24 @@ mod tests {
         }
 
         let mut new_patient_draft = WorkspaceDashboard::new(WorkspaceProfile::Medical);
-        new_patient_draft.execute_workspace_command(":patient new");
+        assert_eq!(
+            new_patient_draft.execute_workspace_command(":patient new"),
+            WorkspaceDashboardAction::StartNewClient
+        );
+        new_patient_draft.start_new_client();
 
         let mut sample_daily_note_draft = medical_recursive_base_dashboard();
-        sample_daily_note_draft.execute_workspace_command(":note new daily");
+        assert_eq!(
+            sample_daily_note_draft.execute_workspace_command(":note new daily"),
+            WorkspaceDashboardAction::StartNewNote
+        );
+        sample_daily_note_draft.start_new_note();
         for c in "SOAP fake sample note: patient tolerated exercise.".chars() {
             sample_daily_note_draft.handle_key_event(KeyEvent::from(KeyCode::Char(c)));
         }
 
         let mut wrong_pane_file_drop_blocked = medical_recursive_base_dashboard();
         wrong_pane_file_drop_blocked.focus = WorkspaceFocus::Demographics;
-        wrong_pane_file_drop_blocked.demographics_field = DemographicsField::DisplayName;
         wrong_pane_file_drop_blocked.handle_paste("/tmp/fake-dropped-scan.png".to_string());
 
         let mut contact_edit_missing = medical_recursive_base_dashboard();
@@ -26864,12 +29756,18 @@ mod tests {
         contact_edit_complete.execute_workspace_command(":emergency contact edit");
 
         let mut coverage_edit_complete = medical_recursive_base_dashboard();
-        coverage_edit_complete.draft_client.payer_name = "Fake Medicare".to_string();
-        coverage_edit_complete.draft_client.plan_name = "Fake Plan A".to_string();
-        coverage_edit_complete.draft_client.member_id = "MED-777".to_string();
-        coverage_edit_complete.draft_client.group_number = "GRP-1".to_string();
-        coverage_edit_complete.draft_client.coverage_type = "Medicare".to_string();
-        coverage_edit_complete.draft_client.coverage_status = "active".to_string();
+        coverage_edit_complete.coverage_draft =
+            CoverageDraft::new("client-1", CoveragePriority::Primary);
+        coverage_edit_complete.coverage_draft.id = Some("coverage-primary".to_string());
+        coverage_edit_complete.coverage_draft.version = Some("coverage-version-1".to_string());
+        coverage_edit_complete.coverage_draft.payer_name = "Fake Medicare".to_string();
+        coverage_edit_complete.coverage_draft.plan_name = "Fake Plan A".to_string();
+        coverage_edit_complete.coverage_draft.member_id = "MED-777".to_string();
+        coverage_edit_complete.coverage_draft.group_number = "GRP-1".to_string();
+        coverage_edit_complete.coverage_draft.coverage_type = "Medicare".to_string();
+        coverage_edit_complete.coverage_draft.coverage_status = "active".to_string();
+        coverage_edit_complete.coverage_draft.billing_readiness =
+            WorkspaceBillingReadiness::Unverified;
         coverage_edit_complete.execute_workspace_command(":coverage edit");
 
         let mut command_palette = medical_recursive_base_dashboard();
@@ -27152,6 +30050,13 @@ mod tests {
             0,
             "Fake proposed replacement note body.",
         ));
+        proposal_draft.notes = vec![test_saved_note(
+            "note-1",
+            "Visit note",
+            "Fake human-entered visit note body.",
+            "draft",
+            0,
+        )];
         proposal_draft.execute_workspace_command(":workflow proposals");
 
         let mut addendum_draft = medical_recursive_result_dashboard(true);
@@ -27362,6 +30267,13 @@ mod tests {
             "note-1",
             0,
             "Fake proposed replacement note body.",
+        )];
+        dashboard.notes = vec![test_saved_note(
+            "note-1",
+            "Visit note",
+            "Fake human-entered visit note body.",
+            "draft",
+            0,
         )];
         dashboard.patient_safety_items = vec![WorkspacePatientSafetyItem {
             id: "safety-1".to_string(),
